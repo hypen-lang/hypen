@@ -188,14 +188,59 @@ impl DependencyGraph {
     /// path's dependent set is drained into the scheduler's dirty set, whose
     /// members are re-rendered independently — so the residual order of the
     /// entries a removal leaves behind is not part of the contract.
+    ///
+    /// A path whose last dependent node goes away is pruned from both the
+    /// dependencies map and the prefix index. Without that, every binding
+    /// path ever mounted stays behind as an empty entry: a long-lived app
+    /// that keeps mounting rows with fresh `items.<n>.title` bindings grows
+    /// both maps without bound, and every `get_affected_nodes("items")`
+    /// walks the dead paths too.
     pub fn remove_node(&mut self, node_id: NodeId) {
         if let Some(paths) = self.node_bindings.swap_remove(&node_id) {
             for path in paths {
-                if let Some(nodes) = self.dependencies.get_mut(&path) {
-                    nodes.swap_remove(&node_id);
+                let now_empty = match self.dependencies.get_mut(&path) {
+                    Some(nodes) => {
+                        nodes.swap_remove(&node_id);
+                        nodes.is_empty()
+                    }
+                    None => false,
+                };
+                if now_empty {
+                    self.dependencies.swap_remove(&path);
+                    self.remove_path_from_prefix_index(&path);
                 }
             }
         }
+    }
+
+    /// Inverse of [`add_path_to_prefix_index`](Self::add_path_to_prefix_index):
+    /// drop `path` from its own entry and from every parent prefix, deleting
+    /// prefix entries that end up empty.
+    fn remove_path_from_prefix_index(&mut self, path: &str) {
+        let mut current = path;
+        loop {
+            if let Some(paths) = self.prefix_index.get_mut(current) {
+                paths.swap_remove(path);
+                if paths.is_empty() {
+                    self.prefix_index.remove(current);
+                }
+            }
+            match current.rfind('.') {
+                Some(dot_pos) => current = &current[..dot_pos],
+                None => break,
+            }
+        }
+    }
+
+    /// Number of distinct state paths with at least one dependent node.
+    pub fn tracked_path_count(&self) -> usize {
+        self.dependencies.len()
+    }
+
+    /// Number of prefix-index entries (every tracked path plus every
+    /// parent prefix of one).
+    pub fn prefix_index_len(&self) -> usize {
+        self.prefix_index.len()
     }
 
     /// Get all nodes that depend on a specific state path
@@ -271,6 +316,44 @@ impl DependencyGraph {
             if path == &root || path.starts_with(&prefix) {
                 affected.extend(nodes.iter().copied());
             }
+        }
+
+        affected
+    }
+
+    /// Nodes bound to a data source provider that read something under one of
+    /// `changed_paths` (dotted, relative to the provider root, e.g.
+    /// `user.name`), plus any node bound to the provider root itself.
+    ///
+    /// The sparse counterpart of
+    /// [`get_data_source_affected_nodes`](Self::get_data_source_affected_nodes):
+    /// a provider refresh that changed only `messages.3.text` leaves nodes
+    /// bound to `ds:provider:user.name` alone. Each path resolves through
+    /// the prefix index exactly like a state path (exact match, parents,
+    /// children), so a binding to `messages` sees the change to
+    /// `messages.3.text` and vice versa.
+    pub fn get_data_source_affected_nodes_for_paths<'p>(
+        &self,
+        provider: &str,
+        changed_paths: impl IntoIterator<Item = &'p str>,
+    ) -> IndexSet<NodeId> {
+        let mut affected = IndexSet::new();
+        let mut key = String::with_capacity(provider.len() + 4);
+        key.push_str("ds:");
+        key.push_str(provider);
+        key.push(':');
+        let prefix_len = key.len();
+
+        // A binding to the bare provider (`@{provider}`) registers under the
+        // empty relative path; it reads the whole blob, so any change hits it.
+        if let Some(nodes) = self.dependencies.get(key.as_str()) {
+            affected.extend(nodes.iter().copied());
+        }
+
+        for path in changed_paths {
+            key.truncate(prefix_len);
+            key.push_str(path);
+            affected.extend(self.get_affected_nodes(&key));
         }
 
         affected
@@ -526,5 +609,156 @@ mod tests {
             0,
             "get_affected_nodes should miss colon-separated children"
         );
+    }
+
+    #[test]
+    fn remove_node_prunes_dead_paths_and_prefixes() {
+        use super::Binding;
+        use crate::ir::Element;
+        use crate::reconcile::tree::InstanceTree;
+
+        let mut graph = DependencyGraph::new();
+        let mut tree = InstanceTree::new();
+        let node1 = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+        let node2 = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+
+        graph.add_dependency(
+            node1,
+            &Binding::state(vec!["user".to_string(), "name".to_string()]),
+            None,
+        );
+        graph.add_dependency(
+            node2,
+            &Binding::state(vec!["user".to_string(), "email".to_string()]),
+            None,
+        );
+        assert_eq!(graph.tracked_path_count(), 2);
+        assert_eq!(graph.prefix_index_len(), 3); // user, user.name, user.email
+
+        // Dropping node1 retires `user.name` everywhere, but the shared
+        // `user` prefix survives because `user.email` still lives under it.
+        graph.remove_node(node1);
+        assert_eq!(graph.tracked_path_count(), 1);
+        assert!(!graph.dependencies.contains_key("user.name"));
+        assert!(!graph.prefix_index.contains_key("user.name"));
+        let user_paths = graph.prefix_index.get("user").expect("shared prefix kept");
+        assert_eq!(user_paths.len(), 1);
+        assert!(user_paths.contains("user.email"));
+        assert_eq!(graph.get_affected_nodes("user").len(), 1);
+
+        // Dropping the last subscriber empties both indexes entirely.
+        graph.remove_node(node2);
+        assert_eq!(graph.tracked_path_count(), 0);
+        assert_eq!(graph.prefix_index_len(), 0);
+        assert!(graph.get_affected_nodes("user").is_empty());
+    }
+
+    #[test]
+    fn mount_unmount_churn_does_not_grow_indexes() {
+        use super::Binding;
+        use crate::ir::Element;
+        use crate::reconcile::tree::InstanceTree;
+
+        let mut graph = DependencyGraph::new();
+        let mut tree = InstanceTree::new();
+
+        // A long-lived list that keeps mounting rows under fresh indices:
+        // each row binds a path nothing else will ever bind again.
+        for i in 0..500 {
+            let node = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+            graph.add_dependency(
+                node,
+                &Binding::state(vec![
+                    "items".to_string(),
+                    i.to_string(),
+                    "title".to_string(),
+                ]),
+                None,
+            );
+            graph.remove_node(node);
+            tree.remove(node);
+        }
+
+        assert_eq!(graph.tracked_path_count(), 0);
+        assert_eq!(graph.prefix_index_len(), 0);
+    }
+
+    #[test]
+    fn remove_node_keeps_shared_path_for_other_subscribers() {
+        use super::Binding;
+        use crate::ir::Element;
+        use crate::reconcile::tree::InstanceTree;
+
+        let mut graph = DependencyGraph::new();
+        let mut tree = InstanceTree::new();
+        let node1 = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+        let node2 = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+        let binding = Binding::state(vec!["count".to_string()]);
+        graph.add_dependency(node1, &binding, None);
+        graph.add_dependency(node2, &binding, None);
+
+        graph.remove_node(node1);
+        assert_eq!(graph.tracked_path_count(), 1);
+        assert_eq!(graph.get_affected_nodes("count").len(), 1);
+        assert!(graph.get_affected_nodes("count").contains(&node2));
+
+        // Re-registering after a prune works like a first registration.
+        graph.add_dependency(node1, &binding, None);
+        assert_eq!(graph.get_affected_nodes("count").len(), 2);
+    }
+
+    #[test]
+    fn data_source_affected_nodes_for_paths_is_sparse() {
+        use super::Binding;
+        use crate::ir::Element;
+        use crate::reconcile::tree::InstanceTree;
+
+        let mut graph = DependencyGraph::new();
+        let mut tree = InstanceTree::new();
+        let whole = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+        let name = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+        let messages = tree.create_node(&Element::new("List"), &serde_json::json!({}));
+        let msg_text = tree.create_node(&Element::new("Text"), &serde_json::json!({}));
+
+        graph.add_dependency(whole, &Binding::data_source("db", vec![]), None);
+        graph.add_dependency(
+            name,
+            &Binding::data_source("db", vec!["user".to_string(), "name".to_string()]),
+            None,
+        );
+        graph.add_dependency(
+            messages,
+            &Binding::data_source("db", vec!["messages".to_string()]),
+            None,
+        );
+        graph.add_dependency(
+            msg_text,
+            &Binding::data_source(
+                "db",
+                vec!["messages".to_string(), "0".to_string(), "text".to_string()],
+            ),
+            None,
+        );
+
+        // A change deep inside `messages` reaches the list (parent), the leaf
+        // (exact), and the whole-provider subscriber — never `user.name`.
+        let affected = graph.get_data_source_affected_nodes_for_paths("db", ["messages.0.text"]);
+        assert!(affected.contains(&whole));
+        assert!(affected.contains(&messages));
+        assert!(affected.contains(&msg_text));
+        assert!(!affected.contains(&name));
+
+        // Replacing `messages` wholesale reaches every child binding.
+        let affected = graph.get_data_source_affected_nodes_for_paths("db", ["messages"]);
+        assert!(affected.contains(&messages));
+        assert!(affected.contains(&msg_text));
+        assert!(!affected.contains(&name));
+
+        // A change to a sibling provider's field touches nothing here.
+        let affected = graph.get_data_source_affected_nodes_for_paths("other", ["user.name"]);
+        assert!(affected.is_empty());
+
+        // The full scan is the superset.
+        assert_eq!(graph.get_data_source_affected_nodes("db").len(), 4);
     }
 }

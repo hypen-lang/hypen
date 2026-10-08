@@ -405,14 +405,27 @@ impl EngineCore {
     /// `ds:spacetime:user.name`) as dirty. The caller must call
     /// `render_dirty()` afterwards.
     ///
-    /// Note: this replaces the entire provider blob, so we invalidate every
-    /// subscriber regardless of which nested key changed — there is no sparse
-    /// diff. Hosts that want granular invalidation should construct their
-    /// own patch strategy at the SDK layer.
+    /// The host hands over the whole provider blob, but invalidation is
+    /// sparse: when a previous value exists and both are objects, the two are
+    /// diffed (`portable::diff`, the same path diff every SDK uses for state)
+    /// and only nodes reading a changed path — or the provider root — are
+    /// scheduled. A data source refreshed every second that changes one
+    /// field no longer re-renders every subscriber. The first `set_context`
+    /// for a provider, or a non-object replacement, still invalidates
+    /// everything bound beneath it.
     pub fn set_context(&mut self, name: &str, data: serde_json::Value) {
         self.dependencies.register_data_source_provider(name);
 
-        let affected = self.dependencies.get_data_source_affected_nodes(name);
+        let affected = match self.data_sources.get(name) {
+            Some(previous) if previous.is_object() && data.is_object() => {
+                let changes = crate::portable::diff::diff_paths(previous, &data);
+                self.dependencies.get_data_source_affected_nodes_for_paths(
+                    name,
+                    changes.iter().map(|change| change.path.as_str()),
+                )
+            }
+            _ => self.dependencies.get_data_source_affected_nodes(name),
+        };
 
         self.data_sources.insert(name.to_string(), data);
 

@@ -806,6 +806,68 @@ fn test_set_context_invalidates_deep_data_source_bindings() {
     );
 }
 
+#[test]
+fn test_set_context_only_rerenders_subscribers_of_changed_paths() {
+    // GIVEN: two Text nodes bound to different fields of one provider
+    let mut engine = Engine::new();
+    let module = ModuleInstance::new(Module::new("Page"), json!({}));
+    engine.set_module(module);
+    engine.set_context(
+        "feed",
+        json!({"user": {"name": "Alice"}, "stats": {"unread": 1}}),
+    );
+
+    let source = r#"Column {
+        Text("@{feed.user.name}")
+        Text("@{feed.stats.unread}")
+    }"#;
+    let component = hypen_parser::parse_component(source).expect("parse");
+    let ir_node = hypen_engine::ir::ast_to_ir_node(&component);
+    engine.render_ir_node(&ir_node);
+
+    let (patches, callback) = patch_capture();
+    engine.set_render_callback(callback);
+
+    // WHEN: the provider is refreshed with only `stats.unread` changed
+    engine.set_context(
+        "feed",
+        json!({"user": {"name": "Alice"}, "stats": {"unread": 2}}),
+    );
+
+    // THEN: exactly one SetProp is emitted, carrying the new unread count.
+    //       The name subscriber was not touched (and would have produced no
+    //       patch anyway — the point is that it was not scheduled at all,
+    //       which the dependency-flow test below pins at the graph level).
+    let captured = patches.lock().unwrap();
+    let set_props: Vec<_> = captured
+        .iter()
+        .filter_map(|p| match p {
+            hypen_engine::reconcile::Patch::SetProp { value, .. } => Some(value.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(set_props, vec![json!("2")], "patches: {:?}", *captured);
+    drop(captured);
+
+    // AND: an identical refresh schedules nothing and emits nothing
+    patches.lock().unwrap().clear();
+    engine.set_context(
+        "feed",
+        json!({"user": {"name": "Alice"}, "stats": {"unread": 2}}),
+    );
+    assert!(patches.lock().unwrap().is_empty());
+
+    // AND: a non-object replacement still reaches every subscriber
+    patches.lock().unwrap().clear();
+    engine.set_context("feed", json!(null));
+    let captured = patches.lock().unwrap();
+    let unresolved = captured
+        .iter()
+        .filter(|p| matches!(p, hypen_engine::reconcile::Patch::SetProp { .. }))
+        .count();
+    assert_eq!(unresolved, 2, "patches: {:?}", *captured);
+}
+
 // ========== Animation prop channel ==========
 
 #[test]

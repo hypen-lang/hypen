@@ -1249,6 +1249,16 @@ pub struct TaffyState {
     /// per-edge over these.
     platform_safe_area: crate::style::Padding,
     image_load_generation: u64,
+    /// Every media source a resolved style asked the decoded-image cache
+    /// about, with the answer it got (`true` = natural size available).
+    /// Filled from `MEDIA_SIZE_PROBES` at the top of each compute. When
+    /// the image-load generation moves, the rebuild it used to force
+    /// unconditionally now happens only if one of these answers flipped:
+    /// a fetch landing for an image sized explicitly, or for one whose
+    /// node this state never styled, changes no style here.
+    media_size_probes: HashMap<String, bool>,
+    #[cfg(test)]
+    bulk_rebuilds: u64,
     /// Scroll panes whose Taffy style [`TaffyState::reconcile_content_sized_scroll_panes`]
     /// rewrote (content-resolving flex basis + `Clip` instead of
     /// `Scroll`), keyed to the overflow the style was built with so the
@@ -1287,6 +1297,9 @@ impl TaffyState {
             safe_area: SafeAreaInsets::default(),
             platform_safe_area: DESKTOP_SAFE_AREA_DEFAULT,
             image_load_generation: crate::paint::image::image_load_generation(),
+            media_size_probes: HashMap::new(),
+            #[cfg(test)]
+            bulk_rebuilds: 0,
             scroll_pane_overrides: HashMap::new(),
         }
     }
@@ -1469,6 +1482,31 @@ impl TaffyState {
         }
         self.wrapped_probes.clear();
         let _ = self.tree.set_node_context(tid, Some(ctx));
+    }
+
+    /// Move the natural-size probes style resolution recorded since the
+    /// last call into `media_size_probes` (a later answer for the same
+    /// source wins).
+    fn drain_media_size_probes(&mut self) {
+        MEDIA_SIZE_PROBES.with(|probes| {
+            for (src, available) in probes.borrow_mut().drain(..) {
+                self.media_size_probes.insert(src, available);
+            }
+        });
+    }
+
+    /// Whether any probed source's natural size became available (or
+    /// went away) since the style that probed it was built.
+    fn media_sizes_changed(&self) -> bool {
+        self.media_size_probes
+            .iter()
+            .any(|(src, had)| crate::paint::image::loaded_natural_size(src).is_some() != *had)
+    }
+
+    /// Number of bulk Taffy rebuilds this state has performed.
+    #[cfg(test)]
+    pub(crate) fn bulk_rebuilds(&self) -> u64 {
+        self.bulk_rebuilds
     }
 
     pub fn mark_needs_rebuild(&mut self) {
@@ -2753,8 +2791,18 @@ impl LayoutPass {
         let interaction_key = interaction_hash(&state.interaction);
         let interaction_changed = interaction_key != state.interaction_key;
         let style_changed = state.structure_key != key;
+        // An image fetch landed (or failed) since the last compute. That
+        // only changes layout when a style was built on the *absence* of
+        // that image's natural size (or on a size that has since been
+        // evicted): consult the probes the styles recorded instead of
+        // rebuilding for every thumbnail in a feed.
+        state.drain_media_size_probes();
         let image_load_generation = crate::paint::image::image_load_generation();
-        let image_intrinsics_changed = image_load_generation != state.image_load_generation;
+        let image_intrinsics_changed =
+            image_load_generation != state.image_load_generation && state.media_sizes_changed();
+        if !image_intrinsics_changed {
+            state.image_load_generation = image_load_generation;
+        }
         let needs_rebuild = state.needs_bulk_rebuild || image_intrinsics_changed;
         // The build / restyle paths read `state.interaction`; clone it
         // up front so the `&mut state.tree` borrow during the bulk
@@ -2771,6 +2819,13 @@ impl LayoutPass {
             state.tree = TaffyTree::new();
             state.renderer_for_taffy.clear();
             state.node_map.clear();
+            // The build below re-probes every media node; entries for
+            // nodes that have since left the tree must not linger.
+            state.media_size_probes.clear();
+            #[cfg(test)]
+            {
+                state.bulk_rebuilds += 1;
+            }
             // NodeIds from the old tree are meaningless in the new one.
             // EVERY `NodeId`-keyed map has to be dropped here: a fresh
             // `TaffyTree` re-issues the SAME id sequence from the start,
@@ -5330,7 +5385,7 @@ fn media_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style
     let fallback_ar = explicit_ar
         .or_else(|| {
             resolve_media_poster(node, vs.viewport)
-                .and_then(|p| crate::paint::image::loaded_natural_size(&p))
+                .and_then(|p| probe_natural_size(&p))
                 .filter(|(_, h)| *h > 0.0)
                 .map(|(w, h)| w / h)
         })
@@ -5758,8 +5813,30 @@ fn image_natural_size(node: &crate::tree::Node) -> Option<(f32, f32)> {
         .get("src")
         .or_else(|| node.props.get("0"))
         .and_then(|value| value.as_str())
-        .and_then(crate::paint::image::loaded_natural_size)
+        .and_then(probe_natural_size)
         .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+}
+
+thread_local! {
+    /// Natural-size lookups style resolution made since the last
+    /// [`TaffyState::drain_media_size_probes`], as `(src, was decoded)`.
+    /// Layout runs on one thread per window (and per test), so a
+    /// thread-local lets the free style functions record without
+    /// threading a collector through every signature.
+    static MEDIA_SIZE_PROBES: std::cell::RefCell<Vec<(String, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// [`crate::paint::image::loaded_natural_size`], recorded: the answer a
+/// style was built on is what decides later whether an image finishing
+/// its fetch changes that style at all (see `image_intrinsics_changed`
+/// in `compute_inner_state`). Call it only where the size actually
+/// feeds the style — a probe that could not matter forces a rebuild
+/// the moment its source lands.
+fn probe_natural_size(src: &str) -> Option<(f32, f32)> {
+    let size = crate::paint::image::loaded_natural_size(src);
+    MEDIA_SIZE_PROBES.with(|probes| probes.borrow_mut().push((src.to_string(), size.is_some())));
+    size
 }
 
 /// Base Taffy style for an [`IMAGE_TYPES`] leaf, shared by the bulk
@@ -5772,9 +5849,21 @@ fn image_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style
     let size_fallback = prop_f32_with(node, "size", vs);
     let w_dim = prop_dim_with(node, "width", vs);
     let h_dim = prop_dim_with(node, "height", vs);
-    let natural_size = image_natural_size(node);
-    let aspect_ratio = crate::style::prop_aspect_ratio_with(node, "aspectRatio", vs)
-        .or_else(|| natural_size.map(|(w, h)| w / h));
+    let explicit_ar = crate::style::prop_aspect_ratio_with(node, "aspectRatio", vs);
+    // The decoded size only matters on an axis the author left open: an
+    // aspect ratio (CSS and Taffy alike) only ever fills in a missing
+    // dimension, so with both set to absolute lengths it is inert and the
+    // natural one is not even looked up. That is what keeps a fixed-
+    // thumbnail feed from relaying out every time one of its sources
+    // lands. A percentage can resolve to "indefinite" against an unsized
+    // parent and let the ratio act after all, so it still probes.
+    let both_fixed = matches!(w_dim, Some(Dim::Length(_))) && matches!(h_dim, Some(Dim::Length(_)));
+    let natural_size = if both_fixed {
+        None
+    } else {
+        image_natural_size(node)
+    };
+    let aspect_ratio = explicit_ar.or_else(|| natural_size.map(|(w, h)| w / h));
 
     // When neither axis is set, fall back to .size or default.
     let component_default = if et.eq_ignore_ascii_case("Avatar") {

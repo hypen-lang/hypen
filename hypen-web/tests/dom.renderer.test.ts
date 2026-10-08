@@ -700,3 +700,179 @@ describe("DOMRenderer falsy text values", () => {
     expect(textNode.textContent).toBe("0");
   });
 });
+
+describe("DOMRenderer batch-scoped child-change notifications", () => {
+  const makeRenderer = () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, new StubEngine() as unknown as Engine);
+    return { container, renderer };
+  };
+
+  const mountBoard = (renderer: DOMRenderer) => {
+    const calls: number[] = [];
+    renderer.getComponentRegistry().register("Board", {
+      create() {
+        return document.createElement("section");
+      },
+      onChildrenChanged(element) {
+        calls.push(element.children.length);
+      },
+    });
+    return calls;
+  };
+
+  test("a host inserted with many children in one batch is notified once, after all of them landed", () => {
+    const { renderer } = makeRenderer();
+    const calls = mountBoard(renderer);
+
+    const patches: Patch[] = [
+      { type: "create", id: "root-1", elementType: "Column", props: {} } as Patch,
+      { type: "create", id: "board", elementType: "Board", props: {} } as Patch,
+      { type: "insert", parentId: "root-1", id: "board" } as Patch,
+    ];
+    for (let i = 0; i < 5; i++) {
+      patches.push({ type: "create", id: `c${i}`, elementType: "Text", props: {} } as Patch);
+      patches.push({ type: "insert", parentId: "board", id: `c${i}` } as Patch);
+    }
+    renderer.applyPatches(patches);
+
+    // One notification for the board, delivered when all five children exist.
+    expect(calls).toEqual([5]);
+
+    // A later structural batch notifies once more, with the final child list.
+    renderer.applyPatches([
+      { type: "remove", id: "c0" } as Patch,
+      { type: "remove", id: "c1" } as Patch,
+      { type: "move", parentId: "board", id: "c4", beforeId: "c2" } as Patch,
+    ]);
+    expect(calls).toEqual([5, 3]);
+
+    // A batch that never touches the board's children is silent.
+    renderer.applyPatches([
+      { type: "setProp", id: "c2", name: "0", value: "hello" } as Patch,
+    ]);
+    expect(calls).toEqual([5, 3]);
+  });
+
+  test("a slot reassignment still reaches the host, coalesced with the batch", () => {
+    const { renderer } = makeRenderer();
+    const calls = mountBoard(renderer);
+    renderer.applyPatches([
+      { type: "create", id: "root-1", elementType: "Column", props: {} } as Patch,
+      { type: "create", id: "board", elementType: "Board", props: {} } as Patch,
+      { type: "insert", parentId: "root-1", id: "board" } as Patch,
+      { type: "create", id: "c0", elementType: "Text", props: {} } as Patch,
+      { type: "insert", parentId: "board", id: "c0" } as Patch,
+    ]);
+    expect(calls).toEqual([1]);
+
+    renderer.applyPatches([
+      { type: "setProp", id: "c0", name: "slot.0", value: "header" } as Patch,
+      { type: "removeProp", id: "c0", name: "slot.0" } as Patch,
+    ]);
+    expect(calls).toEqual([1, 1]);
+  });
+});
+
+describe("DOMRenderer path-narrowed text interpolation", () => {
+  const makeRenderer = () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, new StubEngine() as unknown as Engine);
+    return { container, renderer };
+  };
+
+  const mount = (renderer: DOMRenderer) => {
+    renderer.applyPatches([
+      { type: "create", id: "root-1", elementType: "Column", props: {} } as Patch,
+      { type: "create", id: "name", elementType: "Text", props: { "0": "Hi @{state.user.name}" } } as Patch,
+      { type: "create", id: "first", elementType: "Text", props: { "0": "@{state.items.0.title}" } } as Patch,
+      { type: "create", id: "count", elementType: "Text", props: { "0": "@{state.items.length} items" } } as Patch,
+      { type: "insert", parentId: "root-1", id: "name" } as Patch,
+      { type: "insert", parentId: "root-1", id: "first" } as Patch,
+      { type: "insert", parentId: "root-1", id: "count" } as Patch,
+    ]);
+    renderer.updateState({ user: { name: "Ada" }, items: [{ title: "one" }] });
+    return {
+      name: renderer.getNode("name") as FakeElement,
+      first: renderer.getNode("first") as FakeElement,
+      count: renderer.getNode("count") as FakeElement,
+    };
+  };
+
+  test("only bindings under a changed path are re-interpolated", () => {
+    const { renderer } = makeRenderer();
+    const { name, first, count } = mount(renderer);
+    expect(name.textContent).toBe("Hi Ada");
+    expect(first.textContent).toBe("one");
+    expect(count.textContent).toBe("1 items");
+
+    // Both fields moved in the state object, but only `items.0.title` is
+    // reported: the name binding is not visited (it keeps the stale text,
+    // which is how we observe that it was skipped).
+    renderer.updateState(
+      { user: { name: "Grace" }, items: [{ title: "uno" }] },
+      ["items.0.title"],
+    );
+    expect(first.textContent).toBe("uno");
+    expect(name.textContent).toBe("Hi Ada");
+    // `items.length` reads the array, so an edit inside a slot visits it
+    // (and finds nothing to change here).
+    expect(count.textContent).toBe("1 items");
+  });
+
+  test("an array push, reported as its new index, reaches a `.length` binding", () => {
+    const { renderer } = makeRenderer();
+    const { count, name } = mount(renderer);
+    renderer.updateState(
+      { user: { name: "Ada" }, items: [{ title: "one" }, { title: "two" }] },
+      ["items.1"],
+    );
+    expect(count.textContent).toBe("2 items");
+    expect(name.textContent).toBe("Hi Ada");
+  });
+
+  test("a parent path change reaches every binding beneath it, and vice versa", () => {
+    const { renderer } = makeRenderer();
+    const { name, first, count } = mount(renderer);
+
+    renderer.updateState(
+      { user: { name: "Ada" }, items: [{ title: "a" }, { title: "b" }] },
+      ["items"],
+    );
+    expect(first.textContent).toBe("a");
+    expect(count.textContent).toBe("2 items");
+    expect(name.textContent).toBe("Hi Ada");
+
+    // A leaf below what the binding reads: `user.name` binding sees `user`.
+    renderer.updateState({ user: { name: "Linus" }, items: [{ title: "a" }] }, ["user"]);
+    expect(name.textContent).toBe("Hi Linus");
+  });
+
+  test("a sibling path with a shared prefix string does not match", () => {
+    const { renderer } = makeRenderer();
+    renderer.applyPatches([
+      { type: "create", id: "u", elementType: "Text", props: { "0": "@{state.user.name}" } } as Patch,
+      { type: "insert", parentId: "root-1", id: "u" } as Patch,
+    ]);
+    const u = renderer.getNode("u") as FakeElement;
+    renderer.updateState({ user: { name: "Ada" }, userx: 1 });
+    expect(u.textContent).toBe("Ada");
+    renderer.updateState({ user: { name: "Bob" }, userx: 2 }, ["userx", "user.named"]);
+    expect(u.textContent).toBe("Ada");
+    renderer.updateState({ user: { name: "Bob" }, userx: 2 }, ["user.name"]);
+    expect(u.textContent).toBe("Bob");
+  });
+
+  test("omitting changed paths re-interpolates everything, and removed nodes leave the index", () => {
+    const { renderer } = makeRenderer();
+    const { name, first } = mount(renderer);
+    renderer.updateState({ user: { name: "Grace" }, items: [{ title: "uno" }] });
+    expect(name.textContent).toBe("Hi Grace");
+    expect(first.textContent).toBe("uno");
+
+    renderer.applyPatches([{ type: "remove", id: "first" } as Patch]);
+    // The removed node is no longer visited (no throw, no stale write).
+    renderer.updateState({ user: { name: "Grace" }, items: [{ title: "dos" }] }, ["items.0.title"]);
+    expect(first.textContent).toBe("uno");
+  });
+});

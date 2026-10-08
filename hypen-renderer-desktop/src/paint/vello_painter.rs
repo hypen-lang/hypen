@@ -76,6 +76,14 @@ struct CachedSubtree {
     /// paint-only patch batch drops exactly the entries whose id set
     /// intersects the affected nodes instead of the whole cache.
     item_ids: Vec<String>,
+    /// Image sources this fragment asked for and did NOT get while it
+    /// was being encoded (still fetching, or failed): every one of
+    /// them drew nothing. The fragment is exact until one of them
+    /// resolves, so an image landing anywhere else in the page leaves
+    /// it alone — see the image-load check in `build_scene`. Empty for
+    /// the overwhelming majority of fragments (bitmap-bearing items are
+    /// painted outside the cache; only a Video poster reaches here).
+    awaiting_images: Vec<String>,
     /// The first item's cumulative transform at encode time. The
     /// splice-on-hit is a pure y-translate, which is only valid when
     /// the CURRENT transform is that translate's conjugation of this
@@ -125,6 +133,12 @@ pub struct VelloPainter {
     /// the user resized the window (which dropped the cache as a
     /// side-effect of the viewport change).
     last_image_load_gen: u64,
+    /// Sources `draw_image` (or the Video poster path) looked up and
+    /// missed while the current subtree fragment was being encoded.
+    /// Cleared at the start of a cache-miss encode and moved into the
+    /// new `CachedSubtree::awaiting_images` at its end; pushes outside
+    /// an encode are discarded by the next clear.
+    encoding_awaits: Vec<String>,
     /// Renderer node ids the drag-and-drop runtime wants painted LAST
     /// (the lifted item and its subtree — `DesktopDnd::raised_ids`), so
     /// the ghost floats above its siblings while it is dragged / held.
@@ -186,6 +200,7 @@ impl VelloPainter {
             subtree_cache: indexmap::IndexMap::new(),
             last_viewport: None,
             last_image_load_gen: 0,
+            encoding_awaits: Vec::new(),
             #[cfg(feature = "dev-overlay")]
             dev_overlay: None,
             device_overlay: None,
@@ -304,15 +319,24 @@ impl VelloPainter {
             self.last_viewport = Some(viewport);
         }
         // Image worker landed one or more fetches since the last
-        // build. Any subtree whose images were `Loading` at encode
-        // time would have rendered nothing for that Image, so we
-        // drop the cache and let those subtrees re-encode with the
-        // now-loaded bitmap. The cheap monotonic check here keeps
-        // the steady-state hot path (no fetches in flight) free of
-        // cost: AtomicU64 load + integer compare.
+        // build. A subtree whose images were `Loading` at encode time
+        // rendered nothing for that Image, so it must re-encode with
+        // the now-loaded bitmap — but ONLY that subtree. Each fragment
+        // remembers the sources it missed (`awaiting_images`); one
+        // whose list is empty, or whose awaited sources are all still
+        // unloaded, is exact and stays. Dropping everything here used
+        // to make one thumbnail landing in a 600-post feed re-encode
+        // every visible card. The cheap monotonic check keeps the
+        // steady-state hot path (no fetches in flight) free of cost:
+        // AtomicU64 load + integer compare.
         let load_gen = crate::paint::image::image_load_generation();
         if load_gen != self.last_image_load_gen {
-            self.subtree_cache.clear();
+            self.subtree_cache.retain(|_, entry| {
+                !entry
+                    .awaiting_images
+                    .iter()
+                    .any(|src| crate::paint::image::loaded_source(src).is_some())
+            });
             self.last_image_load_gen = load_gen;
         }
 
@@ -684,10 +708,12 @@ impl VelloPainter {
         // without refactoring every draw helper to take a Scene
         // parameter — swap, draw, swap back.
         let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
+        self.encoding_awaits.clear();
         for item in items {
             self.draw_item_no_outer_clip(item, scale_factor, outer_clip, outer_clip_radius);
         }
         let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
+        let awaiting_images = std::mem::take(&mut self.encoding_awaits);
 
         // A same-key miss (splice-invalid re-encode of an existing
         // entry) replaces in place — evicting first would drop an
@@ -703,6 +729,7 @@ impl VelloPainter {
                 clip_to: outer_clip,
                 clip_radius: outer_clip_radius,
                 item_ids: items.iter().map(|it| it.node_id.clone()).collect(),
+                awaiting_images,
                 transform: items[0].transform,
             },
         );
@@ -1445,7 +1472,11 @@ impl VelloPainter {
                             .as_deref()
                             .map(|p| {
                                 crate::paint::image::ensure_loaded_public(p);
-                                crate::paint::image::loaded_source(p).is_some()
+                                let ready = crate::paint::image::loaded_source(p).is_some();
+                                if !ready {
+                                    self.note_awaiting_image(p);
+                                }
+                                ready
                             })
                             .unwrap_or(false);
                     if poster_ready {
@@ -2011,6 +2042,15 @@ impl VelloPainter {
         self.scene.pop_layer();
     }
 
+    /// Record that the fragment being encoded asked for `src` and drew
+    /// nothing because it is not decoded yet. See
+    /// `CachedSubtree::awaiting_images`.
+    fn note_awaiting_image(&mut self, src: &str) {
+        if !self.encoding_awaits.iter().any(|s| s == src) {
+            self.encoding_awaits.push(src.to_string());
+        }
+    }
+
     fn draw_image(
         &mut self,
         rect: LayoutRect,
@@ -2043,6 +2083,7 @@ impl VelloPainter {
                 crate::paint::image::loaded_source(src)
             });
             let Some(pm) = pm else {
+                self.note_awaiting_image(src);
                 return;
             };
             let img = pixmap_to_peniko(&pm);
@@ -3475,6 +3516,55 @@ mod tests {
         painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(painter.subtree_cache_misses(), 3);
         assert_eq!(painter.subtree_cache_hits(), 3);
+    }
+
+    /// An image fetch landing used to drop EVERY cached fragment. Only a
+    /// fragment that drew nothing for a source it was waiting on can be
+    /// stale, and only once that source is decoded — the other cards in
+    /// the feed keep their encodings.
+    #[test]
+    fn image_load_only_reencodes_fragments_that_awaited_the_landed_source() {
+        use std::sync::Arc;
+        let late = "test://vello-painter-late-poster";
+        let mut layout = three_post_layout();
+        // Bitmap-bearing items paint outside the cache; a Video poster is
+        // the one image a cached fragment itself looks up.
+        layout.items[1].kind = ItemKind::Video {
+            poster: Some(late.to_string()),
+            src: None,
+            state: Default::default(),
+            slots: Default::default(),
+        };
+        let mut painter = VelloPainter::new();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 3);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Some other image landed: nothing these fragments awaited has
+        // resolved, so every one of them replays.
+        crate::paint::image::bump_image_load_generation_for_test();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 3);
+        assert_eq!(painter.subtree_cache_hits(), 3);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // The poster lands: exactly the fragment that drew nothing for
+        // it re-encodes; its two neighbours still hit.
+        let mut pm = tiny_skia::Pixmap::new(16, 16).expect("alloc poster pixmap");
+        pm.fill(tiny_skia::Color::from_rgba8(0x10, 0x20, 0x30, 0xff));
+        crate::paint::image::test_seed_decoded(late, Arc::new(pm));
+        crate::paint::image::bump_image_load_generation_for_test();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 4);
+        assert_eq!(painter.subtree_cache_hits(), 5);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Re-encoded against the decoded poster, the fragment awaits
+        // nothing: further loads leave it alone too.
+        crate::paint::image::bump_image_load_generation_for_test();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 4);
+        assert_eq!(painter.subtree_cache_hits(), 8);
     }
 
     #[test]

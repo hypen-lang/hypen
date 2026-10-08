@@ -499,3 +499,82 @@ describe("through the DOM renderer", () => {
     expect(classesOf(button)).toHaveLength(2);
   });
 });
+
+describe("variant rules are retired when no element wears them", () => {
+  const ruleCount = () => rules().length;
+  const hasRule = (fragment: string) => rules().some((rule) => rule.includes(fragment));
+
+  test("replacing a value on the only wearer swaps the rule instead of accumulating", () => {
+    const registry = new ApplicatorRegistry();
+    const element = makeElement();
+
+    // Values no other test in this file applies, so nothing else holds a
+    // reference to these rules.
+    registry.applyAll(element, { "opacity:hover.0": 0.311 });
+    const before = ruleCount();
+    expect(hasRule("opacity: 0.311")).toBe(true);
+
+    // Twenty distinct values — the shape of an animated or dragged prop.
+    for (let i = 1; i <= 20; i++) {
+      registry.apply(element, "opacity:hover.0", 0.5 + i / 1000);
+    }
+    expect(hasRule("opacity: 0.311")).toBe(false);
+    expect(hasRule("opacity: 0.51;")).toBe(false);
+    expect(hasRule("opacity: 0.52;")).toBe(true);
+    expect(ruleCount()).toBe(before);
+    expect(classesOf(element).filter((c) => c.startsWith("hypen-opacity-hover-"))).toHaveLength(1);
+  });
+
+  test("a rule shared by two elements survives until the last wearer lets go", () => {
+    const registry = new ApplicatorRegistry();
+    const a = makeElement();
+    const b = makeElement();
+
+    registry.apply(a, "opacity:hover.0", 0.42);
+    registry.apply(b, "opacity:hover.0", 0.42);
+    expect(hasRule("opacity: 0.42")).toBe(true);
+
+    registry.apply(a, "opacity:hover.0", 0.43);
+    expect(hasRule("opacity: 0.42")).toBe(true); // b still wears it
+    expect(hasRule("opacity: 0.43")).toBe(true);
+
+    registry.release(b);
+    expect(hasRule("opacity: 0.42")).toBe(false);
+    expect(hasRule("opacity: 0.43")).toBe(true);
+
+    // Precedence bookkeeping stays aligned with the sheet after deletes: a
+    // later base-tier rule still lands ahead of the hover rule.
+    registry.apply(a, "opacity.0", 0.9);
+    expect(ruleIndex("opacity: 0.9")).toBeLessThan(ruleIndex("opacity: 0.43"));
+  });
+
+  test("removing a node through the renderer releases the rules only it used", () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, new StubEngine() as unknown as Engine);
+
+    renderer.applyPatches([
+      { type: "create", id: "root", elementType: "Column", props: {} } as Patch,
+      {
+        type: "create",
+        id: "card",
+        elementType: "Column",
+        props: { "opacity:hover.0": 0.77 },
+      } as Patch,
+      {
+        type: "create",
+        id: "inner",
+        elementType: "Text",
+        props: { "0": "hi", "opacity:hover.0": 0.66 },
+      } as Patch,
+      { type: "insert", parentId: "root", id: "card" } as Patch,
+      { type: "insert", parentId: "card", id: "inner" } as Patch,
+    ]);
+    expect(hasRule("opacity: 0.77")).toBe(true);
+    expect(hasRule("opacity: 0.66")).toBe(true);
+
+    // Removing the subtree root releases its descendants' rules too.
+    renderer.applyPatches([{ type: "remove", id: "card" } as Patch]);
+    expect(hasRule("opacity: 0.77")).toBe(false);
+    expect(hasRule("opacity: 0.66")).toBe(false);
+  });
+});

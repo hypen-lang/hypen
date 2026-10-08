@@ -188,10 +188,10 @@ export class Hypen {
     this.moduleInstances.set(moduleId, this.moduleInstance);
 
     // Connect module state changes to renderer
-    this.moduleInstance.onStateChange(() => {
+    this.moduleInstance.onStateChange((change) => {
       const mergedState = this.getMergedState();
       log.debug(`State changed, merged state:`, mergedState);
-      this.renderer!.updateState(mergedState);
+      this.renderer!.updateState(mergedState, change.paths);
     });
 
     // Set up component resolver for dynamic component composition
@@ -336,10 +336,10 @@ export class Hypen {
       this.moduleInstances.set(componentName, moduleInstance);
 
       // Listen to state changes
-      moduleInstance.onStateChange(() => {
+      moduleInstance.onStateChange((change) => {
         const mergedState = this.getMergedState();
         log.debug(`Lazy component ${componentName} state changed:`, mergedState);
-        this.renderer!.updateState(mergedState);
+        this.renderer!.updateState(mergedState, change.paths);
       });
     }
 
@@ -391,10 +391,10 @@ export class Hypen {
       );
       this.globalContext.registerModule("Router", routerInstance);
       this.moduleInstances.set("Router", routerInstance);
-      routerInstance.onStateChange(() => {
+      routerInstance.onStateChange((change) => {
         const mergedState = this.getMergedState();
         log.debug("Router state changed:", mergedState);
-        this.renderer!.updateState(mergedState);
+        this.renderer!.updateState(mergedState, change.paths);
       });
     }
 
@@ -426,10 +426,10 @@ export class Hypen {
       this.moduleInstances.set(name, moduleInstance);
 
       // Connect state changes to renderer
-      moduleInstance.onStateChange(() => {
+      moduleInstance.onStateChange((change) => {
         const mergedState = this.getMergedState();
         log.debug(`Nested component ${name} state changed:`, mergedState);
-        this.renderer!.updateState(mergedState);
+        this.renderer!.updateState(mergedState, change.paths);
       });
     }
   }

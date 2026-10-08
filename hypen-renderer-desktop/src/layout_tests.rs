@@ -3634,8 +3634,10 @@ fn wrapped_height_memo_does_not_survive_a_bulk_rebuild() {
     // heights: a one-line Text gets a four-line box, or vice versa.
     //
     // This is reachable with no `mark_needs_rebuild` anywhere in sight:
-    // `needs_rebuild` also fires on `image_intrinsics_changed`, which
-    // bumps every single time an image finishes loading or fails.
+    // `needs_rebuild` also fires on `image_intrinsics_changed` — an
+    // image whose natural size a style was built without finishing its
+    // fetch (the fixture carries one such Image, loaded below).
+    let late_src = "test://memo-rebuild-route-late";
     let mut tree = Tree::new();
     let mut taffy = TaffyState::new();
     let mut text = TextEngine::new();
@@ -3666,6 +3668,10 @@ fn wrapped_height_memo_does_not_survive_a_bulk_rebuild() {
             &[("0", json!("ok")), ("fillMaxWidth", json!(true))],
         ),
         insert_patch("col", "short"),
+        // Unsized, not yet decoded: its style is built on "no natural
+        // size", so the fetch landing later is what forces the rebuild.
+        create_patch("late", "Image", &[("src", json!(late_src))]),
+        insert_patch("col", "late"),
     ];
     tree.apply_batch(&batch);
     assert!(taffy.apply_patches(&batch, &tree, 1.0, vp_logical));
@@ -3690,9 +3696,16 @@ fn wrapped_height_memo_does_not_survive_a_bulk_rebuild() {
     let before = taffy.wrapped_probe_snapshot();
 
     // The one route into the rebuild branch that no patch and no
-    // `mark_needs_rebuild` announces.
+    // `mark_needs_rebuild` announces: the awaited image lands.
+    seed_probe_pixmap(late_src, 24, 24);
     crate::paint::image::bump_image_load_generation_for_test();
+    let rebuilds_before = taffy.bulk_rebuilds();
     let after = compute(&mut taffy, &tree, &mut text);
+    assert_eq!(
+        taffy.bulk_rebuilds(),
+        rebuilds_before + 1,
+        "the image load must rebuild"
+    );
 
     // Ground truth: the same renderer tree measured by a `TaffyState`
     // that has never held a memo. Both sides are freshly-built taffy
@@ -4028,8 +4041,9 @@ fn viewport_deps_do_not_survive_a_rebuild_that_renumbers_nodes() {
     // length then freezes at whatever the rebuild happened to bake in.
     //
     // The rebuild is reachable with no `mark_needs_rebuild` in sight:
-    // `image_intrinsics_changed` gets there on its own, every time an
-    // image finishes loading or fails.
+    // `image_intrinsics_changed` gets there on its own when an image a
+    // style was built without finishes loading.
+    let late_src = "test://viewport-deps-rebuild-route-late";
     let mut tree = Tree::new();
     let mut taffy = TaffyState::new();
     let mut text = TextEngine::new();
@@ -4053,6 +4067,8 @@ fn viewport_deps_do_not_survive_a_rebuild_that_renumbers_nodes() {
         &[("height", json!("50vh"))],
     ));
     batch.push(insert_patch("shell", "tall"));
+    batch.push(create_patch("late", "Image", &[("src", json!(late_src))]));
+    batch.push(insert_patch("shell", "late"));
     tree.apply_batch(&batch);
     assert!(taffy.apply_patches(&batch, &tree, 1.0, vp_at((800, 600))));
 
@@ -4071,8 +4087,15 @@ fn viewport_deps_do_not_survive_a_rebuild_that_renumbers_nodes() {
     tree.apply_batch(&remove);
     assert!(taffy.apply_patches(&remove, &tree, 1.0, vp_at((801, 600))));
     let _ = compute(&mut taffy, &tree, &mut text, (801, 600));
+    seed_probe_pixmap(late_src, 24, 24);
     crate::paint::image::bump_image_load_generation_for_test();
+    let rebuilds_before = taffy.bulk_rebuilds();
     let _ = compute(&mut taffy, &tree, &mut text, (801, 600));
+    assert_eq!(
+        taffy.bulk_rebuilds(),
+        rebuilds_before + 1,
+        "the image load must rebuild"
+    );
 
     // Now a height-only change. `tall` must follow it.
     let after = compute(&mut taffy, &tree, &mut text, (801, 1200));
@@ -8477,4 +8500,124 @@ fn incremental_image_create_uses_loaded_natural_size_like_bulk() {
             "incremental {a:?} != bulk {b:?}"
         );
     }
+}
+
+/// Stash a decoded `w`×`h` pixmap for `src` so `loaded_natural_size`
+/// answers synchronously, as the image worker would after a fetch.
+fn seed_probe_pixmap(src: &str, w: u32, h: u32) {
+    crate::paint::image::test_seed_decoded(
+        src,
+        std::sync::Arc::new(tiny_skia::Pixmap::new(w, h).unwrap()),
+    );
+}
+
+/// An image finishing its fetch used to force a full Taffy rebuild no
+/// matter what — in a feed every thumbnail landing threw away the whole
+/// layout. The rebuild is now gated on a probed natural size actually
+/// changing: a tree whose styles never asked for one stays put.
+#[test]
+fn image_load_generation_alone_does_not_rebuild_layout() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("hello")
+            Container().width(40).height(40)
+        }"#,
+        json!({}),
+    );
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let compute = |state: &mut TaffyState, text: &mut TextEngine| {
+        LayoutPass::compute_with_state(state, &tree, text, (800, 600), 1.0, 0.0, &scrolls, 0)
+    };
+    let _ = compute(&mut state, &mut text);
+    let built = state.bulk_rebuilds();
+    assert_eq!(built, 1, "cold start builds once");
+
+    // Images elsewhere in the app (another window, a detached route)
+    // keep landing; nothing here depends on any of them.
+    crate::paint::image::bump_image_load_generation_for_test();
+    let _ = compute(&mut state, &mut text);
+    crate::paint::image::bump_image_load_generation_for_test();
+    let _ = compute(&mut state, &mut text);
+    assert_eq!(state.bulk_rebuilds(), built, "no probed size changed, so no rebuild");
+}
+
+/// An Image with both dimensions set never reads its decoded size, so
+/// its own fetch landing is not a layout change either.
+#[test]
+fn explicitly_sized_image_loading_does_not_rebuild_layout() {
+    let src = "test://explicit-size-no-rebuild";
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+                Image(src: "{src}").width(120).height(80)
+                Text("caption")
+            }}"#
+        ),
+        json!({}),
+    );
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let compute = |state: &mut TaffyState, text: &mut TextEngine| {
+        LayoutPass::compute_with_state(state, &tree, text, (800, 600), 1.0, 0.0, &scrolls, 0)
+    };
+    let before = compute(&mut state, &mut text);
+    let built = state.bulk_rebuilds();
+
+    seed_probe_pixmap(src, 1080, 1920);
+    crate::paint::image::bump_image_load_generation_for_test();
+    let after = compute(&mut state, &mut text);
+    assert_eq!(state.bulk_rebuilds(), built, "explicit size: the bitmap cannot change the style");
+    let id = first_of_type(&tree, "Image");
+    assert_eq!(
+        before.item_by_id(&id).unwrap().rect,
+        after.item_by_id(&id).unwrap().rect,
+    );
+}
+
+/// The complement: an unsized Image is styled on "no natural size yet",
+/// and its fetch landing is exactly the load that must rebuild — and
+/// only once; later unrelated loads leave the rebuilt layout alone.
+#[test]
+fn unsized_image_loading_rebuilds_layout_exactly_once() {
+    let src = "test://unsized-image-rebuilds-once";
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+                Image(src: "{src}")
+                Text("caption")
+            }}"#
+        ),
+        json!({}),
+    );
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let compute = |state: &mut TaffyState, text: &mut TextEngine| {
+        LayoutPass::compute_with_state(state, &tree, text, (800, 600), 1.0, 0.0, &scrolls, 0)
+    };
+    let before = compute(&mut state, &mut text);
+    let built = state.bulk_rebuilds();
+    let id = first_of_type(&tree, "Image");
+
+    // Some other image lands first: this one is still unloaded, the
+    // recorded answer ("none") still holds, nothing to rebuild.
+    crate::paint::image::bump_image_load_generation_for_test();
+    let _ = compute(&mut state, &mut text);
+    assert_eq!(state.bulk_rebuilds(), built);
+
+    seed_probe_pixmap(src, 300, 150);
+    crate::paint::image::bump_image_load_generation_for_test();
+    let after = compute(&mut state, &mut text);
+    assert_eq!(state.bulk_rebuilds(), built + 1, "the awaited size arrived");
+    let rect = after.item_by_id(&id).unwrap().rect;
+    assert_ne!(before.item_by_id(&id).unwrap().rect, rect);
+    assert!((rect.w - 300.0).abs() < 0.5 && (rect.h - 150.0).abs() < 0.5, "{rect:?}");
+
+    // Once rebuilt on the real size, further loads are no concern.
+    crate::paint::image::bump_image_load_generation_for_test();
+    let _ = compute(&mut state, &mut text);
+    assert_eq!(state.bulk_rebuilds(), built + 1);
 }
