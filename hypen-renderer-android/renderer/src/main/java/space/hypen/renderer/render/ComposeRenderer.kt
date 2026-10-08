@@ -97,6 +97,23 @@ class ComposeRenderer(
     // across the detach → attach cycle.
     private val detachedIds = mutableSetOf<String>()
 
+    /**
+     * Elements whose prop and child-list writes are staged for the batch
+     * in flight (see [HypenElement.beginPropStaging] /
+     * [HypenElement.beginChildStaging]); committed, each as one snapshot
+     * write, when the batch ends.
+     */
+    private val stagedElements = LinkedHashSet<HypenElement>()
+    private var inBatch = false
+
+    /**
+     * Main-thread time the last [applyPatches] spent applying its batch,
+     * for measuring what a batch costs the UI thread.
+     */
+    @Volatile
+    var lastBatchApplyNanos: Long = 0L
+        private set
+
     // Animation transaction prelude for the batch currently being applied
     // (null when the batch carried no prelude). Guarded by [lock].
     //
@@ -157,7 +174,53 @@ class ComposeRenderer(
 
         // Snapshot listeners while holding the lock so the list cannot be
         // modified between the copy and the iteration.
+        val started = System.nanoTime()
         val listenersSnapshot = synchronized(lock) {
+            inBatch = true
+            try {
+                applyBatchLocked(patches, deferredNotifications)
+            } finally {
+                // A batch the renderer could not finish (the session logs and
+                // skips it) must still publish what it staged and close the
+                // batch, or the next out-of-batch write would be staged too.
+                commitStagedElements()
+            }
+            stateListeners.toList()
+        }
+        lastBatchApplyNanos = System.nanoTime() - started
+        log.debug { "Applied ${patches.size} patches in ${lastBatchApplyNanos / 1000} µs" }
+
+        // Invoke deferred listener notifications outside the lock
+        for (notification in deferredNotifications) {
+            notification(listenersSnapshot)
+        }
+
+        _treeVersion.value++
+
+        // Notify listeners
+        listenersSnapshot.forEach { it.onTreeChanged() }
+    }
+
+    /**
+     * Publish every staged element once: one props map and one revision
+     * bump per touched node, one child-list write per touched parent,
+     * however many patches hit each. Closes the batch.
+     */
+    private fun commitStagedElements() {
+        for (element in stagedElements) {
+            element.commitStagedProps()
+            element.commitChildren()
+        }
+        stagedElements.clear()
+        inBatch = false
+    }
+
+    /** The body of [applyPatches], run under [lock] with the batch open. */
+    private fun applyBatchLocked(
+        patches: List<Patch>,
+        deferredNotifications: MutableList<(List<RendererStateListener>) -> Unit>,
+    ) {
+        run {
             // Protocol invariant 3, "first-patch-only preludes": the stamp is
             // read from batch index 0 ONLY — a `batchAnimation` patch at any
             // other index, or inside a replayed initialTree, is not a stamp,
@@ -201,19 +264,19 @@ class ComposeRenderer(
             // Flush: queue the enters this batch earned and drop the
             // transaction stamp (strictly batch-scoped).
             animation.endBatch()
-
-            stateListeners.toList()
         }
+    }
 
-        // Invoke deferred listener notifications outside the lock
-        for (notification in deferredNotifications) {
-            notification(listenersSnapshot)
-        }
-
-        _treeVersion.value++
-
-        // Notify listeners
-        listenersSnapshot.forEach { it.onTreeChanged() }
+    /**
+     * Route [element]'s writes for the rest of the batch into its staging
+     * maps. Outside a batch (a drag release writing a prop) writes publish
+     * immediately, as before.
+     */
+    private fun stage(element: HypenElement) {
+        if (!inBatch) return
+        element.beginPropStaging()
+        element.beginChildStaging()
+        stagedElements.add(element)
     }
 
     private fun applyPatch(patch: Patch, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
@@ -278,9 +341,10 @@ class ComposeRenderer(
             // Reuse the live instance so composables already holding it
             // observe the replacement through its snapshot state instead
             // of rendering a stale node.
-            if (existing.children.isNotEmpty()) {
-                log.warn { "CREATE: replacing ${existing.elementType}($id) that had ${existing.children.size} children!" }
+            if (existing.childIds.isNotEmpty()) {
+                log.warn { "CREATE: replacing ${existing.elementType}($id) that had ${existing.childIds.size} children!" }
             }
+            stage(existing)
             existing.elementType = elementType
             existing.replaceProps(props)
             existing.clearChildren()
@@ -329,8 +393,9 @@ class ComposeRenderer(
         }
         // Captured BEFORE the write: it is the glide's start value.
         val previous = element.rawProps[name]
+        stage(element)
         element.setProp(name, patch.value)
-        element.bumpPropsRevision()
+        if (!element.isStagingProps) element.bumpPropsRevision()
 
         noteAnimation(id, name, patch.value, previous)
 
@@ -362,7 +427,8 @@ class ComposeRenderer(
 
         val element = elements[id] ?: return
         val previous = element.rawProps[name]
-        if (element.removeProp(name)) {
+        stage(element)
+        if (element.removeProp(name) && !element.isStagingProps) {
             element.bumpPropsRevision()
         }
 
@@ -412,6 +478,7 @@ class ComposeRenderer(
         }
         child.parentId = parentId
 
+        stage(parent)
         parent.addChild(id, patch.beforeId)
 
         // The drag runtime mirrors the link; during a post-drop hold this is
@@ -430,7 +497,7 @@ class ComposeRenderer(
 
         // Remove from old parent
         child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.removeChild(id)
+            elements[oldParentId]?.let { stage(it); it.removeChild(id) }
         }
 
         // Insert into new parent (same as insert)
@@ -488,7 +555,7 @@ class ComposeRenderer(
 
         // Remove from parent's children
         element.parentId?.let { parentId ->
-            elements[parentId]?.removeChild(id)
+            elements[parentId]?.let { stage(it); it.removeChild(id) }
         }
 
         // Recursively remove all descendants
@@ -524,14 +591,14 @@ class ComposeRenderer(
 
     /** Every id at-or-under [element], captured before any tree mutation. */
     private fun collectSubtreeIds(element: HypenElement, into: MutableSet<String>) {
-        for (childId in element.children.toList()) {
+        for (childId in element.childIds) {
             if (!into.add(childId)) continue
             elements[childId]?.let { collectSubtreeIds(it, into) }
         }
     }
 
     private fun removeDescendants(element: HypenElement, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
-        for (childId in element.children.toList()) {
+        for (childId in element.childIds) {
             val child = elements.remove(childId) ?: continue
             detachedIds.remove(childId)
             animation.forget(childId)
@@ -562,7 +629,7 @@ class ComposeRenderer(
         }
 
         element.parentId?.let { parentId ->
-            elements[parentId]?.removeChild(id)
+            elements[parentId]?.let { stage(it); it.removeChild(id) }
         }
         element.parentId = null
         detachedIds.add(id)
@@ -600,7 +667,7 @@ class ComposeRenderer(
         // be looked up in `elements`.
         if (parentId == "root" && elements[parentId] == null) {
             child.parentId?.let { oldParentId ->
-                elements[oldParentId]?.removeChild(id)
+                elements[oldParentId]?.let { stage(it); it.removeChild(id) }
             }
             child.parentId = null
             rootIdState = id
@@ -619,11 +686,12 @@ class ComposeRenderer(
         // Defensive: if the element somehow still has a stale parent
         // link (engine bug), unlink it first.
         child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.removeChild(id)
+            elements[oldParentId]?.let { stage(it); it.removeChild(id) }
         }
 
         child.parentId = parentId
 
+        stage(parent)
         parent.addChild(id, patch.beforeId)
 
         detachedIds.remove(id)
@@ -760,7 +828,7 @@ class ComposeRenderer(
      */
     fun getChildren(id: String): List<HypenElement> = synchronized(lock) {
         val element = elements[id] ?: return emptyList()
-        element.children.mapNotNull { elements[it] }
+        element.childIds.mapNotNull { elements[it] }
     }
 
     /**

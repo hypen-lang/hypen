@@ -72,8 +72,13 @@ class MoshiMessageParser : MessageParser {
 
     /** [utf8Verified]: [json] came from a strict UTF-8 decoder ([parseMessageBytes]). */
     fun parseMessage(json: String, utf8Verified: Boolean): RemoteMessage? {
+        // One UTF-8 encoding of the message serves both the type peek and the
+        // parse: `peek()` reads the buffer without consuming it, so the same
+        // bytes are handed to the typed adapter below. Encoding twice cost a
+        // second full-message copy per batch.
+        val buffer = Buffer().writeUtf8(json)
         val type = try {
-            peekMessageType(JsonReader.of(Buffer().writeUtf8(json)))
+            peekMessageType(JsonReader.of(buffer.peek()))
         } catch (e: Exception) {
             // Not even loosely JSON. A device-typed text is still a
             // connection-level device violation (counted), not silence.
@@ -84,7 +89,7 @@ class MoshiMessageParser : MessageParser {
             return null
         }
         return try {
-            val reader = JsonReader.of(Buffer().writeUtf8(json))
+            val reader = JsonReader.of(buffer)
             when (type) {
                 "initialTree" -> initialTreeAdapter.fromJson(reader)
                 "patch" -> patchMessageAdapter.fromJson(reader)

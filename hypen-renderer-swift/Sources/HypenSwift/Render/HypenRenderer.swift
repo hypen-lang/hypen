@@ -21,6 +21,10 @@ public final class HypenRenderer: ObservableObject {
     // `remove` arrives).
     private var elements: [String: HypenElement] = [:]
 
+    /// Coalesces element publications over one `applyPatches` call: each
+    /// element that changed publishes once, at the end of the batch.
+    let publishBatch = HypenPublishBatch()
+
     /// IDs that have been detached but not yet re-attached or removed.
     /// Exposed read-only so a Strategy 3 upgrade (limbo container) can
     /// render them invisibly to preserve SwiftUI `@State`, focus, and
@@ -120,6 +124,10 @@ public final class HypenRenderer: ObservableObject {
             currentBatchAnimation = nil
         }
         animator.beginBatch(patches)
+        // Every element publication in the batch is deferred and deduplicated
+        // until `publishBatch.end()`: a row that takes ten SetProps, a move
+        // and a host notification publishes once, not twelve times.
+        publishBatch.begin()
 
         for patch in patches {
             applyPatch(patch)
@@ -130,6 +138,7 @@ public final class HypenRenderer: ObservableObject {
         // `.transition` > snap), the queued enters, and the `.states` /
         // `.animate` re-arms.
         animator.endBatch()
+        publishBatch.end()
 
         treeVersion += 1
         log.debug("Tree version now: \(treeVersion), rootId: \(rootId ?? "nil")")
@@ -188,6 +197,7 @@ public final class HypenRenderer: ObservableObject {
             props: patch.props ?? [:]
         )
         element.semantics = HypenSemantics.from(dictionary: patch.semantics)
+        element.publishBatch = publishBatch
 
         elements[id] = element
 
@@ -253,7 +263,9 @@ public final class HypenRenderer: ObservableObject {
         if name.hasPrefix(HypenDnd.propPrefix) {
             dnd.noteNode(element)
         }
-        notifyHostAncestor(of: element)
+        if HostReadProps.hostReads(prop: name, of: element) {
+            notifyHostAncestor(of: element)
+        }
         log.debug("Set prop: \(id).\(name)")
     }
 
@@ -263,7 +275,9 @@ public final class HypenRenderer: ObservableObject {
     func applyReleasedProp(id: String, name: String, value: Any?) {
         guard let element = elements[id] else { return }
         element.setProp(name, value: value)
-        notifyHostAncestor(of: element)
+        if HostReadProps.hostReads(prop: name, of: element) {
+            notifyHostAncestor(of: element)
+        }
         log.debug("Applied released prop: \(id).\(name)")
     }
 
@@ -283,7 +297,9 @@ public final class HypenRenderer: ObservableObject {
         if name.hasPrefix(HypenDnd.propPrefix) {
             dnd.noteNode(element)
         }
-        notifyHostAncestor(of: element)
+        if HostReadProps.hostReads(prop: name, of: element) {
+            notifyHostAncestor(of: element)
+        }
         log.debug("Removed prop: \(id).\(name)")
     }
 
@@ -299,7 +315,9 @@ public final class HypenRenderer: ObservableObject {
         }
 
         element.textContent = patch.text
-        notifyHostAncestor(of: element)
+        if HostReadProps.hostReads(prop: "text", of: element) {
+            notifyHostAncestor(of: element)
+        }
         log.debug("Set text: \(id) = \"\(patch.text ?? "")\"")
     }
 
@@ -616,8 +634,11 @@ public final class HypenRenderer: ObservableObject {
 
     /// Container components read their children's elements during body
     /// evaluation (weight/flex distribution, grid spans, select options),
-    /// so a prop/text change on a child must also re-render the nearest
-    /// non-control-flow ancestor's view.
+    /// so a change to one of THOSE child props must also re-render the
+    /// nearest non-control-flow ancestor's view. Any other prop — a row's
+    /// text, colour, padding — is the child's own business: re-rendering
+    /// the host for it made every keystroke into a 1,000-row List
+    /// re-enumerate the list (`HostReadProps` decides).
     private func notifyHostAncestor(of element: HypenElement) {
         hostAncestor(startingAt: element.parentId)?.notifyChanged()
     }
@@ -659,5 +680,32 @@ public final class HypenRenderer: ObservableObject {
         treeVersion += 1
         resetEpoch += 1
         log.debug("Cleared renderer")
+    }
+}
+
+/// Which child props a host container's body reads. Mirrors the reads in
+/// `LayoutComponents` (Column / Row weight and flex distribution, Row item
+/// sizing, Grid spans) and `FormComponents` (Select reads its Option
+/// children's text and value), so a change to one of them re-renders the
+/// host while every other change stays on the child's own view.
+enum HostReadProps {
+    /// Base prop names (the `.N` argument suffix stripped), lower-cased.
+    static let layoutFacing: Set<String> = [
+        "weight", "flex", "flexgrow", "flexshrink", "flexbasis",
+        "width", "fillmaxwidth", "fillmaxsize",
+        "gridcolumn", "gridrow", "gridarea", "colspan", "rowspan",
+        "alignself", "order",
+    ]
+
+    /// Element types whose hosts read their text / value (Select options).
+    static let hostReadTypes: Set<String> = ["option", "menuitem", "selectoption"]
+
+    static func hostReads(prop name: String, of element: HypenElement) -> Bool {
+        if hostReadTypes.contains(element.elementType.lowercased()) { return true }
+        var base = Substring(name)
+        if let dot = base.lastIndex(of: "."), base[base.index(after: dot)...].allSatisfy(\.isNumber) {
+            base = base[..<dot]
+        }
+        return layoutFacing.contains(base.lowercased())
     }
 }
