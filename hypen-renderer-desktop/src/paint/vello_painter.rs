@@ -1063,6 +1063,7 @@ impl VelloPainter {
                 align,
                 max_lines,
                 padding,
+                line_through,
             } => {
                 // `truncate` (max_lines = Some(1)) wants overflow to
                 // disappear cleanly instead of bleeding into siblings.
@@ -1097,6 +1098,7 @@ impl VelloPainter {
                     item.font_weight,
                     *max_lines,
                     *padding,
+                    *line_through,
                 );
                 if needs_clip {
                     self.scene.pop_layer();
@@ -1597,6 +1599,7 @@ impl VelloPainter {
         weight: u16,
         max_lines: Option<u32>,
         padding: (f32, f32, f32, f32),
+        line_through: bool,
     ) {
         // Compute the content rect from the outer rect + padding. Bg /
         // border render against the outer rect (separately, in
@@ -1684,6 +1687,20 @@ impl VelloPainter {
             weight,
             scaled_line_height,
         );
+        if line_through && line_w > 0.0 {
+            let thickness = (scaled_size / 14.0).max(1.0);
+            fill_rect(
+                &mut self.scene,
+                LayoutRect {
+                    x: content_x + dx,
+                    y: content_y + scaled_size * 0.55,
+                    w: line_w,
+                    h: thickness,
+                },
+                color,
+                0.0,
+            );
+        }
     }
 
     fn draw_input(

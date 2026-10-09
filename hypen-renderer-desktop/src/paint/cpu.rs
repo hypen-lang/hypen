@@ -376,6 +376,7 @@ impl CpuPainter {
                     max_lines: _,
                     padding: _,
                     line_height: _,
+                    line_through,
                 } => {
                     // Pre-measure the line so right/center alignment
                     // can offset within the laid-out rect. Wrap width
@@ -390,16 +391,31 @@ impl CpuPainter {
                         crate::layout::TextAlign::Center => ((item.rect.w - line_w).max(0.0)) * 0.5,
                         crate::layout::TextAlign::End => (item.rect.w - line_w).max(0.0),
                     };
+                    let color = fg_override.unwrap_or(*color);
                     self.text.draw_text_cached_weighted(
                         pixmap,
                         content,
                         item.rect.x + dx,
                         item.rect.y,
                         scaled_size,
-                        fg_override.unwrap_or(*color),
+                        color,
                         Some(item.rect.w),
                         item.font_weight,
                     );
+                    if *line_through && line_w > 0.0 {
+                        let thickness = (scaled_size / 14.0).max(1.0);
+                        fill_rect(
+                            pixmap,
+                            crate::layout::Rect {
+                                x: item.rect.x + dx,
+                                y: item.rect.y + scaled_size * 0.55,
+                                w: line_w.min(item.rect.w),
+                                h: thickness,
+                            },
+                            color,
+                            0.0,
+                        );
+                    }
                 }
                 ItemKind::Input {
                     value,

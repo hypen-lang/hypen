@@ -50,5 +50,5 @@ fn main() {
     #[cfg(feature = "dev-overlay")]
     let app = app.dev_overlay_top(6.0);
 
-    app.module(module).run();
+    app.module_raw(module).run();
 }

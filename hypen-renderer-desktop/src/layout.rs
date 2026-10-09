@@ -683,6 +683,8 @@ pub enum ItemKind {
         /// the painter uses this inset to shift the glyph origin and
         /// shrink the wrap width to the content area.
         padding: (f32, f32, f32, f32),
+        /// CSS `text-decoration: line-through` / Tailwind `line-through`.
+        line_through: bool,
     },
     Button,
     /// Card keeps Button's action/accessibility behaviour while allowing the
@@ -6844,6 +6846,7 @@ fn emit_items(
                             align,
                             max_lines,
                             padding: padding_phys,
+                            line_through: has_line_through(node, viewport),
                         },
                         rect,
                         action,
@@ -7593,9 +7596,15 @@ pub(crate) fn refresh_item_paint(
                 .map(str::to_string);
             *color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
         }
-        ItemKind::Text { color, align, .. } => {
+        ItemKind::Text {
+            color,
+            align,
+            line_through,
+            ..
+        } => {
             *color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
             *align = parse_text_align(crate::style::prop_str_at(node, "textAlign", viewport));
+            *line_through = has_line_through(node, viewport);
         }
         ItemKind::Icon { .. } | ItemKind::Image { .. } => {
             // Icon-vs-Image is prop-driven (`__iconPaths` presence),
@@ -8259,6 +8268,16 @@ fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign 
         cursor = tree.parent_of(current);
     }
     TextAlign::Start
+}
+
+fn has_line_through(node: &crate::tree::Node, viewport: Viewport) -> bool {
+    crate::style::prop_str_at(node, "textDecoration", viewport)
+        .or_else(|| crate::style::prop_str_at(node, "textDecorationLine", viewport))
+        .is_some_and(|value| {
+            value
+                .split_ascii_whitespace()
+                .any(|token| token.eq_ignore_ascii_case("line-through"))
+        })
 }
 
 fn text_requests_stack_track_width(node: &crate::tree::Node) -> bool {

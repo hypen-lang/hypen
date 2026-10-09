@@ -12,6 +12,7 @@
 //! For trivial demos (`Text` / `Column` only, no state) [`Self::source`]
 //! builds a stateless module behind the scenes.
 
+use crate::embed::HypenAppHost;
 use crate::module::HypenModule;
 use crate::remote::RemoteModule;
 use crate::window::{App as WindowApp, AppEvent, PatchQueue};
@@ -222,6 +223,18 @@ impl DesktopApp {
     /// DesktopApp::new().module(Arc::new(instance)).run();
     /// ```
     pub fn module(mut self, instance: Arc<dyn HypenModule>) -> Self {
+        self.module = Some(HypenAppHost::new(instance));
+        self
+    }
+
+    /// Drive the window with a module that already performs renderer-level
+    /// composition such as `HypenApp` embed hosting.
+    ///
+    /// Ordinary apps should use [`Self::module`] so desktop-native
+    /// `HypenApp(url)` handling is installed automatically. This escape hatch
+    /// exists for shell modules that multiplex several engines themselves
+    /// (currently `hypen-browser`) and would otherwise double-host embeds.
+    pub fn module_raw(mut self, instance: Arc<dyn HypenModule>) -> Self {
         self.module = Some(instance);
         self
     }

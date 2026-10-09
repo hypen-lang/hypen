@@ -30,6 +30,7 @@ pub(crate) mod damage;
 pub(crate) mod dev_overlay;
 pub mod device;
 pub mod dnd;
+pub mod embed;
 pub mod gpu;
 pub(crate) mod ime;
 pub mod layout;
@@ -56,6 +57,7 @@ pub mod window;
 
 pub use app::DesktopApp;
 pub use device::DeviceConfig;
+pub use embed::HypenAppHost;
 pub use layout::{window_controls_platform_insets, SafeAreaInsets, WINDOW_CONTROLS_BAR_HEIGHT};
 pub use module::HypenModule;
 pub use painter::{PaintTarget, Painter};

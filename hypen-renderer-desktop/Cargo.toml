@@ -222,3 +222,7 @@ path = "examples/scroll.rs"
 [[example]]
 name = "remote"
 path = "examples/remote.rs"
+
+[[example]]
+name = "hypenapp_embed"
+path = "examples/hypenapp_embed.rs"
