@@ -43,6 +43,9 @@ pub enum ControlFlowKind {
     ForEach {
         item_name: String,
         key_path: Option<String>,
+        /// Materialized window of a virtualized (lazy) list; `None` when the
+        /// list expands every item.
+        window: Option<ListWindow>,
     },
     /// Conditional (When/If) container
     Conditional,
@@ -69,6 +72,47 @@ pub enum ControlFlowKind {
         /// Maximum number of routes to cache before LRU eviction.
         max_cache_size: usize,
     },
+}
+
+/// Name of the reserved prop that carries a lazy list's window to the
+/// renderer. Set on the list's render parent as
+/// `{"total": n, "start": s, "end": e}` (plus `"estimatedSize"` when the
+/// template gave one): items `[start, end)` are materialized as children; the
+/// renderer stands in for the rest (spacer padding, placeholders).
+pub const VIRT_WINDOW_PROP: &str = "__virt.window";
+
+/// The materialized slice of a lazy `ForEach` — see [`crate::ir::LazyList`].
+///
+/// The window is anchored on the KEY of its first item, not only its index:
+/// inserting or removing items above the window shifts `start` to follow the
+/// anchor, so the rows on screen keep their identity instead of every row
+/// being rebuilt and the content jumping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListWindow {
+    /// Index of the first materialized item.
+    pub start: usize,
+    /// How many items to materialize from `start` (the renderer's visible
+    /// range plus its overscan).
+    pub count: usize,
+    /// Key of the item at `start` when the window was last placed.
+    pub anchor_key: Option<String>,
+    /// `(total, start, end)` last sent in [`VIRT_WINDOW_PROP`], so an
+    /// unchanged window emits no patch.
+    pub sent: Option<(usize, usize, usize)>,
+    /// Forwarded as `estimatedSize` in [`VIRT_WINDOW_PROP`].
+    pub estimated_item_size: Option<f64>,
+}
+
+impl ListWindow {
+    pub fn new(lazy: &crate::ir::LazyList) -> Self {
+        Self {
+            start: 0,
+            count: lazy.initial_count.max(1),
+            anchor_key: None,
+            sent: None,
+            estimated_item_size: lazy.estimated_item_size,
+        }
+    }
 }
 
 /// Instance node - a concrete instance of an element in the tree
@@ -385,6 +429,19 @@ pub struct InstanceTree {
     /// Exit tombstones — see [`ExitTombstone`]. Oldest first, bounded by
     /// [`MAX_EXIT_TOMBSTONES`].
     exit_tombstones: std::collections::VecDeque<(NodeId, ExitTombstone)>,
+
+    /// Whether the renderer handles `__virt.window` and reports viewports.
+    /// Off by default: a renderer that doesn't know the protocol would show
+    /// only the first window of every `List`, so lazy lists expand fully
+    /// until it opts in. Read when a ForEach is created.
+    pub virtualization: bool,
+
+    /// Set by an element just before it creates a child, when that child is
+    /// its ONLY child; taken (reset) by the next `create_ir_node_tree_full`.
+    /// A lazy ForEach windows only in that slot, so `__virt.window` on the
+    /// render parent describes exactly one list and renderer spacers can't
+    /// collide with sibling content.
+    pub(crate) sole_child_slot: bool,
 }
 
 /// How many exit tombstones the tree retains. An exit plays for a few
@@ -438,6 +495,8 @@ impl InstanceTree {
             registered_templates: std::collections::HashSet::new(),
             remove_stack: Vec::new(),
             exit_tombstones: std::collections::VecDeque::new(),
+            virtualization: false,
+            sole_child_slot: false,
         }
     }
 

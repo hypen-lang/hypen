@@ -288,6 +288,7 @@ fn replace_ir_node_impl(
             template,
             props,
             module_scope,
+            lazy,
         } => {
             // Note: source binding is kept as-is; nested ForEach maintains its own iteration context
             // Replace in props
@@ -306,6 +307,7 @@ fn replace_ir_node_impl(
                 template: new_template,
                 props: new_props,
                 module_scope: module_scope.clone(),
+                lazy: lazy.clone(),
             }
         }
         IRNode::Conditional {

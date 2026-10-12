@@ -212,6 +212,7 @@ pub(crate) fn reconcile_iterable_children(
         key_path,
         ir_templates,
         stable_templates,
+        0,
     )
 }
 
@@ -310,6 +311,10 @@ pub(crate) fn reconcile_iterable_children_full(
     key_path: Option<&str>,
     ir_templates: &[IRNode],
     stable_templates: bool,
+    // Absolute index of `items[0]`. Non-zero when `items` is the window of a
+    // lazy list: fallback keys (`item-<idx>`) must stay absolute so a row
+    // keeps its identity as the window slides.
+    index_offset: usize,
 ) {
     let parent_id = logical_parent;
     let multi_template = ir_templates.len() > 1;
@@ -371,7 +376,7 @@ pub(crate) fn reconcile_iterable_children_full(
     let item_keys: Vec<String> = items
         .iter()
         .enumerate()
-        .map(|(index, item)| generate_item_key(item, key_path, item_name, index))
+        .map(|(index, item)| generate_item_key(item, key_path, item_name, index_offset + index))
         .collect();
 
     let mut new_child_ids: Vec<NodeId> = Vec::with_capacity(items.len() * ir_templates.len());
@@ -384,8 +389,9 @@ pub(crate) fn reconcile_iterable_children_full(
     let mut created_ids: Vec<NodeId> = Vec::new();
     let mut unkeyed_idx = 0;
 
-    for (item_index, item) in items.iter().enumerate() {
-        let item_key = item_keys[item_index].as_str();
+    for (window_index, item) in items.iter().enumerate() {
+        let item_key = item_keys[window_index].as_str();
+        let item_index = index_offset + window_index;
         let item_hash = item_fingerprint(item);
 
         for (template_idx, template) in ir_templates.iter().enumerate() {

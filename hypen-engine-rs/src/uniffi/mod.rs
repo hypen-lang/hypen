@@ -898,6 +898,39 @@ impl HypenEngine {
         Ok(state.lower_patches(patches))
     }
 
+    /// Opt in to list virtualization: lazy lists then materialize only a
+    /// window of items, described by the `__virt.window` prop. Call before
+    /// the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
+    /// `setVirtualization`.
+    pub fn set_virtualization(&self, enabled: bool) -> Result<(), HypenError> {
+        self.state
+            .lock()
+            .map_err(|e| HypenError::StateError(e.to_string()))?
+            .core
+            .set_virtualization(enabled);
+        Ok(())
+    }
+
+    /// Report the item range `[start, end)` (visible rows plus overscan) of
+    /// the lazy list whose element id is `list_id` and return the patches
+    /// that move its window. Ids naming no windowed list return none.
+    /// Mirrors WASI's `hypen_set_list_viewport` and JS's `setListViewport`.
+    pub fn set_list_viewport(
+        &self,
+        list_id: String,
+        start: u32,
+        end: u32,
+    ) -> Result<Vec<Patch>, HypenError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| HypenError::StateError(e.to_string()))?;
+        let patches = state
+            .core
+            .set_list_viewport_wire(&list_id, start as usize, end as usize);
+        Ok(state.lower_patches(patches))
+    }
+
     /// Look up which named module owns an action.
     ///
     /// Returns `Some(module_name)` if the action was registered via

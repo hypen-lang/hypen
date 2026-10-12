@@ -1023,6 +1023,7 @@ fn test_router_route_with_list_element_emits_items_on_nav() {
         template: vec![IRNode::Element(Element::new("Row"))],
         props: Props::new(),
         module_scope: None,
+        lazy: None,
     };
     let mut list_el = Element::new("List");
     list_el.ir_children.push(foreach);

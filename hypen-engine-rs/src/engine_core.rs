@@ -6,7 +6,7 @@
 //! and dirty-node rendering.
 
 use crate::{
-    ir::{ComponentRegistry, IRNode, ResourceRegistry},
+    ir::{ComponentRegistry, IRNode, NodeId, ResourceRegistry},
     lifecycle::{Module, ModuleInstance},
     reactive::{DependencyGraph, Scheduler},
     reconcile::{reconcile_ir_with_ds, InstanceTree, Patch},
@@ -697,6 +697,60 @@ impl EngineCore {
         }
 
         patches
+    }
+
+    /// Enable or disable list virtualization (see [`crate::ir::LazyList`]).
+    ///
+    /// A renderer that handles `__virt.window` and reports viewports turns
+    /// this on before the first render. Lists created while it is off expand
+    /// fully and stay that way until rebuilt.
+    pub fn set_virtualization(&mut self, enabled: bool) {
+        self.tree.virtualization = enabled;
+    }
+
+    /// Move a lazy list's window to the renderer's visible range `[start,
+    /// end)` (overscan included) and return the patches that materialize it.
+    ///
+    /// `list_id` is the element carrying `__virt.window`. An id that names no
+    /// windowed list returns no patches.
+    pub fn set_list_viewport(&mut self, list_id: NodeId, start: usize, end: usize) -> Vec<Patch> {
+        let state: &serde_json::Value = self
+            .module
+            .as_ref()
+            .map(|m| m.get_state())
+            .unwrap_or(&NULL_STATE);
+        let mut patches = Vec::new();
+        let mut ctx = crate::reconcile::diff::ReconcileCtx {
+            tree: &mut self.tree,
+            state,
+            patches: &mut patches,
+            dependencies: &mut self.dependencies,
+            data_sources: (!self.data_sources.is_empty()).then_some(&self.data_sources),
+            modules: (!self.modules.is_empty()).then_some(&self.modules),
+        };
+        crate::reconcile::diff::apply_list_viewport(&mut ctx, list_id, start, end);
+        if !patches.is_empty() {
+            self.revision += 1;
+        }
+        patches
+    }
+
+    /// [`set_list_viewport`](Self::set_list_viewport) addressed by the
+    /// patch-wire id string, as the language bindings receive it. A
+    /// malformed id returns no patches.
+    #[cfg_attr(not(any(target_arch = "wasm32", feature = "uniffi")), allow(dead_code))]
+    pub fn set_list_viewport_wire(
+        &mut self,
+        list_id: &str,
+        start: usize,
+        end: usize,
+    ) -> Vec<Patch> {
+        match list_id.parse::<u64>() {
+            Ok(ffi) => {
+                self.set_list_viewport(NodeId::from(slotmap::KeyData::from_ffi(ffi)), start, end)
+            }
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Filter out Remove patches for elements that were Created in the same

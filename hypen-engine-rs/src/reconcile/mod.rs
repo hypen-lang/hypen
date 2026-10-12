@@ -46,4 +46,7 @@ pub use resolve::{
     resolve_props_with_item,
 };
 #[doc(hidden)]
-pub use tree::{ControlFlowKind, ExitTombstone, InstanceNode, InstanceTree, MAX_EXIT_TOMBSTONES};
+pub use tree::{
+    ControlFlowKind, ExitTombstone, InstanceNode, InstanceTree, ListWindow, MAX_EXIT_TOMBSTONES,
+    VIRT_WINDOW_PROP,
+};

@@ -75,6 +75,10 @@ pub enum IRNode {
         /// DSL). When the named module is registered, the source array binding
         /// resolves and registers under that module's state slot.
         module_scope: Option<String>,
+        /// Virtualization config. `Some` asks the engine to materialize only
+        /// a window of items (see [`LazyList`]); `None` expands every item.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        lazy: Option<LazyList>,
     },
 
     /// Conditional construct: When(value: @{state.status}) { Case(match: "loading") {...} Else {...} }
@@ -143,6 +147,39 @@ impl RouterRoute {
     }
 }
 
+/// Default number of items a lazy list materializes before the renderer
+/// reports its first viewport.
+pub const DEFAULT_LAZY_INITIAL_COUNT: usize = 30;
+
+/// Virtualization config for a lazy `ForEach` (`ForEach(…, lazy: true)`, and
+/// `List`/`Grid` unless `lazy: false`).
+///
+/// A lazy list materializes only a window of items. The engine sends the
+/// window to the renderer as a `__virt.window` prop on the list's render
+/// parent; the renderer measures the rows it has, estimates the rest, and
+/// reports the visible range back with `set_list_viewport`. The engine never
+/// knows item sizes. Windowing applies only when the renderer enabled it
+/// (`set_virtualization`) and the ForEach is the sole child of a real
+/// element; otherwise the list expands fully, as if `lazy` were absent.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct LazyList {
+    /// Items materialized before the first viewport report.
+    pub initial_count: usize,
+    /// Renderer hint for sizing unmeasured rows, forwarded verbatim in
+    /// `__virt.window.estimatedSize`. Never required.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_item_size: Option<f64>,
+}
+
+impl Default for LazyList {
+    fn default() -> Self {
+        Self {
+            initial_count: DEFAULT_LAZY_INITIAL_COUNT,
+            estimated_item_size: None,
+        }
+    }
+}
+
 impl IRNode {
     /// Create an Element IRNode
     pub fn element(element: Element) -> Self {
@@ -164,6 +201,7 @@ impl IRNode {
             template,
             props,
             module_scope: None,
+            lazy: None,
         }
     }
 

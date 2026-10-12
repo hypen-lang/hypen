@@ -30,6 +30,7 @@ fn test_foreach_patches_exclude_container() {
         template: vec![IRNode::Element(Element::new("Text"))],
         props: Props::new(),
         module_scope: None,
+        lazy: None,
     };
 
     patches.extend(reconcile_ir(&mut tree, &ir_node, None, &state, &mut deps));
@@ -181,6 +182,7 @@ fn test_foreach_creates_container() {
         ))],
         props: Props::new(),
         module_scope: None,
+        lazy: None,
     };
 
     patches.extend(reconcile_ir(&mut tree, &ir_node, None, &state, &mut deps));
@@ -213,6 +215,7 @@ fn test_foreach_empty_array() {
         template: vec![IRNode::Element(Element::new("Text"))],
         props: Props::new(),
         module_scope: None,
+        lazy: None,
     };
 
     patches.extend(reconcile_ir(&mut tree, &ir_node, None, &state, &mut deps));
@@ -568,6 +571,7 @@ fn test_foreach_reconciliation_add_items() {
         template: vec![IRNode::Element(Element::new("Text"))],
         props: Props::new(),
         module_scope: None,
+        lazy: None,
     };
 
     patches.extend(reconcile_ir(
@@ -718,6 +722,7 @@ fn test_foreach_with_props() {
         template: vec![IRNode::Element(Element::new("Text"))],
         props,
         module_scope: None,
+        lazy: None,
     };
 
     patches.extend(reconcile_ir(&mut tree, &ir_node, None, &state, &mut deps));

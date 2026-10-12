@@ -396,9 +396,26 @@ fn render_dirty_iterable_partial(
         .get(node_id)
         .map(|n| n.children.iter().copied().collect())
         .unwrap_or_default();
-    if children.len() != items.len() * template_count {
+
+    // A lazy list holds children only for its window. Edits outside it have
+    // nothing to update; inside it, child positions are window-relative.
+    let (window_start, window_end) = match tree.get(node_id).and_then(|n| n.control_flow.as_deref())
+    {
+        Some(crate::reconcile::ControlFlowKind::ForEach {
+            window: Some(window),
+            ..
+        }) => match window.sent {
+            // A different total means growth/shrink: the window and
+            // `__virt.window` need the full pass.
+            Some((total, start, end)) if total == items.len() => (start, end),
+            _ => return false,
+        },
+        _ => (0, items.len()),
+    };
+    if children.len() != (window_end - window_start) * template_count {
         return false; // growth/shrink slipped past the path check
     }
+    indices.retain(|&index| (window_start..window_end).contains(&index));
 
     let multi_template = template_count > 1;
     let mut item_keys: Vec<(usize, String)> = Vec::with_capacity(indices.len());
@@ -408,7 +425,7 @@ fn render_dirty_iterable_partial(
         }
         let item_key = generate_item_key(&items[index], key_path.as_deref(), &item_name, index);
         for template_idx in 0..template_count {
-            let child_id = children[index * template_count + template_idx];
+            let child_id = children[(index - window_start) * template_count + template_idx];
             let expected = iterable_child_key(&item_key, template_idx, multi_template);
             let matches = tree
                 .get(child_id)
@@ -456,7 +473,7 @@ fn render_dirty_iterable_partial(
         let item = &items[index];
         let item_hash = item_fingerprint(item);
         for (template_idx, template) in templates.iter().enumerate() {
-            let child_id = children[index * template_count + template_idx];
+            let child_id = children[(index - window_start) * template_count + template_idx];
             let memo = ctx.tree.get(child_id).and_then(|n| n.iter_memo);
             let memo_hit = memo
                 .is_some_and(|m| m.templates_hash == templates_hash && m.item_hash == item_hash);
