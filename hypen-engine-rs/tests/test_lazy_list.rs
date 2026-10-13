@@ -312,7 +312,7 @@ fn viewport_past_the_end_is_clamped() {
 }
 
 #[test]
-fn viewport_on_a_non_lazy_id_is_ignored() {
+fn viewport_on_a_non_list_element_is_ignored() {
     let mut h = Harness::new(
         r#"Column { Text("x") }"#,
         json!({ "items": items(0..3) }),
@@ -411,14 +411,29 @@ fn removing_the_anchor_keeps_the_window_position() {
 
 #[test]
 fn unkeyed_lazy_list_windows_by_index() {
+    // No `id` and no `key:` — rows are keyed by index (`item-<idx>`).
+    let unkeyed = |range: std::ops::Range<usize>| {
+        Value::Array(
+            range
+                .map(|i| json!({ "name": format!("row {i}") }))
+                .collect(),
+        )
+    };
     let mut h = Harness::new(
         r#"List(@state.items, initialCount: 4) { Text("@{item.name}") }"#,
-        json!({ "items": items(0..20) }),
+        json!({ "items": unkeyed(0..20) }),
         true,
     );
     let list = h.screen.find("List");
     h.viewport(&list, 8, 12);
     assert_eq!(h.screen.rows(&list), names(8..12));
+
+    // Index identity can't follow a prepend: the window stays on indices
+    // 8..12, which now hold rows 7..11.
+    let mut prepended = vec![json!({ "name": "new" })];
+    prepended.extend(unkeyed(0..20).as_array().unwrap().iter().cloned());
+    h.set_items(Value::Array(prepended));
+    assert_eq!(h.screen.rows(&list), names(7..11));
 }
 
 #[test]
@@ -466,4 +481,209 @@ fn grid_is_lazy_by_default() {
     );
     let grid = h.screen.find("Grid");
     assert_eq!(h.screen.rows(&grid), names(0..9));
+}
+
+fn animated_removes(batch: &[Patch]) -> usize {
+    batch
+        .iter()
+        .filter(|p| {
+            matches!(
+                p,
+                Patch::Remove {
+                    transition: true,
+                    ..
+                }
+            )
+        })
+        .count()
+}
+
+fn with_prepended(extra: Vec<Value>, base: Value) -> Value {
+    let mut all = extra;
+    all.extend(base.as_array().unwrap().iter().cloned());
+    Value::Array(all)
+}
+
+#[test]
+fn viewport_on_an_eager_list_or_bad_id_is_ignored() {
+    let mut h = Harness::new(
+        r#"List(@state.items, key: "id", lazy: false) { Text("@{item.name}") }"#,
+        json!({ "items": items(0..20) }),
+        true,
+    );
+    let list = h.screen.find("List");
+    assert!(h.viewport(&list, 5, 10).is_empty());
+    assert_eq!(h.screen.rows(&list).len(), 20);
+    // Unknown id: no patches, no panic.
+    h.engine.set_list_viewport(parse_id("123456789"), 0, 10);
+    assert!(h.flush().is_empty());
+}
+
+#[test]
+fn huge_viewport_end_does_not_overflow() {
+    let mut h = Harness::new(LIST, json!({ "items": items(0..100) }), true);
+    let list = h.screen.find("List");
+    h.viewport(&list, 5, usize::MAX);
+    assert_eq!(h.screen.rows(&list), names(5..100));
+    // The next shift used to overflow `start + count`.
+    h.set_items(with_prepended(
+        vec![json!({ "id": 999, "name": "new" })],
+        items(0..100),
+    ));
+    assert_eq!(h.screen.rows(&list), names(5..100));
+}
+
+#[test]
+fn moving_the_top_row_away_keeps_the_window() {
+    let mut h = Harness::new(LIST, json!({ "items": items(0..100) }), true);
+    let list = h.screen.find("List");
+    h.viewport(&list, 40, 50);
+    // Sort row 40 to the bottom: the window stays with its neighbours
+    // instead of following row 40 and collapsing to one row.
+    let mut moved: Vec<Value> = items(0..100)
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|item| item["id"] != 40)
+        .cloned()
+        .collect();
+    moved.push(json!({ "id": 40, "name": "row 40" }));
+    h.set_items(Value::Array(moved));
+    assert_eq!(h.screen.rows(&list), names(41..51));
+}
+
+#[test]
+fn duplicate_key_above_does_not_capture_the_window() {
+    let mut h = Harness::new(LIST, json!({ "items": items(0..100) }), true);
+    let list = h.screen.find("List");
+    h.viewport(&list, 40, 50);
+    h.set_items(with_prepended(
+        vec![json!({ "id": 40, "name": "dup" })],
+        items(0..100),
+    ));
+    assert_eq!(h.screen.rows(&list), names(40..50));
+}
+
+const ANIMATED_LIST: &str =
+    r#"List(@state.items, key: "id", initialCount: 10) { Text("@{item.name}").exit(fade) }"#;
+
+#[test]
+fn rows_scrolled_out_do_not_play_exit_transitions() {
+    let mut h = Harness::new(ANIMATED_LIST, json!({ "items": items(0..100) }), true);
+    let list = h.screen.find("List");
+    let batch = h.viewport(&list, 5, 15);
+    assert_eq!(removes(&batch), 5);
+    assert_eq!(animated_removes(&batch), 0);
+}
+
+#[test]
+fn deleted_rows_still_play_exit_transitions() {
+    let mut h = Harness::new(ANIMATED_LIST, json!({ "items": items(0..100) }), true);
+    let list = h.screen.find("List");
+    h.viewport(&list, 0, 10);
+    // Delete visible row 3 and prepend one: row 9 is pushed out of the
+    // window (an eviction), row 3 is gone from the data (an exit).
+    let mut next: Vec<Value> = vec![json!({ "id": 500, "name": "new" })];
+    next.extend(
+        items(0..100)
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|item| item["id"] != 3)
+            .cloned(),
+    );
+    let batch = h.set_items(Value::Array(next));
+    assert_eq!(animated_removes(&batch), 1);
+    assert!(!h.screen.rows(&list).contains(&"row 3".to_string()));
+}
+
+#[test]
+fn hot_reload_to_lazy_windows_an_expanded_list() {
+    let mut h = Harness::new(
+        r#"List(@state.items, key: "id", lazy: false) { Text("@{item.name}") }"#,
+        json!({ "items": items(0..30) }),
+        true,
+    );
+    let list = h.screen.find("List");
+    h.render(LIST);
+    assert_eq!(h.screen.rows(&list), names(0..10));
+    assert_eq!(
+        h.screen.window(&list),
+        Some(json!({ "total": 30, "start": 0, "end": 10 }))
+    );
+}
+
+#[test]
+fn toggling_virtualization_applies_on_the_next_update() {
+    let mut h = Harness::new(LIST, json!({ "items": items(0..30) }), false);
+    let list = h.screen.find("List");
+    assert_eq!(h.screen.rows(&list).len(), 30);
+
+    h.engine.set_virtualization(true);
+    h.set_items(items(0..31));
+    assert_eq!(h.screen.rows(&list), names(0..10));
+
+    h.engine.set_virtualization(false);
+    h.set_items(items(0..32));
+    assert_eq!(h.screen.rows(&list).len(), 32);
+    assert_eq!(h.screen.window(&list), None);
+}
+
+#[test]
+fn hot_reload_resends_a_changed_estimate() {
+    let mut h = Harness::new(
+        r#"List(@state.items, key: "id", initialCount: 5, estimatedItemSize: 40) { Text("@{item.name}") }"#,
+        json!({ "items": items(0..50) }),
+        true,
+    );
+    let list = h.screen.find("List");
+    h.render(
+        r#"List(@state.items, key: "id", initialCount: 5, estimatedItemSize: 80) { Text("@{item.name}") }"#,
+    );
+    assert_eq!(
+        h.screen.window(&list).unwrap()["estimatedSize"],
+        json!(80.0)
+    );
+}
+
+#[test]
+fn gaining_a_sibling_withdraws_the_window() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } }"#,
+        json!({ "items": items(0..50) }),
+        true,
+    );
+    let column = h.screen.find("Column");
+    assert!(h.screen.window(&column).is_some());
+    h.render(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } Text("footer") }"#,
+    );
+    assert_eq!(h.screen.window(&column), None);
+}
+
+#[test]
+fn replacing_the_list_withdraws_the_window() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } }"#,
+        json!({ "items": items(0..50) }),
+        true,
+    );
+    let column = h.screen.find("Column");
+    h.render(r#"Column { Text("empty") }"#);
+    assert_eq!(h.screen.window(&column), None);
+}
+
+#[test]
+fn bound_lazy_flag_is_an_error() {
+    let h = Harness::new(
+        r#"List(@state.items, key: "id", lazy: @state.flag) { Text("@{item.name}") }"#,
+        json!({ "items": items(0..5), "flag": true }),
+        true,
+    );
+    let error = h.screen.find("__Error");
+    let message = h.screen.props[&error]["message"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert!(message.contains("lazy"), "{message}");
 }

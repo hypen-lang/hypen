@@ -2,7 +2,7 @@ use super::conditionals::{evaluate_value, find_matching_branch, find_matching_ro
 use super::item_bindings::replace_ir_node_item_bindings;
 use super::keyed::{
     generate_item_key, iterable_child_key, reconcile_iterable_children,
-    reconcile_iterable_children_full,
+    reconcile_iterable_children_full, Eviction,
 };
 use super::resolve::{evaluate_binding_ref, resolve_props_full};
 use super::tree::DEFAULT_ROUTER_CACHE_SIZE;
@@ -614,6 +614,15 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
             }
         }
 
+        // A list that was this element's only child and gained a sibling
+        // (hot reload) can no longer own the element's `__virt.window`.
+        if new_children.len() > 1 {
+            let children = ctx.tree.get(node_id).map(|n| n.children.clone());
+            for child in children.into_iter().flatten() {
+                drop_window(ctx, child, node_id);
+            }
+        }
+
         if old_children.len() > new_children.len() {
             let doomed: Vec<NodeId> = old_children
                 .iter()
@@ -648,6 +657,7 @@ fn replace_subtree_impl(
         None
     };
 
+    withdraw_window(ctx.tree, old_node_id, ctx.patches);
     emit_subtree_removal(ctx.tree, old_node_id, ctx.patches);
 
     // Unlink by index — the old filter-collect rebuilt the parent's entire
@@ -1124,14 +1134,31 @@ fn place_window(
 ) -> (usize, usize) {
     let len = items.len();
     let key_at = |index: usize| generate_item_key(&items[index], key_path, item_name, index);
+    // The occurrence of `key` nearest the old start: a shift above the
+    // window moves rows a little, so the scan usually ends within a few
+    // probes, and a duplicate key far away can't capture the window.
+    let nearest = |key: &str, from: usize| {
+        let from = from.min(len.saturating_sub(1));
+        (0..len)
+            .flat_map(|d| [from.checked_add(d), from.checked_sub(d).filter(|_| d > 0)])
+            .flatten()
+            .filter(|&i| i < len)
+            .find(|&i| key_at(i) == key)
+    };
 
     let mut start = window.start;
     if let Some(anchor) = window.anchor_key.as_deref() {
         let anchored = start < len && key_at(start) == anchor;
         if !anchored {
-            // O(n) key scan, paid only when the list shifted under the
-            // window — the steady state hits the check above.
-            if let Some(found) = (0..len).find(|&i| key_at(i) == anchor) {
+            let next = window.next_key.as_deref();
+            // Follow the anchor only where its neighbour came along — that
+            // is a shift. Otherwise the anchor item itself moved (or went
+            // away): stay with the neighbour, which now heads the window.
+            let shifted = nearest(anchor, start).filter(|&found| match next {
+                Some(next) => found + 1 < len && key_at(found + 1) == next,
+                None => true,
+            });
+            if let Some(found) = shifted.or_else(|| next.and_then(|n| nearest(n, start))) {
                 start = found;
             }
         }
@@ -1140,10 +1167,12 @@ fn place_window(
         // Shrunk past the window: show the tail rather than nothing.
         start = len.saturating_sub(window.count);
     }
-    let end = (start + window.count).min(len);
+    // Saturating: `count` comes from a renderer report and may be huge.
+    let end = start.saturating_add(window.count).min(len);
 
     window.start = start;
     window.anchor_key = (start < len).then(|| key_at(start));
+    window.next_key = (start + 1 < len).then(|| key_at(start + 1));
     (start, end)
 }
 
@@ -1220,6 +1249,8 @@ pub(crate) fn apply_list_viewport(
     window.count = end.saturating_sub(start).max(1);
     // An explicit position, not a shift: re-anchor on whatever item is there.
     window.anchor_key = None;
+    window.next_key = None;
+    window.viewport_pass = true;
     reconcile_ir_node_impl(ctx, foreach_id, &template);
     true
 }
@@ -1242,6 +1273,75 @@ fn drop_window(ctx: &mut ReconcileCtx, foreach_id: NodeId, render_parent: NodeId
                 VIRT_WINDOW_PROP.to_string(),
             ));
         }
+    }
+}
+
+/// Bring a ForEach's window in line with its template and the engine, so a
+/// hot reload or a `set_virtualization` toggle takes effect on the list's
+/// next pass: install a window when the list is lazy, virtualization is on
+/// and the ForEach is the sole child of a real element; drop it otherwise;
+/// pick up a changed size estimate.
+///
+/// Returns `(windowed, viewport_pass)`: whether the list is windowed now,
+/// and whether this pass was triggered by a viewport report.
+fn sync_window(
+    ctx: &mut ReconcileCtx,
+    foreach_id: NodeId,
+    parent: Option<NodeId>,
+    render_parent: NodeId,
+    lazy: Option<&crate::ir::LazyList>,
+) -> (bool, bool) {
+    let sole_child_of_element = parent == Some(render_parent)
+        && ctx
+            .tree
+            .get(render_parent)
+            .is_some_and(|p| p.children.len() == 1);
+    let lazy = match lazy {
+        Some(lazy) if ctx.tree.virtualization && sole_child_of_element => lazy,
+        _ => {
+            drop_window(ctx, foreach_id, render_parent);
+            return (false, false);
+        }
+    };
+    let Some(ControlFlowKind::ForEach { window, .. }) = ctx
+        .tree
+        .get_mut(foreach_id)
+        .and_then(|n| n.control_flow.as_deref_mut())
+    else {
+        return (false, false);
+    };
+    match window {
+        None => {
+            *window = Some(ListWindow::new(lazy));
+            (true, false)
+        }
+        Some(window) => {
+            if window.estimated_item_size != lazy.estimated_item_size {
+                window.estimated_item_size = lazy.estimated_item_size;
+                window.sent = None; // re-send with the new estimate
+            }
+            (true, std::mem::take(&mut window.viewport_pass))
+        }
+    }
+}
+
+/// Withdraw `__virt.window` from the parent of a windowed ForEach that is
+/// about to be removed while its parent stays (a hot reload replacing the
+/// list with something else), so the renderer doesn't keep spacers for a
+/// list that is gone.
+fn withdraw_window(tree: &InstanceTree, node_id: NodeId, patches: &mut Vec<Patch>) {
+    let Some(node) = tree.get(node_id) else {
+        return;
+    };
+    if let (
+        Some(ControlFlowKind::ForEach {
+            window: Some(ListWindow { sent: Some(_), .. }),
+            ..
+        }),
+        Some(parent),
+    ) = (node.control_flow.as_deref(), node.parent)
+    {
+        patches.push(Patch::remove_prop(parent, VIRT_WINDOW_PROP.to_string()));
     }
 }
 
@@ -1549,12 +1649,20 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 // ghosts. Correct but O(n), so it stays the exception.
                 let children_intact = old_children.iter().all(|&id| ctx.tree.get(id).is_some());
 
-                if lazy.is_none() {
-                    drop_window(ctx, node_id, render_parent);
-                }
+                let (windowed, viewport_pass) =
+                    sync_window(ctx, node_id, existing_parent, render_parent, lazy.as_ref());
                 let (start, end) =
                     window_for(ctx.tree, node_id, items, key_path.as_deref(), item_name);
                 let window_items = &items[start..end];
+                let eviction = match (windowed, viewport_pass) {
+                    (false, _) => Eviction::None,
+                    (true, true) => Eviction::All,
+                    (true, false) => Eviction::Outside {
+                        items,
+                        key_path: key_path.as_deref(),
+                        item_name,
+                    },
+                };
 
                 if children_intact {
                     reconcile_iterable_children_full(
@@ -1569,6 +1677,7 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                         // copy — recompute rather than trust the cache.
                         false,
                         start,
+                        eviction,
                     );
                 } else {
                     rebuild_foreach_children(
@@ -1935,6 +2044,7 @@ fn remove_subtree(
     patches: &mut Vec<Patch>,
     dependencies: &mut DependencyGraph,
 ) {
+    withdraw_window(tree, node_id, patches);
     emit_subtree_removal(tree, node_id, patches);
     tree.remove_subtree_with(node_id, |id| dependencies.remove_node(id));
 }

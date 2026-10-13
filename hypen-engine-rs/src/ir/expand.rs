@@ -1358,19 +1358,28 @@ const LAZY_ARGS: [&str; 3] = ["lazy", "initialCount", "estimatedItemSize"];
 /// Read a lazy list's config from `lazy:` / `initialCount:` /
 /// `estimatedItemSize:`. `default_on` is true for `List`/`Grid`, which are
 /// lazy unless `lazy: false`; a bare `ForEach` needs `lazy: true`.
-fn lazy_config(args: &[hypen_parser::Argument], default_on: bool) -> Option<LazyList> {
+///
+/// `Err` when `lazy:` is not a literal boolean — it decides the list's shape
+/// at creation, so a state binding can't drive it.
+fn lazy_config(
+    args: &[hypen_parser::Argument],
+    default_on: bool,
+) -> Result<Option<LazyList>, &'static str> {
     let static_arg = |name: &str| match find_named_arg(args, &[name]).map(parser_value_to_ir) {
         Some(Value::Static(value)) => Some(value),
         _ => None,
     };
-    let enabled = static_arg("lazy")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(default_on);
+    let enabled = match find_named_arg(args, &["lazy"]) {
+        None => default_on,
+        Some(_) => static_arg("lazy")
+            .and_then(|v| v.as_bool())
+            .ok_or("lazy: must be true or false (it cannot be bound to state)")?,
+    };
     if !enabled {
-        return None;
+        return Ok(None);
     }
     let defaults = LazyList::default();
-    Some(LazyList {
+    Ok(Some(LazyList {
         initial_count: static_arg("initialCount")
             .and_then(|v| v.as_f64())
             .filter(|n| *n >= 1.0)
@@ -1378,7 +1387,7 @@ fn lazy_config(args: &[hypen_parser::Argument], default_on: bool) -> Option<Lazy
         estimated_item_size: static_arg("estimatedItemSize")
             .and_then(|v| v.as_f64())
             .filter(|n| *n > 0.0),
-    })
+    }))
 }
 
 /// Return the first positional argument value, if any.
@@ -1441,7 +1450,10 @@ fn convert_foreach(component: &ComponentSpecification) -> IRNode {
         .unwrap_or_else(|| "item".to_string());
 
     let key_path = find_named_arg(args, &["key"]).and_then(parser_string_unquoted);
-    let lazy = lazy_config(args, false);
+    let lazy = match lazy_config(args, false) {
+        Ok(lazy) => lazy,
+        Err(message) => return error_element(message),
+    };
 
     // Other named args become container props.
     let mut props = Props::new();
@@ -1497,7 +1509,10 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
 
     let key_path = find_named_arg(args, &["key"]).and_then(parser_string_unquoted);
     // List/Grid are virtualized by default; `lazy: false` opts out.
-    let lazy = lazy_config(args, true);
+    let lazy = match lazy_config(args, true) {
+        Ok(lazy) => lazy,
+        Err(message) => return error_element(message),
+    };
 
     // Pass through other named args (columns, gap, etc.) as props
     // so the renderer can use them for layout configuration.

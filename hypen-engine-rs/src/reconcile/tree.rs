@@ -96,11 +96,20 @@ pub struct ListWindow {
     pub count: usize,
     /// Key of the item at `start` when the window was last placed.
     pub anchor_key: Option<String>,
+    /// Key of the item right after the anchor. A shift (items inserted or
+    /// removed above) moves both together; a reorder that carries the
+    /// anchor item somewhere else separates them, and the window then
+    /// stays with its neighbour instead of following the moved item.
+    pub next_key: Option<String>,
     /// `(total, start, end)` last sent in [`VIRT_WINDOW_PROP`], so an
     /// unchanged window emits no patch.
     pub sent: Option<(usize, usize, usize)>,
     /// Forwarded as `estimatedSize` in [`VIRT_WINDOW_PROP`].
     pub estimated_item_size: Option<f64>,
+    /// Set by a viewport report for the pass it triggers: the data did not
+    /// change, so every row leaving the window is an eviction, not a
+    /// deletion. Cleared by that pass.
+    pub viewport_pass: bool,
 }
 
 impl ListWindow {
@@ -109,8 +118,10 @@ impl ListWindow {
             start: 0,
             count: lazy.initial_count.max(1),
             anchor_key: None,
+            next_key: None,
             sent: None,
             estimated_item_size: lazy.estimated_item_size,
+            viewport_pass: false,
         }
     }
 }

@@ -213,6 +213,7 @@ pub(crate) fn reconcile_iterable_children(
         ir_templates,
         stable_templates,
         0,
+        Eviction::None,
     )
 }
 
@@ -301,6 +302,25 @@ fn create_keyed_row_slow(
     created
 }
 
+/// Why children left a windowed (lazy) list, for choosing how to remove
+/// them: a row that only scrolled out of the window must vanish silently,
+/// while a row whose item was deleted plays its `.exit` transition.
+#[derive(Clone, Copy)]
+pub(crate) enum Eviction<'a> {
+    /// Not a windowed list: every leftover child's item was deleted.
+    None,
+    /// A viewport report moved the window over unchanged data: every
+    /// leftover child only left the window.
+    All,
+    /// A data change on a windowed list: a leftover whose item is still in
+    /// the full `items` list only left the window.
+    Outside {
+        items: &'a [serde_json::Value],
+        key_path: Option<&'a str>,
+        item_name: &'a str,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reconcile_iterable_children_full(
     ctx: &mut ReconcileCtx,
@@ -315,6 +335,7 @@ pub(crate) fn reconcile_iterable_children_full(
     // lazy list: fallback keys (`item-<idx>`) must stay absolute so a row
     // keeps its identity as the window slides.
     index_offset: usize,
+    eviction: Eviction<'_>,
 ) {
     let parent_id = logical_parent;
     let multi_template = ir_templates.len() > 1;
@@ -613,12 +634,57 @@ pub(crate) fn reconcile_iterable_children_full(
     }
 
     // Remove old children that weren't reused.
-    for &old_id in old_keyed.values() {
-        remove_child_subtree(ctx, old_id);
+    let mut live_keys: Option<HashSet<String>> = None;
+    for (child_key, &old_id) in old_keyed.iter() {
+        let evicted = match eviction {
+            Eviction::None => false,
+            Eviction::All => true,
+            Eviction::Outside {
+                items,
+                key_path,
+                item_name,
+            } => {
+                // Built once, and only when a windowed pass actually
+                // removes rows — O(n) keys, the price of telling a
+                // deletion from a scroll-out.
+                let live = live_keys.get_or_insert_with(|| {
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| generate_item_key(item, key_path, item_name, index))
+                        .collect()
+                });
+                let item_key = if multi_template {
+                    child_key
+                        .rsplit_once('#')
+                        .map_or(child_key.as_str(), |(k, _)| k)
+                } else {
+                    child_key.as_str()
+                };
+                live.contains(item_key)
+            }
+        };
+        if evicted {
+            evict_child_subtree(ctx, old_id);
+        } else {
+            remove_child_subtree(ctx, old_id);
+        }
     }
     for &old_id in &old_unkeyed[unkeyed_idx..] {
-        remove_child_subtree(ctx, old_id);
+        if matches!(eviction, Eviction::All) {
+            evict_child_subtree(ctx, old_id);
+        } else {
+            remove_child_subtree(ctx, old_id);
+        }
     }
+}
+
+/// Remove a row that only left a lazy list's window: a plain `Remove` with
+/// no exit transition and no exit tombstone — nothing was deleted.
+fn evict_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
+    ctx.tree
+        .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
+    ctx.patches.push(Patch::remove(child_id));
 }
 
 /// Find the longest increasing subsequence (LIS) indices.
