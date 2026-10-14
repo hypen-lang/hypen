@@ -129,6 +129,8 @@ Data is exchanged as JSON strings.
 - `hypen_get_action_len() -> usize` - Get action buffer size
 - `hypen_get_action(out_ptr, out_len) -> bytes_copied` - Copy action to buffer
 - `hypen_clear_action()` - Clear action buffer
+- `hypen_set_virtualization(enabled) -> status` - Renderer opts in to lazy-list windowing
+- `hypen_set_list_viewport(id_ptr, id_len, start, end) -> status` - Report a lazy list's visible range
 
 ### Device broker (RFC 001) — `hypen_device_*`
 Handle-based sans-IO broker; JSON shapes are documented in
@@ -180,6 +182,25 @@ EOF
 
 
 # Copy every build output to where its SDK loads it (shared with CI).
+# Strip the `name` section (function names) from every shipped module. It is
+# debug-only, and newer Rust toolchains made it ~3 MB — over half of each
+# module. No code changes; wasm-opt's optimizer stays off (see
+# [package.metadata.wasm-pack] in Cargo.toml). Runs before the copy step so
+# the Cloudflare glue hash and the pkg/web == pkg/nodejs check see the final
+# bytes.
+if command -v wasm-opt &> /dev/null; then
+    for wasm in pkg/bundler/hypen_engine_bg.wasm pkg/nodejs/hypen_engine_bg.wasm \
+                pkg/web/hypen_engine_bg.wasm pkg/browser/hypen_engine_bg.wasm \
+                pkg/wasi/hypen_engine.wasm; do
+        [ -f "$wasm" ] || continue
+        wasm-opt --strip-debug --all-features "$wasm" -o "$wasm.stripped"
+        mv "$wasm.stripped" "$wasm"
+    done
+    echo "Stripped name sections with wasm-opt"
+else
+    echo "WARNING: wasm-opt (binaryen) not found; shipping modules with their name section (~3 MB larger each)"
+fi
+
 bash "$(dirname "${BASH_SOURCE[0]}")/copy-wasm-artifacts.sh"
 echo ""
 echo "=== Regenerating UniFFI bindings (Kotlin + Swift) ==="

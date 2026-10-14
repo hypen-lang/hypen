@@ -471,6 +471,19 @@ export class WasmEngine {
         }
     }
     /**
+     * Report the item range `[start, end)` (visible rows plus overscan) of
+     * the lazy list whose element is `listId`; emits the patches that move
+     * its window. Ids naming no windowed list are ignored.
+     * @param {string} list_id
+     * @param {number} start
+     * @param {number} end
+     */
+    setListViewport(list_id, start, end) {
+        const ptr0 = passStringToWasm0(list_id, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        wasm.wasmengine_setListViewport(this.__wbg_ptr, ptr0, len0, start, end);
+    }
+    /**
      * Initialize (or replace) the active module with the given configuration.
      * @param {string} name
      * @param {string[]} actions
@@ -495,6 +508,15 @@ export class WasmEngine {
      */
     setRenderCallback(callback) {
         wasm.wasmengine_setRenderCallback(this.__wbg_ptr, callback);
+    }
+    /**
+     * Opt in to list virtualization: lazy lists (`List`, `Grid`,
+     * `ForEach(…, lazy: true)`) then materialize only a window of items and
+     * describe it in the `__virt.window` prop. Call before the first render.
+     * @param {boolean} enabled
+     */
+    setVirtualization(enabled) {
+        wasm.wasmengine_setVirtualization(this.__wbg_ptr, enabled);
     }
     /**
      * Return the total number of nodes currently in the instance tree.

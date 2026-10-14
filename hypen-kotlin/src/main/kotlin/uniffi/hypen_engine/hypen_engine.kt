@@ -18,8 +18,6 @@ package uniffi.hypen_engine
 // helpers directly inline like we're doing here.
 
 import com.sun.jna.Callback
-import com.sun.jna.IntegerType
-import com.sun.jna.Library
 import com.sun.jna.Native
 import com.sun.jna.Pointer
 import com.sun.jna.Structure
@@ -842,7 +840,11 @@ internal object IntegrityCheckingUniffiLib {
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_set_context(): Short
 
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_set_list_viewport(): Short
+
   external fun uniffi_hypen_engine_checksum_method_hypenengine_set_module(): Short
+
+  external fun uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_unregister_module(): Short
 
@@ -1093,9 +1095,23 @@ internal object UniffiLib {
     uniffi_out_err: UniffiRustCallStatus,
   ): RustBuffer.ByValue
 
+  external fun uniffi_hypen_engine_fn_method_hypenengine_set_list_viewport(
+    `ptr`: Long,
+    `listId`: RustBuffer.ByValue,
+    `start`: Int,
+    `end`: Int,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): RustBuffer.ByValue
+
   external fun uniffi_hypen_engine_fn_method_hypenengine_set_module(
     `ptr`: Long,
     `config`: RustBuffer.ByValue,
+    uniffi_out_err: UniffiRustCallStatus,
+  ): Unit
+
+  external fun uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(
+    `ptr`: Long,
+    `enabled`: Byte,
     uniffi_out_err: UniffiRustCallStatus,
   ): Unit
 
@@ -1865,7 +1881,13 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_context() != 49927.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_list_viewport() != 23916.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_module() != 9330.toShort()) {
+    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+  }
+  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization() != 11207.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_unregister_module() != 32749.toShort()) {
@@ -2019,10 +2041,7 @@ interface Disposable {
     fun destroy(vararg args: Any?) {
       for (arg in args) {
         when (arg) {
-          is Disposable -> {
-            arg.destroy()
-          }
-
+          is Disposable -> arg.destroy()
           is ArrayList<*> -> {
             for (idx in arg.indices) {
               val element = arg[idx]
@@ -2031,7 +2050,6 @@ interface Disposable {
               }
             }
           }
-
           is Map<*, *> -> {
             for (element in arg.values) {
               if (element is Disposable) {
@@ -2039,7 +2057,6 @@ interface Disposable {
               }
             }
           }
-
           is Iterable<*> -> {
             for (element in arg) {
               if (element is Disposable) {
@@ -3399,7 +3416,10 @@ open class DeviceRetainedBytesPool :
     this(
       UniffiWithHandle,
       uniffiRustCall { _status ->
-        UniffiLib.uniffi_hypen_engine_fn_constructor_deviceretainedbytespool_new(FfiConverterULong.lower(`limit`), _status)
+        UniffiLib.uniffi_hypen_engine_fn_constructor_deviceretainedbytespool_new(
+          FfiConverterULong.lower(`limit`),
+          _status,
+        )
       },
     )
 
@@ -3818,9 +3838,29 @@ public interface HypenEngineInterface {
   ): List<Patch>
 
   /**
+   * Report the item range `[start, end)` (visible rows plus overscan) of
+   * the lazy list whose element id is `list_id` and return the patches
+   * that move its window. Ids naming no windowed list return none.
+   * Mirrors WASI's `hypen_set_list_viewport` and JS's `setListViewport`.
+   */
+  fun `setListViewport`(
+    `listId`: kotlin.String,
+    `start`: kotlin.UInt,
+    `end`: kotlin.UInt,
+  ): List<Patch>
+
+  /**
    * Set module configuration
    */
   fun `setModule`(`config`: ModuleConfig)
+
+  /**
+   * Opt in to list virtualization: lazy lists then materialize only a
+   * window of items, described by the `__virt.window` prop. Call before
+   * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
+   * `setVirtualization`.
+   */
+  fun `setVirtualization`(`enabled`: kotlin.Boolean)
 
   /**
    * Drop a module and every action it declared.
@@ -3908,7 +3948,9 @@ open class HypenEngine :
     this(
       UniffiWithHandle,
       uniffiRustCallWithError(HypenException) { _status ->
-        UniffiLib.uniffi_hypen_engine_fn_constructor_hypenengine_new(_status)
+        UniffiLib.uniffi_hypen_engine_fn_constructor_hypenengine_new(
+          _status,
+        )
       },
     )
 
@@ -4431,6 +4473,32 @@ open class HypenEngine :
     )
 
   /**
+   * Report the item range `[start, end)` (visible rows plus overscan) of
+   * the lazy list whose element id is `list_id` and return the patches
+   * that move its window. Ids naming no windowed list return none.
+   * Mirrors WASI's `hypen_set_list_viewport` and JS's `setListViewport`.
+   */
+  @Throws(HypenException::class)
+  override fun `setListViewport`(
+    `listId`: kotlin.String,
+    `start`: kotlin.UInt,
+    `end`: kotlin.UInt,
+  ): List<Patch> =
+    FfiConverterSequenceTypePatch.lift(
+      callWithHandle {
+        uniffiRustCallWithError(HypenException) { _status ->
+          UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_set_list_viewport(
+            it,
+            FfiConverterString.lower(`listId`),
+            FfiConverterUInt.lower(`start`),
+            FfiConverterUInt.lower(`end`),
+            _status,
+          )
+        }
+      },
+    )
+
+  /**
    * Set module configuration
    */
   override fun `setModule`(`config`: ModuleConfig) =
@@ -4439,6 +4507,24 @@ open class HypenEngine :
         UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_set_module(
           it,
           FfiConverterTypeModuleConfig.lower(`config`),
+          _status,
+        )
+      }
+    }
+
+  /**
+   * Opt in to list virtualization: lazy lists then materialize only a
+   * window of items, described by the `__virt.window` prop. Call before
+   * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
+   * `setVirtualization`.
+   */
+  @Throws(HypenException::class)
+  override fun `setVirtualization`(`enabled`: kotlin.Boolean) =
+    callWithHandle {
+      uniffiRustCallWithError(HypenException) { _status ->
+        UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(
+          it,
+          FfiConverterBoolean.lower(`enabled`),
           _status,
         )
       }
@@ -4927,15 +5013,11 @@ sealed class DeviceBindingException : kotlin.Exception() {
 public object FfiConverterTypeDeviceBindingError : FfiConverterRustBuffer<DeviceBindingException> {
   override fun read(buf: ByteBuffer): DeviceBindingException =
     when (buf.getInt()) {
-      1 -> {
+      1 ->
         DeviceBindingException.InvalidInput(
           FfiConverterString.read(buf),
         )
-      }
-
-      else -> {
-        throw RuntimeException("invalid error enum value, something is very wrong!!")
-      }
+      else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
     }
 
   override fun allocationSize(value: DeviceBindingException): ULong =
@@ -4987,22 +5069,16 @@ sealed class DeviceOpenResult {
 public object FfiConverterTypeDeviceOpenResult : FfiConverterRustBuffer<DeviceOpenResult> {
   override fun read(buf: ByteBuffer): DeviceOpenResult =
     when (buf.getInt()) {
-      1 -> {
+      1 ->
         DeviceOpenResult.Opened(
           FfiConverterUInt.read(buf),
         )
-      }
-
-      2 -> {
+      2 ->
         DeviceOpenResult.Refused(
           FfiConverterString.read(buf),
           FfiConverterOptionalString.read(buf),
         )
-      }
-
-      else -> {
-        throw RuntimeException("invalid enum value, something is very wrong!!")
-      }
+      else -> throw RuntimeException("invalid enum value, something is very wrong!!")
     }
 
   override fun allocationSize(value: DeviceOpenResult) =
@@ -5014,7 +5090,6 @@ public object FfiConverterTypeDeviceOpenResult : FfiConverterRustBuffer<DeviceOp
             FfiConverterUInt.allocationSize(value.`id`)
         )
       }
-
       is DeviceOpenResult.Refused -> {
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         (
@@ -5035,7 +5110,6 @@ public object FfiConverterTypeDeviceOpenResult : FfiConverterRustBuffer<DeviceOp
         FfiConverterUInt.write(value.`id`, buf)
         Unit
       }
-
       is DeviceOpenResult.Refused -> {
         buf.putInt(2)
         FfiConverterString.write(value.`code`, buf)
@@ -5082,25 +5156,19 @@ sealed class DeviceOutcome {
 public object FfiConverterTypeDeviceOutcome : FfiConverterRustBuffer<DeviceOutcome> {
   override fun read(buf: ByteBuffer): DeviceOutcome =
     when (buf.getInt()) {
-      1 -> {
+      1 ->
         DeviceOutcome.Success(
           FfiConverterString.read(buf),
           FfiConverterSequenceTypeDeviceBlob.read(buf),
           FfiConverterBoolean.read(buf),
           FfiConverterBoolean.read(buf),
         )
-      }
-
-      2 -> {
+      2 ->
         DeviceOutcome.Failure(
           FfiConverterString.read(buf),
           FfiConverterOptionalString.read(buf),
         )
-      }
-
-      else -> {
-        throw RuntimeException("invalid enum value, something is very wrong!!")
-      }
+      else -> throw RuntimeException("invalid enum value, something is very wrong!!")
     }
 
   override fun allocationSize(value: DeviceOutcome) =
@@ -5115,7 +5183,6 @@ public object FfiConverterTypeDeviceOutcome : FfiConverterRustBuffer<DeviceOutco
             FfiConverterBoolean.allocationSize(value.`held`)
         )
       }
-
       is DeviceOutcome.Failure -> {
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         (
@@ -5139,7 +5206,6 @@ public object FfiConverterTypeDeviceOutcome : FfiConverterRustBuffer<DeviceOutco
         FfiConverterBoolean.write(value.`held`, buf)
         Unit
       }
-
       is DeviceOutcome.Failure -> {
         buf.putInt(2)
         FfiConverterString.write(value.`code`, buf)
@@ -5222,50 +5288,36 @@ sealed class DeviceOutput {
 public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput> {
   override fun read(buf: ByteBuffer): DeviceOutput =
     when (buf.getInt()) {
-      1 -> {
+      1 ->
         DeviceOutput.SendText(
           FfiConverterString.read(buf),
         )
-      }
-
-      2 -> {
+      2 ->
         DeviceOutput.SendFrame(
           FfiConverterByteArray.read(buf),
         )
-      }
-
-      3 -> {
+      3 ->
         DeviceOutput.Event(
           FfiConverterUInt.read(buf),
           FfiConverterString.read(buf),
         )
-      }
-
-      4 -> {
+      4 ->
         DeviceOutput.Data(
           FfiConverterUInt.read(buf),
           FfiConverterUShort.read(buf),
           FfiConverterByteArray.read(buf),
         )
-      }
-
-      5 -> {
+      5 ->
         DeviceOutput.Settled(
           FfiConverterUInt.read(buf),
           FfiConverterTypeDeviceOutcome.read(buf),
         )
-      }
-
-      6 -> {
+      6 ->
         DeviceOutput.CloseConnection(
           FfiConverterUShort.read(buf),
           FfiConverterString.read(buf),
         )
-      }
-
-      else -> {
-        throw RuntimeException("invalid enum value, something is very wrong!!")
-      }
+      else -> throw RuntimeException("invalid enum value, something is very wrong!!")
     }
 
   override fun allocationSize(value: DeviceOutput) =
@@ -5277,7 +5329,6 @@ public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput
             FfiConverterString.allocationSize(value.`text`)
         )
       }
-
       is DeviceOutput.SendFrame -> {
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         (
@@ -5285,7 +5336,6 @@ public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput
             FfiConverterByteArray.allocationSize(value.`frame`)
         )
       }
-
       is DeviceOutput.Event -> {
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         (
@@ -5294,7 +5344,6 @@ public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput
             FfiConverterString.allocationSize(value.`eventJson`)
         )
       }
-
       is DeviceOutput.Data -> {
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         (
@@ -5304,7 +5353,6 @@ public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput
             FfiConverterByteArray.allocationSize(value.`bytes`)
         )
       }
-
       is DeviceOutput.Settled -> {
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         (
@@ -5313,7 +5361,6 @@ public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput
             FfiConverterTypeDeviceOutcome.allocationSize(value.`outcome`)
         )
       }
-
       is DeviceOutput.CloseConnection -> {
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         (
@@ -5334,20 +5381,17 @@ public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput
         FfiConverterString.write(value.`text`, buf)
         Unit
       }
-
       is DeviceOutput.SendFrame -> {
         buf.putInt(2)
         FfiConverterByteArray.write(value.`frame`, buf)
         Unit
       }
-
       is DeviceOutput.Event -> {
         buf.putInt(3)
         FfiConverterUInt.write(value.`id`, buf)
         FfiConverterString.write(value.`eventJson`, buf)
         Unit
       }
-
       is DeviceOutput.Data -> {
         buf.putInt(4)
         FfiConverterUInt.write(value.`id`, buf)
@@ -5355,14 +5399,12 @@ public object FfiConverterTypeDeviceOutput : FfiConverterRustBuffer<DeviceOutput
         FfiConverterByteArray.write(value.`bytes`, buf)
         Unit
       }
-
       is DeviceOutput.Settled -> {
         buf.putInt(5)
         FfiConverterUInt.write(value.`id`, buf)
         FfiConverterTypeDeviceOutcome.write(value.`outcome`, buf)
         Unit
       }
-
       is DeviceOutput.CloseConnection -> {
         buf.putInt(6)
         FfiConverterUShort.write(value.`code`, buf)
@@ -5430,45 +5472,31 @@ sealed class HypenException : kotlin.Exception() {
 public object FfiConverterTypeHypenError : FfiConverterRustBuffer<HypenException> {
   override fun read(buf: ByteBuffer): HypenException =
     when (buf.getInt()) {
-      1 -> {
+      1 ->
         HypenException.ParseException(
           FfiConverterString.read(buf),
         )
-      }
-
-      2 -> {
+      2 ->
         HypenException.RenderException(
           FfiConverterString.read(buf),
         )
-      }
-
-      3 -> {
+      3 ->
         HypenException.StateException(
           FfiConverterString.read(buf),
         )
-      }
-
-      4 -> {
+      4 ->
         HypenException.ActionException(
           FfiConverterString.read(buf),
         )
-      }
-
-      5 -> {
+      5 ->
         HypenException.ComponentException(
           FfiConverterString.read(buf),
         )
-      }
-
-      6 -> {
+      6 ->
         HypenException.InitializationException(
           FfiConverterString.read(buf),
         )
-      }
-
-      else -> {
-        throw RuntimeException("invalid error enum value, something is very wrong!!")
-      }
+      else -> throw RuntimeException("invalid error enum value, something is very wrong!!")
     }
 
   override fun allocationSize(value: HypenException): ULong =
@@ -5478,31 +5506,26 @@ public object FfiConverterTypeHypenError : FfiConverterRustBuffer<HypenException
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
-
       is HypenException.RenderException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
-
       is HypenException.StateException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
-
       is HypenException.ActionException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
-
       is HypenException.ComponentException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
           FfiConverterString.allocationSize(value.v1)
       )
-
       is HypenException.InitializationException -> (
         // Add the size for the Int that specifies the variant plus the size needed for all fields
         4UL +
@@ -5520,31 +5543,26 @@ public object FfiConverterTypeHypenError : FfiConverterRustBuffer<HypenException
         FfiConverterString.write(value.v1, buf)
         Unit
       }
-
       is HypenException.RenderException -> {
         buf.putInt(2)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
-
       is HypenException.StateException -> {
         buf.putInt(3)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
-
       is HypenException.ActionException -> {
         buf.putInt(4)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
-
       is HypenException.ComponentException -> {
         buf.putInt(5)
         FfiConverterString.write(value.v1, buf)
         Unit
       }
-
       is HypenException.InitializationException -> {
         buf.putInt(6)
         FfiConverterString.write(value.v1, buf)
@@ -6002,7 +6020,10 @@ public object FfiConverterSequenceTypeDeviceOutput : FfiConverterRustBuffer<List
 fun `discoverRouters`(`source`: kotlin.String): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCallWithError(HypenException) { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_discover_routers(FfiConverterString.lower(`source`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_discover_routers(
+        FfiConverterString.lower(`source`),
+        _status,
+      )
     },
   )
 
@@ -6030,7 +6051,10 @@ fun `portableBuildUrl`(
 fun `portableDecodeUriComponent`(`input`: kotlin.String): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_portable_decode_uri_component(FfiConverterString.lower(`input`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_portable_decode_uri_component(
+        FfiConverterString.lower(`input`),
+        _status,
+      )
     },
   )
 
@@ -6062,7 +6086,10 @@ fun `portableDiffPaths`(
 fun `portableEncodeUriComponent`(`input`: kotlin.String): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_portable_encode_uri_component(FfiConverterString.lower(`input`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_portable_encode_uri_component(
+        FfiConverterString.lower(`input`),
+        _status,
+      )
     },
   )
 
@@ -6086,7 +6113,10 @@ fun `portableMatchPath`(
 fun `portableParseQuery`(`fullPath`: kotlin.String): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_portable_parse_query(FfiConverterString.lower(`fullPath`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_portable_parse_query(
+        FfiConverterString.lower(`fullPath`),
+        _status,
+      )
     },
   )
 
@@ -6225,7 +6255,9 @@ fun `portableSessionStep`(
 fun `version`(): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_version(_status)
+      UniffiLib.uniffi_hypen_engine_fn_func_version(
+        _status,
+      )
     },
   )
 
@@ -6235,7 +6267,9 @@ fun `version`(): kotlin.String =
 fun `deviceConstantsJson`(): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_device_constants_json(_status)
+      UniffiLib.uniffi_hypen_engine_fn_func_device_constants_json(
+        _status,
+      )
     },
   )
 
@@ -6287,7 +6321,10 @@ fun `deviceHandshake`(
 fun `deviceIsOversizeText`(`text`: kotlin.String): kotlin.Boolean =
   FfiConverterBoolean.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_device_is_oversize_text(FfiConverterString.lower(`text`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_device_is_oversize_text(
+        FfiConverterString.lower(`text`),
+        _status,
+      )
     },
   )
 
@@ -6338,7 +6375,9 @@ fun `deviceSelectAck`(
 fun `deviceServerAdvertisementJson`(): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_device_server_advertisement_json(_status)
+      UniffiLib.uniffi_hypen_engine_fn_func_device_server_advertisement_json(
+        _status,
+      )
     },
   )
 
@@ -6353,7 +6392,10 @@ fun `deviceServerAdvertisementJson`(): kotlin.String =
 fun `deviceServerConsumes`(`revisionJson`: kotlin.String): kotlin.Boolean =
   FfiConverterBoolean.lift(
     uniffiRustCallWithError(DeviceBindingException) { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_device_server_consumes(FfiConverterString.lower(`revisionJson`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_device_server_consumes(
+        FfiConverterString.lower(`revisionJson`),
+        _status,
+      )
     },
   )
 
@@ -6363,7 +6405,10 @@ fun `deviceServerConsumes`(`revisionJson`: kotlin.String): kotlin.Boolean =
 fun `deviceSha256Hex`(`bytes`: kotlin.ByteArray): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCall { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_device_sha256_hex(FfiConverterByteArray.lower(`bytes`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_device_sha256_hex(
+        FfiConverterByteArray.lower(`bytes`),
+        _status,
+      )
     },
   )
 
@@ -6374,7 +6419,10 @@ fun `deviceSha256Hex`(`bytes`: kotlin.ByteArray): kotlin.String =
 fun `deviceValidateAck`(`ackJson`: kotlin.String): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCallWithError(DeviceBindingException) { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_device_validate_ack(FfiConverterString.lower(`ackJson`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_device_validate_ack(
+        FfiConverterString.lower(`ackJson`),
+        _status,
+      )
     },
   )
 
@@ -6385,6 +6433,9 @@ fun `deviceValidateAck`(`ackJson`: kotlin.String): kotlin.String =
 fun `deviceValidateHello`(`helloJson`: kotlin.String): kotlin.String =
   FfiConverterString.lift(
     uniffiRustCallWithError(DeviceBindingException) { _status ->
-      UniffiLib.uniffi_hypen_engine_fn_func_device_validate_hello(FfiConverterString.lower(`helloJson`), _status)
+      UniffiLib.uniffi_hypen_engine_fn_func_device_validate_hello(
+        FfiConverterString.lower(`helloJson`),
+        _status,
+      )
     },
   )

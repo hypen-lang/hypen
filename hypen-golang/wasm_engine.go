@@ -62,6 +62,8 @@ type WasmEngine struct {
 	fnGetLastErrorLen      api.Function
 	fnGetLastError         api.Function
 	fnClearLastError       api.Function
+	fnSetVirtualization    api.Function
+	fnSetListViewport      api.Function
 	fnAlloc                api.Function
 	fnFree                 api.Function
 
@@ -198,6 +200,8 @@ func NewWasmEngine(config WasmEngineConfig) (*WasmEngine, error) {
 	engine.fnGetLastErrorLen = module.ExportedFunction("hypen_get_last_error_len")
 	engine.fnGetLastError = module.ExportedFunction("hypen_get_last_error")
 	engine.fnClearLastError = module.ExportedFunction("hypen_clear_last_error")
+	engine.fnSetVirtualization = module.ExportedFunction("hypen_set_virtualization")
+	engine.fnSetListViewport = module.ExportedFunction("hypen_set_list_viewport")
 	engine.fnAlloc = module.ExportedFunction("wasi_alloc")
 	engine.fnFree = module.ExportedFunction("wasi_free")
 
@@ -648,6 +652,63 @@ func (e *WasmEngine) GetRevision() uint64 {
 		return 0
 	}
 	return results[0]
+}
+
+// SetVirtualization opts the engine in to lazy-list windowing. It is called
+// by a renderer that handles the `__virt.window` prop and reports viewports,
+// never by app code: until then lazy lists (List, Grid, ForEach(lazy: true))
+// expand every item.
+func (e *WasmEngine) SetVirtualization(enabled bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.fnSetVirtualization == nil {
+		return &EngineError{Code: ErrRender, Message: "WASM missing hypen_set_virtualization export"}
+	}
+	flag := uint64(0)
+	if enabled {
+		flag = 1
+	}
+	results, err := e.fnSetVirtualization.Call(e.ctx, flag)
+	if err != nil {
+		return &EngineError{Code: ErrRender, Message: "set_virtualization call failed", Cause: err}
+	}
+	if len(results) > 0 && results[0] != 0 {
+		return newWasmError("set_virtualization", results[0])
+	}
+	return nil
+}
+
+// SetListViewport reports the item range [start, end) - visible rows plus
+// overscan - of the lazy list whose element id is listID (the node carrying
+// `__virt.window`) and returns the patches that move its window. Ids naming
+// no windowed list return no patches.
+func (e *WasmEngine) SetListViewport(listID string, start, end uint32) ([]Patch, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.fnSetListViewport == nil {
+		return nil, &EngineError{Code: ErrRender, Message: "WASM missing hypen_set_list_viewport export"}
+	}
+	ptr, size, err := e.writeString(listID)
+	if err != nil {
+		return nil, err
+	}
+	defer e.freePtr(ptr, size)
+
+	results, err := e.fnSetListViewport.Call(e.ctx, uint64(ptr), uint64(size), uint64(start), uint64(end))
+	if err != nil {
+		return nil, &EngineError{Code: ErrRender, Message: "set_list_viewport call failed", Cause: err}
+	}
+	if len(results) > 0 && results[0] != 0 {
+		return nil, newWasmError("set_list_viewport", results[0])
+	}
+
+	patches, err := e.getPatches()
+	if err == nil && len(patches) > 0 && e.patchCallback != nil {
+		e.patchCallback(patches)
+	}
+	return patches, err
 }
 
 // ClearTree clears the render tree

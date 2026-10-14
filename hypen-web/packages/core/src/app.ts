@@ -34,6 +34,16 @@ export interface IEngine {
     animation?: unknown
   ): void;
 
+  // ── List virtualization (renderer-facing) ─────────────────────────────
+  //
+  // Called by renderers that handle `__virt.window`, never by app code.
+  // Optional for the same structural-contract reason as the surface below.
+
+  /** Opt in to list virtualization (lazy lists materialize a window). */
+  setVirtualization?(enabled: boolean): void;
+  /** Report a lazy list's visible item range `[start, end)` incl. overscan. */
+  setListViewport?(listId: string, start: number, end: number): void;
+
   // ── External capability surface ──────────────────────────────────────
   //
   // For callers that are NOT the rendered UI: MCP servers, REST APIs,

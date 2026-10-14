@@ -384,9 +384,19 @@ RustBuffer uniffi_hypen_engine_fn_method_hypenengine_render_source(uint64_t ptr,
 RustBuffer uniffi_hypen_engine_fn_method_hypenengine_set_context(uint64_t ptr, RustBuffer name, RustBuffer data_json, RustCallStatus *_Nonnull out_status
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_LIST_VIEWPORT
+#define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_LIST_VIEWPORT
+RustBuffer uniffi_hypen_engine_fn_method_hypenengine_set_list_viewport(uint64_t ptr, RustBuffer list_id, uint32_t start, uint32_t end, RustCallStatus *_Nonnull out_status
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_MODULE
 #define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_MODULE
 void uniffi_hypen_engine_fn_method_hypenengine_set_module(uint64_t ptr, RustBuffer config, RustCallStatus *_Nonnull out_status
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_VIRTUALIZATION
+#define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_VIRTUALIZATION
+void uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(uint64_t ptr, int8_t enabled, RustCallStatus *_Nonnull out_status
 );
 #endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_UNREGISTER_MODULE
@@ -1292,9 +1302,21 @@ uint16_t uniffi_hypen_engine_checksum_method_hypenengine_set_context(void
     
 );
 #endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_LIST_VIEWPORT
+#define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_LIST_VIEWPORT
+uint16_t uniffi_hypen_engine_checksum_method_hypenengine_set_list_viewport(void
+    
+);
+#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_MODULE
 #define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_MODULE
 uint16_t uniffi_hypen_engine_checksum_method_hypenengine_set_module(void
+    
+);
+#endif
+#ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_VIRTUALIZATION
+#define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_VIRTUALIZATION
+uint16_t uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization(void
     
 );
 #endif
