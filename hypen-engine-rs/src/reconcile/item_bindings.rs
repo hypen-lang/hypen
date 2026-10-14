@@ -290,15 +290,43 @@ fn replace_ir_node_impl(
             module_scope,
             lazy,
         } => {
-            // Note: source binding is kept as-is; nested ForEach maintains its own iteration context
             // Replace in props
-            let new_props = replace_props_item_bindings(props, item, item_name);
+            let mut new_props = replace_props_item_bindings(props, item, item_name);
 
-            // Recursively replace in template (but inner ForEach has its own item context)
-            let new_template: Vec<IRNode> = template
-                .iter()
-                .map(|child| replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key))
-                .collect();
+            // A loop over the outer item (`@item.children`, or `@g.children`
+            // under `as: "g"`, which parses as a provider named `g`) can't be
+            // resolved against state: resolve it here, where the outer item is
+            // known, and hand the array to the inner loop as `__items`.
+            let over_outer_item = match &source.source {
+                crate::reactive::BindingSource::Item => true,
+                crate::reactive::BindingSource::DataSource(name) => name == item_name,
+                crate::reactive::BindingSource::State => false,
+            };
+            if over_outer_item {
+                let array = if source.path.is_empty() {
+                    Some(item)
+                } else {
+                    navigate_item_path(item, &source.full_path())
+                };
+                new_props.insert(
+                    FOREACH_ITEMS_PROP.to_string(),
+                    Value::Static(array.cloned().unwrap_or(serde_json::Value::Null)),
+                );
+            }
+
+            // Recurse into the inner template so it sees the outer item —
+            // unless the inner loop reuses the outer name, which shadows it:
+            // `@item.*` there means the INNER item.
+            let new_template: Vec<IRNode> = if inner_item_name == item_name {
+                template.clone()
+            } else {
+                template
+                    .iter()
+                    .map(|child| {
+                        replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
+                    })
+                    .collect()
+            };
 
             IRNode::ForEach {
                 source: source.clone(),
@@ -395,6 +423,12 @@ fn replace_ir_node_impl(
 }
 
 /// Replace item bindings in Props
+/// Reserved ForEach container prop carrying the array a nested loop iterates,
+/// resolved from the outer item at row substitution. Takes precedence over
+/// the loop's `source` binding, which only resolves against state or a data
+/// source.
+pub(crate) const FOREACH_ITEMS_PROP: &str = "__items";
+
 fn replace_props_item_bindings(props: &Props, item: &serde_json::Value, item_name: &str) -> Props {
     let mut new_props = Props::new();
     for (key, value) in props {

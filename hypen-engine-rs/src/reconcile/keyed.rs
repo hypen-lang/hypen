@@ -682,9 +682,9 @@ pub(crate) fn reconcile_iterable_children_full(
 /// Remove a row that only left a lazy list's window: a plain `Remove` with
 /// no exit transition and no exit tombstone — nothing was deleted.
 fn evict_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
+    super::diff::emit_plain_removal(ctx.tree, child_id, ctx.patches);
     ctx.tree
         .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
-    ctx.patches.push(Patch::remove(child_id));
 }
 
 /// Find the longest increasing subsequence (LIS) indices.

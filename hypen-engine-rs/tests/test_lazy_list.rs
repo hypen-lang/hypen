@@ -687,3 +687,150 @@ fn bound_lazy_flag_is_an_error() {
         .to_string();
     assert!(message.contains("lazy"), "{message}");
 }
+
+// ── List sources and removal ─────────────────────────────────────────────
+// Not lazy-specific, but the window code depends on them: a nested loop
+// over the outer item, a data-source list, and removing a list that the
+// renderer only sees through its rows.
+
+fn all_texts(screen: &Screen) -> Vec<String> {
+    let mut texts: Vec<String> = screen
+        .props
+        .values()
+        .filter_map(|p| p.get("0").and_then(Value::as_str).map(String::from))
+        .collect();
+    texts.sort();
+    texts
+}
+
+fn groups() -> Value {
+    json!({ "groups": [
+        { "id": 1, "name": "A", "children": [{ "id": 11, "name": "a1" }, { "id": 12, "name": "a2" }] },
+        { "id": 2, "name": "B", "children": [{ "id": 21, "name": "b1" }] },
+    ]})
+}
+
+#[test]
+fn nested_loop_over_the_outer_item_renders() {
+    for source in [
+        // `@item.children`: an item binding.
+        r#"Column { ForEach(items: @state.groups, key: "id") { Column { Text("@{item.name}") ForEach(items: @item.children, as: "child", key: "id") { Text("@{child.name}") } } } }"#,
+        // `@g.children` under `as: "g"` parses as a provider named `g`.
+        r#"Column { ForEach(items: @state.groups, as: "g", key: "id") { Column { Text("@{g.name}") ForEach(items: @g.children, as: "child", key: "id") { Text("@{child.name}") } } } }"#,
+    ] {
+        let h = Harness::new(source, groups(), false);
+        assert_eq!(
+            all_texts(&h.screen),
+            ["A", "B", "a1", "a2", "b1"],
+            "{source}"
+        );
+    }
+}
+
+#[test]
+fn inner_loop_reusing_the_name_shadows_the_outer_item() {
+    let h = Harness::new(
+        r#"Column { ForEach(items: @state.groups, key: "id") { Column { Text("@{item.name}") ForEach(items: @item.children, key: "id") { Text("@{item.name}") } } } }"#,
+        groups(),
+        false,
+    );
+    assert_eq!(all_texts(&h.screen), ["A", "B", "a1", "a2", "b1"]);
+}
+
+#[test]
+fn nested_loop_follows_the_outer_item() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.groups, as: "g", key: "id") { Column { Text("@{g.name}") ForEach(items: @g.children, as: "c", key: "id") { Text("@{c.name}") } } } }"#,
+        json!({ "groups": [{ "id": 1, "name": "A", "children": [{ "id": 11, "name": "a1" }] }] }),
+        false,
+    );
+    h.engine.update_state(
+        None,
+        json!({ "groups": [{ "id": 1, "name": "A", "children": [{ "id": 11, "name": "a1" }, { "id": 12, "name": "a2" }] }] }),
+    );
+    h.flush();
+    assert_eq!(all_texts(&h.screen), ["A", "a1", "a2"]);
+
+    h.engine.update_state_sparse(
+        None,
+        &["groups.0.children.0.name".to_string()],
+        &json!({ "groups.0.children.0.name": "a1!" }),
+    );
+    h.flush();
+    assert_eq!(all_texts(&h.screen), ["A", "a1!", "a2"]);
+}
+
+#[test]
+fn nested_lazy_list_windows_inside_a_row() {
+    let children: Vec<Value> = (0..40)
+        .map(|i| json!({ "id": i, "name": format!("row {i}") }))
+        .collect();
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.groups, as: "g", key: "id") { Row { ForEach(items: @g.children, as: "c", key: "id", lazy: true, initialCount: 5) { Text("@{c.name}") } } } }"#,
+        json!({ "groups": [{ "id": 1, "children": children }] }),
+        true,
+    );
+    let row = h.screen.find("Row");
+    assert_eq!(h.screen.rows(&row), names(0..5));
+    h.viewport(&row, 20, 25);
+    assert_eq!(h.screen.rows(&row), names(20..25));
+}
+
+#[test]
+fn data_source_list_renders_and_updates() {
+    let mut h = Harness::new(r#"Column { Text("x") }"#, json!({}), true);
+    let messages = |n: usize| {
+        Value::Array(
+            (0..n)
+                .map(|i| json!({ "id": i, "name": format!("row {i}") }))
+                .collect(),
+        )
+    };
+    h.engine
+        .set_context("spacetime", json!({ "messages": messages(50) }));
+    h.flush();
+    h.render(r#"List(@spacetime.messages, key: "id", initialCount: 5) { Text("@{item.name}") }"#);
+    let list = h.screen.find("List");
+    assert_eq!(h.screen.rows(&list), names(0..5));
+
+    h.engine
+        .set_context("spacetime", json!({ "messages": messages(60) }));
+    h.flush();
+    assert_eq!(h.screen.window(&list).unwrap()["total"], json!(60));
+    h.viewport(&list, 55, 60);
+    assert_eq!(h.screen.rows(&list), names(55..60));
+}
+
+#[test]
+fn replacing_a_loop_removes_its_rows() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id") { Text("@{item.name}") } }"#,
+        json!({ "items": items(0..5) }),
+        false,
+    );
+    let column = h.screen.find("Column");
+    // Child 0 changes from a ForEach to a Text: the old rows must go, not
+    // linger beside the re-created list.
+    h.render(
+        r#"Column { Text("header") ForEach(items: @state.items, key: "id") { Text("@{item.name}") } }"#,
+    );
+    let mut expected = vec!["header".to_string()];
+    expected.extend(names(0..5));
+    assert_eq!(h.screen.rows(&column), expected);
+}
+
+#[test]
+fn deleting_a_row_rooted_at_an_if_removes_its_content() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id") { If(@item.show) { Text("@{item.name}") } } }"#,
+        json!({ "items": [
+            { "id": 1, "name": "one", "show": true },
+            { "id": 2, "name": "two", "show": true },
+        ]}),
+        false,
+    );
+    let column = h.screen.find("Column");
+    assert_eq!(h.screen.rows(&column), ["one", "two"]);
+    h.set_items(json!([{ "id": 2, "name": "two", "show": true }]));
+    assert_eq!(h.screen.rows(&column), ["two"]);
+}

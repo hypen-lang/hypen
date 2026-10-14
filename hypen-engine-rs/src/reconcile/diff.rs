@@ -1,5 +1,5 @@
 use super::conditionals::{evaluate_value, find_matching_branch, find_matching_route_with_key};
-use super::item_bindings::replace_ir_node_item_bindings;
+use super::item_bindings::{replace_ir_node_item_bindings, FOREACH_ITEMS_PROP};
 use super::keyed::{
     generate_item_key, iterable_child_key, reconcile_iterable_children,
     reconcile_iterable_children_full, Eviction,
@@ -923,6 +923,24 @@ fn create_control_flow_tree(
     }
 }
 
+/// The array a ForEach iterates: the outer item's array a nested loop was
+/// handed at row substitution (`__items`), a data source (`@provider.path`),
+/// or module state.
+fn foreach_items<'x>(
+    props: &'x Props,
+    source: &crate::reactive::Binding,
+    state: &'x serde_json::Value,
+    data_sources: Option<&'x DataSources>,
+) -> Option<&'x serde_json::Value> {
+    if let Some(Value::Static(items)) = props.get(FOREACH_ITEMS_PROP) {
+        return Some(items);
+    }
+    match source.provider() {
+        Some(provider) => evaluate_binding_ref(source, data_sources?.get(provider)?),
+        None => evaluate_binding_ref(source, state),
+    }
+}
+
 /// Create a ForEach iteration tree from IRNode::ForEach
 fn create_foreach_ir_tree(
     ctx: &mut ReconcileCtx,
@@ -957,8 +975,8 @@ fn create_foreach_ir_tree(
     let module_scope_ref = ctx.effective_scope(raw_scope);
     let effective_state = ctx.effective_state(raw_scope);
 
-    // Borrowed out of state, not cloned — the array is only iterated here.
-    let array = evaluate_binding_ref(source, effective_state);
+    // Borrowed, not cloned — the array is only iterated here.
+    let array = foreach_items(props, source, effective_state, ctx.data_sources);
 
     let resolved_props = resolve_props_full(props, effective_state, None, ctx.data_sources);
 
@@ -987,8 +1005,10 @@ fn create_foreach_ir_tree(
         node.clone(),
     );
 
-    ctx.dependencies
-        .add_dependency(node_id, source, module_scope_ref);
+    if !props.contains_key(FOREACH_ITEMS_PROP) {
+        ctx.dependencies
+            .add_dependency(node_id, source, module_scope_ref);
+    }
 
     if let Some(parent) = parent_id {
         ctx.tree.add_child(parent, node_id, None);
@@ -1616,11 +1636,24 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             let module_scope_ref = ctx.effective_scope(module_scope.as_deref());
             let effective_state = ctx.effective_state(module_scope.as_deref());
 
-            ctx.dependencies
-                .add_dependency(node_id, source, module_scope_ref);
+            let props = match node {
+                IRNode::ForEach { props, .. } => props,
+                _ => unreachable!(),
+            };
+            if props.contains_key(FOREACH_ITEMS_PROP) {
+                // A nested loop over the outer item: this copy carries the
+                // freshly resolved array. Keep it as the stored template so a
+                // viewport report or dirty pass on this node sees it too.
+                if let Some(n) = ctx.tree.get_mut(node_id) {
+                    n.ir_node_template = Some(std::sync::Arc::new(node.clone()));
+                }
+            } else {
+                ctx.dependencies
+                    .add_dependency(node_id, source, module_scope_ref);
+            }
 
-            // Borrowed out of state — see `create_foreach_ir_tree`.
-            let array = evaluate_binding_ref(source, effective_state);
+            // Borrowed — see `create_foreach_ir_tree`.
+            let array = foreach_items(props, source, effective_state, ctx.data_sources);
 
             if let Some(serde_json::Value::Array(items)) = array {
                 let old_children: Vec<NodeId> = match ctx.tree.get(node_id) {
@@ -1991,10 +2024,45 @@ pub(crate) fn root_remove_patch(tree: &mut InstanceTree, id: NodeId) -> Patch {
 /// the dependency graph. The exit spec must be read (`root_remove_patch`)
 /// before the removal drops the node's props.
 pub(crate) fn remove_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
+    if control_flow_roots(ctx.tree, child_id).is_some() {
+        // A row rooted at a control-flow node (an `If` per item).
+        emit_subtree_removal(ctx.tree, child_id, ctx.patches);
+        ctx.tree
+            .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
+        return;
+    }
     let patch = root_remove_patch(ctx.tree, child_id);
     ctx.tree
         .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
     ctx.patches.push(patch);
+}
+
+/// The renderer-visible roots of a control-flow container: its children
+/// plus, for a Router, the detached subtrees in its route cache (still
+/// alive in the renderer). `None` for an ordinary element.
+fn control_flow_roots(tree: &InstanceTree, id: NodeId) -> Option<Vec<NodeId>> {
+    let node = tree.get(id)?;
+    let kind = node.control_flow.as_deref()?;
+    let mut roots: Vec<NodeId> = node.children.iter().copied().collect();
+    if let ControlFlowKind::Router { cache, .. } = kind {
+        roots.extend(cache.values().flatten().copied());
+    }
+    Some(roots)
+}
+
+/// Emit plain `Remove`s (no exit transition) for what `id` put on screen.
+/// A control-flow container never received a `Create`, so a `Remove`
+/// naming it would be dropped and leave its content on screen: remove its
+/// renderer-visible roots instead.
+pub(crate) fn emit_plain_removal(tree: &InstanceTree, id: NodeId, patches: &mut Vec<Patch>) {
+    match control_flow_roots(tree, id) {
+        Some(roots) => {
+            for root in roots {
+                emit_plain_removal(tree, root, patches);
+            }
+        }
+        None => patches.push(Patch::remove(id)),
+    }
 }
 
 /// Emit the Remove patches for the subtree rooted at `root_id` without
@@ -2018,6 +2086,15 @@ pub(crate) fn remove_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
 ///   one patch per descendant meant ~17k patches to clear a 1,000-row list
 ///   that the renderer discards in a single subtree unlink.
 fn emit_subtree_removal(tree: &mut InstanceTree, root_id: NodeId, patches: &mut Vec<Patch>) {
+    // See `emit_plain_removal`: a control-flow container is transparent, so
+    // each of its renderer-visible roots is removed in its own right (and
+    // plays its own exit transition, if it has one).
+    if let Some(roots) = control_flow_roots(tree, root_id) {
+        for root in roots {
+            emit_subtree_removal(tree, root, patches);
+        }
+        return;
+    }
     let root_patch = root_remove_patch(tree, root_id);
     let animated = matches!(
         root_patch,
