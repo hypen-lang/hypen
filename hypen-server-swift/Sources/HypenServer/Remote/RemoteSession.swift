@@ -788,6 +788,14 @@ public final class RemoteSession: @unchecked Sendable {
             let payload = json["payload"]
             handleDispatchAction(actionName: name, payload: payload)
 
+        case "viewport":
+            // List virtualization (docs/virtualization.md §4): accepted only
+            // after hello, like `dispatchAction`; a malformed report is
+            // ignored — no error, no disconnect.
+            if !helloIsReceived { return }
+            guard let report = RemoteSession.parseViewport(json) else { return }
+            handleViewport(listId: report.listId, start: report.start, end: report.end)
+
         default:
             // Unknown — ignore for forward compatibility.
             break
@@ -1361,6 +1369,60 @@ public final class RemoteSession: @unchecked Sendable {
 
     private func engineRef() -> NativeEngine? {
         lock.lock(); defer { lock.unlock() }; return engine
+    }
+
+    /// Decode a client `viewport` message (docs/virtualization.md §4):
+    /// `listId` a non-empty string, `start`/`end` non-negative integers
+    /// clamped to `UInt32`. `nil` for anything malformed.
+    static func parseViewport(_ json: [String: Any]) -> (listId: String, start: UInt32, end: UInt32)? {
+        guard let listId = json["listId"] as? String, !listId.isEmpty,
+              let start = viewportBound(json["start"]),
+              let end = viewportBound(json["end"]) else {
+            return nil
+        }
+        return (listId, start, end)
+    }
+
+    /// A non-negative integer clamped to `UInt32`, or `nil` when the value
+    /// is not one (a string, a bool, a fraction, a negative number, NaN).
+    static func viewportBound(_ value: Any?) -> UInt32? {
+        guard let value, !(value is String), let number = value as? NSNumber else { return nil }
+        // JSONSerialization decodes `true`/`false` as NSNumber too.
+        if ModuleInstance.isBooleanNumber(number) { return nil }
+        let double = number.doubleValue
+        guard double.isFinite, double >= 0, double.rounded(.towardZero) == double else { return nil }
+        if double >= Double(UInt32.max) { return UInt32.max }
+        return UInt32(double)
+    }
+
+    /// Apply a client's viewport report to THIS session's engine only. The
+    /// resulting patches go out as an ordinary `patch` message at the next
+    /// revision. A viewport is per client: it is never an action, never
+    /// replayed to other sessions, and never followed by a `stateUpdate`
+    /// (it changes no state).
+    private func handleViewport(listId: String, start: UInt32, end: UInt32) {
+        lock.lock()
+        let engine = self.engine
+        let destroyedLocal = destroyed
+        lock.unlock()
+        guard !destroyedLocal, let engine else { return }
+
+        let patches: [[String: Any]]
+        do {
+            patches = try engine.setListViewport(listId: listId, start: start, end: end)
+        } catch {
+            HypenLoggers.server.warning("Session %@: setListViewport failed: %@", id, "\(error)")
+            return
+        }
+        if patches.isEmpty { return }
+
+        lock.lock()
+        if destroyed { lock.unlock(); return }
+        revision += 1
+        let rev = revision
+        let module = host.moduleName
+        lock.unlock()
+        send(.patch(module: module, patches: patches, revision: rev))
     }
 
     /// Dispatch through the ModuleInstance (typed path) or the legacy

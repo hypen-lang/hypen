@@ -465,6 +465,17 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
         sendMessage(message)
     }
 
+    // MARK: - List virtualization
+
+    /// Report the item range `[start, end)` a windowed list needs
+    /// (docs/virtualization.md §4): `{"type":"viewport","listId",...}`.
+    /// `listId` is the id of the element carrying `__virt.window`. The server
+    /// answers with ordinary `patch` messages; there is no reply otherwise.
+    public func setListViewport(listId: String, start: Int, end: Int) {
+        let message = Virtualization.viewportMessage(listId: listId, start: start, end: end)
+        sendMessage(message, logContents: false)
+    }
+
     /// - Parameter logContents: false for messages carrying credentials
     ///   (`hello.resumeToken`), which must never reach the log.
     private func sendMessage(_ message: [String: Any], logContents: Bool = true) {

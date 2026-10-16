@@ -177,6 +177,10 @@ final class HypenViewModel: ObservableObject {
         // (`__hypen_reorder` / `__hypen_pin`) and the six `.on*` DnD events.
         renderer.animator.actionDispatcher = self.actionDispatcher
         renderer.dnd.actionDispatcher = self.actionDispatcher
+        // Windowed lists report the item range they need (virtualization.md §4).
+        renderer.viewportReporter = { [weak engine] listId, start, end in
+            engine?.setListViewport(listId: listId, start: start, end: end)
+        }
 
         // Element views observe their own HypenElement, so per-patch
         // invalidation never goes through this view model. The HypenView

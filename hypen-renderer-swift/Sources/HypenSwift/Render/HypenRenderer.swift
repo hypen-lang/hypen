@@ -53,6 +53,18 @@ public final class HypenRenderer: ObservableObject {
     /// `DragAndDrop/HypenDndCoordinator.swift`.
     public private(set) lazy var dnd = HypenDndCoordinator(renderer: self)
 
+    /// Where windowed lists report the item range they need
+    /// (docs/virtualization.md §3): `(listId, start, end)`. The host wires it
+    /// to `RemoteEngine.setListViewport` (remote) or a local engine's
+    /// `setListViewport`. Unset ⇒ reports are dropped.
+    public var viewportReporter: (@MainActor (String, Int, Int) -> Void)?
+
+    /// Report a windowed list's wanted range `[start, end)` to the engine.
+    public func reportListViewport(listId: String, start: Int, end: Int) {
+        log.debug("Viewport %@: [%d, %d)", listId, start, end)
+        viewportReporter?(listId, start, end)
+    }
+
     @Published private(set) public var rootId: String?
 
     // Reactive state. `treeVersion` still counts patch batches for
@@ -191,11 +203,18 @@ public final class HypenRenderer: ObservableObject {
             return
         }
 
+        // `__virt.window` is never an ordinary prop (virtualization.md §1);
+        // should a create ever carry it, lift it onto `virtWindow`.
+        var props = patch.props ?? [:]
+        let virtValue = props.removeValue(forKey: VirtWindow.propName)
         let element = HypenElement(
             id: id,
             elementType: elementType,
-            props: patch.props ?? [:]
+            props: props
         )
+        if let virtValue {
+            element.virtWindow = Virtualization.parseVirtWindow(virtValue)
+        }
         element.semantics = HypenSemantics.from(dictionary: patch.semantics)
         element.publishBatch = publishBatch
 
@@ -250,6 +269,16 @@ public final class HypenRenderer: ObservableObject {
             return
         }
 
+        // List window (docs/virtualization.md §1): stored on the element,
+        // never as a prop (not a style, never echoed or diffed). SwiftUI
+        // renders after the whole batch is applied, so it naturally takes
+        // effect after the batch's structural patches. A malformed value
+        // clears it (render as a plain container).
+        if name == VirtWindow.propName {
+            element.virtWindow = Virtualization.parseVirtWindow(patch.value)
+            return
+        }
+
         // Handle special prop names
         if name == "0" || name == "text" {
             // Text content
@@ -289,6 +318,12 @@ public final class HypenRenderer: ObservableObject {
 
         guard let element = elements[id] else {
             log.debug("REMOVE_PROP: Element not found: %@", id)
+            return
+        }
+
+        // The list is no longer windowed: render the children normally.
+        if name == VirtWindow.propName {
+            element.virtWindow = nil
             return
         }
 

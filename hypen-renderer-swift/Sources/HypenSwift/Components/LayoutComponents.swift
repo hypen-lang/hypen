@@ -118,7 +118,30 @@ public struct ColumnComponent: ComponentHandler {
 
         return AnyView(
             Group {
-                if scrollable {
+                if let window = context.element.virtWindow {
+                    // Windowed lazy ForEach (docs/virtualization.md §5):
+                    // `total` slots, rows for the window, placeholders
+                    // elsewhere. Without `.scrollable` the lazy stack is
+                    // lazy against the nearest scrolling ancestor.
+                    VirtualizedLazyStack(
+                        listId: context.element.id,
+                        window: window,
+                        childIds: context.element.virtChildIds(renderer: context.renderer),
+                        renderer: context.renderer,
+                        actionDispatcher: context.actionDispatcher,
+                        axis: .vertical,
+                        spacing: gap,
+                        horizontalAlignment: horizontalAlignment,
+                        scrolls: scrollable,
+                        decorateChild: { view, _ in
+                            AnyView(view
+                                .environment(\.stretchCrossAxis, isStretch ? .horizontal : .none)
+                                .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                                .environment(\.parentExplicitWidth, explicitWidth)
+                                .environment(\.parentExplicitHeight, explicitHeight))
+                        }
+                    )
+                } else if scrollable {
                     // Lazy rows so a long feed only instantiates what is on
                     // screen. Control-flow wrappers are flattened (like List
                     // and Grid) because a wrapper rendered as one item would
@@ -385,7 +408,28 @@ public struct RowComponent: ComponentHandler {
 
         return AnyView(
             Group {
-                if scrollable {
+                if let window = context.element.virtWindow {
+                    // Windowed lazy ForEach (docs/virtualization.md §5),
+                    // laid out horizontally.
+                    VirtualizedLazyStack(
+                        listId: context.element.id,
+                        window: window,
+                        childIds: context.element.virtChildIds(renderer: context.renderer),
+                        renderer: context.renderer,
+                        actionDispatcher: context.actionDispatcher,
+                        axis: .horizontal,
+                        spacing: gap,
+                        verticalAlignment: verticalAlignment,
+                        scrolls: scrollable,
+                        decorateChild: { view, _ in
+                            AnyView(view
+                                .environment(\.stretchCrossAxis, isStretch ? .vertical : .none)
+                                .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                                .environment(\.parentExplicitHeight, explicitHeight)
+                                .environment(\.parentExplicitWidth, explicitWidth))
+                        }
+                    )
+                } else if scrollable {
                     // Lazy items so a long carousel only instantiates what is
                     // on screen. Control-flow wrappers are flattened (like
                     // List and Grid) because a wrapper rendered as one item
@@ -1278,10 +1322,13 @@ public struct ListComponent: ComponentHandler {
             || flexDirection?.lowercased() == "row"
             || flexDirection?.lowercased() == "row-reverse"
 
+        let window = context.element.virtWindow
         let layout = resolveListLayout(
             element: context.element,
             modifier: modifier,
-            hasDynamicItems: hasDynamicItems
+            // A windowed list is dynamic by definition (its rows come
+            // from a lazy ForEach), so it keeps scrolling.
+            hasDynamicItems: hasDynamicItems || window != nil
         )
 
         // A List consumes a finite cross-axis proposal. This is distinct from
@@ -1297,6 +1344,34 @@ public struct ListComponent: ComponentHandler {
         let allowsHorizontalExpansion = true
         let allowsVerticalExpansion = modifier.fillMaxHeight || modifier.height != nil
         let explicitWidth = modifier.width
+
+        if let window {
+            // Windowed list (docs/virtualization.md §5): a native lazy
+            // container declaring `total` slots — rows for the window,
+            // placeholders elsewhere — that reports its visible range.
+            // Horizontal windowed lists scroll (a non-scrolling HStack
+            // would never reveal the rest of the list).
+            return AnyView(
+                VirtualizedLazyStack(
+                    listId: context.element.id,
+                    window: window,
+                    childIds: childElements.map(\.id),
+                    renderer: context.renderer,
+                    actionDispatcher: context.actionDispatcher,
+                    axis: isHorizontal ? .horizontal : .vertical,
+                    spacing: gap,
+                    scrolls: isHorizontal || layout.scrollsVertically,
+                    decorateChild: { view, _ in
+                        AnyView(view
+                            .environment(\.parentAllowsHorizontalExpansion, allowsHorizontalExpansion)
+                            .environment(\.parentAllowsVerticalExpansion, allowsVerticalExpansion)
+                            .environment(\.parentExplicitWidth, explicitWidth)
+                            .environment(\.parentStretchesHorizontalSizing, !isHorizontal))
+                    }
+                )
+                .hypenModifier(effectiveModifier)
+            )
+        }
 
         return AnyView(
             Group {
@@ -1420,6 +1495,34 @@ public struct GridComponent: ComponentHandler {
         // needs to lay out the individual items directly (not a single wrapper as one cell).
         let rawChildren = context.renderer.getChildren(of: context.element.id)
         let childElements = GridComponent.flattenControlFlowChildren(rawChildren, renderer: context.renderer)
+
+        // Windowed grid (docs/virtualization.md §5): a LazyVGrid of `total`
+        // slots — cells for the window, row-height placeholders elsewhere —
+        // reporting its visible range. Without `.scrollable` it is lazy
+        // against the nearest scrolling ancestor.
+        if let window = context.element.virtWindow {
+            return AnyView(
+                VirtualizedLazyStack(
+                    listId: context.element.id,
+                    window: window,
+                    childIds: childElements.map(\.id),
+                    renderer: context.renderer,
+                    actionDispatcher: context.actionDispatcher,
+                    axis: .vertical,
+                    columns: columns,
+                    spacing: spacing,
+                    scrolls: scrollable,
+                    decorateChild: { view, child in
+                        AnyView(view
+                            .environment(\.parentAllowsHorizontalExpansion, true)
+                            .environment(\.parentStretchesHorizontalSizing, true)
+                            .environment(\.parentStretchesBareGridImage, true)
+                            .environment(\.parentTrackAlignment, child.flatMap(GridComponent.cellAlignment)))
+                    }
+                )
+                .hypenModifier(modifier)
+            )
+        }
 
         // Scrollable grids use ScrollView + LazyVGrid — the canonical SwiftUI pattern.
         // LazyVGrid's "reports one row in sizeThatFits" bug doesn't matter here because the

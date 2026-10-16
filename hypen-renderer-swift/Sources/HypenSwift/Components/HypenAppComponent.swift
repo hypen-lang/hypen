@@ -231,6 +231,10 @@ private final class EmbeddedHypenViewModel: ObservableObject {
         renderer.dnd.actionDispatcher = actionDispatcher
         // `.onAnimationComplete` completions likewise go to the embedded engine.
         renderer.animator.actionDispatcher = actionDispatcher
+        // Windowed lists report their viewport to the embedded app's engine.
+        renderer.viewportReporter = { [weak engine] listId, start, end in
+            engine?.setListViewport(listId: listId, start: start, end: end)
+        }
 
         // Element views observe their own HypenElement; the embedded root
         // only needs to re-render when the root element changes.
