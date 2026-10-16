@@ -145,9 +145,12 @@ private struct EmbeddedHypenView: View {
     private var content: some View {
         switch viewModel.connectionState {
         case .connected:
-            if let rootId = viewModel.renderer.rootId {
-                HypenElementView(
-                    elementId: rootId,
+            let rootLayout = viewModel.renderer.rootLayout
+            if rootLayout != .empty {
+                // One root child renders directly; several stack top to
+                // bottom in root order (see HypenRootChildrenView).
+                HypenRootChildrenView(
+                    layout: rootLayout,
                     renderer: viewModel.renderer,
                     actionDispatcher: viewModel.actionDispatcher
                 )
@@ -237,9 +240,8 @@ private final class EmbeddedHypenViewModel: ObservableObject {
         }
 
         // Element views observe their own HypenElement; the embedded root
-        // only needs to re-render when the root element changes.
-        renderer.$rootId
-            .removeDuplicates()
+        // only needs to re-render when the root children change.
+        renderer.rootIdsPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 self?.objectWillChange.send()

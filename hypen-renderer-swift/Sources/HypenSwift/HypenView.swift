@@ -84,7 +84,8 @@ public struct HypenView: View {
     private var content: some View {
         switch viewModel.connectionState {
         case .connected:
-            if let rootId = viewModel.renderer.rootId {
+            let rootLayout = viewModel.renderer.rootLayout
+            if rootLayout != .empty {
                 if let navOptions = backNavigationOptions {
                     if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
                         BackNavigationContainer(
@@ -92,14 +93,14 @@ public struct HypenView: View {
                             renderer: viewModel.renderer,
                             actionDispatcher: viewModel.actionDispatcher
                         ) {
-                            connectedContent(rootId: rootId)
+                            connectedContent(rootLayout: rootLayout)
                         }
                     } else {
                         // Fallback for older OS: render without NavigationStack integration
-                        connectedContent(rootId: rootId)
+                        connectedContent(rootLayout: rootLayout)
                     }
                 } else {
-                    connectedContent(rootId: rootId)
+                    connectedContent(rootLayout: rootLayout)
                 }
             } else {
                 loadingContent
@@ -117,12 +118,14 @@ public struct HypenView: View {
     }
 
     @ViewBuilder
-    private func connectedContent(rootId: String) -> some View {
+    private func connectedContent(rootLayout: RootChildren.Layout) -> some View {
         // Use ZStack with explicit alignment to ensure content starts at top-left
         // This is more reliable than frame alignment in NavigationStack contexts
         ZStack(alignment: .topLeading) {
-            HypenElementView(
-                elementId: rootId,
+            // One root child renders directly; several (control flow at the
+            // IR root with siblings) stack top to bottom in root order.
+            HypenRootChildrenView(
+                layout: rootLayout,
                 renderer: viewModel.renderer,
                 actionDispatcher: viewModel.actionDispatcher
             )
@@ -184,10 +187,10 @@ final class HypenViewModel: ObservableObject {
 
         // Element views observe their own HypenElement, so per-patch
         // invalidation never goes through this view model. The HypenView
-        // root only needs to re-render when the root element changes
-        // (first mount, route swap at the root, clear).
-        renderer.$rootId
-            .removeDuplicates()
+        // root only needs to re-render when the root children change
+        // (first mount, a root sibling inserted / moved / removed, route
+        // swap at the root, clear).
+        renderer.rootIdsPublisher
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 log.debug("Root element changed, triggering view update")
@@ -234,7 +237,7 @@ final class HypenViewModel: ObservableObject {
             .sink { [weak self] patches in
                 log.debug("Received \(patches.count) patches from engine")
                 self?.renderer.applyPatches(patches)
-                log.debug("After applying patches, rootId: \(self?.renderer.rootId ?? "nil")")
+                log.debug("After applying patches, roots: \(self?.renderer.rootIds ?? [])")
             }
             .store(in: &cancellables)
 

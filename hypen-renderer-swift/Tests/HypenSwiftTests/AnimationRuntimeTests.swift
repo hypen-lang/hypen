@@ -102,6 +102,27 @@ private var enterFadeSpec: [String: Any] {
     }
 }
 
+/// A root child exiting (an If at the IR root with a sibling) keeps its slot
+/// in the root container while the exit plays, then leaves only it.
+@Test func testExitingRootChildKeepsItsSlotUntilFinalize() async {
+    await MainActor.run {
+        let h = AnimHarness()
+        h.renderer.applyPatches([
+            Patch(type: .create, id: "banner", elementType: "text",
+                  props: [HypenAnim.exitProp: exitFadeSpec]),
+            Patch(type: .insert, id: "banner", parentId: "root"),
+            Patch(type: .create, id: "body", elementType: "text"),
+            Patch(type: .insert, id: "body", parentId: "root"),
+        ])
+        h.renderer.applyPatches([Patch(type: .remove, id: "banner", transition: true)])
+        #expect(h.renderer.rootIds == ["banner", "body"])
+
+        h.clock.advance(by: 0.3)
+        #expect(h.renderer.rootIds == ["body"])
+        #expect(h.renderer.getElement("banner") == nil)
+    }
+}
+
 @Test func testPlainRemovesInsideAnExitingSubtreeDeferToTheRootFinalize() async {
     await MainActor.run {
         let h = AnimHarness()

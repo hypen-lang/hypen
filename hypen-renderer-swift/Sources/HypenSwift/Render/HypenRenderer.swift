@@ -16,7 +16,7 @@ public protocol RendererStateListener: AnyObject {
 public final class HypenRenderer: ObservableObject {
 
     // Element storage. Includes both attached elements (reachable
-    // from `rootId` via `children`) and detached elements (unlinked
+    // from a root child via `children`) and detached elements (unlinked
     // by a `detach` patch, kept alive in this map until `attach` or
     // `remove` arrives).
     private var elements: [String: HypenElement] = [:]
@@ -65,7 +65,35 @@ public final class HypenRenderer: ObservableObject {
         viewportReporter?(listId, start, end)
     }
 
-    @Published private(set) public var rootId: String?
+    /// The `"root"` mount container's ordered children (see `RootChildren`).
+    /// Usually one; several when control flow sits at the IR root with
+    /// siblings. Hosts render `rootLayout`.
+    @Published private(set) var roots = RootChildren()
+
+    /// The root container's children, top to bottom.
+    public var rootIds: [String] { roots.ids }
+
+    /// The first root child — the whole tree for a single-root app.
+    /// Multi-root hosts read `rootIds` / `rootLayout`.
+    public var rootId: String? { roots.first }
+
+    /// How hosts render the root container (nothing / one child directly /
+    /// several stacked top to bottom).
+    var rootLayout: RootChildren.Layout { roots.layout }
+
+    /// Drop `id` from the root container. Checked first so the common case
+    /// (a node that was never a root child) does not publish `roots`.
+    private func leaveRoot(_ id: String) {
+        if roots.contains(id) {
+            roots.unlink(id)
+        }
+    }
+
+    /// Emits the root children whenever they change (first mount, a root
+    /// sibling inserted / moved / removed, a route swap at the root, clear).
+    public var rootIdsPublisher: AnyPublisher<[String], Never> {
+        $roots.map(\.ids).removeDuplicates().eraseToAnyPublisher()
+    }
 
     // Reactive state. `treeVersion` still counts patch batches for
     // diagnostics, but views no longer observe the renderer — each
@@ -153,7 +181,7 @@ public final class HypenRenderer: ObservableObject {
         publishBatch.end()
 
         treeVersion += 1
-        log.debug("Tree version now: \(treeVersion), rootId: \(rootId ?? "nil")")
+        log.debug("Tree version now: \(treeVersion), roots: \(roots.ids)")
         listener?.onTreeChanged()
     }
 
@@ -220,9 +248,11 @@ public final class HypenRenderer: ObservableObject {
 
         elements[id] = element
 
-        // Set as root if this is the first element
-        if rootId == nil {
-            rootId = id
+        // Legacy implicit root: the first element becomes the root while
+        // nothing is mounted. A root-level Insert re-places it; linking it
+        // under a real parent takes it back out.
+        if roots.isEmpty {
+            roots.adoptIfEmpty(id)
             log.debug("Root element set: %@ (%@)", id, elementType)
         }
 
@@ -381,8 +411,8 @@ public final class HypenRenderer: ObservableObject {
                 bubbleControlFlowChange(from: oldParent)
             }
             element.parentId = nil
-            rootId = id
-            log.debug("Inserted at root: \(id)")
+            roots.place(id, before: patch.beforeId)
+            log.debug("Inserted at root: \(id) (before: \(patch.beforeId ?? "end"))")
             return
         }
 
@@ -397,7 +427,8 @@ public final class HypenRenderer: ObservableObject {
             bubbleControlFlowChange(from: oldParent)
         }
 
-        // Add to new parent
+        // Add to new parent (leaving the root container, if it was there)
+        leaveRoot(id)
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
         bubbleControlFlowChange(from: parent)
@@ -426,8 +457,8 @@ public final class HypenRenderer: ObservableObject {
                 bubbleControlFlowChange(from: oldParent)
             }
             element.parentId = nil
-            rootId = id
-            log.debug("Moved to root: \(id)")
+            roots.place(id, before: patch.beforeId)
+            log.debug("Moved to root: \(id) (before: \(patch.beforeId ?? "end"))")
             return
         }
 
@@ -442,7 +473,8 @@ public final class HypenRenderer: ObservableObject {
             bubbleControlFlowChange(from: oldParent)
         }
 
-        // Add to new parent
+        // Add to new parent (leaving the root container, if it was there)
+        leaveRoot(id)
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
         bubbleControlFlowChange(from: parent)
@@ -554,10 +586,8 @@ public final class HypenRenderer: ObservableObject {
         dnd.forget(id: id)
         listener?.onElementRemoved(id: id)
 
-        // Clear root if this was the root
-        if rootId == id {
-            rootId = nil
-        }
+        // Leave the root container if this was one of its children
+        leaveRoot(id)
     }
 
     /// Unlink an element from its parent without destroying it.
@@ -591,10 +621,7 @@ public final class HypenRenderer: ObservableObject {
         }
         element.parentId = nil
         detachedIds.insert(id)
-
-        if rootId == id {
-            rootId = nil
-        }
+        leaveRoot(id)
 
         log.debug("Detached: \(id)")
     }
@@ -619,9 +646,9 @@ public final class HypenRenderer: ObservableObject {
                 bubbleControlFlowChange(from: oldParent)
             }
             element.parentId = nil
-            rootId = id
+            roots.place(id, before: patch.beforeId)
             detachedIds.remove(id)
-            log.debug("Attached at root: \(id)")
+            log.debug("Attached at root: \(id) (before: \(patch.beforeId ?? "end"))")
             return
         }
 
@@ -637,6 +664,7 @@ public final class HypenRenderer: ObservableObject {
             bubbleControlFlowChange(from: oldParent)
         }
 
+        leaveRoot(id)
         element.parentId = parentId
         parent.addChild(id, beforeId: patch.beforeId)
         bubbleControlFlowChange(from: parent)
@@ -711,7 +739,7 @@ public final class HypenRenderer: ObservableObject {
         currentBatchAnimation = nil
         animator.reset()
         dnd.reset()
-        rootId = nil
+        roots.removeAll()
         treeVersion += 1
         resetEpoch += 1
         log.debug("Cleared renderer")

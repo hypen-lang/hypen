@@ -275,6 +275,83 @@ import Testing
     }
 }
 
+// MARK: - Several root children (control flow at the IR root with siblings)
+//
+// The engine places several nodes under "root" when Router / If / ForEach
+// sits at the IR root with siblings, anchoring them with `beforeId` (see
+// hypen-engine-rs/tests/test_control_flow_order.rs, `root_*`). The pure
+// ordering rules are covered by RootChildrenTests; these drive the patch
+// applier end to end.
+
+@Test func testRendererRootSiblingsKeepOrder() async {
+    await MainActor.run {
+        let renderer = HypenRenderer()
+        renderer.applyPatches([
+            Patch(type: .create, id: "a", elementType: "text"),
+            Patch(type: .insert, id: "a", parentId: "root"),
+            Patch(type: .create, id: "b", elementType: "text"),
+            Patch(type: .insert, id: "b", parentId: "root"),
+        ])
+        #expect(renderer.rootIds == ["a", "b"])
+        #expect(renderer.rootLayout == .stacked(["a", "b"]))
+
+        // If at the root turning on: lands before its sibling.
+        renderer.applyPatches([
+            Patch(type: .create, id: "banner", elementType: "text"),
+            Patch(type: .insert, id: "banner", parentId: "root", beforeId: "a"),
+        ])
+        #expect(renderer.rootIds == ["banner", "a", "b"])
+
+        // Move at the root.
+        renderer.applyPatches([
+            Patch(type: .move, id: "b", parentId: "root", beforeId: "a"),
+        ])
+        #expect(renderer.rootIds == ["banner", "b", "a"])
+
+        // Remove one of several.
+        renderer.applyPatches([Patch(type: .remove, id: "b")])
+        #expect(renderer.rootIds == ["banner", "a"])
+        #expect(renderer.getElement("b") == nil)
+    }
+}
+
+@Test func testRendererRootDetachAttachWithBeforeId() async {
+    await MainActor.run {
+        let renderer = HypenRenderer()
+        renderer.applyPatches([
+            Patch(type: .create, id: "route", elementType: "column"),
+            Patch(type: .insert, id: "route", parentId: "root"),
+            Patch(type: .create, id: "footer", elementType: "text"),
+            Patch(type: .insert, id: "footer", parentId: "root"),
+        ])
+        renderer.applyPatches([Patch(type: .detach, id: "route")])
+        #expect(renderer.rootIds == ["footer"])
+        #expect(renderer.detachedIds.contains("route"))
+
+        renderer.applyPatches([
+            Patch(type: .attach, id: "route", parentId: "root", beforeId: "footer"),
+        ])
+        #expect(renderer.rootIds == ["route", "footer"])
+        #expect(renderer.detachedIds.isEmpty)
+    }
+}
+
+@Test func testRendererSingleRootStaysSingle() async {
+    await MainActor.run {
+        let renderer = HypenRenderer()
+        // Children created before being linked under their parent never
+        // linger at the root.
+        renderer.applyPatches([
+            Patch(type: .create, id: "t", elementType: "text"),
+            Patch(type: .create, id: "col", elementType: "column"),
+            Patch(type: .insert, id: "t", parentId: "col"),
+            Patch(type: .insert, id: "col", parentId: "root"),
+        ])
+        #expect(renderer.rootIds == ["col"])
+        #expect(renderer.rootLayout == .single("col"))
+    }
+}
+
 // MARK: - HypenImageCache
 
 @Test func testImageCacheReturnsNilBeforeLoad() async {

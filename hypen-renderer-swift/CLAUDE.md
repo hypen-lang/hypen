@@ -363,6 +363,18 @@ native views. Handled in `HypenRenderer.applyDetach` / `applyAttach`
 A `Patch.remove` arriving for a detached id (engine LRU eviction)
 tears down normally via `applyRemove`.
 
+### Root children (`"root"` sentinel)
+
+`parentId: "root"` names the mount container, which can hold several
+ordered children when control flow sits at the IR root with siblings.
+`Render/RootChildren.swift` (pure Foundation, Linux-testable via
+`RootChildrenTests`) keeps the order: Insert / Move / Attach place before
+`beforeId` (absent anchor ⇒ append), Remove / Detach drop one child, and an
+exiting root child keeps its slot until finalize — the DOM container and
+desktop `Tree` semantics. `HypenRenderer.rootIds` / `rootIdsPublisher`
+expose it (`rootId` is the first child). `HypenRootChildrenView` renders one
+child directly (unchanged hierarchy) and several in a `VStack(spacing: 0)`.
+
 ### Strategy 3 hook (limbo container)
 
 `HypenRenderer.detachedIds: Set<String>` is exposed publicly so a
