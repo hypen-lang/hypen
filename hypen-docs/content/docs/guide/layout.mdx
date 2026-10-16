@@ -203,7 +203,7 @@ bindable per record, e.g. `.gridColumn("@{item.span}")` with
 
 ## List
 
-A scrollable container optimized for displaying collections of items. On Android, uses virtualized rendering (LazyColumn) for performance with large lists.
+A scrollable container optimized for displaying collections of items. Virtualized on every platform: the engine only creates the rows near the viewport, and the renderer fills the rest of the scroll range with stand-in space. Pass `lazy: false` to render every row.
 
 ```hypen
 List(@state.items) {

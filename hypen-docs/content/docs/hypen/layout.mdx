@@ -86,6 +86,11 @@ Scrollable, data-driven list — shorthand for
 `ForEach(items: @state.items, key: "id")` in a scrollable container. The
 array binding is required.
 
+Lists are virtualized out of the box: only the rows near the viewport exist,
+so a 10,000-item list costs about as much as the rows on screen — locally and
+over the network. `lazy: false` renders every row; `initialCount` (default
+30) and `estimatedItemSize` tune the window.
+
 ```hypen
 List(@state.items) {
     Text("@{item.title}")

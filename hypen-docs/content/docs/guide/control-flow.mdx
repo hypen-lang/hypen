@@ -91,6 +91,9 @@ export default app
 | `items` or `in` | Yes | — | Array binding from state (e.g., `@state.users`) |
 | `as` | No | `"item"` | Custom variable name for each element |
 | `key` | No | index | Property name for stable identity across re-renders |
+| `lazy` | No | `false` | Virtualize: materialize only the rows near the viewport. Applies when the ForEach is the only child of its container. Literal `true`/`false`. |
+| `initialCount` | No | `30` | With `lazy`: rows materialized before the first scroll report |
+| `estimatedItemSize` | No | — | With `lazy`: size hint for rows not measured yet |
 
 ### Why Keys Matter
 
@@ -542,6 +545,8 @@ When(value: @state.pageStatus) {
 3. **Use expressions for style, control flow for structure** — Don't wrap a single Text in an If just to change its color. Use `"@{state.x ? 'red' : 'blue'}"` instead.
 
 4. **Control flow nodes are free** — ForEach, When, and If don't create DOM elements. Nest them freely without worrying about extra wrappers.
+
+5. **Long lists are virtualized** — `List` and `Grid` only create the rows near the viewport, on every renderer and over the network, and keep each row's identity as you scroll. Use them (or `ForEach(..., lazy: true)` as the only child of a scrolling container) for long lists; `lazy: false` renders every row when you need them all (e.g. for find-in-page).
 
 ## Next Steps
 

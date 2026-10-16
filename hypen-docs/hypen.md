@@ -200,7 +200,7 @@ When(value: "@{state.status}") {
 
 ## List & Grid
 
-`List` and `Grid` work like `ForEach` but produce virtualized containers — native renderers use `LazyColumn`/`LazyVStack` for efficient scrolling.
+`List` and `Grid` work like `ForEach` but are virtualized out of the box: the engine only materializes the rows near the viewport (on every renderer, and over the network), and renderers stand in for the rest. `lazy: false` renders every row; `initialCount` (default 30) and `estimatedItemSize` tune the window. `ForEach(..., lazy: true)` virtualizes too when it is the only child of its container.
 
 ### List
 
