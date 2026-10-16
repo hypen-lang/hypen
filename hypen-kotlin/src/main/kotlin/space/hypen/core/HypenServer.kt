@@ -28,6 +28,9 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 internal const val RESERVED_ANIMATE_KEY = "__hypenAnimate"
 
+/** A parsed remote `viewport` report (hypen-web/docs/virtualization.md §4). */
+internal data class ViewportRequest(val listId: String, val start: UInt, val end: UInt)
+
 /**
  * Per-client data managed by HypenServer.
  */
@@ -1030,6 +1033,20 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                 events.emit(HypenEvents.routeChanged, HypenEvents.RouteChanged(null, path))
             }
 
+            "viewport" -> {
+                // List virtualization (hypen-web/docs/virtualization.md §4):
+                // per-client, so it runs on THIS session's engine only. Not
+                // an action (no handler, no actionDispatched event, never
+                // replayed to other sessions) and never a stateUpdate.
+                val client = clients[connectionKey] ?: return
+                val req = parseViewportMessage(msg)
+                if (req == null) {
+                    log.debug("Malformed viewport message ignored")
+                    return
+                }
+                applyViewport(client, req, sendMessage)
+            }
+
             "dispatchAction", "action" -> {
                 val actionName = msg.stringMember("action")
                     ?: msg.stringMember("name")
@@ -1163,6 +1180,31 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         val patches = synchronized(client.pendingPatches) {
             client.pendingPatches.toList().also { client.pendingPatches.clear() }
         }
+        client.revision++
+        sendPatchBatch(client, patches, send)
+        patches
+    }
+
+    /**
+     * Move a lazy list's window for one client and stream the result as an
+     * ordinary `patch` message. Runs under [ClientState.mutex] like
+     * [dispatchAndSend], so its revision is ordered with every other
+     * frame; unlike a dispatch, a report that moves nothing (a stale or
+     * unknown list id, an already-covered range) sends nothing and bumps
+     * no revision.
+     */
+    internal suspend fun applyViewport(
+        client: ClientState,
+        req: ViewportRequest,
+        send: (suspend (String) -> Unit)? = null,
+    ): List<Patch> = client.mutex.withLock {
+        // The render callback queues the patches on pendingPatches (with any
+        // async-handler deltas not yet flushed); drain them all, in order.
+        client.engine.setListViewport(req.listId, req.start, req.end)
+        val patches = synchronized(client.pendingPatches) {
+            client.pendingPatches.toList().also { client.pendingPatches.clear() }
+        }
+        if (patches.isEmpty()) return@withLock patches
         client.revision++
         sendPatchBatch(client, patches, send)
         patches
@@ -1785,6 +1827,35 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
             }
 
         private val DEVICE_TYPE_NAMES = setOf("deviceEvent", "deviceResponse", "deviceRequest")
+
+        private val U32_MAX = java.math.BigDecimal(UInt.MAX_VALUE.toLong())
+
+        /**
+         * Parse `{"type":"viewport","listId":"…","start":n,"end":n}`
+         * (virtualization.md §4): `listId` a string, `start`/`end`
+         * non-negative integers clamped to `u32`. Anything else is
+         * malformed: `null`, ignored by the caller. Never throws.
+         */
+        internal fun parseViewportMessage(msg: JsonObject): ViewportRequest? {
+            val listId = msg.stringMember("listId") ?: return null
+            val start = msg.u32Member("start") ?: return null
+            val end = msg.u32Member("end") ?: return null
+            return ViewportRequest(listId, start, end)
+        }
+
+        /** A non-negative JSON integer (`40`, `40.0`, `4e1`) clamped to `u32`, or `null`. */
+        private fun JsonObject.u32Member(key: String): UInt? {
+            val p = this[key] as? JsonPrimitive ?: return null
+            if (p.isString || p is JsonNull) return null
+            val n = p.content.toBigDecimalOrNull() ?: return null
+            if (n.signum() < 0) return null
+            val integral = try {
+                n.toBigIntegerExact()
+            } catch (_: ArithmeticException) {
+                return null
+            }
+            return if (integral.toBigDecimal() > U32_MAX) UInt.MAX_VALUE else integral.toLong().toUInt()
+        }
 
         /** A top-level string member, or `null` (absent, or not a string — never throws). */
         private fun JsonObject.stringMember(key: String): String? =
