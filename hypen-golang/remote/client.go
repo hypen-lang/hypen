@@ -28,19 +28,19 @@ type RemoteEngine struct {
 
 	reconnectStopped bool
 	url              string
-	options EngineOptions
-	conn    *websocket.Conn
-	state   ConnectionState
+	options          EngineOptions
+	conn             *websocket.Conn
+	state            ConnectionState
 
 	reconnectAttempts int
 	stopReconnect     chan struct{}
 
 	// Callbacks
-	patchCallbacks       []PatchCallback
-	stateCallbacks       []StateCallback
-	connectionCallbacks  []ConnectionCallback
-	disconnectCallbacks  []ConnectionCallback
-	errorCallbacks       []ErrorCallback
+	patchCallbacks      []PatchCallback
+	stateCallbacks      []StateCallback
+	connectionCallbacks []ConnectionCallback
+	disconnectCallbacks []ConnectionCallback
+	errorCallbacks      []ErrorCallback
 
 	// State
 	currentState    any
@@ -168,6 +168,32 @@ func (e *RemoteEngine) DispatchAction(action string, payload any) error {
 		return fmt.Errorf("marshal failed: %w", err)
 	}
 
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// SetListViewport reports the item range [start, end) - visible rows plus
+// overscan - of the windowed list whose element id is listID (the node
+// carrying `__virt.window`) to the server as a `viewport` message
+// (virtualization contract §4). The window move arrives back as ordinary
+// patches through OnPatches; nothing else is sent in reply.
+func (e *RemoteEngine) SetListViewport(listID string, start, end uint32) error {
+	e.mu.RLock()
+	if e.state != StateConnected || e.conn == nil {
+		e.mu.RUnlock()
+		return fmt.Errorf("not connected")
+	}
+	conn := e.conn
+	e.mu.RUnlock()
+
+	data, err := json.Marshal(ViewportMessage{
+		Type:   MessageTypeViewport,
+		ListID: listID,
+		Start:  start,
+		End:    end,
+	})
+	if err != nil {
+		return fmt.Errorf("marshal failed: %w", err)
+	}
 	return conn.WriteMessage(websocket.TextMessage, data)
 }
 

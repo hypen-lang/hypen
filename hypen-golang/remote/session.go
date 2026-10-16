@@ -23,6 +23,7 @@ package remote
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -494,6 +495,12 @@ func (s *RemoteSession) Receive(data []byte) error {
 			return nil
 		}
 		s.handleDispatchAction(raw.Action, raw.Payload)
+		return nil
+
+	case MessageTypeViewport:
+		// Virtualization contract §4: per-client, never an action, never
+		// replayed, never answered with a stateUpdate.
+		s.handleViewport(data)
 		return nil
 
 	case "deviceRequest", "deviceResponse", "deviceEvent":
@@ -1315,6 +1322,67 @@ func (s *RemoteSession) sendStateUpdate(moduleName string) {
 		State:    state,
 		Revision: rev,
 	})
+}
+
+// handleViewport applies a client `viewport` report (virtualization
+// contract §4) to THIS session's engine. Before hello (or before the
+// engine exists) it is ignored, like dispatchAction; a malformed message
+// (missing/empty listId, non-integer or negative start/end) is dropped
+// silently — no error, no disconnect. start/end clamp to u32. The engine's
+// patch callback ships the resulting patches to this client only, as an
+// ordinary `patch` message at the next revision. Nothing else is sent: no
+// stateUpdate, no action dispatch, no replay to other sessions.
+func (s *RemoteSession) handleViewport(data []byte) {
+	if !s.HelloReceived() {
+		return
+	}
+	listID, start, end, ok := parseViewport(data)
+	if !ok {
+		return
+	}
+	engine, err := s.liveEngine()
+	if err != nil {
+		return
+	}
+	if _, err := engine.SetListViewport(listID, start, end); err != nil {
+		logServer.Warn("Session %s: viewport %s failed: %v", s.ID, listID, err)
+	}
+}
+
+// parseViewport decodes a `viewport` message leniently: any shape it does
+// not accept reports ok=false so the caller drops the message.
+func parseViewport(data []byte) (listID string, start, end uint32, ok bool) {
+	var msg struct {
+		ListID any `json:"listId"`
+		Start  any `json:"start"`
+		End    any `json:"end"`
+	}
+	if json.Unmarshal(data, &msg) != nil {
+		return "", 0, 0, false
+	}
+	id, isStr := msg.ListID.(string)
+	if !isStr || id == "" {
+		return "", 0, 0, false
+	}
+	st, okStart := viewportIndex(msg.Start)
+	en, okEnd := viewportIndex(msg.End)
+	if !okStart || !okEnd {
+		return "", 0, 0, false
+	}
+	return id, st, en, true
+}
+
+// viewportIndex accepts a non-negative integral JSON number and clamps it
+// to u32.
+func viewportIndex(v any) (uint32, bool) {
+	f, isNum := v.(float64)
+	if !isNum || math.IsNaN(f) || math.IsInf(f, 0) || f < 0 || f != math.Trunc(f) {
+		return 0, false
+	}
+	if f > math.MaxUint32 {
+		return math.MaxUint32, true
+	}
+	return uint32(f), true
 }
 
 // handleDispatchAction routes a client dispatch into the engine (or, for
