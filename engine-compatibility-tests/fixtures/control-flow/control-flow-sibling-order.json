@@ -5,11 +5,6 @@
   "category": "control-flow",
   "priority": "P0",
 
-  "skip": {
-    "reason": "Asserts placement through the fixture-only `before` anchor, which only the Rust runner resolves; the prebuilt WASM/native engines the other runners load predate the control-flow anchor fix",
-    "sdks": ["typescript", "golang", "kotlin"]
-  },
-
   "input": {
     "source": "Column { ForEach(items: @state.items, key: \"id\") { Text(\"@{item.name}\") } If(@state.show) { Text(\"shown\") } Text(\"footer\") }",
     "initialState": {

@@ -7,6 +7,7 @@
 
 import { describe, test, expect, beforeEach } from "bun:test";
 import { Engine, type Patch, type Action } from "../../../hypen-web/packages/server/src/engine";
+import { TemplateExpander } from "../../../hypen-web/packages/core/src/patch-expand";
 import { readdir } from "node:fs/promises";
 import { join, relative } from "node:path";
 
@@ -49,6 +50,11 @@ interface ExpectedPatch {
   /** Batch-animation spec on `batchAnimation` patches (deep partial match
    *  like `value` — the fixture pins the normalized `{curve, duration}`). */
   spec?: Record<string, any>;
+  /** Fixture-assertion-only (never on the wire): on `insert`/`move`, the
+   *  element the patch's `beforeId` must name, matched against that
+   *  element's `create` patch from any earlier batch of the run (elementType,
+   *  partial props). Pins placement contracts the id-agnostic match can't. */
+  before?: { elementType?: string; props?: Record<string, any> };
 }
 
 interface TestStep {
@@ -189,8 +195,30 @@ function matchPatchStructure(actual: EnginePatch[], expected: ExpectedPatch[], a
   });
 }
 
+// Every `create` patch seen so far in the current fixture run, by wire id —
+// what `before` anchors resolve against. Reset per test, fed per batch.
+let createdById = new Map<string, EnginePatch>();
+
+function recordCreates(patches: EnginePatch[]): void {
+  for (const patch of patches) {
+    if (patch.type === "create" && patch.id !== undefined) createdById.set(patch.id, patch);
+  }
+}
+
 function patchMatches(actual: EnginePatch, expected: ExpectedPatch): boolean {
   if (actual.type !== expected.type) return false;
+
+  // Check the insert/move anchor against the element it names
+  if (expected.before !== undefined) {
+    const target = actual.beforeId == null ? undefined : createdById.get(actual.beforeId);
+    if (target === undefined) return false;
+    if (expected.before.elementType !== undefined && target.elementType !== expected.before.elementType) {
+      return false;
+    }
+    for (const [key, value] of Object.entries(expected.before.props ?? {})) {
+      if (!deepEquals(target.props?.[key], value)) return false;
+    }
+  }
 
   // Check elementType if specified
   if (expected.elementType !== undefined && actual.elementType !== expected.elementType) {
@@ -286,8 +314,12 @@ describe("Engine Compatibility Tests", async () => {
         await engine.init();
 
         collectedPatches = [];
+        createdById = new Map();
+        // Fixtures assert the plain Create+Insert wire (as the Rust runner
+        // does): lower template rows through a session-lifetime expander.
+        const expander = new TemplateExpander();
         patchCallback = (patches: any[]) => {
-          collectedPatches.push(...normalizePatches(patches));
+          collectedPatches.push(...normalizePatches(expander.expand(patches)));
         };
 
         engine.setRenderCallback(patchCallback);
@@ -328,6 +360,7 @@ describe("Engine Compatibility Tests", async () => {
         // Simple test case (expected patches from initial render)
         if (testCase.expected && !testCase.steps) {
           engine.renderSource(testCase.input.source);
+          recordCreates(collectedPatches);
 
           // Check patch count
           if (testCase.expected.patchCount !== undefined) {
@@ -410,6 +443,7 @@ describe("Engine Compatibility Tests", async () => {
               }
             }
 
+            recordCreates(collectedPatches);
             for (const patch of collectedPatches as any[]) {
               if (patch.type === "create" && !createdIds.has(patch.elementType)) {
                 createdIds.set(patch.elementType, patch.id);
