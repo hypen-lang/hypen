@@ -46,6 +46,7 @@ import type {
   SessionExpiredMessage,
   StateUpdateMessage,
   UpdateStateMessage,
+  ViewportMessage,
 } from "./types.js";
 import { SessionManager } from "./session.js";
 import type { Patch } from "../types.js";
@@ -67,6 +68,25 @@ import { frameworkLoggers } from "../logger.js";
 import { BaseEngine } from "../engine-base.js";
 
 const log = frameworkLoggers.remote;
+
+const U32_MAX = 0xffff_ffff;
+
+/**
+ * Validate an inbound `viewport` message (docs/virtualization.md §4):
+ * `listId` a non-empty string, `start`/`end` non-negative integers, clamped
+ * to `u32` (the engine's index type — `>>> 0` alone would wrap). Anything
+ * else is malformed and yields `null`.
+ */
+function parseViewport(
+  msg: unknown
+): { listId: string; start: number; end: number } | null {
+  const { listId, start, end } = msg as Partial<ViewportMessage>;
+  if (typeof listId !== "string" || listId.length === 0) return null;
+  const ok = (n: unknown): n is number =>
+    typeof n === "number" && Number.isInteger(n) && n >= 0;
+  if (!ok(start) || !ok(end)) return null;
+  return { listId, start: Math.min(start, U32_MAX), end: Math.min(end, U32_MAX) };
+}
 
 /**
  * Server → client messages emitted by a `RemoteSession`.
@@ -287,6 +307,8 @@ export class RemoteSession {
 
   private _sessionId: string | null = null;
   private _helloReceived = false;
+  /** True while a `viewport` message is being applied (no stateUpdate). */
+  private _viewportRender = false;
   /**
    * True when the session was initialised by the legacy `helloGrace` timer
    * rather than an explicit hello. Only then may a late hello negotiate the
@@ -867,6 +889,27 @@ export class RemoteSession {
               if (other._moduleInstance) other._moduleInstance.runReplayed(dispatch);
               else dispatch();
             }
+          }
+          break;
+        }
+
+        case "viewport": {
+          // List virtualization (docs/virtualization.md §4). Per client:
+          // THIS session's engine only — never replayed to other sessions
+          // (syncActions), never an action, never a stateUpdate. The
+          // window change streams out through the streaming render
+          // callback as ordinary `patch` messages.
+          if (!this._helloReceived) break;
+          const vp = parseViewport(msg);
+          if (!vp) break; // malformed: ignored, no error, no disconnect
+          // The engine renders synchronously inside this call; the flag
+          // keeps the streaming callback from attaching a stateUpdate to
+          // the window's patches (a viewport changes no state).
+          this._viewportRender = true;
+          try {
+            this.engine.setListViewport(vp.listId, vp.start, vp.end);
+          } finally {
+            this._viewportRender = false;
           }
           break;
         }
@@ -1558,7 +1601,10 @@ export class RemoteSession {
       };
       this.send(patchMessage);
 
-      if (this._stateSubscribed && this._moduleInstance) {
+      // A viewport-driven render only moves a list window: no state changed.
+      const sendState = !this._viewportRender;
+
+      if (sendState && this._stateSubscribed && this._moduleInstance) {
         const stateMessage: StateUpdateMessage = {
           type: "stateUpdate",
           module: this.host.moduleName,
@@ -1576,7 +1622,7 @@ export class RemoteSession {
         for (const peer of this.host.sessionsForId(this._sessionId)) {
           if (peer === this) continue;
           peer.send(patchMessage);
-          if (peer._stateSubscribed && this._moduleInstance) {
+          if (sendState && peer._stateSubscribed && this._moduleInstance) {
             const stateMessage: StateUpdateMessage = {
               type: "stateUpdate",
               module: this.host.moduleName,
