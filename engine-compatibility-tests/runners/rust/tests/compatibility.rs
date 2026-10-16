@@ -64,6 +64,11 @@ struct Step {
     description: Option<String>,
     action: String,
     source: Option<String>,
+    viewport: Option<ViewportStep>,
+    /// Subset matching for `expected_patches` — the Rust matcher is already
+    /// structural-subset, so this only needs to deserialize.
+    #[allow(dead_code)]
+    allow_extra_patches: Option<bool>,
     state_change: Option<StateChange>,
     dispatch_action: Option<DispatchAction>,
     /// Optional batch-animation context for this step's state update
@@ -77,6 +82,16 @@ struct Step {
     strict_patch_order: Option<bool>,
     forbidden_patch_types: Option<Vec<String>>,
     expected_state: Option<Value>,
+}
+
+/// A `setViewport` step: report `[start, end)` visible for the first list
+/// created so far with `element_type`, as a renderer would.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ViewportStep {
+    element_type: String,
+    start: usize,
+    end: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -493,6 +508,9 @@ fn run_fixture(tc: &TestCase) {
 
     // Multi-step test
     if let Some(ref steps) = tc.steps {
+        // Wire id of the first element created per element type, for
+        // `setViewport` steps to address a list the way a renderer does.
+        let mut created_ids: HashMap<String, String> = HashMap::new();
         for (i, step) in steps.iter().enumerate() {
             let default_label = format!("step {i}");
             let step_label = step.description.as_deref().unwrap_or(&default_label);
@@ -557,12 +575,35 @@ fn run_fixture(tc: &TestCase) {
                         }
                     }
                 }
+                "setViewport" => {
+                    let viewport = step.viewport.as_ref().unwrap_or_else(|| {
+                        panic!("[{}] setViewport step needs `viewport`", tc.name)
+                    });
+                    let list_id = created_ids.get(&viewport.element_type).unwrap_or_else(|| {
+                        panic!(
+                            "[{}] setViewport: no {} created yet",
+                            tc.name, viewport.element_type
+                        )
+                    });
+                    engine.set_list_viewport_wire(list_id, viewport.start, viewport.end);
+                }
                 other => {
                     panic!("[{}] Unknown step action: {other}", tc.name);
                 }
             }
 
             let patches = collected_patches.lock().unwrap();
+            for patch in patches.iter() {
+                if let (Some("create"), Some(element_type), Some(id)) = (
+                    patch.get("type").and_then(Value::as_str),
+                    patch.get("elementType").and_then(Value::as_str),
+                    patch.get("id").and_then(Value::as_str),
+                ) {
+                    created_ids
+                        .entry(element_type.to_string())
+                        .or_insert_with(|| id.to_string());
+                }
+            }
             assert_expected(
                 &tc.name,
                 step_label,

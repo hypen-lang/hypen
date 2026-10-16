@@ -53,7 +53,9 @@ interface ExpectedPatch {
 
 interface TestStep {
   description?: string;
-  action: "initialRender" | "updateState" | "dispatchAction" | "renderSource";
+  action: "initialRender" | "updateState" | "dispatchAction" | "renderSource" | "setViewport";
+  viewport?: { elementType: string; start: number; end: number };
+  allowExtraPatches?: boolean;
   source?: string;
   stateChange?: StateChange;
   /**
@@ -354,6 +356,9 @@ describe("Engine Compatibility Tests", async () => {
 
         // Multi-step test case
         if (testCase.steps) {
+          // Wire id of the first element created per element type, for
+          // `setViewport` steps to address a list the way a renderer does.
+          const createdIds = new Map<string, string>();
           for (const step of testCase.steps) {
             collectedPatches = []; // Reset for each step
             currentStepAnimation = step.animation;
@@ -395,6 +400,20 @@ describe("Engine Compatibility Tests", async () => {
                   await new Promise((resolve) => setTimeout(resolve, 10));
                 }
                 break;
+
+              case "setViewport": {
+                const viewport = step.viewport!;
+                const listId = createdIds.get(viewport.elementType);
+                if (!listId) throw new Error(`setViewport: no ${viewport.elementType} created yet`);
+                engine.setListViewport(listId, viewport.start, viewport.end);
+                break;
+              }
+            }
+
+            for (const patch of collectedPatches as any[]) {
+              if (patch.type === "create" && !createdIds.has(patch.elementType)) {
+                createdIds.set(patch.elementType, patch.id);
+              }
             }
 
             // Verify expected patch count
@@ -413,7 +432,11 @@ describe("Engine Compatibility Tests", async () => {
             if (step.expectedPatches) {
               const matches = step.strictPatchOrder
                 ? matchPatchSequence(collectedPatches, step.expectedPatches)
-                : matchPatchStructure(collectedPatches, step.expectedPatches, testCase.category === "dnd");
+                : matchPatchStructure(
+                    collectedPatches,
+                    step.expectedPatches,
+                    testCase.category === "dnd" || step.allowExtraPatches === true,
+                  );
               if (!matches) {
                 console.log("Step:", step.description || step.action);
                 console.log("Expected patches:", JSON.stringify(step.expectedPatches, null, 2));

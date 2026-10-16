@@ -729,7 +729,6 @@ impl EngineCore {
     /// [`set_list_viewport`](Self::set_list_viewport) addressed by the
     /// patch-wire id string, as the language bindings receive it. A
     /// malformed id returns no patches.
-    #[cfg_attr(not(any(target_arch = "wasm32", feature = "uniffi")), allow(dead_code))]
     pub fn set_list_viewport_wire(
         &mut self,
         list_id: &str,
