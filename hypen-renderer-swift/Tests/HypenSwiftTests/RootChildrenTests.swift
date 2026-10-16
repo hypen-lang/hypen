@@ -17,7 +17,6 @@ import Testing
     roots.place("a", before: nil)
     roots.place("b", before: nil)
     #expect(roots.ids == ["a", "b"])
-    #expect(roots.layout == .stacked(["a", "b"]))
 }
 
 @Test func rootChildrenInsertWithBeforeIdLandsBeforeAnchor() {
@@ -59,7 +58,6 @@ import Testing
     roots.place("footer", before: nil)
     #expect(roots.unlink("route") == true)
     #expect(roots.ids == ["footer"])
-    #expect(roots.layout == .single("footer"))
     // Router cache hit: the cached subtree re-enters before its sibling.
     roots.place("route", before: "footer")
     #expect(roots.ids == ["route", "footer"])
@@ -79,7 +77,6 @@ import Testing
     var roots = RootChildren()
     #expect(roots.isEmpty)
     #expect(roots.first == nil)
-    #expect(roots.layout == .empty)
     // Legacy: the first Create becomes the implicit root (tests and hosts
     // that drive a single tree without a root-level Insert).
     roots.adoptIfEmpty("col")
@@ -90,13 +87,37 @@ import Testing
     roots.place("col", before: nil)
     #expect(roots.ids == ["col"])
     #expect(roots.first == "col")
-    #expect(roots.layout == .single("col"))
     // Router swap at the root: the new route enters, the old detaches.
     roots.place("route2", before: nil)
     roots.unlink("col")
-    #expect(roots.layout == .single("route2"))
+    #expect(roots.ids == ["route2"])
     roots.removeAll()
-    #expect(roots.layout == .empty)
+    #expect(roots.isEmpty)
+}
+
+@Test func rootChildrenPlaceholderOnlyBeforeFirstRoot() {
+    var roots = RootChildren()
+    #expect(roots.showsPlaceholder)
+    // Unlinking / clearing before anything mounted keeps the placeholder.
+    roots.unlink("ghost")
+    roots.removeAll()
+    #expect(roots.showsPlaceholder)
+
+    roots.place("banner", before: nil)
+    #expect(!roots.showsPlaceholder)
+    // A root If turning off empties the list: render nothing, not loading.
+    roots.unlink("banner")
+    #expect(roots.isEmpty)
+    #expect(!roots.showsPlaceholder)
+    // A renderer reset (initialTree replay) does not flash loading either.
+    roots.removeAll()
+    #expect(!roots.showsPlaceholder)
+}
+
+@Test func rootChildrenImplicitRootCountsAsMounted() {
+    var roots = RootChildren()
+    roots.adoptIfEmpty("col")
+    #expect(!roots.showsPlaceholder)
 }
 
 @Test func rootChildrenImplicitRootLeavesWhenLinkedUnderAParent() {
@@ -123,5 +144,6 @@ import Testing
     roots.place("b", before: "a")
     #expect(roots.ids == ["banner", "c", "b", "a", "footer"])
     for id in ["banner", "c", "b", "a", "footer"] { roots.unlink(id) }
-    #expect(roots.layout == .empty)
+    #expect(roots.isEmpty)
+    #expect(!roots.showsPlaceholder)
 }

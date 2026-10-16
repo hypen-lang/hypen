@@ -293,7 +293,7 @@ import Testing
             Patch(type: .insert, id: "b", parentId: "root"),
         ])
         #expect(renderer.rootIds == ["a", "b"])
-        #expect(renderer.rootLayout == .stacked(["a", "b"]))
+        #expect(!renderer.showsRootPlaceholder)
 
         // If at the root turning on: lands before its sibling.
         renderer.applyPatches([
@@ -348,7 +348,7 @@ import Testing
             Patch(type: .insert, id: "col", parentId: "root"),
         ])
         #expect(renderer.rootIds == ["col"])
-        #expect(renderer.rootLayout == .single("col"))
+        #expect(!renderer.showsRootPlaceholder)
     }
 }
 

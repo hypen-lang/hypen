@@ -67,19 +67,19 @@ public final class HypenRenderer: ObservableObject {
 
     /// The `"root"` mount container's ordered children (see `RootChildren`).
     /// Usually one; several when control flow sits at the IR root with
-    /// siblings. Hosts render `rootLayout`.
+    /// siblings. Hosts render `rootIds` through `HypenRootChildrenView`.
     @Published private(set) var roots = RootChildren()
 
     /// The root container's children, top to bottom.
     public var rootIds: [String] { roots.ids }
 
     /// The first root child — the whole tree for a single-root app.
-    /// Multi-root hosts read `rootIds` / `rootLayout`.
+    /// Multi-root hosts read `rootIds`.
     public var rootId: String? { roots.first }
 
-    /// How hosts render the root container (nothing / one child directly /
-    /// several stacked top to bottom).
-    var rootLayout: RootChildren.Layout { roots.layout }
+    /// True only until a root child has ever been placed: hosts show their
+    /// loading content then. Afterwards an empty root list renders nothing.
+    public var showsRootPlaceholder: Bool { roots.showsPlaceholder }
 
     /// Drop `id` from the root container. Checked first so the common case
     /// (a node that was never a root child) does not publish `roots`.

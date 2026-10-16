@@ -17,25 +17,29 @@ import Foundation
 ///   (no anchor, or an unknown one) at the end;
 /// - unlinking drops just that id and keeps the others' order.
 ///
-/// Hosts stack the children vertically in this order (`layout`); a single
-/// root child renders exactly as the old single-`rootId` tree did.
+/// Hosts stack the children vertically in this order inside one
+/// always-present container (`HypenRootChildrenView`), so going between one
+/// and several roots never changes a surviving child's view identity.
+///
+/// `showsPlaceholder` is true only until a root child has ever been placed:
+/// hosts show their loading content then, and afterwards an empty root list
+/// (e.g. a root `If` that turned off) renders nothing.
 ///
 /// Pure Foundation so it builds and tests on Linux; `HypenRenderer` owns one.
 struct RootChildren: Equatable {
     /// The parent id the engine uses for the mount container.
     static let sentinel = "root"
 
-    /// How a host renders the root container.
-    enum Layout: Equatable {
-        /// Nothing mounted yet (hosts show their loading content).
-        case empty
-        /// One root child: rendered directly, no wrapper.
-        case single(String)
-        /// Several root children: stacked top to bottom in this order.
-        case stacked([String])
-    }
-
     private(set) var ids: [String] = []
+
+    /// Whether a root child has ever been placed (sticky: survives the list
+    /// emptying and `removeAll`, so a renderer reset replaying the tree does
+    /// not flash the loading content).
+    private(set) var hasMounted = false
+
+    /// Hosts show loading / placeholder content only before the first root
+    /// child ever arrives; afterwards an empty root list renders nothing.
+    var showsPlaceholder: Bool { !hasMounted }
 
     var isEmpty: Bool { ids.isEmpty }
     var count: Int { ids.count }
@@ -43,21 +47,16 @@ struct RootChildren: Equatable {
 
     func contains(_ id: String) -> Bool { ids.contains(id) }
 
-    var layout: Layout {
-        switch ids.count {
-        case 0: return .empty
-        case 1: return .single(ids[0])
-        default: return .stacked(ids)
-        }
-    }
-
     /// Legacy implicit root: the first created element becomes the root when
     /// nothing is mounted yet, for hosts and tests that drive a single tree
     /// without a root-level `Insert`. The engine's own `Insert(root)` of the
     /// same node is then a no-op re-place, and linking it under a real parent
     /// takes it back out (`unlink`).
     mutating func adoptIfEmpty(_ id: String) {
-        if ids.isEmpty { ids.append(id) }
+        if ids.isEmpty {
+            ids.append(id)
+            hasMounted = true
+        }
     }
 
     /// `Insert` / `Move` / `Attach` at the root: unlink `id`, then insert it
@@ -69,6 +68,7 @@ struct RootChildren: Equatable {
         } else {
             ids.append(id)
         }
+        hasMounted = true
     }
 
     /// `Remove` / `Detach` of a root child, or a root child being linked under

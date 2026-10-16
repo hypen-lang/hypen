@@ -145,12 +145,13 @@ private struct EmbeddedHypenView: View {
     private var content: some View {
         switch viewModel.connectionState {
         case .connected:
-            let rootLayout = viewModel.renderer.rootLayout
-            if rootLayout != .empty {
-                // One root child renders directly; several stack top to
-                // bottom in root order (see HypenRootChildrenView).
+            // Loading slot only until the first root child ever arrives;
+            // afterwards an empty root list renders nothing.
+            if !viewModel.renderer.showsRootPlaceholder {
+                // The root children in one always-present container (see
+                // HypenRootChildrenView).
                 HypenRootChildrenView(
-                    layout: rootLayout,
+                    rootIds: viewModel.renderer.rootIds,
                     renderer: viewModel.renderer,
                     actionDispatcher: viewModel.actionDispatcher
                 )

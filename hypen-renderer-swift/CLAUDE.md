@@ -372,8 +372,13 @@ ordered children when control flow sits at the IR root with siblings.
 `beforeId` (absent anchor ⇒ append), Remove / Detach drop one child, and an
 exiting root child keeps its slot until finalize — the DOM container and
 desktop `Tree` semantics. `HypenRenderer.rootIds` / `rootIdsPublisher`
-expose it (`rootId` is the first child). `HypenRootChildrenView` renders one
-child directly (unchanged hierarchy) and several in a `VStack(spacing: 0)`.
+expose it (`rootId` is the first child). `HypenRootChildrenView` always
+renders `VStack(alignment: .leading, spacing: 0) { ForEach(rootIds) }`, so
+going between one and several roots never remounts a surviving child (a
+lone child lays out exactly as a bare element view — see the type's doc).
+`showsRootPlaceholder` (pure, sticky) gates loading content: shown only
+before the first root child ever arrives; an empty list later renders
+nothing.
 
 ### Strategy 3 hook (limbo container)
 

@@ -84,8 +84,9 @@ public struct HypenView: View {
     private var content: some View {
         switch viewModel.connectionState {
         case .connected:
-            let rootLayout = viewModel.renderer.rootLayout
-            if rootLayout != .empty {
+            // Loading content only until the first root child ever arrives;
+            // afterwards an empty root list renders nothing.
+            if !viewModel.renderer.showsRootPlaceholder {
                 if let navOptions = backNavigationOptions {
                     if #available(iOS 16.0, macOS 13.0, tvOS 16.0, watchOS 9.0, *) {
                         BackNavigationContainer(
@@ -93,14 +94,14 @@ public struct HypenView: View {
                             renderer: viewModel.renderer,
                             actionDispatcher: viewModel.actionDispatcher
                         ) {
-                            connectedContent(rootLayout: rootLayout)
+                            connectedContent()
                         }
                     } else {
                         // Fallback for older OS: render without NavigationStack integration
-                        connectedContent(rootLayout: rootLayout)
+                        connectedContent()
                     }
                 } else {
-                    connectedContent(rootLayout: rootLayout)
+                    connectedContent()
                 }
             } else {
                 loadingContent
@@ -118,14 +119,15 @@ public struct HypenView: View {
     }
 
     @ViewBuilder
-    private func connectedContent(rootLayout: RootChildren.Layout) -> some View {
+    private func connectedContent() -> some View {
         // Use ZStack with explicit alignment to ensure content starts at top-left
         // This is more reliable than frame alignment in NavigationStack contexts
         ZStack(alignment: .topLeading) {
-            // One root child renders directly; several (control flow at the
-            // IR root with siblings) stack top to bottom in root order.
+            // The root children (several when control flow sits at the IR
+            // root with siblings), stacked in root order in one
+            // always-present container — see HypenRootChildrenView.
             HypenRootChildrenView(
-                layout: rootLayout,
+                rootIds: viewModel.renderer.rootIds,
                 renderer: viewModel.renderer,
                 actionDispatcher: viewModel.actionDispatcher
             )
