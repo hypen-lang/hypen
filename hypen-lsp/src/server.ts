@@ -241,6 +241,8 @@ const commonComponents = [
   "Text", "Heading", "Paragraph", "Image", "Avatar", "Badge", "Card", "Spinner", "ProgressBar",
   // Input
   "Button", "Input", "Textarea", "Checkbox", "Switch", "Select", "Slider", "Scrubber",
+  // Lists (virtualized: only visible rows are materialized)
+  "List", "ForEach",
   // Navigation
   "Router", "Route", "Link",
   // Media
@@ -693,6 +695,11 @@ const componentArguments: Record<string, string[]> = {
   Link: ["to"],
   Video: ["src", "playlist", "startIndex", "startPosition", "poster", "controls", "autoplay", "loop", "muted", "preload", "headers", "onPlay", "onPause", "onEnded", "onTrackChange", "onError"],
   Scrubber: ["onSeek", "disabled"],
+  // Lists are virtualized by default (`lazy: false` opts out); ForEach only
+  // with `lazy: true`. See hypen-web/docs/virtualization.md.
+  List: ["items", "key", "as", "lazy", "initialCount", "estimatedItemSize", "direction", "gap"],
+  Grid: ["items", "key", "as", "columns", "lazy", "initialCount", "estimatedItemSize", "gap"],
+  ForEach: ["items", "key", "as", "lazy", "initialCount", "estimatedItemSize"],
   Audio: ["src", "autoplay", "controls", "loop"]
 };
 
@@ -1073,11 +1080,19 @@ connection.onHover((params: HoverParams): Hover | null => {
   }
 
   // Control flow keywords
-  if (word === "forEach") {
+  if (word === "ForEach") {
     return {
       contents: {
         kind: "markdown",
-        value: "**forEach**(items, item) { ... }\n\nIterates over a list and renders children for each item.\n\n```hypen\nforEach(@{state.items}, item) {\n  Text(\"@{item.name}\")\n}\n```"
+        value: "**ForEach**(items: @state.list, key: \"id\", as: \"item\") { ... }\n\nRenders its children once per item. With `lazy: true` (and as the only child of its container) only the visible rows are materialized; `initialCount` and `estimatedItemSize` tune the window.\n\n```hypen\nForEach(items: @state.items, key: \"id\") {\n  Text(\"@{item.name}\")\n}\n```"
+      }
+    };
+  }
+  if (word === "List") {
+    return {
+      contents: {
+        kind: "markdown",
+        value: "**List**(@state.items, key: \"id\") { ... }\n\nA scrolling list, virtualized out of the box: only the rows near the viewport exist. `lazy: false` renders every row; `initialCount` (default 30) and `estimatedItemSize` tune the window.\n\n```hypen\nList(@state.messages, key: \"id\") {\n  Text(\"@{item.text}\")\n}\n```"
       }
     };
   }
