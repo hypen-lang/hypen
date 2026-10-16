@@ -385,38 +385,69 @@ removeProp, which restores the normal container rendering.
 - `Virtualization/VirtualizationMath.swift` — pure Foundation (builds and
   tests on Linux). Port of `@hypen-space/core/virtualization`
   (parseVirtWindow, childrenPerItem, windowRows, itemSize, windowPadding,
-  visibleRange, wantedRange, shouldReport, viewportReport — same names and cases as the TS reference and Android's
+  visibleRange, wantedRange, shouldReport, windowChanged, viewportReport —
+  same names and cases as the TS reference and Android's
   `virt/Virtualization.kt`), the §5 slot mapping (`Virtualization.Slots`, a
-  `RandomAccessCollection` resolved on demand), the §4 `viewportMessage`, and
-  `VirtViewportTracker`. `VirtualizationMathTests` mirrors
-  `hypen-web/tests/virtualization-math.test.ts` case for case — keep aligned.
+  `RandomAccessCollection` resolved on demand), the §4 `viewportMessage`,
+  `anchorUnitPoint` (§2 anchoring via `scrollTo`), the accessibility strings
+  (`accessibilityPosition` "Row 41 of 10000" / "Item 5 of 30",
+  `accessibilitySummary` "10000 rows"), and `VirtViewportTracker`.
+  `VirtualizationMathTests` mirrors `hypen-web/tests/virtualization-math.test.ts`
+  case for case (plus tracker / anchoring / a11y cases) — keep aligned.
+- `VirtViewportTracker` (pure) owns every decision: the visible range (best
+  first: slot frames intersecting the viewport → list-edge geometry through
+  the item size → `onAppear`/`onDisappear` slots), §3 step 4 (`observe` /
+  `evaluate` forget `lastReported` only when `__virt.window` changes value;
+  an identical re-send keeps it), and `anchorCorrection()` (how far the first
+  visible slot moved within the list since the last evaluation — found by
+  slot id, else by item index when a placeholder became a row).
 - `Virtualization/VirtualizedLazyStack.swift` — `LazyVStack` / `LazyHStack` /
   `LazyVGrid` of `total` slots (rows keyed `n:<nodeId>`, placeholders
   `p:<index>` sized at the measured average). Used by List, Column, Row and
   Grid; any other windowed element (`Box`, `Stack`, unknown types) renders as
-  a Column (`HypenElementContentView.componentHandler(for:)`). Visible range:
-  `onScrollGeometryChange` when the stack owns its `ScrollView` and the OS has
-  it (iOS 18 / macOS 15 / tvOS 18 / watchOS 11), else per-slot
-  `onAppear`/`onDisappear`. Evaluated once per main-actor turn.
+  a Column (`HypenElementContentView.componentHandler(for:)`). Evaluated once
+  per main-actor turn.
+  - **Geometry**: `.hypenVirtScrollContainer(axis)` (same file) gives a
+    `ScrollView` a unique named coordinate space and puts
+    `{space, axis, viewport extent}` in the environment. It is on the stack's
+    own `ScrollView` and on the scrollable Column / Row / List / Grid
+    `ScrollView`s in `LayoutComponents.swift`, so a list under an ancestor
+    Hypen scroller measures against it too. Each slot and the stack report
+    their frames in that space (`GeometryReader` + `onChange`); a container
+    on the other axis is ignored. `onScrollGeometryChange` (iOS 18 / macOS 15)
+    still feeds the owned case. Only under a host app's own `ScrollView` does
+    it fall back to `onAppear`/`onDisappear` (a few slots wide).
+  - **Scroll anchoring (§2)**, owned `ScrollView` only: iOS 17 / macOS 14 /
+    tvOS 17 / watchOS 10 — `scrollPosition(id:anchor:)` +
+    `scrollTargetLayout()` (SwiftUI keeps the first visible slot in place;
+    the bound id lives in a reference box so it never re-renders the stack).
+    Earlier — `tracker.anchorCorrection()` + `ScrollViewProxy.scrollTo(id,
+    anchor: UnitPoint(…, anchorUnitPoint))`.
+  - **Accessibility (§2)**: rows carry `.accessibilityHint("Row N of total")`
+    (SwiftUI has no set-position API for arbitrary views; the hint reaches
+    every element in the row); the stack is `.accessibilityElement(children:
+    .contain)` with `.accessibilityValue("<total> rows")`. Placeholders are
+    `accessibilityHidden`.
 - Reports go `HypenRenderer.reportListViewport` → `viewportReporter` (wired
   in `HypenView` and the embedded app) → `RemoteEngine.setListViewport` /
   the embedded engine's `setListViewport`.
 - DnD: a sortable / pinboard inside a windowed list names whole-list indices
   in its reserved writes and event locations (`HypenDndCoordinator.listIndex`).
 
-The SwiftUI files cannot be compiled on Linux; verify on macOS/Xcode.
+The SwiftUI files cannot be compiled on Linux; verify on macOS/Xcode. The
+pure file can: symlink it and its tests into a scratch SwiftPM package.
 
 Known gaps:
-- **Over-wide visible range** under an ancestor scroller and before iOS 18:
-  `onAppear` fires for prefetched slots, so reports overscan a little more
-  than §3 asks. Harmless (a slightly larger window), not wrong.
-- **Scroll anchoring (§2)** is not implemented: a placeholder replaced by a
-  row of a different height above the viewport can shift content by the
-  difference. Placeholders use the measured average, which keeps it small.
-  (`scrollPosition(id:)`, iOS 17, is the likely fix.)
-- **Accessibility position**: SwiftUI has no public "item n of total" for
-  arbitrary views, so rows do not expose the whole-list position
-  (placeholders are `accessibilityHidden`).
+- **Anchoring under an ancestor scroller**: no correction (a `ScrollViewProxy`
+  only reaches scroll views inside its reader). Placeholders use the measured
+  average, which keeps any shift small.
+- **Anchoring by identity on iOS 17+**: when the anchored slot changes id
+  (a placeholder materializing into a row), SwiftUI's own behaviour applies.
+- **Visible range under a host app's `ScrollView`** (not Hypen's) still comes
+  from `onAppear`/`onDisappear`, a few slots wide. Harmless (a slightly larger
+  window), not wrong.
+- **Accessibility strings** are English, and the hint replaces a hint a row's
+  own semantics set.
 
 ## Feature Parity with hypen-android
 

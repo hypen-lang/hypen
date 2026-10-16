@@ -162,6 +162,7 @@ public struct ColumnComponent: ComponentHandler {
                         }
                         .frame(maxWidth: .infinity, alignment: verticalFrameAlignment(verticalAlignmentStr))
                     }
+                    .hypenVirtScrollContainer(.vertical)
                 } else {
                     switch justifyContent {
                     case .spaceBetween:
@@ -450,6 +451,7 @@ public struct RowComponent: ComponentHandler {
                         }
                         .frame(maxHeight: .infinity, alignment: horizontalFrameAlignment(horizontalAlignmentStr))
                     }
+                    .hypenVirtScrollContainer(.horizontal)
                 } else {
                     switch justifyContent {
                     case .spaceBetween:
@@ -1410,6 +1412,7 @@ public struct ListComponent: ComponentHandler {
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
+                    .hypenVirtScrollContainer(.vertical)
                 } else {
                     VStack(alignment: .leading, spacing: gap) {
                         ForEach(childElements, id: \.id) { childElement in
@@ -1547,6 +1550,7 @@ public struct GridComponent: ComponentHandler {
                         }
                     }
                 }
+                .hypenVirtScrollContainer(.vertical)
                 .hypenModifier(modifier)
             )
         }

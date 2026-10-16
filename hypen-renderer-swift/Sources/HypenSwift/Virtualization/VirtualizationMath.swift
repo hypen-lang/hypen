@@ -164,6 +164,16 @@ public enum Virtualization {
         return !covered || oversized
     }
 
+    /// Whether a newly received `__virt.window` differs in value from the
+    /// previous one (`nil` = none yet). §3 step 4: when it does, forget
+    /// `lastReported` — the engine may have moved the window on its own
+    /// (e.g. `total` changed) to exactly the range last reported, and the
+    /// renderer must be able to ask for it again. An identical re-send is not
+    /// a change.
+    public static func windowChanged(_ previous: VirtWindow?, _ next: VirtWindow) -> Bool {
+        previous != next
+    }
+
     /// §3 steps 2–4 in one call: the visible range, widened by overscan, if
     /// it should be reported now — else nil. The caller sends it and keeps it
     /// as `lastReported` for the next call. While the list starts below the
@@ -196,6 +206,40 @@ public enum Virtualization {
             "start": min(cap, max(0, start)),
             "end": min(cap, max(0, end)),
         ]
+    }
+
+    // MARK: - Scroll anchoring (§2)
+
+    /// The `UnitPoint` coordinate (along the scroll axis) that
+    /// `ScrollViewProxy.scrollTo(_:anchor:)` needs to put a row's leading
+    /// edge `rowOffset` points from the viewport's leading edge. `scrollTo`
+    /// aligns the point `u` of the row with the point `u` of the viewport, so
+    /// `rowOffset = u × (viewportExtent − rowExtent)`. Nil when the row is as
+    /// long as the viewport (any `u` gives the same position) or the inputs
+    /// are not finite.
+    public static func anchorUnitPoint(rowOffset: Double, rowExtent: Double, viewportExtent: Double) -> Double? {
+        let free = viewportExtent - rowExtent
+        guard rowOffset.isFinite, free.isFinite, abs(free) >= 0.5 else { return nil }
+        return rowOffset / free
+    }
+
+    // MARK: - Accessibility (§2)
+
+    /// What a materialized row says about its place in the whole list, the
+    /// SwiftUI stand-in for `aria-posinset` / `aria-setsize` and Android's
+    /// `CollectionItemInfo` (SwiftUI has no set-position API for arbitrary
+    /// views): "Row 41 of 10000", or "Item 41 of 10000" in a grid.
+    public static func accessibilityPosition(index: Int, total: Int, columns: Int = 1) -> String {
+        let noun = columns > 1 ? "Item" : "Row"
+        return "\(noun) \(max(0, index) + 1) of \(max(0, total))"
+    }
+
+    /// The list container's size, for its accessibility value:
+    /// "10000 rows", "1 row", "30 items".
+    public static func accessibilitySummary(total: Int, columns: Int = 1) -> String {
+        let n = max(0, total)
+        let noun = columns > 1 ? (n == 1 ? "item" : "items") : (n == 1 ? "row" : "rows")
+        return "\(n) \(noun)"
     }
 
     // MARK: - Native lazy containers (§5)
@@ -325,21 +369,58 @@ public struct ViewportGeometry: Equatable, Sendable {
     }
 }
 
+/// One slot's extent along the scroll axis in the scroll container's
+/// viewport coordinates (0 = the viewport's leading edge), for
+/// ``VirtViewportTracker/slotFrame(id:index:min:max:)``.
+public struct VirtSlotFrame: Equatable, Sendable {
+    public var index: Int
+    public var min: Double
+    public var max: Double
+
+    public init(index: Int, min: Double, max: Double) {
+        self.index = index
+        self.min = min
+        self.max = max
+    }
+}
+
+/// Scroll the slot `slotId` so its leading edge is back where it was before
+/// a layout change above it (§2 scroll anchoring): pass `unitPoint` as the
+/// scroll-axis coordinate of `ScrollViewProxy.scrollTo(_:anchor:)`.
+public struct VirtAnchorCorrection: Equatable, Sendable {
+    public var slotId: String
+    public var unitPoint: Double
+
+    public init(slotId: String, unitPoint: Double) {
+        self.slotId = slotId
+        self.unitPoint = unitPoint
+    }
+}
+
 /// Visibility bookkeeping for one windowed native lazy container (§5),
 /// turned into the range to report by ``evaluate(_:spacing:columns:)`` under
 /// the §3 overscan and reporting rules. Pure — the SwiftUI view owns one and
 /// calls the engine with what `evaluate` returns.
 ///
-/// Two sources of the visible range, best first:
-/// - **Scroll geometry** (``scrolled(offset:extent:)``, from
-///   `onScrollGeometryChange` on iOS 18 / macOS 15 when the container owns
-///   its `ScrollView`): the visible extent mapped through the item size, the
-///   reference `visibleRange` math. Exact for the placeholders (they are
-///   sized at the item size) and close for the materialized rows.
+/// Three sources of the visible range, best first:
+/// - **Slot frames** (``slotFrame(id:index:min:max:)`` with
+///   ``listFrame(leading:viewportExtent:)``, from a `GeometryReader` per slot
+///   in the scroll container's named coordinate space): the slots that
+///   actually intersect the viewport. Exact, on every OS, also under an
+///   ancestor Hypen scroller.
+/// - **Scroll geometry** (``scrolled(offset:extent:)`` — or the list's
+///   leading edge from ``listFrame(leading:viewportExtent:)`` — and
+///   `onScrollGeometryChange` on iOS 18 / macOS 15): the visible extent
+///   mapped through the item size, the reference `visibleRange` math. Used
+///   when no slot is on screen (the list is scrolled out of view).
 /// - **Slot appearance** (``slotAppeared(_:)`` / ``slotDisappeared(_:)``,
-///   SwiftUI `onAppear` / `onDisappear`): works under an ancestor scroller
-///   and on older systems, but lazy stacks prefetch beyond the screen, so the
-///   range runs a few slots wide.
+///   SwiftUI `onAppear` / `onDisappear`): when no geometry is known (an
+///   ancestor scroller that is not Hypen's). Lazy stacks prefetch beyond the
+///   screen, so this range runs a few slots wide.
+///
+/// It also remembers the first visible slot's position in the list's
+/// content, so a layout change above it (a window move, a new placeholder
+/// size) can be undone by ``anchorCorrection()`` (§2 scroll anchoring).
 public final class VirtViewportTracker: @unchecked Sendable {
     /// Appearance count per slot index. A count, not a set: when a slot's
     /// identity changes (placeholder → row) SwiftUI may deliver the new
@@ -349,13 +430,34 @@ public final class VirtViewportTracker: @unchecked Sendable {
     /// The scroll container's visible extent along the axis, in content
     /// coordinates (`offset` = how far it has scrolled past the first slot).
     private var scroll: (offset: Double, extent: Double)?
+    /// Live slots' frames in viewport coordinates, keyed by slot id.
+    private var frames: [String: VirtSlotFrame] = [:]
+    /// The list's leading edge and the viewport's extent, in the same
+    /// viewport coordinates as `frames`.
+    private var list: (leading: Double, extent: Double)?
+    /// The first visible slot at the last ``anchorCorrection()``, and its
+    /// leading edge relative to the list's leading edge.
+    private var anchor: (id: String, index: Int, offsetInList: Double)?
     public private(set) var lastReported: ItemRange?
+    /// The last `__virt.window` seen by ``observe(_:)``.
+    public private(set) var lastWindow: VirtWindow?
     /// Set while an evaluation is queued for the next main-actor turn, so a
     /// burst of appear/disappear callbacks during one scroll frame is
     /// evaluated once (§3: at most once per frame).
     public var evaluationScheduled = false
 
     public init() {}
+
+    /// Note the list's current `__virt.window`. A change in value forgets
+    /// `lastReported` (§3 step 4, ``Virtualization/windowChanged(_:_:)``);
+    /// an identical re-send keeps it. Returns whether it changed.
+    @discardableResult
+    public func observe(_ window: VirtWindow) -> Bool {
+        guard Virtualization.windowChanged(lastWindow, window) else { return false }
+        lastWindow = window
+        lastReported = nil
+        return true
+    }
 
     public func slotAppeared(_ index: Int) {
         appeared[index, default: 0] += 1
@@ -374,6 +476,26 @@ public final class VirtViewportTracker: @unchecked Sendable {
         scroll = (offset, extent)
     }
 
+    /// Record where the list's leading edge is in its scroll container's
+    /// viewport (negative once scrolled past it) and the viewport's extent.
+    /// Also the scroll geometry: `scrolledPast = -leading`.
+    public func listFrame(leading: Double, viewportExtent: Double) {
+        guard viewportExtent > 0, viewportExtent.isFinite, leading.isFinite else { return }
+        list = (leading, viewportExtent)
+        scrolled(offset: -leading, extent: viewportExtent)
+    }
+
+    /// Record a live slot's frame (viewport coordinates along the axis).
+    public func slotFrame(id: String, index: Int, min: Double, max: Double) {
+        guard min.isFinite, max.isFinite, max >= min else { return }
+        frames[id] = VirtSlotFrame(index: index, min: min, max: max)
+    }
+
+    /// Forget a slot's frame (it left the lazy container).
+    public func slotFrameRemoved(id: String) {
+        frames.removeValue(forKey: id)
+    }
+
     /// Record a materialized item's extent along the scroll axis.
     public func recordSize(_ index: Int, extent: Double) {
         guard extent > 0, extent.isFinite else { return }
@@ -381,9 +503,18 @@ public final class VirtViewportTracker: @unchecked Sendable {
     }
 
     /// The items on screen, clamped to `total`; nil when nothing is. From the
-    /// scroll geometry when known (rows are `itemSize + spacing` apart), else
-    /// from the appeared slots `[min, max + 1)`.
+    /// slot frames that intersect the viewport when any do; else from the
+    /// scroll geometry (rows are `itemSize + spacing` apart); else from the
+    /// appeared slots `[min, max + 1)`.
     public func visibleRange(_ window: VirtWindow, spacing: Double = 0, columns: Int = 1) -> ItemRange? {
+        if let list {
+            let onScreen = frames.values.filter {
+                $0.index >= 0 && $0.index < window.total && $0.max > 0 && $0.min < list.extent
+            }.map(\.index)
+            if let lo = onScreen.min(), let hi = onScreen.max() {
+                return ItemRange(start: lo, end: hi + 1)
+            }
+        }
         if let g = geometry(window, spacing: spacing, columns: columns) {
             return Virtualization.visibleRange(
                 total: window.total,
@@ -407,21 +538,56 @@ public final class VirtViewportTracker: @unchecked Sendable {
         return Virtualization.itemSize(window, measuredTotal: sum, measuredCount: measured.count)
     }
 
-    /// The range to report now, or nil. Records the report so the same
-    /// range is never sent twice in a row.
+    /// The range to report now, or nil. Observes `window` first (a changed
+    /// window forgets the last report), and records the report so the same
+    /// range is never sent twice in a row for one window.
     public func evaluate(_ window: VirtWindow, spacing: Double = 0, columns: Int = 1) -> ItemRange? {
-        let next: ItemRange?
-        if let g = geometry(window, spacing: spacing, columns: columns) {
-            next = Virtualization.viewportReport(window, geometry: g, lastReported: lastReported)
-        } else if let visible = visibleRange(window, spacing: spacing, columns: columns) {
-            let wanted = Virtualization.wantedRange(visible, total: window.total)
-            next = Virtualization.shouldReport(window, visible: visible, wanted: wanted, lastReported: lastReported)
-                ? wanted : nil
-        } else {
-            next = nil
+        observe(window)
+        guard let visible = visibleRange(window, spacing: spacing, columns: columns) else { return nil }
+        let wanted = Virtualization.wantedRange(visible, total: window.total)
+        guard Virtualization.shouldReport(window, visible: visible, wanted: wanted, lastReported: lastReported) else {
+            return nil
         }
-        if let next { lastReported = next }
-        return next
+        lastReported = wanted
+        return wanted
+    }
+
+    /// §2 scroll anchoring, for a scroll view that keeps its content offset
+    /// when content above the viewport changes size (SwiftUI before
+    /// `scrollPosition(id:)`). Compares the slot that was first visible at
+    /// the previous call — found again by id, else by item index (a
+    /// placeholder that became a row) — with where it sits in the list now.
+    /// If it moved within the list (rows above it changed size), returns the
+    /// `scrollTo` that puts it back at its expected on-screen position; a
+    /// plain scroll moves the list and the slot together and corrects
+    /// nothing. Then remembers the current first visible slot.
+    public func anchorCorrection() -> VirtAnchorCorrection? {
+        guard let list else { anchor = nil; return nil }
+        let first = frames
+            .filter { $0.value.max > 0 && $0.value.min < list.extent }
+            .min { ($0.value.index, $0.key) < ($1.value.index, $1.key) }
+        defer {
+            anchor = first.map { (id: $0.key, index: $0.value.index, offsetInList: $0.value.min - list.leading) }
+        }
+        guard let previous = anchor else { return nil }
+        let match: (id: String, frame: VirtSlotFrame)?
+        if let frame = frames[previous.id] {
+            match = (previous.id, frame)
+        } else {
+            match = frames
+                .filter { $0.value.index == previous.index }
+                .min { $0.key < $1.key }
+                .map { (id: $0.key, frame: $0.value) }
+        }
+        guard let match else { return nil }
+        let shift = (match.frame.min - list.leading) - previous.offsetInList
+        guard abs(shift) >= 0.5 else { return nil }
+        guard let unit = Virtualization.anchorUnitPoint(
+            rowOffset: match.frame.min - shift,
+            rowExtent: match.frame.max - match.frame.min,
+            viewportExtent: list.extent
+        ) else { return nil }
+        return VirtAnchorCorrection(slotId: match.id, unitPoint: unit)
     }
 
     private func geometry(_ window: VirtWindow, spacing: Double, columns: Int) -> ViewportGeometry? {

@@ -326,4 +326,202 @@ final class VirtualizationMathTests: XCTestCase {
         tracker.recordSize(12, extent: 0)    // unmeasured: ignored
         XCTAssertEqual(tracker.itemSize(w), 50)
     }
+
+    // MARK: windowChanged (§3 step 4)
+
+    func testWindowChangedTheFirstWindowIsAChange() {
+        XCTAssertTrue(V.windowChanged(nil, VirtWindow(total: 1000, start: 30, end: 60)))
+    }
+
+    func testWindowChangedAnIdenticalResendIsNotAChange() {
+        let w = VirtWindow(total: 1000, start: 30, end: 60)
+        XCTAssertFalse(V.windowChanged(w, VirtWindow(total: 1000, start: 30, end: 60)))
+        XCTAssertFalse(V.windowChanged(VirtWindow(total: 1000, start: 30, end: 60, estimatedSize: 40),
+                                       VirtWindow(total: 1000, start: 30, end: 60, estimatedSize: 40)))
+    }
+
+    func testWindowChangedAnyFieldMovingIsAChangeTotalAloneIncluded() {
+        let w = VirtWindow(total: 1000, start: 30, end: 60)
+        XCTAssertTrue(V.windowChanged(w, VirtWindow(total: 1001, start: 30, end: 60)))
+        XCTAssertTrue(V.windowChanged(w, VirtWindow(total: 1000, start: 31, end: 60)))
+        XCTAssertTrue(V.windowChanged(w, VirtWindow(total: 1000, start: 30, end: 61)))
+        XCTAssertTrue(V.windowChanged(w, VirtWindow(total: 1000, start: 30, end: 60, estimatedSize: 40)))
+    }
+
+    func testWindowChangedForgettingTheLastReportLetsTheSameRangeBeAskedAgain() {
+        let geometry = ViewportGeometry(size: 50, scrolledPast: 2000, viewportExtent: 500)
+        let before = VirtWindow(total: 1000, start: 0, end: 20)
+        var last = V.viewportReport(before, geometry: geometry, lastReported: nil)
+        XCTAssertEqual(last, ItemRange(start: 30, end: 60))
+        // The engine moves the window on its own (total changed), still not covering.
+        let after = VirtWindow(total: 1001, start: 0, end: 20)
+        if V.windowChanged(before, after) { last = nil }
+        XCTAssertEqual(V.viewportReport(after, geometry: geometry, lastReported: last), ItemRange(start: 30, end: 60))
+    }
+
+    func testTrackerDoesNotRepeatAReportAnsweredWithNoWindowChange() {
+        let tracker = VirtViewportTracker()
+        let w = VirtWindow(total: 1000, start: 0, end: 20, estimatedSize: 50)
+        tracker.scrolled(offset: 2000, extent: 500)
+        XCTAssertEqual(tracker.evaluate(w), ItemRange(start: 30, end: 60))
+        // The engine answered with an identical re-send (the report moved
+        // nothing): observing it must not reset, so no repeat.
+        XCTAssertFalse(tracker.observe(VirtWindow(total: 1000, start: 0, end: 20, estimatedSize: 50)))
+        XCTAssertNil(tracker.evaluate(w))
+        XCTAssertNil(tracker.evaluate(w))
+        XCTAssertEqual(tracker.lastReported, ItemRange(start: 30, end: 60))
+    }
+
+    func testTrackerForgetsTheLastReportWhenTheWindowChanges() {
+        let tracker = VirtViewportTracker()
+        let w = VirtWindow(total: 1000, start: 0, end: 20, estimatedSize: 50)
+        tracker.scrolled(offset: 2000, extent: 500)
+        XCTAssertEqual(tracker.evaluate(w), ItemRange(start: 30, end: 60))
+        // The engine moves the window on its own (total changed) and it still
+        // does not cover the visible range: the same range may be asked again.
+        let moved = VirtWindow(total: 1001, start: 0, end: 20, estimatedSize: 50)
+        XCTAssertTrue(tracker.observe(moved))
+        XCTAssertNil(tracker.lastReported)
+        XCTAssertEqual(tracker.evaluate(moved), ItemRange(start: 30, end: 60))
+        XCTAssertNil(tracker.evaluate(moved), "at most once per window value")
+        // evaluate() observes by itself too.
+        XCTAssertEqual(tracker.evaluate(VirtWindow(total: 1002, start: 0, end: 20, estimatedSize: 50)),
+                       ItemRange(start: 30, end: 60))
+        XCTAssertEqual(tracker.lastWindow, VirtWindow(total: 1002, start: 0, end: 20, estimatedSize: 50))
+    }
+
+    // MARK: Tracker geometry (slot frames)
+
+    func testTrackerPrefersSlotFramesInTheScrollContainer() {
+        let tracker = VirtViewportTracker()
+        let w = VirtWindow(total: 1000, start: 0, end: 30, estimatedSize: 40)
+        // Prefetched slots appear well past the screen...
+        for i in 0..<20 { tracker.slotAppeared(i) }
+        // ...the list starts at the viewport top and the rows are taller than
+        // the estimate, so the item-size math would say 0..15 for 600pt.
+        tracker.listFrame(leading: 0, viewportExtent: 600)
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 15))
+        // Frames say rows 0..5 (100pt each) are on screen; 6..9 are prefetched below.
+        for i in 0..<10 {
+            tracker.slotFrame(id: "n:\(i)", index: i, min: Double(i) * 100, max: Double(i + 1) * 100)
+        }
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 6))
+        // Scrolled 250pt: rows 2 (partly) ..8 (partly).
+        tracker.listFrame(leading: -250, viewportExtent: 600)
+        for i in 0..<10 {
+            tracker.slotFrame(id: "n:\(i)", index: i, min: Double(i) * 100 - 250, max: Double(i + 1) * 100 - 250)
+        }
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 2, end: 9))
+        // A slot that left the container no longer counts.
+        tracker.slotFrameRemoved(id: "n:8")
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 2, end: 8))
+    }
+
+    func testTrackerFallsBackToTheListGeometryWhenNoSlotIsOnScreen() {
+        // A list below the viewport's top: only the part over the list counts.
+        let tracker = VirtViewportTracker()
+        let w = VirtWindow(total: 1000, start: 0, end: 30, estimatedSize: 50)
+        tracker.listFrame(leading: 300, viewportExtent: 800)
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 10))
+        // Frames entirely off screen are ignored.
+        tracker.slotFrame(id: "n:0", index: 0, min: 900, max: 950)
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 10))
+        // Scrolled far past it (an outer scroller): geometry, not appearances.
+        tracker.slotAppeared(3)
+        tracker.listFrame(leading: -5000, viewportExtent: 500)
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 100, end: 110))
+        // Non-positive extents (not laid out yet) are ignored.
+        let fresh = VirtViewportTracker()
+        fresh.slotAppeared(3)
+        fresh.listFrame(leading: 0, viewportExtent: 0)
+        XCTAssertEqual(fresh.visibleRange(w), ItemRange(start: 3, end: 4))
+    }
+
+    // MARK: Scroll anchoring (§2)
+
+    func testAnchorUnitPointPlacesTheRowsLeadingEdge() throws {
+        // scrollTo aligns point u of the row with point u of the viewport:
+        // rowOffset = u × (viewport − row).
+        XCTAssertEqual(V.anchorUnitPoint(rowOffset: 0, rowExtent: 100, viewportExtent: 600), 0)
+        XCTAssertEqual(V.anchorUnitPoint(rowOffset: 500, rowExtent: 100, viewportExtent: 600), 1)
+        let u = try XCTUnwrap(V.anchorUnitPoint(rowOffset: -20, rowExtent: 60, viewportExtent: 600))
+        XCTAssertEqual(u * (600 - 60), -20, accuracy: 1e-9)
+        // A row as long as the viewport: every anchor gives the same position.
+        XCTAssertNil(V.anchorUnitPoint(rowOffset: 10, rowExtent: 600, viewportExtent: 600))
+        XCTAssertNil(V.anchorUnitPoint(rowOffset: .nan, rowExtent: 60, viewportExtent: 600))
+        // A row taller than the viewport still resolves.
+        let tall = try XCTUnwrap(V.anchorUnitPoint(rowOffset: -100, rowExtent: 1000, viewportExtent: 600))
+        XCTAssertEqual(tall * (600 - 1000), -100, accuracy: 1e-9)
+    }
+
+    func testAnchorCorrectionIgnoresAPlainScroll() {
+        let tracker = VirtViewportTracker()
+        tracker.listFrame(leading: -1000, viewportExtent: 600)
+        tracker.slotFrame(id: "n:a", index: 10, min: -20, max: 40)
+        tracker.slotFrame(id: "n:b", index: 11, min: 40, max: 100)
+        XCTAssertNil(tracker.anchorCorrection(), "first call only records the anchor")
+        // The user scrolls 30pt: list and rows move together.
+        tracker.listFrame(leading: -1030, viewportExtent: 600)
+        tracker.slotFrame(id: "n:a", index: 10, min: -50, max: 10)
+        tracker.slotFrame(id: "n:b", index: 11, min: 10, max: 70)
+        XCTAssertNil(tracker.anchorCorrection())
+    }
+
+    func testAnchorCorrectionUndoesALayoutShiftAboveTheFirstVisibleRow() throws {
+        let tracker = VirtViewportTracker()
+        tracker.listFrame(leading: -1000, viewportExtent: 600)
+        tracker.slotFrame(id: "n:a", index: 10, min: -20, max: 40)
+        XCTAssertNil(tracker.anchorCorrection())
+        // The window moved and the placeholders above grew by 50pt in total;
+        // the scroll view kept its offset, so the row slid down 50pt.
+        tracker.slotFrame(id: "n:a", index: 10, min: 30, max: 90)
+        let c = try XCTUnwrap(tracker.anchorCorrection())
+        XCTAssertEqual(c.slotId, "n:a")
+        XCTAssertEqual(c.unitPoint * (600 - 60), -20, accuracy: 1e-9, "back at -20")
+        // Once corrected (list moved by the shift, row back at -20), nothing more.
+        tracker.listFrame(leading: -1050, viewportExtent: 600)
+        tracker.slotFrame(id: "n:a", index: 10, min: -20, max: 40)
+        XCTAssertNil(tracker.anchorCorrection())
+    }
+
+    func testAnchorCorrectionFollowsAPlaceholderThatBecameARow() throws {
+        let tracker = VirtViewportTracker()
+        tracker.listFrame(leading: -4800, viewportExtent: 500)
+        tracker.slotFrame(id: "p:100", index: 100, min: 0, max: 48)
+        tracker.slotFrame(id: "p:101", index: 101, min: 48, max: 96)
+        XCTAssertNil(tracker.anchorCorrection())
+        // Item 100 materialized (new slot id) and the placeholder size above
+        // changed from 48 to 50: 100 × 2pt further down.
+        tracker.slotFrameRemoved(id: "p:100")
+        tracker.slotFrameRemoved(id: "p:101")
+        tracker.slotFrame(id: "n:x", index: 100, min: 200, max: 270)
+        tracker.slotFrame(id: "n:y", index: 101, min: 270, max: 330)
+        let c = try XCTUnwrap(tracker.anchorCorrection())
+        XCTAssertEqual(c.slotId, "n:x")
+        XCTAssertEqual(c.unitPoint, 0, accuracy: 1e-9, "its leading edge back at the viewport top")
+    }
+
+    func testAnchorCorrectionNeedsTheListGeometry() {
+        let tracker = VirtViewportTracker()
+        tracker.slotFrame(id: "n:a", index: 0, min: 0, max: 10)
+        XCTAssertNil(tracker.anchorCorrection())
+        tracker.slotFrame(id: "n:a", index: 0, min: 50, max: 60)
+        XCTAssertNil(tracker.anchorCorrection())
+    }
+
+    // MARK: Accessibility (§2)
+
+    func testAccessibilityPositionCountsFromOneInTheWholeList() {
+        XCTAssertEqual(V.accessibilityPosition(index: 0, total: 10_000), "Row 1 of 10000")
+        XCTAssertEqual(V.accessibilityPosition(index: 40, total: 10_000), "Row 41 of 10000")
+        XCTAssertEqual(V.accessibilityPosition(index: 4, total: 30, columns: 3), "Item 5 of 30")
+    }
+
+    func testAccessibilitySummaryNamesTheTotal() {
+        XCTAssertEqual(V.accessibilitySummary(total: 10_000), "10000 rows")
+        XCTAssertEqual(V.accessibilitySummary(total: 1), "1 row")
+        XCTAssertEqual(V.accessibilitySummary(total: 0), "0 rows")
+        XCTAssertEqual(V.accessibilitySummary(total: 30, columns: 3), "30 items")
+        XCTAssertEqual(V.accessibilitySummary(total: 1, columns: 3), "1 item")
+    }
 }
