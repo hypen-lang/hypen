@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.model.HypenElement
+import space.hypen.renderer.virt.LazyOrPadded
 import space.hypen.renderer.virt.LocalSuppressOwnScroll
 import space.hypen.renderer.virt.ProvideVirtScroller
 
@@ -49,6 +50,33 @@ class ColumnComponent : ComponentHandler {
     override fun Render(
         element: HypenElement,
         modifier: Modifier,
+        renderChildren: @Composable () -> Unit,
+    ) {
+        // `.scrollable(true)` or the web strings ("vertical" / "both"); "horizontal"
+        // is a no-op on a Column.
+        val declaredScrollable = element.getBoolProp("scrollable.0")
+            ?: element.getStringProp("scrollable.0")?.lowercase()?.let { it == "vertical" || it == "both" || it == "true" }
+            ?: false
+        // Whether it actually scrolls is decided from the constraints it is
+        // measured with, like the DOM: with an unbounded main axis (inside a
+        // scroller on the same axis, no height of its own) it lays out at
+        // its full content size and the ancestor scrolls; bounded, it scrolls
+        // itself. Off as well where a windowed container renders padded
+        // (`LocalSuppressOwnScroll`).
+        if (declaredScrollable && !LocalSuppressOwnScroll.current) {
+            LazyOrPadded(horizontal = false, modifier = modifier) { bounded ->
+                Body(element, Modifier, scrollable = bounded, renderChildren)
+            }
+        } else {
+            Body(element, modifier, scrollable = false, renderChildren)
+        }
+    }
+
+    @Composable
+    private fun Body(
+        element: HypenElement,
+        modifier: Modifier,
+        scrollable: Boolean,
         renderChildren: @Composable () -> Unit,
     ) {
         // All layout options below are via applicators only (using .0 suffix pattern)
@@ -112,17 +140,6 @@ class ColumnComponent : ComponentHandler {
                 "stretch" -> Alignment.Start // Stretch uses Start alignment + fillMaxWidth on children
                 else -> Alignment.Start
             }
-
-        // Scrollable - applicator: .scrollable(true) or .scrollable("vertical")/"both".
-        // Accept bool true or the string values web uses so Hypen source authored once
-        // (e.g. `.scrollable("vertical")`) works on Android too. "horizontal" on a Column
-        // is a no-op — a Column scrolls vertically by nature.
-        val declaredScrollable = element.getBoolProp("scrollable.0")
-            ?: element.getStringProp("scrollable.0")?.lowercase()?.let { it == "vertical" || it == "both" || it == "true" }
-            ?: false
-        // A windowed scrollable container laid out padded because its main
-        // axis is unbounded (`LazyOrPadded`) must not scroll itself there.
-        val scrollable = declaredScrollable && !LocalSuppressOwnScroll.current
 
         // For arrangement (verticalAlignment) to have visible effect,
         // the Column needs to fill available height unless scrollable

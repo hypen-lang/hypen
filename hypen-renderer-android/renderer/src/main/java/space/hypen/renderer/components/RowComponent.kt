@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.render.ComposeRenderer
 import space.hypen.renderer.render.LocalComposeRenderer
 import space.hypen.renderer.model.HypenElement
+import space.hypen.renderer.virt.LazyOrPadded
 import space.hypen.renderer.virt.LocalSuppressOwnScroll
 import space.hypen.renderer.virt.ProvideVirtScroller
 import kotlin.math.roundToInt
@@ -55,6 +56,33 @@ class RowComponent : ComponentHandler {
     override fun Render(
         element: HypenElement,
         modifier: Modifier,
+        renderChildren: @Composable () -> Unit,
+    ) {
+        // `.scrollable(true)` or the web strings ("horizontal" / "both"); "vertical"
+        // is a no-op on a Row.
+        val declaredScrollable = element.getBoolProp("scrollable.0")
+            ?: element.getStringProp("scrollable.0")?.lowercase()?.let { it == "horizontal" || it == "both" || it == "true" }
+            ?: false
+        // Whether it actually scrolls is decided from the constraints it is
+        // measured with, like the DOM: with an unbounded main axis (inside a
+        // scroller on the same axis, no width of its own) it lays out at
+        // its full content size and the ancestor scrolls; bounded, it scrolls
+        // itself. Off as well where a windowed container renders padded
+        // (`LocalSuppressOwnScroll`).
+        if (declaredScrollable && !LocalSuppressOwnScroll.current) {
+            LazyOrPadded(horizontal = true, modifier = modifier) { bounded ->
+                Body(element, Modifier, scrollable = bounded, renderChildren)
+            }
+        } else {
+            Body(element, modifier, scrollable = false, renderChildren)
+        }
+    }
+
+    @Composable
+    private fun Body(
+        element: HypenElement,
+        modifier: Modifier,
+        scrollable: Boolean,
         renderChildren: @Composable () -> Unit,
     ) {
         // All layout options below are via applicators only (using .0 suffix pattern)
@@ -118,17 +146,6 @@ class RowComponent : ComponentHandler {
                 "stretch" -> Alignment.Top // Stretch uses Top alignment + fillMaxHeight on children
                 else -> Alignment.Top
             }
-
-        // Scrollable - applicator: .scrollable(true) or .scrollable("horizontal")/"both".
-        // Accept bool true or the string values web uses so Hypen source authored once
-        // (e.g. `.scrollable("horizontal")`) works on Android too. "vertical" on a Row is
-        // a no-op — a Row scrolls horizontally by nature.
-        val declaredScrollable = element.getBoolProp("scrollable.0")
-            ?: element.getStringProp("scrollable.0")?.lowercase()?.let { it == "horizontal" || it == "both" || it == "true" }
-            ?: false
-        // A windowed scrollable container laid out padded because its main
-        // axis is unbounded (`LazyOrPadded`) must not scroll itself there.
-        val scrollable = declaredScrollable && !LocalSuppressOwnScroll.current
 
         val renderer = LocalComposeRenderer.current
         val managedChildren = renderer?.let { managedRowChildren(element, it) }.orEmpty()

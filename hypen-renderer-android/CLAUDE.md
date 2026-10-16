@@ -97,7 +97,14 @@ through `HypenRoot` (what `HypenApp` renders once connected) with
 and has a `FakeViewportEngine` for viewport reports. Use
 `@Config(qualifiers = "w400dp-h800dp-mdpi")` so dp == px. Existing:
 `RootChildrenRenderTest`, `ChildListRenderTest`, `virt/VirtLazyListRenderTest`,
-`virt/VirtPaddedRenderTest`, `virt/VirtShapesRenderTest`, `virt/VirtUnboundedRenderTest`.
+`virt/VirtPaddedRenderTest`, `virt/VirtShapesRenderTest`, `virt/VirtUnboundedRenderTest`,
+`virt/VirtMoreRenderTest`, `NestedScrollRenderTest`.
+
+Nested scrollers: a `.scrollable(true)` Column / Row decides whether it
+scrolls from its measured constraints (`LazyOrPadded`), like the DOM: with an
+unbounded main axis (inside a same-axis scroller or a lazy row, no size of its
+own) it lays out at full content size and the ancestor scrolls; bounded, it
+scrolls itself (`NestedScrollRenderTest`).
 
 ## Architecture
 
@@ -257,7 +264,10 @@ whole-list `CollectionItemInfo`) and `VirtPaddedRenderTest` (a windowed
 scroll, anchoring keeps the first visible row's on-screen position across a
 window move, padded rows' `CollectionItemInfo`), `VirtShapesRenderTest` (lazy
 `Grid` rows x columns, horizontal `List`, self-scrolling windowed `Column` /
-`Row`, padded anchoring inside a lazy `List`) and `VirtUnboundedRenderTest`.
+`Row`, padded anchoring inside a lazy `List`), `VirtUnboundedRenderTest`, and
+`VirtMoreRenderTest` (multi-node item templates on both paths, horizontal
+padded anchoring, a sortable in a windowed lazy `List` dragged by touch
+writing whole-list `__hypen_reorder` indices).
 
 Lazy vs padded is decided from constraints, not the element tree:
 `LazyOrPadded` (`BoxWithConstraints`, the element's modifier on the box with
@@ -272,13 +282,9 @@ drops its own scroll modifier there via `LocalSuppressOwnScroll`.
 Known gaps:
 - Anchoring assumes LTR for horizontal lists and approximates the rows above
   the anchor by the measured average size.
-- Not yet rendered in tests: multi-node item templates (several children per
-  item), padded horizontal anchoring, DnD inside a windowed list, and
-  `HypenApp` itself (session / connection states — the tests mount
-  `HypenRoot`).
-- A non-windowed `.scrollable(true)` Column / Row nested in a scroller on the
-  same axis with no size of its own still hits Compose's unbounded-scroll
-  check (only the windowed case falls back).
+- Not yet rendered in tests: `HypenApp` itself (session / connection states —
+  the tests mount `HypenRoot`), pinboards and cross-list drops inside a
+  windowed list, and RTL horizontal anchoring.
 
 ## Device Capability Protocol (RFC 001)
 
