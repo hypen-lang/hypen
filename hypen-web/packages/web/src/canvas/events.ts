@@ -268,7 +268,10 @@ export class CanvasEventManager {
    */
   hitTest(point: Point): VirtualNode | null {
     if (!this.rootNode) return null;
-    return this.hitTestNode(this.rootNode, point);
+    const hit = this.hitTestNode(this.rootNode, point);
+    // The implicit root column (several root children) is layout scaffolding
+    // like the DOM renderer's container: empty canvas hits nothing.
+    return hit?.implicitRoot ? null : hit;
   }
 
   /**

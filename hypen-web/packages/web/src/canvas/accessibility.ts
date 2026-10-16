@@ -425,7 +425,11 @@ export class AccessibilityLayer {
     this.mirrorRoot.innerHTML = "";
     this.nodeMap.clear();
 
-    if (root) {
+    if (root?.implicitRoot) {
+      // Several root children: each mounts directly under the overlay root,
+      // in order (the implicit column has no mirror element of its own).
+      for (const child of root.children) this.mountSubtree(child, this.mirrorRoot);
+    } else if (root) {
       this.mountSubtree(root, this.mirrorRoot);
     }
   }
@@ -458,7 +462,9 @@ export class AccessibilityLayer {
   syncPositions(root: VirtualNode | null): void {
     if (!this.enabled) return;
     this.repositionRoot();
-    if (root) {
+    if (root?.implicitRoot) {
+      for (const child of root.children) this.syncNodePosition(child, 0, 0, 0, 0);
+    } else if (root) {
       this.syncNodePosition(root, 0, 0, 0, 0);
     }
   }

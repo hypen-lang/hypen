@@ -83,7 +83,16 @@ export class CanvasRenderer implements Renderer {
   private engine: IEngine;
   private options: CanvasRendererOptions;
 
-  private rootNode: VirtualNode | null = null;
+  /**
+   * Implicit parent of every root-level node, in engine order. The engine
+   * addresses several nodes to the reserved `"root"` parent when control
+   * flow (Router / If / ForEach) sits at the IR root next to siblings —
+   * `insert`/`move`/`attach` anchored by `beforeId`, `remove`/`detach` of a
+   * root child. DOM parity: those are ordered children of the renderer's
+   * container element; desktop parity: ordered children of an implicit
+   * viewport-sized flex column. Never in `nodes`, never a hit target.
+   */
+  private rootContainer: VirtualNode = createImplicitRoot();
   private nodes = new Map<string, VirtualNode>();
 
   /**
@@ -347,12 +356,45 @@ export class CanvasRenderer implements Renderer {
     // Don't schedule initial render - wait for patches
   }
 
-  /** Whether `node` is in the rendered tree (its root is the root node). */
+  /**
+   * The node every tree walk (layout, paint, hit testing, scroll targeting,
+   * text selection, the a11y mirror) starts from. A lone root child is
+   * returned directly so the single-root case lays out exactly as it always
+   * has — pinned to the canvas; several are walked through the implicit
+   * root column, which stacks them top-to-bottom in engine order.
+   */
+  private get rootNode(): VirtualNode | null {
+    const roots = this.rootContainer.children;
+    if (roots.length === 0) return null;
+    if (roots.length === 1) return roots[0]!;
+    return this.rootContainer;
+  }
+
+  /** Root-level nodes in engine order (exit-animating ones included). */
+  getRootNodes(): readonly VirtualNode[] {
+    return this.rootContainer.children;
+  }
+
+  /** Whether `node` is in the rendered tree (it hangs off a root child). */
   private isAttached(node: VirtualNode): boolean {
-    if (this.rootNode === null) return false;
     let current: VirtualNode = node;
     while (current.parent) current = current.parent;
-    return current === this.rootNode;
+    return current === this.rootContainer && current !== node;
+  }
+
+  /**
+   * The set of root children changed: re-point the walkers at the current
+   * effective root and repaint everything (siblings below the change move,
+   * and the 1↔many switch changes how the first root is sized).
+   */
+  private rootChildrenChanged(): void {
+    const root = this.rootNode;
+    this.eventManager.setRootNode(root);
+    this.scrollManager.setRootNode(root);
+    this.selectionManager.setRootNode(root);
+    if (this.options.enableDirtyRects) {
+      this.dirtyTracker.markFullDirty();
+    }
   }
 
   /**
@@ -813,26 +855,18 @@ export class CanvasRenderer implements Renderer {
     this.accessibilityLayer.insertNode(parentId, id, beforeId);
     this.virt.noteChildrenChanged(parentId);
 
-    // Check if this is setting the root node (parent_id === id === "root" or similar)
-    if (parentId === "root" && id === "root") {
-      this.rootNode = child;
-      this.eventManager.setRootNode(child);
-      this.scrollManager.setRootNode(child);
-      this.selectionManager.setRootNode(child);
-      return;
-    }
+    // Root-level: the engine's reserved `"root"` parent (or a node mounted
+    // as its own parent). A real node whose id is "root" still takes
+    // children addressed to it — only an unknown "root" means the root.
+    const atRoot = parentId === id || (parentId === "root" && !this.nodes.has(parentId));
+    const parent = atRoot ? this.rootContainer : this.nodes.get(parentId);
+    if (!parent) return;
 
-    // Otherwise find the parent node
-    const parent = this.nodes.get(parentId);
-    if (!parent) {
-      // If parent is "root", this might be the first real root node
-      if (parentId === "root") {
-        this.rootNode = child;
-        this.eventManager.setRootNode(child);
-      this.scrollManager.setRootNode(child);
-      this.selectionManager.setRootNode(child);
-      }
-      return;
+    if (atRoot && child.parent === parent) {
+      // Re-addressing a root child (move / repeated insert): unlink first so
+      // the anchor below positions the single entry.
+      const idx = parent.children.indexOf(child);
+      if (idx >= 0) parent.children.splice(idx, 1);
     }
 
     // Insert child into parent
@@ -853,6 +887,11 @@ export class CanvasRenderer implements Renderer {
     // post-drop hold (the engine's re-render landed) or marks a cached
     // list (origin included) for a rebuild after the next layout.
     this.dnd.noteStructural(parent, id);
+
+    if (atRoot) {
+      this.rootChildrenChanged();
+      return;
+    }
 
     // Mark parent dirty since its children changed
     if (this.options.enableDirtyRects) {
@@ -928,6 +967,7 @@ export class CanvasRenderer implements Renderer {
       this.dirtyTracker.markNodeDirty(node);
     }
 
+    const wasRoot = node.parent === this.rootContainer;
     if (node.parent) {
       const idx = node.parent.children.indexOf(node);
       if (idx >= 0) {
@@ -939,12 +979,7 @@ export class CanvasRenderer implements Renderer {
       node.parent = null;
     }
 
-    if (this.rootNode === node) {
-      this.rootNode = null;
-      this.eventManager.setRootNode(null);
-      this.scrollManager.setRootNode(null);
-      this.selectionManager.setRootNode(null);
-    }
+    if (wasRoot) this.rootChildrenChanged();
   }
 
   /**
@@ -1012,21 +1047,16 @@ export class CanvasRenderer implements Renderer {
       this.dirtyTracker.markNodeDirty(node);
     }
 
-    // Remove from parent
+    // Remove from parent (a root child leaves the implicit root's list)
+    const wasRoot = node.parent === this.rootContainer;
     if (node.parent) {
       const index = node.parent.children.indexOf(node);
       if (index >= 0) {
         node.parent.children.splice(index, 1);
       }
+      node.parent = null;
     }
-
-    // Remove from root
-    if (this.rootNode === node) {
-      this.rootNode = null;
-      this.eventManager.setRootNode(null);
-      this.scrollManager.setRootNode(null);
-    this.selectionManager.setRootNode(null);
-    }
+    if (wasRoot) this.rootChildrenChanged();
 
     // Remove from nodes map — including every descendant. The engine emits
     // ONE Remove for a removed subtree's root (keyed teardown always did;
@@ -1207,7 +1237,15 @@ export class CanvasRenderer implements Renderer {
     setSafeAreaInsetOverrides(this.options.safeAreaInsets);
 
     const root = this.rootNode;
-    const layout = () => computeLayout(this.ctx, root, contentWidth, this.canvas.height / dpr);
+    const contentHeight = this.canvas.height / dpr;
+    if (root === this.rootContainer) {
+      // Several root children: the implicit column is the canvas box
+      // (desktop parity: a viewport-sized flex column), so both layout
+      // backends size it the same and its children stack from the top.
+      root.props.width = contentWidth;
+      root.props.height = contentHeight;
+    }
+    const layout = () => computeLayout(this.ctx, root, contentWidth, contentHeight);
     // Windowed lists size their stand-in padding before layout, then refine
     // it from the measured rows (one extra pass when it moved) and shift /
     // anchor rows after it.
@@ -1380,7 +1418,7 @@ export class CanvasRenderer implements Renderer {
     this.textEditor.endEditing();
     this.releaseAllVideos();
     this.virt.reset();
-    this.rootNode = null;
+    this.rootContainer = createImplicitRoot();
     this.nodes.clear();
     this.eventManager.setRootNode(null);
     this.scrollManager.setRootNode(null);
@@ -1445,4 +1483,25 @@ export class CanvasRenderer implements Renderer {
     this.focusManager.destroy();
     this.accessibilityLayer.destroy();
   }
+}
+
+/** A fresh implicit root column (see `CanvasRenderer.rootContainer`). */
+function createImplicitRoot(): VirtualNode {
+  return {
+    id: "__hypen_root__",
+    type: "Column",
+    // Stretch: root children span the canvas width, as block children of
+    // the DOM container and flex items of desktop's root column do.
+    props: { alignItems: "stretch" },
+    children: [],
+    parent: null,
+    implicitRoot: true,
+    visible: true,
+    opacity: 1,
+    clickable: false,
+    hoverable: false,
+    focusable: false,
+    focused: false,
+    hovered: false,
+  };
 }

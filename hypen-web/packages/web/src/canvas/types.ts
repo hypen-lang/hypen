@@ -22,6 +22,14 @@ export interface VirtualNode {
    */
   semantics?: Semantics;
 
+  /**
+   * The renderer's implicit root container: the ordered parent of every
+   * node the engine addresses to the reserved `"root"` parent. Never in the
+   * renderer's id map, never a hit target. Laid out and painted only while
+   * there is more than one root child (a lone root keeps the canvas pin).
+   */
+  implicitRoot?: boolean;
+
   // Computed layout
   layout?: Layout;
 
