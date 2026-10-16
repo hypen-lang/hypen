@@ -107,7 +107,13 @@ impl Screen {
                     );
                     self.place(parent_id, id, before_id.as_deref());
                 }
-                Patch::Detach { id } => self.unlink(id),
+                Patch::Detach { id } => {
+                    assert!(
+                        self.types.contains_key(&**id),
+                        "detach of {id}, which the renderer never created"
+                    );
+                    self.unlink(id);
+                }
                 Patch::Remove { id, .. } => {
                     let id = id.to_string();
                     self.unlink(&id);
@@ -613,4 +619,123 @@ fn row_type_change_on_hot_reload_keeps_order() {
         .update_state(None, json!({ "items": items(&["b", "a", "c"]) }));
     h.flush();
     assert_eq!(h.screen.rows(&col), strs(&["b", "a", "c", "footer"]));
+}
+
+// ---------------------------------------------------------------------------
+// Router routes rooted at control flow
+// ---------------------------------------------------------------------------
+
+const ROUTER_CF: &str = r#"Column {
+    Text("nav")
+    Router {
+        Route(path: "/list") {
+            ForEach(items: @state.items, key: "id") { Text("@{item.name}") }
+            If(@state.show) { Text("shown") }
+        }
+        Route(path: "/other") { Text("other") }
+    }
+    Text("footer")
+}"#;
+
+#[test]
+fn router_route_rooted_at_control_flow_detaches_and_reattaches_its_content() {
+    let mut h = Harness::new(
+        ROUTER_CF,
+        json!({ "location": "/list", "items": items(&["a", "b"]), "show": true }),
+    );
+    let col = h.screen.find("Column");
+    assert_eq!(
+        h.screen.rows(&col),
+        strs(&["nav", "a", "b", "shown", "footer"])
+    );
+    h.update(json!({ "location": "/other" }));
+    assert_eq!(h.screen.rows(&col), strs(&["nav", "other", "footer"]));
+    h.update(json!({ "location": "/list" }));
+    assert_eq!(
+        h.screen.rows(&col),
+        strs(&["nav", "a", "b", "shown", "footer"])
+    );
+}
+
+#[test]
+fn router_control_flow_route_updated_while_away_catches_up_on_return() {
+    let mut h = Harness::new(
+        ROUTER_CF,
+        json!({ "location": "/list", "items": items(&["a", "b"]), "show": false }),
+    );
+    let col = h.screen.find("Column");
+    h.update(json!({ "location": "/other" }));
+    // Off-screen edits must not leak onto the screen (or into "root").
+    h.update(json!({ "items": items(&["c", "a"]), "show": true }));
+    assert_eq!(h.screen.rows(&col), strs(&["nav", "other", "footer"]));
+    h.update(json!({ "location": "/list" }));
+    assert_eq!(
+        h.screen.rows(&col),
+        strs(&["nav", "c", "a", "shown", "footer"])
+    );
+    // And it stays live once back.
+    h.update(json!({ "items": items(&["c", "a", "d"]) }));
+    assert_eq!(
+        h.screen.rows(&col),
+        strs(&["nav", "c", "a", "d", "shown", "footer"])
+    );
+}
+
+#[test]
+fn nested_router_as_route_root_keeps_order_across_navigation() {
+    let mut h = Harness::new(
+        r#"Column {
+            Router {
+                Route(path: "/in/*") {
+                    Router(value: @state.sub) {
+                        Route(path: "x") { Text("x1") Text("x2") }
+                        Route(path: "y") { Text("y1") }
+                    }
+                }
+                Route(path: "/out") { Text("out") }
+            }
+            Text("footer")
+        }"#,
+        json!({ "location": "/in/a", "sub": "x" }),
+    );
+    let col = h.screen.find("Column");
+    assert_eq!(h.screen.rows(&col), strs(&["x1", "x2", "footer"]));
+    h.update(json!({ "location": "/out" }));
+    assert_eq!(h.screen.rows(&col), strs(&["out", "footer"]));
+    h.update(json!({ "sub": "y" }));
+    assert_eq!(h.screen.rows(&col), strs(&["out", "footer"]));
+    h.update(json!({ "location": "/in/b" }));
+    assert_eq!(h.screen.rows(&col), strs(&["y1", "footer"]));
+    h.update(json!({ "sub": "x" }));
+    assert_eq!(h.screen.rows(&col), strs(&["x1", "x2", "footer"]));
+}
+
+#[test]
+fn evicted_control_flow_route_is_removed_from_the_renderer() {
+    let mut routes = String::from(
+        r#"Route(path: "/list") { ForEach(items: @state.items, key: "id") { Text("@{item.name}") } }"#,
+    );
+    for i in 0..12 {
+        routes.push_str(&format!(r#" Route(path: "/p{i}") {{ Text("p{i}") }}"#));
+    }
+    let src = format!(r#"Column {{ Router {{ {routes} }} Text("footer") }}"#);
+    let mut h = Harness::new(
+        &src,
+        json!({ "location": "/list", "items": items(&["a", "b"]) }),
+    );
+    for i in 0..12 {
+        h.update(json!({ "location": format!("/p{i}") }));
+    }
+    // `/list` fell out of the LRU: its rows are gone from the renderer, not
+    // leaked as detached nodes.
+    assert!(
+        !h.screen
+            .types
+            .keys()
+            .any(|id| ["a", "b"].contains(&h.screen.label(id).as_str())),
+        "evicted route rows still alive in the renderer"
+    );
+    h.update(json!({ "location": "/list" }));
+    let col = h.screen.find("Column");
+    assert_eq!(h.screen.rows(&col), strs(&["a", "b", "footer"]));
 }

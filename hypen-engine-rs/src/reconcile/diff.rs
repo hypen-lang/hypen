@@ -1910,8 +1910,15 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                     // native node but keeps it alive. The engine-side
                     // node stays in the tree; its descendants stay
                     // under it; dependencies stay registered so state
-                    // updates flow through while off-screen.
-                    ctx.patches.push(Patch::detach(child_id));
+                    // updates flow through while off-screen. A route
+                    // root that is control flow (a ForEach, an If, a
+                    // nested Router) never reached the renderer: detach
+                    // what it rendered instead.
+                    let tree = &*ctx.tree;
+                    let patches = &mut *ctx.patches;
+                    tree.for_each_rendered_root(child_id, &mut |root| {
+                        patches.push(Patch::detach(root));
+                    });
                     if let Some(child) = ctx.tree.get_mut(child_id) {
                         child.parent = None;
                     }
@@ -1966,13 +1973,22 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                         }
                         // Back inside the Router's range: before whatever
                         // renders after the Router, not appended behind it.
+                        // A control-flow route root re-attaches what it
+                        // rendered, in order.
                         let before = ctx.tree.render_anchor_after(*cached_id);
-                        let attach_patch = match render_parent {
-                            Some(rp) => Patch::attach(rp, *cached_id, before),
-                            None => Patch::attach_root(*cached_id, before),
-                        };
-                        ctx.patches.push(attach_patch);
+                        let tree = &*ctx.tree;
+                        let patches = &mut *ctx.patches;
+                        tree.for_each_rendered_root(*cached_id, &mut |root| {
+                            patches.push(match render_parent {
+                                Some(rp) => Patch::attach(rp, root, before),
+                                None => Patch::attach_root(root, before),
+                            });
+                        });
                     }
+                    // Control flow that changed while the route was away
+                    // was deferred (it had nowhere to put content); now
+                    // that it is linked and on screen, catch it up.
+                    run_deferred_detached(ctx);
                 } else if let Some((_, children)) = matched.as_ref() {
                     // Cache miss: build fresh IR tree for this route.
                     // When the Router is at the IR root (render_parent
@@ -2002,6 +2018,29 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                     max_cache_size,
                 }));
             }
+        }
+    }
+}
+
+/// Re-run every deferred control-flow node (see
+/// `InstanceTree::deferred_detached`) that is attached again, from its
+/// stored template. Nodes still detached stay deferred; removed ones are
+/// dropped.
+fn run_deferred_detached(ctx: &mut ReconcileCtx) {
+    if ctx.tree.deferred_detached.is_empty() {
+        return;
+    }
+    let pending = std::mem::take(&mut ctx.tree.deferred_detached);
+    for id in pending {
+        if ctx.tree.get(id).is_none() {
+            continue;
+        }
+        if ctx.tree.in_detached_range(id) {
+            ctx.tree.deferred_detached.insert(id);
+            continue;
+        }
+        if let Some(template) = ctx.tree.get(id).and_then(|n| n.ir_node_template.clone()) {
+            reconcile_ir_node_impl(ctx, id, &template);
         }
     }
 }

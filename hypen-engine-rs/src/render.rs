@@ -103,6 +103,13 @@ pub fn render_dirty_nodes_full(
             None => (false, false, false),
         };
 
+        // A control-flow node inside a detached route root (Router cache)
+        // has nowhere to place content: defer it to the route's re-attach.
+        if (is_control_flow || is_foreach) && tree.in_detached_range(node_id) {
+            tree.deferred_detached.insert(node_id);
+            continue;
+        }
+
         // Narrow pass first: when the batch's changed paths name specific
         // item indices of this iterable, reconcile only those children.
         // Falls through to the full pass whenever the hint doesn't hold

@@ -456,6 +456,14 @@ pub struct InstanceTree {
     /// descendant, so it only ever applies to the replacement itself. The
     /// replacement's content is then anchored from its real position.
     pub(crate) place_before_slot: Option<NodeId>,
+
+    /// Control-flow nodes that went dirty while their content had no live
+    /// render parent — they sit, through transparent containers only, under
+    /// a Router route root that is detached in the route cache (see
+    /// [`InstanceTree::in_detached_range`]). Reconciling them then would
+    /// insert their content at "root"; instead they are re-run from their
+    /// stored templates when the route is attached again.
+    pub(crate) deferred_detached: indexmap::IndexSet<NodeId>,
 }
 
 /// How many exit tombstones the tree retains. An exit plays for a few
@@ -511,6 +519,7 @@ impl InstanceTree {
             exit_tombstones: std::collections::VecDeque::new(),
             sole_child_slot: false,
             place_before_slot: None,
+            deferred_detached: indexmap::IndexSet::new(),
         }
     }
 
@@ -806,6 +815,28 @@ impl InstanceTree {
             // A real element is the render parent: nothing follows.
             parent.control_flow.as_ref()?;
             current = parent_id;
+        }
+    }
+
+    /// Whether `id`'s content has no live render parent: walking up from
+    /// `id` through control-flow containers only, the chain ends at a
+    /// container with no parent that is not the tree root — a route root
+    /// detached in a Router's cache. Content placed from there would have
+    /// nowhere to go (it is NOT inside a detached real element, which
+    /// keeps receiving patches like any live node).
+    pub fn in_detached_range(&self, id: NodeId) -> bool {
+        let mut current = id;
+        loop {
+            let Some(node) = self.get(current) else {
+                return false;
+            };
+            if node.control_flow.is_none() {
+                return false;
+            }
+            match node.parent {
+                Some(parent) => current = parent,
+                None => return self.root != Some(current),
+            }
         }
     }
 
