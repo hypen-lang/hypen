@@ -36,6 +36,9 @@ const (
 	MessageTypeDispatchAction MessageType = "dispatchAction"
 	MessageTypeHello          MessageType = "hello"
 	MessageTypeSessionAck     MessageType = "sessionAck"
+	// MessageTypeViewport is the client → server list viewport report
+	// (virtualization contract §4).
+	MessageTypeViewport MessageType = "viewport"
 )
 
 // Message is the base interface for all remote messages
@@ -83,6 +86,22 @@ type DispatchActionMessage struct {
 }
 
 func (m *DispatchActionMessage) GetType() MessageType { return MessageTypeDispatchAction }
+
+// ViewportMessage is sent from a client to report the item range
+// [Start, End) — visible rows plus overscan — of the windowed list whose
+// element id is ListID (the node carrying `__virt.window`). The server
+// moves that list's window on the sending session's engine only and
+// streams the result back as ordinary `patch` messages. It is never an
+// action, never replayed to other sessions, and never answered with a
+// `stateUpdate`.
+type ViewportMessage struct {
+	Type   MessageType `json:"type"`
+	ListID string      `json:"listId"`
+	Start  uint32      `json:"start"`
+	End    uint32      `json:"end"`
+}
+
+func (m *ViewportMessage) GetType() MessageType { return MessageTypeViewport }
 
 // RawMessage is used for parsing incoming messages
 type RawMessage struct {

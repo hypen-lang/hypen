@@ -31,13 +31,15 @@ hypen-golang/
 └── remote/               # Remote UI protocol
     ├── server.go         # WebSocket server (device plane on by default: ConfigureDevice/DisableDevice;
     │                     #   AllowedOrigins/Authenticate + Admit: admission when configured; startup warnings)
-    ├── session.go        # Per-connection session (hello.device, sessionAck.device + resumeToken, dispatch queue)
+    ├── session.go        # Per-connection session (hello.device, sessionAck.device + resumeToken, dispatch queue,
+    │                     #   `viewport` → this engine's SetListViewport, patches only: virtualization contract §4)
     ├── session_device.go # Device handshake/attach, session module owners, dispatch provenance, state merge
     ├── device_plane.go   # DeviceConfig + sessionDevice: pumps socket ⇄ Rust broker, tick() timer, sinks
     ├── dispatch_queue.go # FIFO dispatch slot; device waits yield it (device.Waiter)
     ├── client.go         # WebSocket client
     ├── types.go          # Protocol types
     ├── remote_test.go    # Remote UI tests
+    ├── viewport_test.go  # List virtualization `viewport` message (session-level + real WebSocket + Go client)
     ├── device_*_test.go  # Device plane over real WebSockets (Go client) + device_e2e_test.go (TS client via bun,
     │                     #   testdata/device_e2e_client.ts)
     └── device/           # Go binding of the ONE device protocol implementation (the Rust broker; RFC 001, provisional)
