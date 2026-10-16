@@ -16,8 +16,8 @@
  * 3. measures the laid-out rows to refine the per-item size, anchoring the
  *    first visible row when the leading space changes;
  * 4. reports the visible range + overscan through the engine's
- *    `setListViewport` after each frame (`report`), deduplicated by the
- *    shared `shouldReport` rule.
+ *    `setListViewport` after each frame (`report`), per the shared
+ *    `viewportReport` rule.
  *
  * All range/padding math is the shared `@hypen-space/core/virtualization`.
  */
@@ -25,12 +25,12 @@
 import {
   VIRT_WINDOW_PROP,
   DEFAULT_ITEM_SIZE,
+  childrenPerItem,
   parseVirtWindow,
   itemSize,
+  viewportReport,
   windowPadding,
-  visibleRange,
-  wantedRange,
-  shouldReport,
+  windowRows,
   type VirtWindow,
 } from "@hypen-space/core/virtualization";
 import type { Layout, VirtualNode, VirtListState } from "./types.js";
@@ -61,23 +61,29 @@ export class VirtListController {
   private lists = new Map<string, VirtualNode>();
   /** Windows set during the current batch; `null` = removed. */
   private pending = new Map<string, VirtWindow | null>();
+  /** Lists whose children were inserted, moved or removed this batch. */
+  private childrenChanged = new Set<string>();
 
   constructor(private host: VirtListHost) {}
 
-  /** Is `name` the reserved window prop (handled here, never stored in props)? */
-  static isWindowProp(name: string): boolean {
-    return name === VIRT_WINDOW_PROP;
-  }
-
   /** A `setProp` of `__virt.window`; applied at {@link flush}. Malformed values are ignored. */
-  noteSet(id: string, value: unknown): void {
+  setWindow(id: string, value: unknown): void {
     const window = parseVirtWindow(value);
     if (window) this.pending.set(id, window);
   }
 
   /** A `removeProp` of `__virt.window`: the list renders as a normal container again. */
-  noteRemove(id: string): void {
+  removeWindow(id: string): void {
     this.pending.set(id, null);
+  }
+
+  /**
+   * A child of `parentId` was inserted, moved or removed. A reorder inside
+   * the window changes no `__virt.window`, but moves rows to new positions:
+   * their aria positions are re-stamped at {@link flush}.
+   */
+  noteChildrenChanged(parentId: string): void {
+    if (this.lists.has(parentId)) this.childrenChanged.add(parentId);
   }
 
   /** Whether any windowed list exists (skips per-frame work otherwise). */
@@ -90,6 +96,11 @@ export class VirtListController {
    * of the batch landed, so the children are exactly the window's items.
    */
   flush(): void {
+    for (const id of this.childrenChanged) {
+      const node = this.lists.get(id);
+      if (node?.virt && !this.pending.has(id)) this.syncAria(node);
+    }
+    this.childrenChanged.clear();
     if (this.pending.size === 0) return;
     for (const [id, window] of this.pending) {
       const node = this.host.getNode(id);
@@ -132,6 +143,7 @@ export class VirtListController {
   reset(): void {
     this.lists.clear();
     this.pending.clear();
+    this.childrenChanged.clear();
   }
 
   /**
@@ -198,16 +210,13 @@ export class VirtListController {
       const v = node.virt;
       if (!v || !node.layout || !this.host.isAttached(node)) continue;
       const frame = this.visibleFrame(node, v);
-      const visible = visibleRange(
-        v.window.total,
-        v.itemSize,
-        frame.scrolledPast,
-        frame.extent,
-        v.columns,
-      );
       v.anchor = this.findAnchor(node, v, frame.viewStart);
-      const wanted = wantedRange(visible, v.window.total);
-      if (shouldReport(v.window, visible, wanted, v.lastReported)) {
+      const wanted = viewportReport(
+        v.window,
+        { size: v.itemSize, scrolledPast: frame.scrolledPast, viewportExtent: frame.extent, columns: v.columns },
+        v.lastReported,
+      );
+      if (wanted) {
         v.lastReported = wanted;
         this.host.setListViewport(id, wanted.start, wanted.end);
       }
@@ -295,8 +304,7 @@ export class VirtListController {
   /** `aria-setsize` / `aria-posinset` on each row's mirror element (§2). */
   private syncAria(node: VirtualNode): void {
     const v = node.virt!;
-    const per = childrenPerItem(node, v);
-    if (per === 0) return;
+    const per = childrenPerItem(v.window, node.children.length);
     const total = String(v.window.total);
     node.children.forEach((child, i) => {
       const el = this.host.mirrorElement(child.id);
@@ -320,13 +328,6 @@ export class VirtListController {
 
 function axisPos(layout: Layout, horizontal: boolean): number {
   return horizontal ? layout.x : layout.y;
-}
-
-/** Children per item (multi-node templates, §1); 0 for an empty window. */
-function childrenPerItem(node: VirtualNode, v: VirtListState): number {
-  const count = v.window.end - v.window.start;
-  if (count <= 0 || node.children.length === 0) return 0;
-  return Math.max(1, Math.round(node.children.length / count));
 }
 
 /** A Grid's column count (`columns` / `.gridColumns(n)`), else 1. */
@@ -355,8 +356,8 @@ function scrollContainer(node: VirtualNode, horizontal: boolean): VirtualNode | 
  * number of rows. `null` when nothing is laid out yet.
  */
 function measureItemSize(node: VirtualNode, v: VirtListState): number | null {
-  const count = v.window.end - v.window.start;
-  if (count <= 0) return null;
+  const rows = windowRows(v.window, v.columns);
+  if (rows <= 0) return null;
   const h = v.horizontal;
   let min = Infinity;
   let max = -Infinity;
@@ -369,7 +370,6 @@ function measureItemSize(node: VirtualNode, v: VirtListState): number | null {
     if (end > max) max = end;
   }
   if (!(max > min)) return null;
-  const rows = Math.ceil(count / v.columns);
   const size = itemSize(v.window, max - min + mainAxisGap(node.props, !h), rows);
   return size > 0 ? size : null;
 }

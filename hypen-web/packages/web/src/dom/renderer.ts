@@ -264,9 +264,9 @@ import { DomVirtualizer, VIRT_WINDOW_PROP } from "./virtualize.js";
 interface IEngine {
   dispatchAction(name: string, payload?: any): void;
   /**
-   * List virtualization (docs/virtualization.md §3): report the item range a
-   * windowed list needs. Optional — present on BaseEngine and RemoteEngine;
-   * an engine without it simply never receives viewport reports.
+   * Viewport report for a windowed list (docs/virtualization.md §3). Every
+   * real engine has it (BaseEngine, RemoteEngine); optional so a bare
+   * test/dispatch-only engine works.
    */
   setListViewport?(listId: string, start: number, end: number): void;
 }

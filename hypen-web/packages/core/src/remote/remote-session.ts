@@ -307,7 +307,7 @@ export class RemoteSession {
 
   private _sessionId: string | null = null;
   private _helloReceived = false;
-  /** True while a `viewport` message is being applied (no stateUpdate). */
+  /** True while a `viewport` message is being applied: its patches go to this client only, with no stateUpdate. */
   private _viewportRender = false;
   /**
    * True when the session was initialised by the legacy `helloGrace` timer
@@ -904,7 +904,8 @@ export class RemoteSession {
           if (!vp) break; // malformed: ignored, no error, no disconnect
           // The engine renders synchronously inside this call; the flag
           // keeps the streaming callback from attaching a stateUpdate to
-          // the window's patches (a viewport changes no state).
+          // the window's patches (a viewport changes no state) or fanning
+          // them out to allow-multiple peers (the window is per client).
           this._viewportRender = true;
           try {
             this.engine.setListViewport(vp.listId, vp.start, vp.end);
@@ -1601,10 +1602,11 @@ export class RemoteSession {
       };
       this.send(patchMessage);
 
-      // A viewport-driven render only moves a list window: no state changed.
-      const sendState = !this._viewportRender;
+      // A viewport-driven render only moves THIS client's list window: no
+      // state changed, and no peer shares the window (§4).
+      if (this._viewportRender) return;
 
-      if (sendState && this._stateSubscribed && this._moduleInstance) {
+      if (this._stateSubscribed && this._moduleInstance) {
         const stateMessage: StateUpdateMessage = {
           type: "stateUpdate",
           module: this.host.moduleName,
@@ -1622,7 +1624,7 @@ export class RemoteSession {
         for (const peer of this.host.sessionsForId(this._sessionId)) {
           if (peer === this) continue;
           peer.send(patchMessage);
-          if (sendState && peer._stateSubscribed && this._moduleInstance) {
+          if (peer._stateSubscribed && this._moduleInstance) {
             const stateMessage: StateUpdateMessage = {
               type: "stateUpdate",
               module: this.host.moduleName,

@@ -178,6 +178,14 @@ describe("__virt.window layout", () => {
     expect(s.list().style.paddingBottom).toBe(`${15 * 30}px`);
   });
 
+  test("a malformed window is ignored; the current one stays", () => {
+    const s = setup();
+    s.renderer.applyPatches([...rowPatches(0, 5), win(50, 0, 5)]);
+    s.renderer.applyPatches([win(5, 4, 9)]); // end > total
+    expect(s.list().style.paddingBottom).toBe(`${45 * 50}px`);
+    expect(s.list().children[0]!.attributes["aria-setsize"]).toBe("50");
+  });
+
   test("rows evicted by a window move disappear; aria positions follow the window", () => {
     const s = setup();
     selfScroll(s);

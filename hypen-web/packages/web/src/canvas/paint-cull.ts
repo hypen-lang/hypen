@@ -20,19 +20,19 @@ import { isScrollable } from "./scroll.js";
 const OVERSCAN = 100;
 
 /** Minimum child count before culling is worth the per-child test. */
-export const VIRTUALIZE_THRESHOLD = 20;
+const CULL_THRESHOLD = 20;
 
 /**
  * The children of `node` to paint: all of them, unless `node` is a scrolled
  * container (scrollable, with a `scrollState`) with
- * more than {@link VIRTUALIZE_THRESHOLD} children — then only those whose
+ * more than {@link CULL_THRESHOLD} children — then only those whose
  * layout overlaps its box shifted by the scroll offset, widened by
  * {@link OVERSCAN}. Children without a layout are always kept.
  */
 export function getVisibleChildren(node: VirtualNode): VirtualNode[] {
   const ss = node.scrollState;
   const box = node.layout;
-  if (!ss || !box || node.children.length <= VIRTUALIZE_THRESHOLD || !isScrollable(node)) {
+  if (!ss || !box || node.children.length <= CULL_THRESHOLD || !isScrollable(node)) {
     return node.children;
   }
 

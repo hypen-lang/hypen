@@ -39,7 +39,7 @@ The engine sets one reserved prop on the list's element (the `List`/`Grid` node,
 
 - It arrives as an ordinary `setProp`, in the same batch as the row `create`/`instantiate`/`insert`/`remove` patches it describes. Apply it **after** the batch's structural patches.
 - `removeProp` of `__virt.window` means the list is no longer windowed: drop the padding and render the children as a normal container.
-- Each item may render as several children (a multi-node template). Group the children into items: `childrenPerItem = children.length / (end - start)`.
+- Each item may render as several children (a multi-node template). Group the children into items: `childrenPerItem = round(children.length / (end - start))`, at least 1; child `i` belongs to item `start + floor(i / childrenPerItem)`.
 - Rows leaving the window arrive as plain `remove`s (never `transition: true`); remove them immediately.
 - The prop is never stored as an ordinary prop on the node: never echo it back, never diff it.
 
@@ -47,7 +47,7 @@ The engine sets one reserved prop on the list's element (the `List`/`Grid` node,
 
 - **Scroll axis**: vertical, unless the element lays out horizontally (`Row`, `List(direction: horizontal)`). A `Grid` with `columns: n` lays items out in rows of `n`: item `i` is in row `floor(i / n)`, so its padding is counted in rows.
 - **Stand-ins are padding, never sibling nodes.** The engine appends new rows with `before_id: none`; a trailing spacer element would end up before them. Use `padding-top`/`padding-bottom` (or `-left`/`-right`) on the list element, `contentPadding` on Compose's `LazyColumn`, or padding on SwiftUI's `LazyVStack`. Native lazy containers may instead show `total` slots with placeholders of the estimated size (see §5).
-- **Estimating**: `itemSize` = the average measured size of the materialized items, else `estimatedSize`, else **48** (px / pt). Leading padding = `start × itemSize`; trailing padding = `(total − end) × itemSize`. A per-index cache of measured sizes is allowed, but the average alone is correct enough.
+- **Estimating**: `itemSize` = the average measured size of the materialized items (for a grid, of the rows they occupy: `windowRows`), else `estimatedSize`, else **48** (px / pt). Leading padding = `start × itemSize`; trailing padding = `(total − end) × itemSize`. A per-index cache of measured sizes is allowed, but the average alone is correct enough.
 - **Scroll anchoring**: when a window change alters the leading padding, keep the first visible materialized row at the same screen position by adjusting the scroll offset by the difference.
 - **Accessibility**: rows should expose the full list position (`aria-setsize = total`, `aria-posinset = item index + 1`, or the platform equivalent).
 - Off-screen items do not exist, so browser find-in-page does not find them. That is the accepted trade-off.
@@ -57,14 +57,24 @@ The engine sets one reserved prop on the list's element (the `List`/`Grid` node,
 Compute the range of items the user can see, widened by overscan, and report it.
 
 1. **Scroll container**: the list element if it scrolls itself; otherwise its nearest scrolling ancestor; otherwise the window / root view. Account for the list's offset inside that container.
-2. **Visible range**: `visibleStart = floor(scrolledPast / itemSize)`, `visibleEnd = ceil((scrolledPast + viewportExtent) / itemSize)`, clamped to `[0, total]`, where `scrolledPast` is how far the container has scrolled past the list's top edge (0 if it hasn't). Refine with the measured positions of materialized rows when the range overlaps them.
+2. **Visible range**: `visibleStart = floor(scrolledPast / itemSize)`, `visibleEnd = ceil((scrolledPast + viewportExtent) / itemSize)`, clamped to `[0, total]`, where `scrolledPast` is how far the container has scrolled past the list's top edge (0 if it hasn't). While the list starts below the top of the viewport, only the part of the viewport over the list counts: `viewportExtent` shrinks by that distance. Refine with the measured positions of materialized rows when the range overlaps them.
 3. **Overscan**: widen both sides by one viewport's worth of items, at least **5** items.
-4. **Report** `setListViewport(listId, wantStart, wantEnd)` when the overscanned range is not inside the current `[start, end)`, or when the current window is more than three times the overscanned range (shrink after a fling). Never report the same range twice in a row.
+4. **Report** `setListViewport(listId, wantStart, wantEnd)` (the overscanned range) when the visible range is not inside the current `[start, end)`, or when the current window is more than three times the overscanned range (shrink after a fling). Never report the same range twice in a row.
 5. **When**: after the list first lays out, on scroll (at most once per frame), on resize, and whenever `__virt.window` changes and the current window no longer covers the needed range.
 
 `listId` is the id of the element carrying `__virt.window`. Ids naming no windowed list are ignored by the engine, so a stale report is harmless. A report computed just before items were inserted above may be off by the shift; the next report corrects it.
 
-The shared math is in `@hypen-space/core` (`packages/core/src/virtualization.ts`): `windowPadding`, `visibleRange`, `wantedRange`, `shouldReport`. Native renderers port it (it is a few lines) and keep their port's tests aligned with `tests/virtualization-math.test.ts`.
+The shared math is in `@hypen-space/core` (`packages/core/src/virtualization.ts`). Native renderers port it (it is a few lines) and keep their port's tests aligned with `tests/virtualization-math.test.ts`:
+
+| Function | Contract |
+|---|---|
+| `parseVirtWindow(value)` | Decode `__virt.window`; `null` when malformed (ignore it). |
+| `childrenPerItem(window, childCount)` | §1 grouping. |
+| `windowRows(window, columns)` | Rows the materialized items occupy (the divisor for a measured average). |
+| `itemSize(window, measuredTotal, measuredCount)` | §2 estimating. |
+| `windowPadding(window, size, columns)` | §2 leading / trailing padding. |
+| `visibleRange`, `wantedRange`, `shouldReport` | §3 steps 2–4. |
+| `viewportReport(window, geometry, lastReported)` | Steps 2–4 in one call (with the below-the-top rule of step 2): the range to send now, or `null`. The caller keeps what it sent as `lastReported`. |
 
 ## 4. Remote protocol
 

@@ -4,7 +4,8 @@
  *
  *   - session handler: applied to THIS session's engine after hello; ignored
  *     before hello and when malformed; clamped to u32; never replayed to a
- *     sibling session under syncActions; never answered with a stateUpdate.
+ *     sibling session under syncActions nor fanned out to allow-multiple
+ *     peers; never answered with a stateUpdate.
  *   - end to end over a real WebSocket: RemoteServer + RemoteEngine render a
  *     100-item List, only the initial window arrives, a viewport report
  *     brings in the new rows.
@@ -67,9 +68,10 @@ afterEach(async () => {
   while (cleanups.length) await cleanups.pop()!();
 });
 
-async function buildServer(sync = false): Promise<RemoteServer> {
+async function buildServer(sync = false, allowMultiple = false): Promise<RemoteServer> {
   const server = new RemoteServer().module("Feed", feedModule()).ui(UI);
   if (sync) server.syncActions();
+  if (allowMultiple) server.session({ concurrent: "allow-multiple" });
   await server.prepare();
   cleanups.push(() => server.stop());
   return server;
@@ -97,8 +99,8 @@ function openSession(server: RemoteServer) {
 
 type Opened = ReturnType<typeof openSession>;
 
-async function hello(s: Opened) {
-  await s.session.receive({ type: "hello" });
+async function hello(s: Opened, sessionId?: string) {
+  await s.session.receive(sessionId ? { type: "hello", sessionId } : { type: "hello" });
   await s.session.ready;
   const initial = s.sent.find((m) => m.type === "initialTree") as any;
   expect(initial).toBeDefined();
@@ -216,6 +218,22 @@ describe("RemoteSession viewport handler", () => {
     };
     await a.session.receive({ type: "dispatchAction", module: "Feed", action: "noop" });
     expect(bSaw).toBe(true);
+  });
+
+  test("is not fanned out to allow-multiple peers sharing the session id", async () => {
+    const server = await buildServer(false, true);
+    const a = openSession(server);
+    const b = openSession(server);
+    const { id } = await hello(a);
+    const ack = a.sent.find((m) => m.type === "sessionAck") as any;
+    await hello(b, ack.sessionId);
+    a.sent.length = 0;
+    b.sent.length = 0;
+
+    await a.session.receive({ type: "viewport", listId: id, start: 60, end: 90 });
+    await flush();
+    expect(a.sent.some((m) => m.type === "patch")).toBe(true);
+    expect(b.sent).toEqual([]);
   });
 });
 

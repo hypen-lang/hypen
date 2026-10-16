@@ -77,9 +77,29 @@ export function windowPadding(
   const cols = Math.max(1, Math.floor(columns));
   const rowsBefore = Math.ceil(window.start / cols);
   const rowsTotal = Math.ceil(window.total / cols);
-  const rowsInWindow = Math.ceil(window.end / cols) - Math.floor(window.start / cols);
-  const rowsAfter = Math.max(0, rowsTotal - rowsBefore - rowsInWindow);
+  const rowsAfter = Math.max(0, rowsTotal - rowsBefore - windowRows(window, cols));
   return { leading: rowsBefore * size, trailing: rowsAfter * size };
+}
+
+/**
+ * Rows the materialized items occupy: `end - start` for a list; for a grid
+ * with `columns > 1`, every row any of them touches. Divide the measured
+ * extent of the children by this to get the row size for {@link itemSize}.
+ */
+export function windowRows(window: VirtWindow, columns = 1): number {
+  const cols = Math.max(1, Math.floor(columns));
+  return Math.ceil(window.end / cols) - Math.floor(window.start / cols);
+}
+
+/**
+ * Children per item (§1): a multi-node template renders several children
+ * for each item. Never less than 1, so `start + floor(childIndex / n)` is
+ * always the item a child belongs to.
+ */
+export function childrenPerItem(window: VirtWindow, childCount: number): number {
+  const items = window.end - window.start;
+  if (items <= 0 || childCount <= 0) return 1;
+  return Math.max(1, Math.round(childCount / items));
 }
 
 /**
@@ -142,6 +162,40 @@ export function shouldReport(
   const wantedSize = Math.max(1, wanted.end - wanted.start);
   const oversized = window.end - window.start > 3 * wantedSize;
   return !covered || oversized;
+}
+
+/** Where the list sits in its scroll container, for {@link viewportReport}. */
+export interface ViewportGeometry {
+  /** Extent of one item (one row of items for a grid). */
+  size: number;
+  /**
+   * How far the scroll container has scrolled past the list's leading edge;
+   * negative when the list starts below the top of the viewport.
+   */
+  scrolledPast: number;
+  /** The scroll container's visible extent. */
+  viewportExtent: number;
+  columns?: number;
+}
+
+/**
+ * §3 steps 2–4 in one call: the visible range, widened by overscan, if it
+ * should be reported now — else `null`. The caller sends it with
+ * `setListViewport` and keeps it as `lastReported` for the next call.
+ *
+ * While the list starts below the top of the viewport (`scrolledPast < 0`)
+ * only the part of the viewport over the list counts as visible.
+ */
+export function viewportReport(
+  window: VirtWindow,
+  geometry: ViewportGeometry,
+  lastReported: ItemRange | null
+): ItemRange | null {
+  const { size, scrolledPast, viewportExtent, columns } = geometry;
+  const extent = viewportExtent + Math.min(0, scrolledPast);
+  const visible = visibleRange(window.total, size, scrolledPast, extent, columns);
+  const wanted = wantedRange(visible, window.total);
+  return shouldReport(window, visible, wanted, lastReported) ? wanted : null;
 }
 
 function clamp(n: number, lo: number, hi: number): number {

@@ -5,12 +5,15 @@
 import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_ITEM_SIZE,
+  childrenPerItem,
   itemSize,
   parseVirtWindow,
   shouldReport,
   visibleRange,
+  viewportReport,
   wantedRange,
   windowPadding,
+  windowRows,
 } from "../packages/core/src/virtualization";
 
 describe("parseVirtWindow", () => {
@@ -70,6 +73,27 @@ describe("windowPadding", () => {
   });
 });
 
+describe("windowRows", () => {
+  test("is the item count for a list", () => {
+    expect(windowRows({ total: 100, start: 40, end: 70 })).toBe(30);
+  });
+  test("counts every grid row the window touches", () => {
+    expect(windowRows({ total: 30, start: 9, end: 18 }, 3)).toBe(3);
+    expect(windowRows({ total: 30, start: 10, end: 17 }, 3)).toBe(3);
+  });
+});
+
+describe("childrenPerItem", () => {
+  test("groups a multi-node template's children into items", () => {
+    expect(childrenPerItem({ total: 100, start: 10, end: 20 }, 10)).toBe(1);
+    expect(childrenPerItem({ total: 100, start: 10, end: 20 }, 30)).toBe(3);
+  });
+  test("is at least 1", () => {
+    expect(childrenPerItem({ total: 100, start: 10, end: 10 }, 0)).toBe(1);
+    expect(childrenPerItem({ total: 100, start: 10, end: 20 }, 0)).toBe(1);
+  });
+});
+
 describe("visibleRange", () => {
   test("maps the scroll offset to items", () => {
     expect(visibleRange(1000, 50, 500, 200)).toEqual({ start: 10, end: 14 });
@@ -110,5 +134,35 @@ describe("shouldReport", () => {
   test("never the same range twice", () => {
     const wanted = { start: 50, end: 110 };
     expect(shouldReport(window, { start: 70, end: 90 }, wanted, wanted)).toBe(false);
+  });
+});
+
+describe("viewportReport", () => {
+  const window = { total: 1000, start: 0, end: 20 };
+  test("nothing while the window covers the visible range", () => {
+    expect(viewportReport(window, { size: 50, scrolledPast: 0, viewportExtent: 500 }, null)).toBeNull();
+  });
+  test("the overscanned range once the user scrolls past the window", () => {
+    const geometry = { size: 50, scrolledPast: 2000, viewportExtent: 500 };
+    // visible [40,50) → one viewport (10 items) of overscan each side.
+    expect(viewportReport(window, geometry, null)).toEqual({ start: 30, end: 60 });
+    expect(viewportReport(window, geometry, { start: 30, end: 60 })).toBeNull();
+  });
+  test("counts only the part of the viewport over a list that starts below its top", () => {
+    const short = { total: 1000, start: 0, end: 2 };
+    // The list starts 100px down a 300px viewport: 200px (4 items) of it shows.
+    expect(viewportReport(short, { size: 50, scrolledPast: -100, viewportExtent: 300 }, null)).toEqual({
+      start: 0,
+      end: 9,
+    });
+    // Entirely below the viewport: nothing is visible, nothing to report.
+    expect(viewportReport(short, { size: 50, scrolledPast: -400, viewportExtent: 300 }, null)).toBeNull();
+  });
+  test("grids report whole rows", () => {
+    const grid = { total: 90, start: 0, end: 9 };
+    expect(viewportReport(grid, { size: 100, scrolledPast: 300, viewportExtent: 200, columns: 3 }, null)).toEqual({
+      start: 3,
+      end: 21,
+    });
   });
 });

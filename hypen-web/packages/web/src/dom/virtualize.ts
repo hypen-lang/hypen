@@ -14,7 +14,7 @@
  * - stamps `aria-setsize` / `aria-posinset` on every materialized row;
  * - computes the visible range in the list's scroll container (the list
  *   itself, a scrolling ancestor, or the window) and reports the overscanned
- *   range with `engine.setListViewport` per `shouldReport` — after layout,
+ *   range with `engine.setListViewport` per `viewportReport` — after layout,
  *   on scroll (once per frame), on resize, and on every window change.
  *
  * All of the math is the shared `@hypen-space/core/virtualization`.
@@ -22,12 +22,12 @@
 
 import {
   VIRT_WINDOW_PROP,
+  childrenPerItem,
   itemSize,
   parseVirtWindow,
-  shouldReport,
-  visibleRange,
-  wantedRange,
+  viewportReport,
   windowPadding,
+  windowRows,
   type ItemRange,
   type VirtWindow,
 } from "@hypen-space/core/virtualization";
@@ -62,8 +62,8 @@ interface ListState {
   element: HTMLElement;
   window: VirtWindow;
   axis: Axis;
-  /** Last applied item extent (row extent for grids). */
-  size: number;
+  /** Extent assumed per item (per row of items for grids). */
+  itemSize: number;
   leading: EdgeState;
   trailing: EdgeState;
   /** CSS edges the leading/trailing padding were written to. */
@@ -179,11 +179,6 @@ export class DomVirtualizer {
 
   constructor(private readonly getEngine: () => ViewportEngine) {}
 
-  /** Whether `id` currently carries a window. */
-  has(id: string): boolean {
-    return this.lists.has(id);
-  }
-
   /** Record a column-count prop (Grid). Returns nothing; never consumes the prop. */
   noteProp(id: string, name: string, value: unknown): void {
     if (name === "columns" || name === "columns.0" || name === "gridColumns" || name === "gridColumns.0") {
@@ -220,13 +215,13 @@ export class DomVirtualizer {
     }
   }
 
-  /** `setProp __virt.window`. Applied in `flush` after the batch's structure. */
+  /**
+   * `setProp __virt.window`. Applied in `flush` after the batch's structure.
+   * A malformed value is ignored (the current window, if any, stays).
+   */
   setWindow(id: string, element: HTMLElement, value: unknown): void {
     const window = parseVirtWindow(value);
-    if (!window) {
-      this.removeWindow(id);
-      return;
-    }
+    if (!window) return;
     let state = this.lists.get(id);
     if (state && state.element !== element) {
       this.removeWindow(id);
@@ -238,7 +233,7 @@ export class DomVirtualizer {
         element,
         window,
         axis: "y",
-        size: 0,
+        itemSize: 0,
         leading: { base: "", baseInline: false, written: null },
         trailing: { base: "", baseInline: false, written: null },
         edges: null,
@@ -337,19 +332,12 @@ export class DomVirtualizer {
     return this.columns.get(state.id) ?? 1;
   }
 
-  /** Children per item for a multi-node template. */
-  private childrenPerItem(state: ListState, count: number): number {
-    const items = state.window.end - state.window.start;
-    if (items <= 0 || count <= 0) return 1;
-    return Math.max(1, Math.round(count / items));
-  }
-
   /** Average extent of a materialized row (item, or grid row), or 0 when unknown. */
   private measure(state: ListState, children: HTMLElement[]): { total: number; count: number } {
     const { start, end } = state.window;
     if (children.length === 0 || end <= start) return { total: 0, count: 0 };
     const cols = this.columnsOf(state);
-    const rows = cols > 1 ? Math.ceil(end / cols) - Math.floor(start / cols) : end - start;
+    const rows = windowRows(state.window, cols);
     const first = children[0]!.getBoundingClientRect?.();
     const last = children[children.length - 1]!.getBoundingClientRect?.();
     if (!first || !last) return { total: 0, count: 0 };
@@ -390,24 +378,14 @@ export class DomVirtualizer {
     const measured = this.measure(state, children);
     // Grid rows: the measured extent is per ROW; the estimate is per item
     // and a grid row is one item tall, so either feeds `windowPadding`.
-    const size = itemSize(state.window, measured.total, measured.count);
-    state.size = size;
-    const { leading, trailing } = windowPadding(state.window, size, this.columnsOf(state));
+    state.itemSize = itemSize(state.window, measured.total, measured.count);
+    const { leading, trailing } = windowPadding(state.window, state.itemSize, this.columnsOf(state));
 
     this.writeEdge(el, edges[0], state.leading, leading);
     this.writeEdge(el, edges[1], state.trailing, trailing);
 
     this.stampAria(state, children);
-
-    if (state.anchor) {
-      const anchor = state.anchor;
-      state.anchor = null;
-      if (anchor.element.parentNode === el) {
-        const now = this.anchorOffset(state, anchor.element);
-        const delta = now - anchor.offset;
-        if (Math.abs(delta) >= 0.5) this.scrollBy(state, delta);
-      }
-    }
+    this.restoreAnchor(state);
     state.laidOut = true;
   }
 
@@ -458,7 +436,7 @@ export class DomVirtualizer {
 
   /** Aria: every child carries its item's position in the full list. */
   private stampAria(state: ListState, children: HTMLElement[]): void {
-    const cpi = this.childrenPerItem(state, children.length);
+    const cpi = childrenPerItem(state.window, children.length);
     const total = String(state.window.total);
     const next = new Set<HTMLElement>();
     for (let i = 0; i < children.length; i++) {
@@ -585,6 +563,18 @@ export class DomVirtualizer {
     return null;
   }
 
+  /**
+   * Scroll anchoring (§2): scroll by however far the row captured before the
+   * padding changed has moved, so it stays at the same screen position.
+   */
+  private restoreAnchor(state: ListState): void {
+    const anchor = state.anchor;
+    state.anchor = null;
+    if (!anchor || anchor.element.parentNode !== state.element) return;
+    const delta = this.anchorOffset(state, anchor.element) - anchor.offset;
+    if (Math.abs(delta) >= 0.5) this.scrollBy(state, delta);
+  }
+
   private anchorOffset(state: ListState, element: HTMLElement): number {
     const r = element.getBoundingClientRect?.();
     return (r ? (state.axis === "y" ? r.top : r.left) : 0) - this.viewportStart(state);
@@ -647,19 +637,21 @@ export class DomVirtualizer {
   }
 
   /** Compute the wanted range and report it when the contract says so. */
-  check(state: ListState): void {
+  private check(state: ListState): void {
     if (!isConnected(state.element)) return;
     if (state.scroller === undefined) this.bindScroller(state);
-    const { window } = state;
-    const cols = this.columnsOf(state);
-    const past = this.scrolledPast(state);
-    // Before the list is reached only the part of the viewport over it counts.
-    const extent = Math.max(0, this.viewportExtent(state) + Math.min(0, past));
-    const visible = visibleRange(window.total, state.size, past, extent, cols);
-    const wanted = wantedRange(visible, window.total);
-    if (!shouldReport(window, visible, wanted, state.lastReported)) return;
+    const wanted = viewportReport(
+      state.window,
+      {
+        size: state.itemSize,
+        scrolledPast: this.scrolledPast(state),
+        viewportExtent: this.viewportExtent(state),
+        columns: this.columnsOf(state),
+      },
+      state.lastReported,
+    );
     const engine = this.getEngine();
-    if (typeof engine.setListViewport !== "function") return;
+    if (!wanted || typeof engine.setListViewport !== "function") return;
     state.lastReported = wanted;
     engine.setListViewport(state.id, wanted.start, wanted.end);
   }

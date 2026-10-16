@@ -426,6 +426,11 @@ describe("canvas windowed list — accessibility mirror", () => {
     // The mirror boxes sit where the rows paint: after the leading padding.
     expect(findMirror(rowId(40))!.style.top).toBe(`${40 * ROW}px`);
 
+    // A reorder inside the window changes no __virt.window: positions still follow.
+    renderer.applyPatches([{ type: "move", parentId: "L", id: rowId(49), beforeId: rowId(40) } as Patch]);
+    expect(findMirror(rowId(49))!.attributes["aria-posinset"]).toBe("41");
+    expect(findMirror(rowId(40))!.attributes["aria-posinset"]).toBe("42");
+
     renderer.applyPatches([removeProp("L", "__virt.window")]);
     expect(findMirror(rowId(40))!.attributes["aria-setsize"]).toBeUndefined();
     renderer.destroy();

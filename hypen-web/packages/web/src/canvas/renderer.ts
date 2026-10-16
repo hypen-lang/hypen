@@ -536,7 +536,7 @@ export class CanvasRenderer implements Renderer {
     const windowValue = rawProps[VIRT_WINDOW_PROP];
     if (windowValue !== undefined) {
       delete rawProps[VIRT_WINDOW_PROP];
-      this.virt.noteSet(id, windowValue);
+      this.virt.setWindow(id, windowValue);
     }
     normalizeAllApplicators(rawProps);
 
@@ -607,7 +607,7 @@ export class CanvasRenderer implements Renderer {
     // `__virt.window` is list-window state, not a prop: queued for the
     // post-batch flush, never stored in `node.props` (§1).
     if (name === VIRT_WINDOW_PROP) {
-      this.virt.noteSet(id, value);
+      this.virt.setWindow(id, value);
       return;
     }
 
@@ -712,7 +712,7 @@ export class CanvasRenderer implements Renderer {
 
     // The list is no longer windowed: drop its stand-in space (§1).
     if (name === VIRT_WINDOW_PROP) {
-      this.virt.noteRemove(id);
+      this.virt.removeWindow(id);
       return;
     }
 
@@ -811,6 +811,7 @@ export class CanvasRenderer implements Renderer {
     // Mirror the insert/attach/move — insertNode resolves root addressing
     // and unknown-beforeId fallback with the same rules as the code below.
     this.accessibilityLayer.insertNode(parentId, id, beforeId);
+    this.virt.noteChildrenChanged(parentId);
 
     // Check if this is setting the root node (parent_id === id === "root" or similar)
     if (parentId === "root" && id === "root") {
@@ -993,7 +994,10 @@ export class CanvasRenderer implements Renderer {
     // A drag rooted in the removed subtree cancels with NO dispatch; a
     // removal under a list the drag touches releases a post-drop hold.
     this.dnd.forget(node);
-    if (node.parent) this.dnd.noteStructural(node.parent, id);
+    if (node.parent) {
+      this.dnd.noteStructural(node.parent, id);
+      this.virt.noteChildrenChanged(node.parent.id);
+    }
 
     // End any edit session inside the removed subtree; focus state follows.
     this.textEditor.endIfWithin(node);

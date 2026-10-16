@@ -856,7 +856,7 @@ function buildTaffyStyle(
   if (props.paddingLeft !== undefined) p.left = cssLengthToPx(props.paddingLeft) ?? 0;
   if (type === "safearea") addSafeAreaPadding(p, props);
   addVirtPadding(p, node);
-  style.padding ={ top: p.top, right: p.right, bottom: p.bottom, left: p.left };
+  style.padding = { top: p.top, right: p.right, bottom: p.bottom, left: p.left };
 
   // --- Border ----------------------------------------------------------------
   const bw = resolvedBorderWidth(props);

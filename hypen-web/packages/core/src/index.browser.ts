@@ -235,8 +235,11 @@ export {
   visibleRange,
   wantedRange,
   shouldReport,
+  windowRows,
+  childrenPerItem,
+  viewportReport,
 } from "./virtualization.js";
-export type { VirtWindow, ItemRange } from "./virtualization.js";
+export type { VirtWindow, ItemRange, ViewportGeometry } from "./virtualization.js";
 
 // DRAG & DROP (__dnd.* prop channel — shared renderer vocabulary)
 // ============================================================================

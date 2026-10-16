@@ -9,7 +9,7 @@ import { pinOffset } from "./pin-position";
 import type { VirtualNode, PainterFunction, Rectangle } from "./types.js";
 import { measureText, renderText } from "./text.js";
 import { ScrollManager, isScrollable } from "./scroll.js";
-import { getVisibleChildren } from "./virtualize.js";
+import { getVisibleChildren } from "./paint-cull.js";
 import type { SelectionManager } from "./selection.js";
 import type { TextEditController } from "./editing.js";
 import {
