@@ -91,9 +91,26 @@ public enum Virtualization {
         let cols = max(1, columns)
         let rowsBefore = ceilDiv(window.start, cols)
         let rowsTotal = ceilDiv(window.total, cols)
-        let rowsInWindow = ceilDiv(window.end, cols) - window.start / cols
-        let rowsAfter = max(0, rowsTotal - rowsBefore - rowsInWindow)
+        let rowsAfter = max(0, rowsTotal - rowsBefore - windowRows(window, columns: cols))
         return (Double(rowsBefore) * size, Double(rowsAfter) * size)
+    }
+
+    /// Rows the materialized items occupy: `end - start` for a list; for a
+    /// grid with `columns > 1`, every row any of them touches. Divide the
+    /// measured extent of the children by this to get the row size for
+    /// ``itemSize(_:measuredTotal:measuredCount:)``.
+    public static func windowRows(_ window: VirtWindow, columns: Int = 1) -> Int {
+        let cols = max(1, columns)
+        return ceilDiv(window.end, cols) - window.start / cols
+    }
+
+    /// Children per item (§1): a multi-node template renders several
+    /// children for each item. Never less than 1, so
+    /// `start + childIndex / n` is always the item a child belongs to.
+    public static func childrenPerItem(_ window: VirtWindow, childCount: Int) -> Int {
+        let items = window.count
+        guard items > 0, childCount > 0 else { return 1 }
+        return max(1, Int((Double(childCount) / Double(items)).rounded()))
     }
 
     /// Items the user can see.
@@ -147,6 +164,28 @@ public enum Virtualization {
         return !covered || oversized
     }
 
+    /// §3 steps 2–4 in one call: the visible range, widened by overscan, if
+    /// it should be reported now — else nil. The caller sends it and keeps it
+    /// as `lastReported` for the next call. While the list starts below the
+    /// top of the viewport (`scrolledPast < 0`) only the part of the viewport
+    /// over the list counts as visible.
+    public static func viewportReport(
+        _ window: VirtWindow,
+        geometry: ViewportGeometry,
+        lastReported: ItemRange?
+    ) -> ItemRange? {
+        let extent = geometry.viewportExtent + min(0, geometry.scrolledPast)
+        let visible = visibleRange(
+            total: window.total,
+            size: geometry.size,
+            scrolledPast: geometry.scrolledPast,
+            viewportExtent: extent,
+            columns: geometry.columns
+        )
+        let wanted = wantedRange(visible, total: window.total)
+        return shouldReport(window, visible: visible, wanted: wanted, lastReported: lastReported) ? wanted : nil
+    }
+
     /// The remote `viewport` message (§4) a client sends for a windowed
     /// list; bounds clamped to `[0, UInt32.max]`.
     public static func viewportMessage(listId: String, start: Int, end: Int) -> [String: Any] {
@@ -185,35 +224,42 @@ public enum Virtualization {
         }
     }
 
-    /// Children per item for a multi-node template:
-    /// `childCount / (end - start)`, at least 1 when any item is in the window.
-    public static func childrenPerItem(_ window: VirtWindow, childCount: Int) -> Int {
-        let items = window.count
-        guard items > 0 else { return 0 }
-        return max(1, childCount / items)
-    }
-
     /// Map the list element's children onto `total` slots. Slot `i` is
     /// `.item` when `start ≤ i < end` and its children exist, else
-    /// `.placeholder`. Children are grouped per item; a short or ragged
-    /// child list (a batch still settling) leaves the uncovered items as
-    /// placeholders rather than misattributing children.
-    public static func slots(_ window: VirtWindow, childIds: [String]) -> [Slot] {
-        let per = childrenPerItem(window, childCount: childIds.count)
-        var result: [Slot] = []
-        result.reserveCapacity(window.total)
-        for index in 0..<window.total {
-            if index >= window.start && index < window.end && per > 0 {
-                let lo = (index - window.start) * per
-                let hi = lo + per
-                if hi <= childIds.count {
-                    result.append(.item(index: index, childIds: Array(childIds[lo..<hi])))
-                    continue
+    /// `.placeholder`. Children are grouped per item (``childrenPerItem(_:childCount:)``);
+    /// a short child list (a batch still settling) leaves the uncovered items
+    /// as placeholders rather than throwing.
+    public static func slots(_ window: VirtWindow, childIds: [String]) -> Slots {
+        Slots(window: window, childIds: childIds)
+    }
+
+    /// The `total` slots of a windowed list, resolved on demand: O(1) to
+    /// build, so a 10,000-item list never allocates 10,000 slot values per
+    /// render (Android's `VirtSlots` is the same shape).
+    public struct Slots: RandomAccessCollection, Sendable {
+        public let window: VirtWindow
+        public let childIds: [String]
+        public let childrenPerItem: Int
+
+        public init(window: VirtWindow, childIds: [String]) {
+            self.window = window
+            self.childIds = childIds
+            self.childrenPerItem = Virtualization.childrenPerItem(window, childCount: childIds.count)
+        }
+
+        public var startIndex: Int { 0 }
+        public var endIndex: Int { window.total }
+
+        public subscript(index: Int) -> Slot {
+            if index >= window.start && index < window.end {
+                let lo = (index - window.start) * childrenPerItem
+                if lo < childIds.count {
+                    let hi = Swift.min(childIds.count, lo + childrenPerItem)
+                    return .item(index: index, childIds: Array(childIds[lo..<hi]))
                 }
             }
-            result.append(.placeholder(index: index))
+            return .placeholder(index: index)
         }
-        return result
     }
 
     // MARK: - Helpers
@@ -259,18 +305,50 @@ public enum Virtualization {
     }
 }
 
-/// Visibility bookkeeping for one windowed native lazy container (§5):
-/// slots report `appeared` / `disappeared` (SwiftUI `onAppear` /
-/// `onDisappear`), materialized rows report their measured extent, and
-/// ``evaluate(_:)`` turns that into the range to report, applying the §3
-/// overscan and reporting rules. Pure — the SwiftUI view owns one and calls
-/// the engine with what `evaluate` returns.
+/// Where a list sits in its scroll container, for
+/// ``Virtualization/viewportReport(_:geometry:lastReported:)``.
+public struct ViewportGeometry: Equatable, Sendable {
+    /// Extent of one item (one row of items for a grid).
+    public var size: Double
+    /// How far the scroll container has scrolled past the list's leading
+    /// edge; negative while the list starts below the top of the viewport.
+    public var scrolledPast: Double
+    /// The scroll container's visible extent.
+    public var viewportExtent: Double
+    public var columns: Int
+
+    public init(size: Double, scrolledPast: Double, viewportExtent: Double, columns: Int = 1) {
+        self.size = size
+        self.scrolledPast = scrolledPast
+        self.viewportExtent = viewportExtent
+        self.columns = columns
+    }
+}
+
+/// Visibility bookkeeping for one windowed native lazy container (§5),
+/// turned into the range to report by ``evaluate(_:spacing:columns:)`` under
+/// the §3 overscan and reporting rules. Pure — the SwiftUI view owns one and
+/// calls the engine with what `evaluate` returns.
+///
+/// Two sources of the visible range, best first:
+/// - **Scroll geometry** (``scrolled(offset:extent:)``, from
+///   `onScrollGeometryChange` on iOS 18 / macOS 15 when the container owns
+///   its `ScrollView`): the visible extent mapped through the item size, the
+///   reference `visibleRange` math. Exact for the placeholders (they are
+///   sized at the item size) and close for the materialized rows.
+/// - **Slot appearance** (``slotAppeared(_:)`` / ``slotDisappeared(_:)``,
+///   SwiftUI `onAppear` / `onDisappear`): works under an ancestor scroller
+///   and on older systems, but lazy stacks prefetch beyond the screen, so the
+///   range runs a few slots wide.
 public final class VirtViewportTracker: @unchecked Sendable {
     /// Appearance count per slot index. A count, not a set: when a slot's
     /// identity changes (placeholder → row) SwiftUI may deliver the new
     /// view's `onAppear` before the old one's `onDisappear`.
     private var appeared: [Int: Int] = [:]
     private var measured: [Int: Double] = [:]
+    /// The scroll container's visible extent along the axis, in content
+    /// coordinates (`offset` = how far it has scrolled past the first slot).
+    private var scroll: (offset: Double, extent: Double)?
     public private(set) var lastReported: ItemRange?
     /// Set while an evaluation is queued for the next main-actor turn, so a
     /// burst of appear/disappear callbacks during one scroll frame is
@@ -288,16 +366,34 @@ public final class VirtViewportTracker: @unchecked Sendable {
         if n <= 1 { appeared.removeValue(forKey: index) } else { appeared[index] = n - 1 }
     }
 
+    /// Record the scroll container's visible extent (content coordinates
+    /// along the scroll axis). A non-positive extent (not laid out yet) is
+    /// ignored, leaving the appearance-based range in charge.
+    public func scrolled(offset: Double, extent: Double) {
+        guard extent > 0, extent.isFinite, offset.isFinite else { return }
+        scroll = (offset, extent)
+    }
+
     /// Record a materialized item's extent along the scroll axis.
     public func recordSize(_ index: Int, extent: Double) {
         guard extent > 0, extent.isFinite else { return }
         measured[index] = extent
     }
 
-    /// The visible slots `[min, max + 1)`, clamped to `total`; nil when
-    /// nothing is on screen.
-    public func visibleRange(total: Int) -> ItemRange? {
-        let indices = appeared.keys.filter { $0 >= 0 && $0 < total }
+    /// The items on screen, clamped to `total`; nil when nothing is. From the
+    /// scroll geometry when known (rows are `itemSize + spacing` apart), else
+    /// from the appeared slots `[min, max + 1)`.
+    public func visibleRange(_ window: VirtWindow, spacing: Double = 0, columns: Int = 1) -> ItemRange? {
+        if let g = geometry(window, spacing: spacing, columns: columns) {
+            return Virtualization.visibleRange(
+                total: window.total,
+                size: g.size,
+                scrolledPast: g.scrolledPast,
+                viewportExtent: g.viewportExtent + min(0, g.scrolledPast),
+                columns: columns
+            )
+        }
+        let indices = appeared.keys.filter { $0 >= 0 && $0 < window.total }
         guard let lo = indices.min(), let hi = indices.max() else { return nil }
         return ItemRange(start: lo, end: hi + 1)
     }
@@ -313,13 +409,28 @@ public final class VirtViewportTracker: @unchecked Sendable {
 
     /// The range to report now, or nil. Records the report so the same
     /// range is never sent twice in a row.
-    public func evaluate(_ window: VirtWindow) -> ItemRange? {
-        guard let visible = visibleRange(total: window.total) else { return nil }
-        let wanted = Virtualization.wantedRange(visible, total: window.total)
-        guard Virtualization.shouldReport(window, visible: visible, wanted: wanted, lastReported: lastReported) else {
-            return nil
+    public func evaluate(_ window: VirtWindow, spacing: Double = 0, columns: Int = 1) -> ItemRange? {
+        let next: ItemRange?
+        if let g = geometry(window, spacing: spacing, columns: columns) {
+            next = Virtualization.viewportReport(window, geometry: g, lastReported: lastReported)
+        } else if let visible = visibleRange(window, spacing: spacing, columns: columns) {
+            let wanted = Virtualization.wantedRange(visible, total: window.total)
+            next = Virtualization.shouldReport(window, visible: visible, wanted: wanted, lastReported: lastReported)
+                ? wanted : nil
+        } else {
+            next = nil
         }
-        lastReported = wanted
-        return wanted
+        if let next { lastReported = next }
+        return next
+    }
+
+    private func geometry(_ window: VirtWindow, spacing: Double, columns: Int) -> ViewportGeometry? {
+        guard let scroll else { return nil }
+        return ViewportGeometry(
+            size: itemSize(window) + max(0, spacing),
+            scrolledPast: scroll.offset,
+            viewportExtent: scroll.extent,
+            columns: columns
+        )
     }
 }

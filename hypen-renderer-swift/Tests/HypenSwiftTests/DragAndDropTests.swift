@@ -545,6 +545,22 @@ private func location(_ payload: [String: Any], _ key: String) -> (zone: String?
 
 // MARK: - Sortable: preview, drop ordering, hold-until-Move (§4.2 / §6.3)
 
+@Test func testWindowedSortableNamesWholeListPositions() async {
+    await MainActor.run {
+        // A sortable List windowed to items [40, 43) of 100: its composed
+        // rows are window-relative, the reserved write and events must not be.
+        let h = DndHarness()
+        h.buildSortable(listExtra: [VirtWindow.propName: ["total": 100, "start": 40, "end": 43] as [String: Any]])
+        h.liftT1(to: CGPoint(x: 60, y: 260))
+        #expect(location(h.payload(0), "from").index as? Int == 40)
+        h.dnd.dragEnded(sourceId: "t1")
+        let reorder = h.payload(1)
+        #expect(reorder["from"] as? Int == 40)
+        #expect(reorder["to"] as? Int == 42)
+        #expect(location(h.payload(2), "to").index as? Int == 42)
+    }
+}
+
 @Test func testSameListReorderDispatchesInContractOrderAndHoldsUntilMove() async {
     await MainActor.run {
         let h = DndHarness()

@@ -537,7 +537,7 @@ public final class HypenDndCoordinator {
         let originIndex = origin.flatMap { indexOf(container: $0, itemId: itemId) }
         let from: DndLocation
         if let origin = origin {
-            from = DndLocation(zone: containerLabel(origin) ?? origin.id, index: originIndex)
+            from = DndLocation(zone: containerLabel(origin) ?? origin.id, index: listIndex(originIndex, in: origin.id))
         } else {
             from = DndLocation(zone: looseZoneLabel(source), index: nil)
         }
@@ -879,13 +879,13 @@ public final class HypenDndCoordinator {
         guard let target = target else { return drag.from }
         switch target {
         case .sort(let containerId, let index):
-            return DndLocation(zone: containerLabel(renderer.getElement(containerId)) ?? containerId, index: index)
+            return DndLocation(zone: containerLabel(renderer.getElement(containerId)) ?? containerId, index: listIndex(index, in: containerId))
         case .zone(let id):
             return DndLocation(zone: intoLabel(renderer.getElement(id)) ?? id, index: nil)
         case .pin(let containerId):
             return DndLocation(
                 zone: containerLabel(renderer.getElement(containerId)) ?? containerId,
-                index: drag.originIndex
+                index: listIndex(drag.originIndex, in: drag.originId)
             )
         }
     }
@@ -1023,13 +1023,17 @@ public final class HypenDndCoordinator {
             }
             let fromPath = drag.originId.flatMap { bindPath(of: $0) }
             let toPath = bindPath(of: destinationId)
-            if sameList, let toPath = toPath, let fromIndex = drag.originIndex {
+            // A windowed list composes only items [start, end): name
+            // whole-list positions in the reserved write.
+            let toIndex = index + windowStart(destinationId)
+            if sameList, let toPath = toPath, let fromIndex = listIndex(drag.originIndex, in: drag.originId) {
                 dispatch(action: HypenDnd.reorderAction, payload: [
-                    "path": toPath, "from": fromIndex, "to": index,
+                    "path": toPath, "from": fromIndex, "to": toIndex,
                 ])
-            } else if !sameList, let fromPath = fromPath, let toPath = toPath, let fromIndex = drag.originIndex {
+            } else if !sameList, let fromPath = fromPath, let toPath = toPath,
+                      let fromIndex = listIndex(drag.originIndex, in: drag.originId) {
                 dispatch(action: HypenDnd.reorderAction, payload: [
-                    "fromPath": fromPath, "from": fromIndex, "toPath": toPath, "to": index,
+                    "fromPath": fromPath, "from": fromIndex, "toPath": toPath, "to": toIndex,
                 ])
             } else if !sameList, (fromPath != nil) != (toPath != nil), !warnedMixedBind {
                 warnedMixedBind = true
@@ -1052,7 +1056,7 @@ public final class HypenDndCoordinator {
             updateGhost(drag, offset: result.ghostOffset)
             var path: String?
             if let bind = bindPath(of: boardId) {
-                if let index = drag.originIndex {
+                if let index = listIndex(drag.originIndex, in: drag.originId) {
                     path = DndGeometry.userPinPath(bindPath: bind, index: index)
                 }
             } else if let group = spec.group {
@@ -1280,6 +1284,20 @@ public final class HypenDndCoordinator {
 
     private func indexOf(container: HypenElement, itemId: String) -> Int? {
         draggableItems(container).firstIndex(of: itemId)
+    }
+
+    /// First materialized item of a windowed list (`__virt.window.start`),
+    /// else 0. A sortable / pinboard inside a virtualized list only composes
+    /// items `[start, end)`, so its child indices are window-relative.
+    private func windowStart(_ containerId: String?) -> Int {
+        containerId.flatMap { renderer.getElement($0)?.virtWindow?.start } ?? 0
+    }
+
+    /// A composed-child [index] of [containerId] as a whole-list position —
+    /// what reserved writes and event locations name (Android's
+    /// `absIndexLocked`). Internal geometry stays window-relative.
+    private func listIndex(_ index: Int?, in containerId: String?) -> Int? {
+        index.map { $0 + windowStart(containerId) }
     }
 
     // MARK: - Labels (§4.2)

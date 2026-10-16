@@ -5,10 +5,12 @@ import SwiftUI
 ///
 /// The container declares `total` slots. Slot `i` renders the materialized
 /// child(ren) for item `i` when `start ≤ i < end`, else a placeholder sized
-/// to the current item-size estimate (§2). Each slot reports its own
-/// visibility (`onAppear` / `onDisappear`) to a ``VirtViewportTracker``; once
-/// per main-actor turn the tracker applies the §3 overscan and reporting
-/// rules and the wanted range goes to the engine through
+/// to the current item-size estimate (§2). The visible range comes from the
+/// owned `ScrollView`'s geometry (`onScrollGeometryChange`, iOS 18 /
+/// macOS 15) when there is one, else from each slot's `onAppear` /
+/// `onDisappear` (a few slots wide: lazy stacks prefetch). Once per
+/// main-actor turn a ``VirtViewportTracker`` applies the §3 overscan and
+/// reporting rules and the wanted range goes to the engine through
 /// ``HypenRenderer/reportListViewport(listId:start:end:)``.
 ///
 /// The slot mapping, size estimate and reporting decisions are pure
@@ -37,6 +39,11 @@ struct VirtualizedLazyStack: View {
     let decorateChild: @MainActor (HypenElementView, HypenElement?) -> AnyView
 
     @State private var tracker = VirtViewportTracker()
+
+    /// Component handlers (`typeName`) that render `__virt.window` through
+    /// this view. Any other windowed element renders as a `Column`
+    /// (`HypenElementContentView.componentHandler(for:)`).
+    static let windowAwareTypes: Set<String> = ["list", "grid", "column", "row"]
 
     // Explicit: the private `@State` would make the memberwise init private.
     init(
@@ -75,6 +82,10 @@ struct VirtualizedLazyStack: View {
                 ScrollView(axis == .vertical ? .vertical : .horizontal, showsIndicators: true) {
                     container(slots: slots, size: size)
                 }
+                .modifier(VirtScrollGeometryReader(axis: axis) { offset, extent in
+                    tracker.scrolled(offset: offset, extent: extent)
+                    scheduleEvaluation()
+                })
             } else {
                 container(slots: slots, size: size)
             }
@@ -84,7 +95,7 @@ struct VirtualizedLazyStack: View {
     }
 
     @ViewBuilder
-    private func container(slots: [Virtualization.Slot], size: CGFloat) -> some View {
+    private func container(slots: Virtualization.Slots, size: CGFloat) -> some View {
         if columns > 1 {
             let gridColumns = Array(repeating: GridItem(.flexible(), spacing: spacing), count: columns)
             LazyVGrid(columns: gridColumns, spacing: spacing) {
@@ -102,7 +113,7 @@ struct VirtualizedLazyStack: View {
         }
     }
 
-    private func slotViews(_ slots: [Virtualization.Slot], size: CGFloat) -> some View {
+    private func slotViews(_ slots: Virtualization.Slots, size: CGFloat) -> some View {
         ForEach(slots, id: \.id) { slot in
             slotView(slot, size: size)
                 .onAppear {
@@ -175,14 +186,47 @@ struct VirtualizedLazyStack: View {
         tracker.evaluationScheduled = true
         let renderer = self.renderer
         let listId = self.listId
+        let spacing = Double(self.spacing)
+        let columns = self.columns
         Task { @MainActor in
             tracker.evaluationScheduled = false
             guard let window = renderer.getElement(listId)?.virtWindow else { return }
-            if let wanted = tracker.evaluate(window) {
+            if let wanted = tracker.evaluate(window, spacing: spacing, columns: columns) {
                 renderer.reportListViewport(listId: listId, start: wanted.start, end: wanted.end)
             }
         }
     }
+}
+
+/// Feeds the owned `ScrollView`'s visible extent (content coordinates along
+/// [axis]) to the tracker where SwiftUI exposes it (iOS 18 / macOS 15 /
+/// tvOS 18 / watchOS 11); a no-op before that, leaving the per-slot
+/// `onAppear` / `onDisappear` range in charge.
+private struct VirtScrollGeometryReader: ViewModifier {
+    let axis: Axis
+    let onChange: @MainActor (_ offset: Double, _ extent: Double) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        let vertical = axis == .vertical
+        if #available(iOS 18.0, macOS 15.0, tvOS 18.0, watchOS 11.0, *) {
+            content.onScrollGeometryChange(for: VirtScrollExtent.self) { geometry in
+                let rect = geometry.visibleRect
+                return vertical
+                    ? VirtScrollExtent(offset: Double(rect.minY), extent: Double(rect.height))
+                    : VirtScrollExtent(offset: Double(rect.minX), extent: Double(rect.width))
+            } action: { _, visible in
+                onChange(visible.offset, visible.extent)
+            }
+        } else {
+            content
+        }
+    }
+}
+
+private struct VirtScrollExtent: Equatable, Sendable {
+    var offset: Double
+    var extent: Double
 }
 
 extension HypenElement {

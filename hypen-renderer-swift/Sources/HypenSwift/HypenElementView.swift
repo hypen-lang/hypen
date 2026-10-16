@@ -98,6 +98,21 @@ struct HypenElementContentView: View {
         }
     }
 
+    /// The element's handler. A windowed container (`__virt.window`) whose
+    /// handler does not render the window itself — a `Box`, `Stack`, `Card`
+    /// or unknown type whose sole child is a lazy `ForEach` — renders as a
+    /// `Column`, so it still declares `total` slots and reports its viewport
+    /// (hypen-web/docs/virtualization.md §5) instead of freezing at the
+    /// engine's initial window.
+    private func componentHandler(for element: HypenElement) -> (any ComponentHandler)? {
+        let handler = componentRegistry.getHandler(for: element.elementType)
+        guard element.virtWindow != nil,
+              !VirtualizedLazyStack.windowAwareTypes.contains(handler?.typeName ?? "") else {
+            return handler
+        }
+        return componentRegistry.getHandler(for: "column") ?? handler
+    }
+
     @ViewBuilder
     private func renderVisibleElement(_ element: HypenElement) -> some View {
         // Event-dispatch plane of the exiting-subtree exclusion: the
@@ -147,7 +162,7 @@ struct HypenElementContentView: View {
             || !(element.getBoolProp("enabled.0") ?? element.getBoolProp("enabled") ?? true)
 
         // Get component handler or use fallback
-        if let handler = componentRegistry.getHandler(for: element.elementType) {
+        if let handler = componentHandler(for: element) {
             if hasResponsiveVariants || hasStateVariants || hasCombinedVariants {
                 // Use variant-aware rendering
                 VariantAwareView(

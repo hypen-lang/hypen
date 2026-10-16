@@ -3,8 +3,9 @@ import XCTest
 
 /// The renderer-side window math from hypen-web/docs/virtualization.md.
 /// Mirrors hypen-web/tests/virtualization-math.test.ts case for case (the
-/// reference every native port aligns with), plus the Swift-only slot
-/// mapping and viewport tracker used by the lazy containers.
+/// reference every native port aligns with; Android's VirtualizationMathTest
+/// carries the same cases), plus the slot mapping, wire message and viewport
+/// tracker used by the lazy containers.
 final class VirtualizationMathTests: XCTestCase {
     typealias V = Virtualization
 
@@ -77,6 +78,29 @@ final class VirtualizationMathTests: XCTestCase {
         XCTAssertEqual(p.trailing, 400)
     }
 
+    // MARK: windowRows
+
+    func testWindowRowsIsTheItemCountForAList() {
+        XCTAssertEqual(V.windowRows(VirtWindow(total: 100, start: 40, end: 70)), 30)
+    }
+
+    func testWindowRowsCountsEveryGridRowTheWindowTouches() {
+        XCTAssertEqual(V.windowRows(VirtWindow(total: 30, start: 9, end: 18), columns: 3), 3)
+        XCTAssertEqual(V.windowRows(VirtWindow(total: 30, start: 10, end: 17), columns: 3), 3)
+    }
+
+    // MARK: childrenPerItem
+
+    func testChildrenPerItemGroupsAMultiNodeTemplatesChildren() {
+        XCTAssertEqual(V.childrenPerItem(VirtWindow(total: 100, start: 10, end: 20), childCount: 10), 1)
+        XCTAssertEqual(V.childrenPerItem(VirtWindow(total: 100, start: 10, end: 20), childCount: 30), 3)
+    }
+
+    func testChildrenPerItemIsAtLeastOne() {
+        XCTAssertEqual(V.childrenPerItem(VirtWindow(total: 100, start: 10, end: 10), childCount: 0), 1)
+        XCTAssertEqual(V.childrenPerItem(VirtWindow(total: 100, start: 10, end: 20), childCount: 0), 1)
+    }
+
     // MARK: visibleRange
 
     func testVisibleRangeMapsTheScrollOffsetToItems() {
@@ -136,11 +160,45 @@ final class VirtualizationMathTests: XCTestCase {
                                       wanted: wanted, lastReported: wanted))
     }
 
-    // MARK: Slot mapping (§5, Swift-only)
+    // MARK: viewportReport
+
+    private let top = VirtWindow(total: 1000, start: 0, end: 20)
+
+    func testViewportReportNothingWhileTheWindowCoversTheVisibleRange() {
+        XCTAssertNil(V.viewportReport(top, geometry: ViewportGeometry(size: 50, scrolledPast: 0, viewportExtent: 500),
+                                      lastReported: nil))
+    }
+
+    func testViewportReportTheOverscannedRangeOnceTheUserScrollsPastTheWindow() {
+        let geometry = ViewportGeometry(size: 50, scrolledPast: 2000, viewportExtent: 500)
+        // visible [40,50) → one viewport (10 items) of overscan each side.
+        XCTAssertEqual(V.viewportReport(top, geometry: geometry, lastReported: nil), ItemRange(start: 30, end: 60))
+        XCTAssertNil(V.viewportReport(top, geometry: geometry, lastReported: ItemRange(start: 30, end: 60)))
+    }
+
+    func testViewportReportCountsOnlyThePartOfTheViewportOverAListThatStartsBelowItsTop() {
+        let short = VirtWindow(total: 1000, start: 0, end: 2)
+        // The list starts 100pt down a 300pt viewport: 200pt (4 items) of it shows.
+        XCTAssertEqual(V.viewportReport(short, geometry: ViewportGeometry(size: 50, scrolledPast: -100, viewportExtent: 300),
+                                        lastReported: nil),
+                       ItemRange(start: 0, end: 9))
+        // Entirely below the viewport: nothing is visible, nothing to report.
+        XCTAssertNil(V.viewportReport(short, geometry: ViewportGeometry(size: 50, scrolledPast: -400, viewportExtent: 300),
+                                      lastReported: nil))
+    }
+
+    func testViewportReportGridsReportWholeRows() {
+        let grid = VirtWindow(total: 90, start: 0, end: 9)
+        XCTAssertEqual(V.viewportReport(grid, geometry: ViewportGeometry(size: 100, scrolledPast: 300, viewportExtent: 200, columns: 3),
+                                        lastReported: nil),
+                       ItemRange(start: 3, end: 21))
+    }
+
+    // MARK: Slot mapping (§5)
 
     func testSlotsDeclareTotalWithItemsInsideTheWindow() {
         let w = VirtWindow(total: 6, start: 2, end: 4)
-        let slots = V.slots(w, childIds: ["a", "b"])
+        let slots = Array(V.slots(w, childIds: ["a", "b"]))
         XCTAssertEqual(slots, [
             .placeholder(index: 0),
             .placeholder(index: 1),
@@ -155,7 +213,7 @@ final class VirtualizationMathTests: XCTestCase {
     func testSlotsGroupMultiNodeTemplates() {
         let w = VirtWindow(total: 4, start: 1, end: 3)
         XCTAssertEqual(V.childrenPerItem(w, childCount: 6), 3)
-        XCTAssertEqual(V.slots(w, childIds: ["a1", "a2", "a3", "b1", "b2", "b3"]), [
+        XCTAssertEqual(Array(V.slots(w, childIds: ["a1", "a2", "a3", "b1", "b2", "b3"])), [
             .placeholder(index: 0),
             .item(index: 1, childIds: ["a1", "a2", "a3"]),
             .item(index: 2, childIds: ["b1", "b2", "b3"]),
@@ -166,7 +224,7 @@ final class VirtualizationMathTests: XCTestCase {
     func testSlotsLeaveMissingChildrenAsPlaceholders() {
         // A window of 3 items with only 2 children (a batch still settling).
         let w = VirtWindow(total: 5, start: 1, end: 4)
-        XCTAssertEqual(V.slots(w, childIds: ["a", "b"]), [
+        XCTAssertEqual(Array(V.slots(w, childIds: ["a", "b"])), [
             .placeholder(index: 0),
             .item(index: 1, childIds: ["a"]),
             .item(index: 2, childIds: ["b"]),
@@ -177,9 +235,9 @@ final class VirtualizationMathTests: XCTestCase {
 
     func testSlotsForAnEmptyWindowAreAllPlaceholders() {
         let w = VirtWindow(total: 3, start: 0, end: 0)
-        XCTAssertEqual(V.childrenPerItem(w, childCount: 0), 0)
-        XCTAssertEqual(V.slots(w, childIds: []), [.placeholder(index: 0), .placeholder(index: 1), .placeholder(index: 2)])
-        XCTAssertEqual(V.slots(VirtWindow(total: 0, start: 0, end: 0), childIds: []), [])
+        XCTAssertEqual(V.childrenPerItem(w, childCount: 0), 1)
+        XCTAssertEqual(Array(V.slots(w, childIds: [])), [.placeholder(index: 0), .placeholder(index: 1), .placeholder(index: 2)])
+        XCTAssertTrue(V.slots(VirtWindow(total: 0, start: 0, end: 0), childIds: []).isEmpty)
     }
 
     func testSlotIdsKeyRowsByNodeAndPlaceholdersByIndex() {
@@ -211,7 +269,7 @@ final class VirtualizationMathTests: XCTestCase {
         // Scroll to 40..50.
         for i in 0..<10 { tracker.slotDisappeared(i) }
         for i in 40..<50 { tracker.slotAppeared(i) }
-        XCTAssertEqual(tracker.visibleRange(total: 1000), ItemRange(start: 40, end: 50))
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 40, end: 50))
         XCTAssertEqual(tracker.evaluate(w), ItemRange(start: 30, end: 60))
         XCTAssertNil(tracker.evaluate(w), "never the same range twice")
         XCTAssertEqual(tracker.lastReported, ItemRange(start: 30, end: 60))
@@ -221,14 +279,41 @@ final class VirtualizationMathTests: XCTestCase {
         // Placeholder → row swap: the row's onAppear can precede the
         // placeholder's onDisappear for the same index.
         let tracker = VirtViewportTracker()
+        let ten = VirtWindow(total: 10, start: 0, end: 0)
         tracker.slotAppeared(5)
         tracker.slotAppeared(5)
         tracker.slotDisappeared(5)
-        XCTAssertEqual(tracker.visibleRange(total: 10), ItemRange(start: 5, end: 6))
+        XCTAssertEqual(tracker.visibleRange(ten), ItemRange(start: 5, end: 6))
         tracker.slotDisappeared(5)
-        XCTAssertNil(tracker.visibleRange(total: 10))
+        XCTAssertNil(tracker.visibleRange(ten))
         tracker.slotDisappeared(5) // unbalanced: ignored
-        XCTAssertNil(tracker.visibleRange(total: 10))
+        XCTAssertNil(tracker.visibleRange(ten))
+    }
+
+    func testTrackerPrefersTheScrollGeometry() {
+        let tracker = VirtViewportTracker()
+        let w = VirtWindow(total: 1000, start: 0, end: 30, estimatedSize: 40)
+        // Prefetched slots appear well past the screen...
+        for i in 0..<20 { tracker.slotAppeared(i) }
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 20))
+        // ...the geometry says what is actually on screen: rows 40 + 10 apart.
+        tracker.scrolled(offset: 500, extent: 200)
+        XCTAssertEqual(tracker.visibleRange(w, spacing: 10), ItemRange(start: 10, end: 14))
+        XCTAssertEqual(tracker.evaluate(w, spacing: 10), nil, "covered by the window")
+        // A grid counts rows.
+        XCTAssertEqual(tracker.visibleRange(w, spacing: 10, columns: 3), ItemRange(start: 30, end: 42))
+        // An unlaid-out container (zero extent) is ignored.
+        let fresh = VirtViewportTracker()
+        fresh.slotAppeared(3)
+        fresh.scrolled(offset: 0, extent: 0)
+        XCTAssertEqual(fresh.visibleRange(w), ItemRange(start: 3, end: 4))
+    }
+
+    func testSlotsResolveOnDemand() {
+        let slots = V.slots(VirtWindow(total: 10_000, start: 40, end: 42), childIds: ["a", "b"])
+        XCTAssertEqual(slots.count, 10_000)
+        XCTAssertEqual(slots[41], .item(index: 41, childIds: ["b"]))
+        XCTAssertEqual(slots[9_999], .placeholder(index: 9_999))
     }
 
     func testTrackerItemSizeAveragesTheWindowsMeasurements() {

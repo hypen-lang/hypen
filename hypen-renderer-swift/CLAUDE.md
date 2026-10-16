@@ -373,6 +373,51 @@ offsets, focus, and in-flight animations across the detach → attach
 cycle. Not implemented today; ship if/when scroll-position loss becomes
 a real complaint.
 
+## List Virtualization (`__virt.window`)
+
+Always on (contract: `hypen-web/docs/virtualization.md`). The engine windows
+every List/Grid/lazy ForEach and sets `__virt.window` =
+`{total,start,end,estimatedSize?}` on the list element. `HypenRenderer`
+lifts it onto `HypenElement.virtWindow` on create/setProp (never into
+`props`, so it never reaches the applicator pipeline) and clears it on
+removeProp, which restores the normal container rendering.
+
+- `Virtualization/VirtualizationMath.swift` — pure Foundation (builds and
+  tests on Linux). Port of `@hypen-space/core/virtualization`
+  (parseVirtWindow, childrenPerItem, windowRows, itemSize, windowPadding,
+  visibleRange, wantedRange, shouldReport, viewportReport — same names and cases as the TS reference and Android's
+  `virt/Virtualization.kt`), the §5 slot mapping (`Virtualization.Slots`, a
+  `RandomAccessCollection` resolved on demand), the §4 `viewportMessage`, and
+  `VirtViewportTracker`. `VirtualizationMathTests` mirrors
+  `hypen-web/tests/virtualization-math.test.ts` case for case — keep aligned.
+- `Virtualization/VirtualizedLazyStack.swift` — `LazyVStack` / `LazyHStack` /
+  `LazyVGrid` of `total` slots (rows keyed `n:<nodeId>`, placeholders
+  `p:<index>` sized at the measured average). Used by List, Column, Row and
+  Grid; any other windowed element (`Box`, `Stack`, unknown types) renders as
+  a Column (`HypenElementContentView.componentHandler(for:)`). Visible range:
+  `onScrollGeometryChange` when the stack owns its `ScrollView` and the OS has
+  it (iOS 18 / macOS 15 / tvOS 18 / watchOS 11), else per-slot
+  `onAppear`/`onDisappear`. Evaluated once per main-actor turn.
+- Reports go `HypenRenderer.reportListViewport` → `viewportReporter` (wired
+  in `HypenView` and the embedded app) → `RemoteEngine.setListViewport` /
+  the embedded engine's `setListViewport`.
+- DnD: a sortable / pinboard inside a windowed list names whole-list indices
+  in its reserved writes and event locations (`HypenDndCoordinator.listIndex`).
+
+The SwiftUI files cannot be compiled on Linux; verify on macOS/Xcode.
+
+Known gaps:
+- **Over-wide visible range** under an ancestor scroller and before iOS 18:
+  `onAppear` fires for prefetched slots, so reports overscan a little more
+  than §3 asks. Harmless (a slightly larger window), not wrong.
+- **Scroll anchoring (§2)** is not implemented: a placeholder replaced by a
+  row of a different height above the viewport can shift content by the
+  difference. Placeholders use the measured average, which keeps it small.
+  (`scrollPosition(id:)`, iOS 17, is the likely fix.)
+- **Accessibility position**: SwiftUI has no public "item n of total" for
+  arbitrary views, so rows do not expose the whole-list position
+  (placeholders are `accessibilityHidden`).
+
 ## Feature Parity with hypen-android
 
 HypenSwift now has **full feature parity** with hypen-android including:
