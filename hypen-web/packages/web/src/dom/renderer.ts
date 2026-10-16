@@ -258,10 +258,17 @@ import { createSafeAreaHandler } from "./components/safearea.js";
 import { createImageHandler } from "./components/image.js";
 import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
 import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
+import { DomVirtualizer, VIRT_WINDOW_PROP } from "./virtualize.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
   dispatchAction(name: string, payload?: any): void;
+  /**
+   * List virtualization (docs/virtualization.md §3): report the item range a
+   * windowed list needs. Optional — present on BaseEngine and RemoteEngine;
+   * an engine without it simply never receives viewport reports.
+   */
+  setListViewport?(listId: string, start: number, end: number): void;
 }
 
 export interface DOMRendererOptions {
@@ -512,6 +519,13 @@ export class DOMRenderer {
     applyApplicator: (element, name, value) => this.applicators.apply(element, name, value),
   });
 
+  /**
+   * `__virt.window` runtime: padding stand-ins for the rows outside a lazy
+   * list's window, scroll anchoring, row aria positions, and viewport
+   * reports to the engine. See `virtualize.ts`.
+   */
+  private virt = new DomVirtualizer(() => this.engine);
+
   constructor(
     container: HTMLElement,
     engine: IEngine,
@@ -731,6 +745,10 @@ export class DOMRenderer {
     // matching and playback happen in `animator.flush()`.
     this.animator.prepareShared(domPatches, (nodeId) => this.nodes.get(nodeId));
 
+    // Virtualization pre-pass: snapshot the scroll anchor of every list
+    // whose window this batch moves, before its rows change.
+    this.virt.prepareBatch(domPatches);
+
     // Apply DOM patches normally. Child-change notifications to native
     // hosts are collected for the whole pass and delivered once per host
     // below, after every insert/move/remove of the batch has landed.
@@ -743,6 +761,11 @@ export class DOMRenderer {
     } finally {
       if (ownsChildrenBatch) this.flushChildrenChanged();
     }
+
+    // `__virt.window` applies after the batch's structural patches: lay out
+    // the windows the batch touched (padding, aria, anchoring) and queue
+    // their viewport checks.
+    this.virt.flush();
 
     // Forward canvas-subtree patches to their CanvasRenderer instances
     if (canvasBatches) {
@@ -1352,18 +1375,21 @@ export class DOMRenderer {
     // applicators (or their CSS fallback).
     let animProps: Record<string, any> | null = null;
     let hasDndProps = false;
+    let virtWindow: unknown = undefined;
     for (const key of Object.keys(propsObj)) {
       if (key.startsWith(ANIM_PROP_PREFIX)) {
         (animProps ??= {})[key] = propsObj[key];
       } else if (key.startsWith(DND_PROP_PREFIX)) {
         hasDndProps = true;
+      } else if (key === VIRT_WINDOW_PROP) {
+        virtWindow = propsObj[key];
       }
     }
     const fullProps = propsObj;
-    if (animProps || hasDndProps) {
+    if (animProps || hasDndProps || virtWindow !== undefined) {
       const rest: Record<string, any> = {};
       for (const [key, value] of Object.entries(propsObj)) {
-        if (!key.startsWith(ANIM_PROP_PREFIX) && !key.startsWith(DND_PROP_PREFIX)) rest[key] = value;
+        if (!key.startsWith(ANIM_PROP_PREFIX) && !key.startsWith(DND_PROP_PREFIX) && key !== VIRT_WINDOW_PROP) rest[key] = value;
       }
       propsObj = rest;
     }
@@ -1461,6 +1487,12 @@ export class DOMRenderer {
     }
 
     this.nodes.set(id, element);
+    this.virt.noteCreate(id, propsObj);
+    // The engine sends `__virt.window` as a setProp; accept it on a create
+    // too (a replayed/serialized tree) — never as an ordinary prop.
+    if (virtWindow !== undefined) {
+      this.virt.setWindow(id, element, virtWindow);
+    }
     // Only Text elements can ever register a binding (`syncTextBinding`
     // requires dataset.hypenType === "text"), and its first act is a
     // DOMStringMap read — a real attribute access. Skipping the call for
@@ -1504,6 +1536,14 @@ export class DOMRenderer {
   private onSetProp(id: string, name: string, value: any): void {
     const element = this.nodes.get(id);
     if (!element) return;
+
+    // List virtualization: the window description is never an ordinary
+    // prop (no attribute, no style, no applicator).
+    if (name === VIRT_WINDOW_PROP) {
+      this.virt.setWindow(id, element, value);
+      return;
+    }
+    this.virt.noteProp(id, name, value);
 
     // `__dnd.*` channel props route to the DnD runtime, never to applicators.
     if (name.startsWith(DND_PROP_PREFIX)) {
@@ -1743,6 +1783,12 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (!element) return;
 
+    if (name === VIRT_WINDOW_PROP) {
+      this.virt.removeWindow(id);
+      return;
+    }
+    this.virt.noteProp(id, name, undefined);
+
     if (name.startsWith(DND_PROP_PREFIX)) {
       if ((name === "__dnd.pinX" || name === "__dnd.pinY") && this.dnd.deferEngineRemoveProp(id, name)) return;
       this.dnd.removeDndProp(id, element, name);
@@ -1887,6 +1933,8 @@ export class DOMRenderer {
       this.queueChildrenChanged(parent);
       reconcileColumnWidthDemandFrom(child);
     }
+    if (previousParent !== parent) this.virt.noteChildrenChanged(previousParent);
+    this.virt.noteChildrenChanged(parent);
 
     // Dialog entering the document (insert or cached re-attach): queue mount
     // focus for the end of the batch (flushDialogMounts). Already-open
@@ -1933,6 +1981,7 @@ export class DOMRenderer {
     const element = this.nodes.get(id);
     if (element) {
       this.animator.noteAttach(element);
+      this.virt.noteAttach(element);
       // Scroll-source scrubs anywhere in the re-attached subtree re-arm:
       // the attach patch names only the root, but descendants' scroll
       // listeners were detached with the route (Option G).
@@ -1986,6 +2035,7 @@ export class DOMRenderer {
       this.queueChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
+    this.virt.noteChildrenChanged(previousParent);
 
     // Any open dialog inside the detached subtree just left the document:
     // restore its trigger (a trigger detached along with it fails the
@@ -2091,6 +2141,7 @@ export class DOMRenderer {
       this.queueChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
+    this.virt.noteChildrenChanged(previousParent);
 
     // Restore-to-trigger for any open dialog in the removed subtree, before
     // the node map forgets it. The removed subtree is gone for good, so the
@@ -2101,6 +2152,7 @@ export class DOMRenderer {
     this.handlerProps.delete(id);
     this.dropTextBinding(id);
     this.dialogIds.delete(id);
+    this.virt.forget(id);
     this.animator.forget(id);
     // A remove mid-drag cancels everything and releases capture cleanly.
     this.scrubber.forget(id);
@@ -2158,6 +2210,7 @@ export class DOMRenderer {
       this.handlerProps.delete(descId);
       this.dropTextBinding(descId);
       this.dialogIds.delete(descId);
+      this.virt.forget(descId);
       this.animator.forget(descId);
       this.scrubber.forget(descId);
       this.dnd.forget(descId);
@@ -2250,6 +2303,7 @@ export class DOMRenderer {
     this.animator.reset();
     this.scrubber.reset();
     this.dnd.reset();
+    this.virt.reset();
     this.rootId = null;
     this.dialogIds.clear();
     this.dialogOpeners.clear();
