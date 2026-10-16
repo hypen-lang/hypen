@@ -87,7 +87,7 @@ function resolveGap(props: Record<string, any>): { row: number; column: number }
 }
 
 /** Gap along a container's main axis: rows stack vertically, columns across. */
-function mainAxisGap(props: Record<string, any>, isCol: boolean): number {
+export function mainAxisGap(props: Record<string, any>, isCol: boolean): number {
   const { row, column } = resolveGap(props);
   return isCol ? row : column;
 }
@@ -98,7 +98,7 @@ const ROW_FLOW_TYPES = new Set(["row", "tabs", "badge"]);
  * Does this node lay its children out along the vertical axis?
  * Explicit `flexDirection` (from `.tw("flex-row")` / `flex-col`) always wins.
  */
-function isColumnFlow(node: VirtualNode): boolean {
+export function isColumnFlow(node: VirtualNode): boolean {
   const type = node.type.toLowerCase();
   const dir = node.props.flexDirection;
   if (dir === "row" || dir === "row-reverse") return false;
@@ -122,6 +122,26 @@ function addSafeAreaPadding(p: BoxSpacing, props: Record<string, any>): void {
   const edges = resolveSafeAreaEdges(props.edges);
   for (const edge of SAFE_AREA_EDGES) {
     if (edges.has(edge)) p[edge] += insets[edge];
+  }
+}
+
+/**
+ * Windowed list (`__virt.window`, docs/virtualization.md §2): the space
+ * standing in for the items outside the window is padding on the list's own
+ * box along its scroll axis — never sibling nodes. A list that scrolls itself
+ * gets no padding here (it would grow the box past its own size); the
+ * renderer shifts its rows after layout instead (see `virt-list.ts`).
+ * Mutates `p` in place.
+ */
+function addVirtPadding(p: BoxSpacing, node: VirtualNode): void {
+  const v = node.virt;
+  if (!v || v.selfScroll) return;
+  if (v.horizontal) {
+    p.left += v.leading;
+    p.right += v.trailing;
+  } else {
+    p.top += v.leading;
+    p.bottom += v.trailing;
   }
 }
 
@@ -550,7 +570,8 @@ function buildTaffyStyle(
   const parentIsRow = parent !== null && !parentIsStack && !parentIsCol;
   const parentMainAxisScrolls =
     (parentIsRow && parentScrollAxes.x) || (parentIsCol && parentScrollAxes.y);
-  const defaultShrink = INTRINSIC_SIZED.has(type) || parentMainAxisScrolls ? 0 : 1;
+  // A windowed list's rows never shrink into its stand-in padding.
+  const defaultShrink = INTRINSIC_SIZED.has(type) || parentMainAxisScrolls || parent?.virt ? 0 : 1;
   style.flexShrink = props.flexShrink !== undefined ? parseFloat(props.flexShrink) : defaultShrink;
   if (props.flexBasis !== undefined) {
     style.flexBasis = toDimension(props.flexBasis);
@@ -834,7 +855,8 @@ function buildTaffyStyle(
   if (props.paddingBottom !== undefined) p.bottom = cssLengthToPx(props.paddingBottom) ?? 0;
   if (props.paddingLeft !== undefined) p.left = cssLengthToPx(props.paddingLeft) ?? 0;
   if (type === "safearea") addSafeAreaPadding(p, props);
-  style.padding = { top: p.top, right: p.right, bottom: p.bottom, left: p.left };
+  addVirtPadding(p, node);
+  style.padding ={ top: p.top, right: p.right, bottom: p.bottom, left: p.left };
 
   // --- Border ----------------------------------------------------------------
   const bw = resolvedBorderWidth(props);
@@ -1626,7 +1648,11 @@ function readMarginFallback(props: Record<string, any>): BoxSpacing {
   return m;
 }
 
-function readPaddingFallback(props: Record<string, any>, type: string): BoxSpacing {
+function readPaddingFallback(
+  props: Record<string, any>,
+  type: string,
+  node?: VirtualNode,
+): BoxSpacing {
   const p = parseSpacing(basePaddingValue(props, type));
   if (props.paddingHorizontal !== undefined) {
     p.left = cssLengthToPx(props.paddingHorizontal) ?? 0;
@@ -1641,13 +1667,18 @@ function readPaddingFallback(props: Record<string, any>, type: string): BoxSpaci
   if (props.paddingBottom !== undefined) p.bottom = cssLengthToPx(props.paddingBottom) ?? 0;
   if (props.paddingLeft !== undefined) p.left = cssLengthToPx(props.paddingLeft) ?? 0;
   if (type === "safearea") addSafeAreaPadding(p, props);
+  if (node) addVirtPadding(p, node);
   return p;
 }
 
-function readBoxFallback(props: Record<string, any>, type: string): FallbackBox {
+function readBoxFallback(
+  props: Record<string, any>,
+  type: string,
+  node?: VirtualNode,
+): FallbackBox {
   return {
     margin: readMarginFallback(props),
-    padding: readPaddingFallback(props, type),
+    padding: readPaddingFallback(props, type, node),
     border: resolvedBorderWidth(props),
   };
 }
@@ -1823,7 +1854,7 @@ function measureFallback(
 
   const props = node.props;
   const type = node.type.toLowerCase();
-  const box = readBoxFallback(props, type);
+  const box = readBoxFallback(props, type, node);
   const insetW = box.padding.left + box.padding.right + box.border * 2;
   const insetH = box.padding.top + box.padding.bottom + box.border * 2;
 
@@ -2035,7 +2066,7 @@ function placeFallback(
   height: number,
 ): void {
   const props = node.props;
-  const box = readBoxFallback(props, node.type.toLowerCase());
+  const box = readBoxFallback(props, node.type.toLowerCase(), node);
   const borderWidth = box.border;
 
   node.layout = {
@@ -2168,7 +2199,7 @@ function placeChildrenFallback(ctx: CanvasRenderingContext2D, parent: VirtualNod
       const grow = childType === "spacer"
         ? 1
         : parseFloat(cp.flexGrow) || (Number.isFinite(flexShorthand) ? flexShorthand : 0);
-      const defaultShrink = INTRINSIC_SIZED.has(childType) || mainScrolls ? 0 : 1;
+      const defaultShrink = INTRINSIC_SIZED.has(childType) || mainScrolls || parent.virt ? 0 : 1;
       const shrink = cp.flexShrink !== undefined ? parseFloat(cp.flexShrink) : defaultShrink;
 
       items.push({

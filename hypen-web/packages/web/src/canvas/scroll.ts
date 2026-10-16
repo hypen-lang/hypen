@@ -670,6 +670,15 @@ export class ScrollManager {
       maxBottom = Math.max(maxBottom, relY + child.layout.height + child.layout.margin.bottom);
     }
 
+    // A self-scrolling windowed list: its rows were shifted past the
+    // leading stand-in space after layout, and the rows after the window
+    // exist only as trailing space — the scroll extent is padding + rows.
+    const v = node.virt;
+    if (v && v.selfScroll) {
+      if (v.horizontal) maxRight = Math.max(maxRight, v.leading) + v.trailing;
+      else maxBottom = Math.max(maxBottom, v.leading) + v.trailing;
+    }
+
     // Cap content size to the viewport on disabled axes — otherwise a
     // horizontal strip with tall children would report a phantom scrollHeight
     // and the touch handler would let users drag vertically into nothing.
