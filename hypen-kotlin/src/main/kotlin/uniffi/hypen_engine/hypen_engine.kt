@@ -844,8 +844,6 @@ internal object IntegrityCheckingUniffiLib {
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_set_module(): Short
 
-  external fun uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization(): Short
-
   external fun uniffi_hypen_engine_checksum_method_hypenengine_unregister_module(): Short
 
   external fun uniffi_hypen_engine_checksum_method_hypenengine_update_state(): Short
@@ -1106,12 +1104,6 @@ internal object UniffiLib {
   external fun uniffi_hypen_engine_fn_method_hypenengine_set_module(
     `ptr`: Long,
     `config`: RustBuffer.ByValue,
-    uniffi_out_err: UniffiRustCallStatus,
-  ): Unit
-
-  external fun uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(
-    `ptr`: Long,
-    `enabled`: Byte,
     uniffi_out_err: UniffiRustCallStatus,
   ): Unit
 
@@ -1885,9 +1877,6 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_module() != 9330.toShort()) {
-    throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
-  }
-  if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization() != 11207.toShort()) {
     throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
   }
   if (lib.uniffi_hypen_engine_checksum_method_hypenengine_unregister_module() != 32749.toShort()) {
@@ -3855,14 +3844,6 @@ public interface HypenEngineInterface {
   fun `setModule`(`config`: ModuleConfig)
 
   /**
-   * Opt in to list virtualization: lazy lists then materialize only a
-   * window of items, described by the `__virt.window` prop. Call before
-   * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
-   * `setVirtualization`.
-   */
-  fun `setVirtualization`(`enabled`: kotlin.Boolean)
-
-  /**
    * Drop a module and every action it declared.
    *
    * **Call on destroy only**, never on unmount: under the default
@@ -4507,24 +4488,6 @@ open class HypenEngine :
         UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_set_module(
           it,
           FfiConverterTypeModuleConfig.lower(`config`),
-          _status,
-        )
-      }
-    }
-
-  /**
-   * Opt in to list virtualization: lazy lists then materialize only a
-   * window of items, described by the `__virt.window` prop. Call before
-   * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
-   * `setVirtualization`.
-   */
-  @Throws(HypenException::class)
-  override fun `setVirtualization`(`enabled`: kotlin.Boolean) =
-    callWithHandle {
-      uniffiRustCallWithError(HypenException) { _status ->
-        UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(
-          it,
-          FfiConverterBoolean.lower(`enabled`),
           _status,
         )
       }

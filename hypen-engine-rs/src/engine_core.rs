@@ -699,15 +699,6 @@ impl EngineCore {
         patches
     }
 
-    /// Enable or disable list virtualization (see [`crate::ir::LazyList`]).
-    ///
-    /// A renderer that handles `__virt.window` and reports viewports turns
-    /// this on before the first render. Lists created while it is off expand
-    /// fully and stay that way until rebuilt.
-    pub fn set_virtualization(&mut self, enabled: bool) {
-        self.tree.virtualization = enabled;
-    }
-
     /// Move a lazy list's window to the renderer's visible range `[start,
     /// end)` (overscan included) and return the patches that materialize it.
     ///

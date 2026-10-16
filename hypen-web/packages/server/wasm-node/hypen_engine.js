@@ -931,15 +931,6 @@ class WasmEngine {
         wasm.wasmengine_setRenderCallback(this.__wbg_ptr, callback);
     }
     /**
-     * Opt in to list virtualization: lazy lists (`List`, `Grid`,
-     * `ForEach(…, lazy: true)`) then materialize only a window of items and
-     * describe it in the `__virt.window` prop. Call before the first render.
-     * @param {boolean} enabled
-     */
-    setVirtualization(enabled) {
-        wasm.wasmengine_setVirtualization(this.__wbg_ptr, enabled);
-    }
-    /**
      * Return the total number of nodes currently in the instance tree.
      * @returns {number}
      */

@@ -862,22 +862,11 @@ export abstract class BaseEngine {
   // ── List Virtualization ─────────────────────────────────────────────
 
   /**
-   * Opt in to list virtualization. Called by a RENDERER that handles the
-   * `__virt.window` prop and reports viewports — never by app code. Lazy
-   * lists (`List`, `Grid`, `ForEach(…, lazy: true)`) then materialize only
-   * a window of items; until a renderer opts in they expand fully, so a
-   * renderer that predates the protocol still shows every row.
-   */
-  setVirtualization(enabled: boolean): void {
-    const engine = this.ensureInitialized();
-    engine.setVirtualization(enabled);
-  }
-
-  /**
    * Report the item range `[start, end)` — visible rows plus overscan — of
    * the lazy list whose element is `listId` (the node carrying
    * `__virt.window`). Emits the patches that move its window. Ids naming no
-   * windowed list are ignored.
+   * windowed list are ignored. Renderer-facing (docs/virtualization.md):
+   * app code never calls it.
    */
   setListViewport(listId: string, start: number, end: number): void {
     const engine = this.ensureInitialized();

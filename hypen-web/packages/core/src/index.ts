@@ -428,6 +428,20 @@ export type {
 } from "./animation.js";
 
 // ============================================================================
+// LIST VIRTUALIZATION (__virt.window — shared renderer math)
+export {
+  VIRT_WINDOW_PROP,
+  DEFAULT_ITEM_SIZE,
+  MIN_OVERSCAN_ITEMS,
+  parseVirtWindow,
+  itemSize,
+  windowPadding,
+  visibleRange,
+  wantedRange,
+  shouldReport,
+} from "./virtualization.js";
+export type { VirtWindow, ItemRange } from "./virtualization.js";
+
 // DRAG & DROP (__dnd.* prop channel — shared renderer vocabulary)
 // ============================================================================
 

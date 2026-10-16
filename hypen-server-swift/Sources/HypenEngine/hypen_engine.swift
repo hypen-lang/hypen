@@ -1509,14 +1509,6 @@ public protocol HypenEngineProtocol: AnyObject, Sendable {
     func setModule(config: ModuleConfig) 
     
     /**
-     * Opt in to list virtualization: lazy lists then materialize only a
-     * window of items, described by the `__virt.window` prop. Call before
-     * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
-     * `setVirtualization`.
-     */
-    func setVirtualization(enabled: Bool) throws 
-    
-    /**
      * Drop a module and every action it declared.
      *
      * **Call on destroy only**, never on unmount: under the default
@@ -1981,20 +1973,6 @@ open func setModule(config: ModuleConfig)  {try! rustCall() {
     uniffi_hypen_engine_fn_method_hypenengine_set_module(
             self.uniffiCloneHandle(),
         FfiConverterTypeModuleConfig_lower(config),$0
-    )
-}
-}
-    
-    /**
-     * Opt in to list virtualization: lazy lists then materialize only a
-     * window of items, described by the `__virt.window` prop. Call before
-     * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
-     * `setVirtualization`.
-     */
-open func setVirtualization(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeHypenError_lift) {
-    uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(
-            self.uniffiCloneHandle(),
-        FfiConverterBool.lower(enabled),$0
     )
 }
 }
@@ -4089,9 +4067,6 @@ private let initializationResult: InitializationResult = {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_set_module() != 9330) {
-        return InitializationResult.apiChecksumMismatch
-    }
-    if (uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization() != 11207) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_unregister_module() != 32749) {

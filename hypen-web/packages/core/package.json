@@ -112,6 +112,12 @@
       "import": "./dist/dnd.js",
       "default": "./dist/dnd.js"
     },
+    "./virtualization": {
+      "types": "./dist/virtualization.d.ts",
+      "bun": "./src/virtualization.ts",
+      "import": "./dist/virtualization.js",
+      "default": "./dist/virtualization.js"
+    },
     "./result": {
       "types": "./dist/result.d.ts",
       "bun": "./src/result.ts",

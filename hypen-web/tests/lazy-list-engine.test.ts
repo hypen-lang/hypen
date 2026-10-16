@@ -1,8 +1,7 @@
 /**
- * List virtualization through the shipped wasm-node engine and BaseEngine's
- * renderer-facing wrappers: a renderer opts in with `setVirtualization`, the
- * engine materializes only a window of a `List`'s rows and describes it in
- * `__virt.window`, and `setListViewport` moves the window.
+ * List virtualization through the shipped wasm-node engine: a `List`
+ * materializes only a window of its rows, describes it in `__virt.window`,
+ * and BaseEngine's `setListViewport` moves the window. `lazy: false` opts out.
  */
 import { describe, expect, test } from "bun:test";
 import { Engine } from "../packages/server/src/engine";
@@ -10,15 +9,14 @@ import type { Patch } from "../packages/core/src/types";
 
 const LIST = `List(@state.items, key: "id", initialCount: 10) { Text("@{item.name}") }`;
 
-async function setup(virtualization: boolean) {
+async function setup(source = LIST) {
   const engine = new Engine();
   await engine.init();
   const batches: Patch[][] = [];
   engine.setRenderCallback((patches) => batches.push(patches));
-  engine.setVirtualization(virtualization);
   const items = Array.from({ length: 100 }, (_, i) => ({ id: i, name: `row ${i}` }));
   engine.setModule("Test", [], ["items"], { items });
-  engine.renderSource(LIST);
+  engine.renderSource(source);
   const patches = batches.flat();
   const list = patches.find(
     (p) => p.type === "create" && (p as { elementType?: string }).elementType === "List"
@@ -46,14 +44,16 @@ const windowProp = (patches: Patch[], listId: string) =>
   )?.value;
 
 describe("lazy List through the WASM engine", () => {
-  test("off by default: every row is created", async () => {
-    const { patches, listId } = await setup(false);
+  test("lazy: false creates every row", async () => {
+    const { patches, listId } = await setup(
+      `List(@state.items, key: "id", lazy: false) { Text("@{item.name}") }`
+    );
     expect(texts(patches)).toBe(100);
     expect(windowProp(patches, listId)).toBeUndefined();
   });
 
-  test("opted in: only the window is created, and the viewport moves it", async () => {
-    const { engine, batches, patches, listId } = await setup(true);
+  test("only the window is created, and the viewport moves it", async () => {
+    const { engine, batches, patches, listId } = await setup();
     expect(texts(patches)).toBe(10);
     expect(windowProp(patches, listId)).toEqual({ total: 100, start: 0, end: 10 });
 

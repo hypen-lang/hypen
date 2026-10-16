@@ -97,7 +97,6 @@ export const wasmengine_setContext: (a: number, b: number, c: number, d: any) =>
 export const wasmengine_setListViewport: (a: number, b: number, c: number, d: number, e: number) => void;
 export const wasmengine_setModule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => [number, number];
 export const wasmengine_setRenderCallback: (a: number, b: any) => void;
-export const wasmengine_setVirtualization: (a: number, b: number) => void;
 export const wasmengine_treeSize: (a: number) => number;
 export const wasmengine_unregisterModule: (a: number, b: number, c: number) => void;
 export const wasmengine_updateState: (a: number, b: number, c: number, d: any, e: number) => [number, number];

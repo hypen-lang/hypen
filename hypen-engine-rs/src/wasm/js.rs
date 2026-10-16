@@ -770,14 +770,6 @@ impl WasmEngine {
 
     // ── List Virtualization ─────────────────────────────────────────
 
-    /// Opt in to list virtualization: lazy lists (`List`, `Grid`,
-    /// `ForEach(…, lazy: true)`) then materialize only a window of items and
-    /// describe it in the `__virt.window` prop. Call before the first render.
-    #[wasm_bindgen(js_name = setVirtualization)]
-    pub fn set_virtualization(&mut self, enabled: bool) {
-        self.core.set_virtualization(enabled);
-    }
-
     /// Report the item range `[start, end)` (visible rows plus overscan) of
     /// the lazy list whose element is `listId`; emits the patches that move
     /// its window. Ids naming no windowed list are ignored.

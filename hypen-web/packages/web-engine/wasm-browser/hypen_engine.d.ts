@@ -271,12 +271,6 @@ export class WasmEngine {
      */
     setRenderCallback(callback: Function): void;
     /**
-     * Opt in to list virtualization: lazy lists (`List`, `Grid`,
-     * `ForEach(…, lazy: true)`) then materialize only a window of items and
-     * describe it in the `__virt.window` prop. Call before the first render.
-     */
-    setVirtualization(enabled: boolean): void;
-    /**
      * Return the total number of nodes currently in the instance tree.
      */
     treeSize(): number;
@@ -456,7 +450,6 @@ export interface InitOutput {
     readonly wasmengine_setListViewport: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmengine_setModule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => [number, number];
     readonly wasmengine_setRenderCallback: (a: number, b: any) => void;
-    readonly wasmengine_setVirtualization: (a: number, b: number) => void;
     readonly wasmengine_treeSize: (a: number) => number;
     readonly wasmengine_unregisterModule: (a: number, b: number, c: number) => void;
     readonly wasmengine_updateState: (a: number, b: number, c: number, d: any, e: number) => [number, number];

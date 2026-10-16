@@ -39,6 +39,7 @@ const entrypoints = [
   "./src/types.ts",
   "./src/animation.ts",
   "./src/dnd.ts",
+  "./src/virtualization.ts",
   "./src/result.ts",
   "./src/retry.ts",
   "./src/engine-base.ts",

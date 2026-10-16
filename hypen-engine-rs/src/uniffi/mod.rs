@@ -898,19 +898,6 @@ impl HypenEngine {
         Ok(state.lower_patches(patches))
     }
 
-    /// Opt in to list virtualization: lazy lists then materialize only a
-    /// window of items, described by the `__virt.window` prop. Call before
-    /// the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
-    /// `setVirtualization`.
-    pub fn set_virtualization(&self, enabled: bool) -> Result<(), HypenError> {
-        self.state
-            .lock()
-            .map_err(|e| HypenError::StateError(e.to_string()))?
-            .core
-            .set_virtualization(enabled);
-        Ok(())
-    }
-
     /// Report the item range `[start, end)` (visible rows plus overscan) of
     /// the lazy list whose element id is `list_id` and return the patches
     /// that move its window. Ids naming no windowed list return none.

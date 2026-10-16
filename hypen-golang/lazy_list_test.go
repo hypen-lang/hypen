@@ -5,17 +5,13 @@ import (
 	"testing"
 )
 
-// TestLazyListWindowing drives the WASI engine's list virtualization: a
-// renderer opts in with SetVirtualization, the engine materializes only a
-// window of a List's rows and reports it in `__virt.window`, and
-// SetListViewport moves the window.
+// TestLazyListWindowing drives the WASI engine's list virtualization: the
+// engine materializes only a window of a List's rows and reports it in
+// `__virt.window`, and SetListViewport moves the window.
 func TestLazyListWindowing(t *testing.T) {
 	engine := newTestEngine(t)
 	if err := engine.RegisterPrimitive("List"); err != nil {
 		t.Fatalf("register List: %v", err)
-	}
-	if err := engine.SetVirtualization(true); err != nil {
-		t.Fatalf("SetVirtualization: %v", err)
 	}
 
 	items := make([]any, 100)

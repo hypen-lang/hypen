@@ -981,13 +981,11 @@ fn create_foreach_ir_tree(
     let resolved_props = resolve_props_full(props, effective_state, None, ctx.data_sources);
 
     // Window only where `__virt.window` on the parent can describe this list
-    // alone: the renderer opted in, and the ForEach is the sole child of a
-    // real element (List/Grid always are). Anywhere else a lazy ForEach
-    // expands fully.
+    // alone: the ForEach is the sole child of a real element (List/Grid
+    // always are). Anywhere else a lazy ForEach expands fully.
     let window = lazy
         .filter(|_| {
-            ctx.tree.virtualization
-                && sole_child
+            sole_child
                 && parent_id.is_some()
                 && nearest_render_parent(ctx.tree, render_parent_hint.or(parent_id)) == parent_id
         })
@@ -1240,7 +1238,7 @@ fn emit_window_prop(
 ///
 /// `list_id` is the list's render parent — the element carrying
 /// `__virt.window` — or the `__ForEach` itself. Returns `false` when it
-/// names no windowed list (a non-lazy list, or virtualization off).
+/// names no windowed list.
 pub(crate) fn apply_list_viewport(
     ctx: &mut ReconcileCtx,
     list_id: NodeId,
@@ -1296,9 +1294,8 @@ fn drop_window(ctx: &mut ReconcileCtx, foreach_id: NodeId, render_parent: NodeId
     }
 }
 
-/// Bring a ForEach's window in line with its template and the engine, so a
-/// hot reload or a `set_virtualization` toggle takes effect on the list's
-/// next pass: install a window when the list is lazy, virtualization is on
+/// Bring a ForEach's window in line with its template, so a hot reload takes
+/// effect on the list's next pass: install a window when the list is lazy
 /// and the ForEach is the sole child of a real element; drop it otherwise;
 /// pick up a changed size estimate.
 ///
@@ -1317,7 +1314,7 @@ fn sync_window(
             .get(render_parent)
             .is_some_and(|p| p.children.len() == 1);
     let lazy = match lazy {
-        Some(lazy) if ctx.tree.virtualization && sole_child_of_element => lazy,
+        Some(lazy) if sole_child_of_element => lazy,
         _ => {
             drop_window(ctx, foreach_id, render_parent);
             return (false, false);

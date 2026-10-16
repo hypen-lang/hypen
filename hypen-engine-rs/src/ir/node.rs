@@ -158,9 +158,9 @@ pub const DEFAULT_LAZY_INITIAL_COUNT: usize = 30;
 /// window to the renderer as a `__virt.window` prop on the list's render
 /// parent; the renderer measures the rows it has, estimates the rest, and
 /// reports the visible range back with `set_list_viewport`. The engine never
-/// knows item sizes. Windowing applies only when the renderer enabled it
-/// (`set_virtualization`) and the ForEach is the sole child of a real
-/// element; otherwise the list expands fully, as if `lazy` were absent.
+/// knows item sizes. Windowing applies whenever the ForEach is the sole
+/// child of a real element; elsewhere the list expands fully, as if `lazy`
+/// were absent. Every renderer must handle `__virt.window`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LazyList {
     /// Items materialized before the first viewport report.

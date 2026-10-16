@@ -129,7 +129,6 @@ Data is exchanged as JSON strings.
 - `hypen_get_action_len() -> usize` - Get action buffer size
 - `hypen_get_action(out_ptr, out_len) -> bytes_copied` - Copy action to buffer
 - `hypen_clear_action()` - Clear action buffer
-- `hypen_set_virtualization(enabled) -> status` - Renderer opts in to lazy-list windowing
 - `hypen_set_list_viewport(id_ptr, id_len, start, end) -> status` - Report a lazy list's visible range
 
 ### Device broker (RFC 001) — `hypen_device_*`

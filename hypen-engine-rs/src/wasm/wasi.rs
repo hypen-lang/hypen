@@ -571,26 +571,6 @@ fn render_dirty_internal(engine: &mut WasiEngine) {
 // List Virtualization
 // ============================================================================
 
-/// Opt in (`enabled != 0`) to list virtualization: lazy lists then
-/// materialize only a window of items, described by the `__virt.window`
-/// prop. Call before the first render.
-///
-/// # Returns
-/// 0 on success, non-zero if the engine is not initialized
-#[no_mangle]
-pub extern "C" fn hypen_set_virtualization(enabled: i32) -> i32 {
-    ENGINE.with(|cell| match cell.borrow_mut().as_mut() {
-        Some(engine) => {
-            engine.core.set_virtualization(enabled != 0);
-            0
-        }
-        None => fail(
-            3,
-            "hypen_set_virtualization: engine not initialized (call hypen_init first)",
-        ),
-    })
-}
-
 /// Report the item range `[start, end)` (visible rows plus overscan) of the
 /// lazy list whose element id is `list_id`; emits the patches that move its
 /// window. Ids naming no windowed list are ignored.

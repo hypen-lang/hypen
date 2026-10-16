@@ -379,14 +379,6 @@ impl Engine {
 
     // ── List Virtualization ─────────────────────────────────────────────
 
-    /// Enable or disable list virtualization. Renderers that handle the
-    /// `__virt.window` prop and report viewports call this before the first
-    /// render; until then lazy lists (`List`, `Grid`, `ForEach(…, lazy:
-    /// true)`) expand every item.
-    pub fn set_virtualization(&mut self, enabled: bool) {
-        self.core.set_virtualization(enabled);
-    }
-
     /// Report a lazy list's visible range. `list_id` is the element carrying
     /// `__virt.window`; `[start, end)` is the item range the renderer wants
     /// materialized (visible rows plus overscan). Emits the patches that

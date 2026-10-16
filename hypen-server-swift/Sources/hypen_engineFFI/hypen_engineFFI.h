@@ -394,11 +394,6 @@ RustBuffer uniffi_hypen_engine_fn_method_hypenengine_set_list_viewport(uint64_t 
 void uniffi_hypen_engine_fn_method_hypenengine_set_module(uint64_t ptr, RustBuffer config, RustCallStatus *_Nonnull out_status
 );
 #endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_VIRTUALIZATION
-#define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_SET_VIRTUALIZATION
-void uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(uint64_t ptr, int8_t enabled, RustCallStatus *_Nonnull out_status
-);
-#endif
 #ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_UNREGISTER_MODULE
 #define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_FN_METHOD_HYPENENGINE_UNREGISTER_MODULE
 void uniffi_hypen_engine_fn_method_hypenengine_unregister_module(uint64_t ptr, RustBuffer name, RustCallStatus *_Nonnull out_status
@@ -1311,12 +1306,6 @@ uint16_t uniffi_hypen_engine_checksum_method_hypenengine_set_list_viewport(void
 #ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_MODULE
 #define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_MODULE
 uint16_t uniffi_hypen_engine_checksum_method_hypenengine_set_module(void
-    
-);
-#endif
-#ifndef UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_VIRTUALIZATION
-#define UNIFFI_FFIDEF_UNIFFI_HYPEN_ENGINE_CHECKSUM_METHOD_HYPENENGINE_SET_VIRTUALIZATION
-uint16_t uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization(void
     
 );
 #endif

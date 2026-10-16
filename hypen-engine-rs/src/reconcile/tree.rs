@@ -441,12 +441,6 @@ pub struct InstanceTree {
     /// [`MAX_EXIT_TOMBSTONES`].
     exit_tombstones: std::collections::VecDeque<(NodeId, ExitTombstone)>,
 
-    /// Whether the renderer handles `__virt.window` and reports viewports.
-    /// Off by default: a renderer that doesn't know the protocol would show
-    /// only the first window of every `List`, so lazy lists expand fully
-    /// until it opts in. Read when a ForEach is created.
-    pub virtualization: bool,
-
     /// Set by an element just before it creates a child, when that child is
     /// its ONLY child; taken (reset) by the next `create_ir_node_tree_full`.
     /// A lazy ForEach windows only in that slot, so `__virt.window` on the
@@ -506,7 +500,6 @@ impl InstanceTree {
             registered_templates: std::collections::HashSet::new(),
             remove_stack: Vec::new(),
             exit_tombstones: std::collections::VecDeque::new(),
-            virtualization: false,
             sole_child_slot: false,
         }
     }

@@ -62,7 +62,6 @@ type WasmEngine struct {
 	fnGetLastErrorLen      api.Function
 	fnGetLastError         api.Function
 	fnClearLastError       api.Function
-	fnSetVirtualization    api.Function
 	fnSetListViewport      api.Function
 	fnAlloc                api.Function
 	fnFree                 api.Function
@@ -200,7 +199,6 @@ func NewWasmEngine(config WasmEngineConfig) (*WasmEngine, error) {
 	engine.fnGetLastErrorLen = module.ExportedFunction("hypen_get_last_error_len")
 	engine.fnGetLastError = module.ExportedFunction("hypen_get_last_error")
 	engine.fnClearLastError = module.ExportedFunction("hypen_clear_last_error")
-	engine.fnSetVirtualization = module.ExportedFunction("hypen_set_virtualization")
 	engine.fnSetListViewport = module.ExportedFunction("hypen_set_list_viewport")
 	engine.fnAlloc = module.ExportedFunction("wasi_alloc")
 	engine.fnFree = module.ExportedFunction("wasi_free")
@@ -652,31 +650,6 @@ func (e *WasmEngine) GetRevision() uint64 {
 		return 0
 	}
 	return results[0]
-}
-
-// SetVirtualization opts the engine in to lazy-list windowing. It is called
-// by a renderer that handles the `__virt.window` prop and reports viewports,
-// never by app code: until then lazy lists (List, Grid, ForEach(lazy: true))
-// expand every item.
-func (e *WasmEngine) SetVirtualization(enabled bool) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-
-	if e.fnSetVirtualization == nil {
-		return &EngineError{Code: ErrRender, Message: "WASM missing hypen_set_virtualization export"}
-	}
-	flag := uint64(0)
-	if enabled {
-		flag = 1
-	}
-	results, err := e.fnSetVirtualization.Call(e.ctx, flag)
-	if err != nil {
-		return &EngineError{Code: ErrRender, Message: "set_virtualization call failed", Cause: err}
-	}
-	if len(results) > 0 && results[0] != 0 {
-		return newWasmError("set_virtualization", results[0])
-	}
-	return nil
 }
 
 // SetListViewport reports the item range [start, end) - visible rows plus
