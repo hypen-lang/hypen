@@ -5,6 +5,7 @@ import kotlinx.coroutines.test.advanceTimeBy
 import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
@@ -136,6 +137,32 @@ class RootChildrenTest {
         renderer.applyPatches(texts("a", "b") + listOf(Patch.insert("root", "a"), Patch.insert("root", "b")))
         renderer.clear()
         assertEquals(emptyList<String>(), renderer.getRootChildIds())
+    }
+
+    @Test
+    fun `hasRendered latches on the first root insert and survives an empty root`() {
+        assertFalse(renderer.hasRendered())
+        renderer.applyPatches(texts("a"))
+        assertFalse("a created-only node is not a render", renderer.hasRendered())
+        renderer.applyPatches(listOf(Patch.insert("root", "a")))
+        assertTrue(renderer.hasRendered())
+        // A root If turning off empties the root: no longer "loading".
+        renderer.applyPatches(listOf(Patch.remove("a")))
+        assertEquals(emptyList<String>(), renderer.getRootChildIds())
+        assertTrue(renderer.hasRendered())
+    }
+
+    @Test
+    fun `hasRendered latches on a root attach and resets on clear`() {
+        renderer.applyPatches(texts("a") + listOf(Patch.insert("root", "a"), Patch.detach("a")))
+        renderer.clear()
+        assertFalse(renderer.hasRendered())
+        renderer.applyPatches(texts("b") + listOf(Patch.insert("root", "b"), Patch.detach("b")))
+        assertTrue(renderer.hasRendered())
+        assertEquals(emptyList<String>(), renderer.getRootChildIds())
+        renderer.applyPatches(listOf(Patch.attach("root", "b")))
+        assertTrue(renderer.hasRendered())
+        assertEquals(listOf("b"), renderer.getRootChildIds())
     }
 
     @Test

@@ -2,7 +2,7 @@ package space.hypen.renderer
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
-import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -12,6 +12,15 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.layout.Layout
+import androidx.compose.ui.layout.MeasurePolicy
+import androidx.compose.ui.layout.Measured
+import androidx.compose.ui.layout.ParentDataModifier
+import androidx.compose.ui.layout.Placeable
+import androidx.compose.ui.layout.VerticalAlignmentLine
+import androidx.compose.ui.unit.Constraints
+import androidx.compose.ui.unit.Density
+import kotlin.math.roundToInt
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.DpSize
 import space.hypen.renderer.anim.ClearFocusOnExit
@@ -175,7 +184,9 @@ fun HypenApp(
                     // read the touched element's snapshot state.
                     val rootElements = renderer.getRootChildIds().mapNotNull { renderer.getElement(it) }
 
-                    if (rootElements.isNotEmpty()) {
+                    if (renderer.hasRendered()) {
+                        // An empty root after the first render (a root `If`
+                        // turned off) renders nothing, like the DOM container.
                         HypenRootChildren(rootElements, renderer)
                     } else {
                         // Tree not yet loaded, show loading
@@ -421,34 +432,134 @@ internal fun HypenElement(
 /**
  * Renders the ordered children of the "root" mount container.
  *
- * One root (the common case) renders directly in the host, with no wrapper
- * layout — exactly as before root siblings existed. Several roots (control
- * flow at the IR root with siblings) stack top-to-bottom in a Column that
- * fills the host, matching the DOM container's block flow and the desktop
- * renderer's viewport-sized flex column; the Column scope is provided so a
- * `.weight` root child (a `flex-1` page above a bottom bar) works as it would
- * in an explicit root Column. Switching between one and several roots moves
- * the content under a different parent, so Compose-local state (`remember`,
- * scroll) of the surviving root restarts at that moment.
+ * Always one stable structure — a single [Layout] with each root under
+ * `key(id)` — so a root keeps its composition identity (remember, scroll,
+ * focus) as siblings come and go, including across one <-> several roots.
+ * See [rootChildrenMeasurePolicy] for how each case lays out.
+ *
+ * With several roots, [RootColumnScope] replaces [LocalColumnScope] so a
+ * `.weight` root (a `flex-1` page above a bottom bar) works, and cross-axis
+ * stretch is off (Column default). With one root both locals pass through
+ * unchanged from the host, so the root builds the same modifiers as before.
  */
 @Composable
 private fun HypenRootChildren(
     roots: List<HypenElement>,
     renderer: ComposeRenderer,
 ) {
-    if (roots.size == 1) {
-        HypenElement(element = roots[0], renderer = renderer)
-        return
-    }
-    Column(modifier = Modifier.fillMaxSize()) {
-        CompositionLocalProvider(LocalColumnScope provides this) {
-            for (root in roots) {
-                key(root.id) {
-                    HypenElement(element = root, renderer = renderer)
+    val stacked = roots.size > 1
+    val inheritedColumnScope = LocalColumnScope.current
+    val inheritedStretch = LocalStretchCrossAxis.current
+    Layout(
+        content = {
+            CompositionLocalProvider(
+                LocalColumnScope provides if (stacked) RootColumnScope else inheritedColumnScope,
+                LocalStretchCrossAxis provides if (stacked) false else inheritedStretch,
+            ) {
+                for (root in roots) {
+                    key(root.id) {
+                        HypenElement(element = root, renderer = renderer)
+                    }
                 }
             }
+        },
+        modifier = Modifier.fillMaxSize(),
+        measurePolicy = remember(stacked) { rootChildrenMeasurePolicy(stacked) },
+    )
+}
+
+/**
+ * Root container layout.
+ *
+ * Not [stacked] (one root): exactly the host `Box`'s policy that used to
+ * hold the root directly — every child measured with the incoming
+ * constraints with minimums dropped (`propagateMinConstraints = false`) and
+ * placed at the top-start corner (`placeRelative`, so RTL mirrors as Box's
+ * `TopStart` did); parent data (weights) is ignored, as Box ignored it. This
+ * Layout is `fillMaxSize`, the same size as that host box, so the root sees
+ * identical constraints and lands at the identical offset.
+ *
+ * [stacked] (several roots): a vertical column filling the host, like the
+ * DOM container's block flow and the desktop renderer's viewport-sized flex
+ * column. Unweighted children are measured top-down with the height left;
+ * children carrying [RootWeight] (from [RootColumnScope]) share what remains
+ * by weight, `fill` making the share exact, as Compose's Column does.
+ */
+private fun rootChildrenMeasurePolicy(stacked: Boolean) = MeasurePolicy { measurables, constraints ->
+    val loose = constraints.copy(minWidth = 0, minHeight = 0)
+    if (!stacked) {
+        val placeables = measurables.map { it.measure(loose) }
+        val width = if (constraints.hasBoundedWidth) constraints.maxWidth
+            else (placeables.maxOfOrNull { it.width } ?: 0).coerceAtLeast(constraints.minWidth)
+        val height = if (constraints.hasBoundedHeight) constraints.maxHeight
+            else (placeables.maxOfOrNull { it.height } ?: 0).coerceAtLeast(constraints.minHeight)
+        return@MeasurePolicy layout(width, height) {
+            placeables.forEach { it.placeRelative(0, 0) }
         }
     }
+
+    val weights = measurables.map { it.parentData as? RootWeight }
+    val placeables = arrayOfNulls<Placeable>(measurables.size)
+    var used = 0
+    measurables.forEachIndexed { i, m ->
+        if (weights[i] != null) return@forEachIndexed
+        val maxH = if (constraints.hasBoundedHeight) (constraints.maxHeight - used).coerceAtLeast(0)
+            else Constraints.Infinity
+        val p = m.measure(loose.copy(maxHeight = maxH))
+        placeables[i] = p
+        used += p.height
+    }
+    val totalWeight = weights.sumOf { (it?.weight ?: 0f).toDouble() }.toFloat()
+    if (totalWeight > 0f) {
+        val remaining = if (constraints.hasBoundedHeight) (constraints.maxHeight - used).coerceAtLeast(0) else 0
+        var left = remaining
+        var weightLeft = totalWeight
+        measurables.forEachIndexed { i, m ->
+            val w = weights[i] ?: return@forEachIndexed
+            val share = if (weightLeft > 0f) (left * (w.weight / weightLeft)).roundToInt().coerceIn(0, left) else 0
+            left -= share
+            weightLeft -= w.weight
+            val p = m.measure(loose.copy(minHeight = if (w.fill) share else 0, maxHeight = share))
+            placeables[i] = p
+            used += p.height
+        }
+    }
+    val width = if (constraints.hasBoundedWidth) constraints.maxWidth
+        else (placeables.maxOfOrNull { it?.width ?: 0 } ?: 0).coerceAtLeast(constraints.minWidth)
+    val height = if (constraints.hasBoundedHeight) constraints.maxHeight
+        else used.coerceAtLeast(constraints.minHeight)
+    layout(width, height) {
+        var y = 0
+        for (p in placeables) {
+            if (p == null) continue
+            p.placeRelative(0, y)
+            y += p.height
+        }
+    }
+}
+
+/** A root child's weight inside the stacked root container. */
+private data class RootWeight(val weight: Float, val fill: Boolean) : ParentDataModifier {
+    override fun Density.modifyParentData(parentData: Any?): Any = this@RootWeight
+}
+
+/**
+ * The [ColumnScope] the stacked root container hands its roots through
+ * [LocalColumnScope]: `weight` tags the child for [rootChildrenMeasurePolicy];
+ * horizontal alignment is start (the column default), so `align` / `alignBy`
+ * are no-ops.
+ */
+private object RootColumnScope : ColumnScope {
+    override fun Modifier.weight(weight: Float, fill: Boolean): Modifier {
+        require(weight > 0f) { "invalid weight $weight; must be greater than zero" }
+        return this.then(RootWeight(weight, fill))
+    }
+
+    override fun Modifier.align(alignment: Alignment.Horizontal): Modifier = this
+
+    override fun Modifier.alignBy(alignmentLine: VerticalAlignmentLine): Modifier = this
+
+    override fun Modifier.alignBy(alignmentLineBlock: (Measured) -> Int): Modifier = this
 }
 
 /**

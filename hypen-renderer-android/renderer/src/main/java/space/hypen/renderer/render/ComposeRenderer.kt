@@ -135,6 +135,9 @@ class ComposeRenderer(
     // Guarded by [lock].
     private var rootChildIdsState: List<String> by mutableStateOf(emptyList())
 
+    // Latched by the first root placement; reset only by [clear]. Guarded by [lock].
+    private var hasRenderedState: Boolean by mutableStateOf(false)
+
     /** Place [id] among the root children before [beforeId] (append when absent/unknown). */
     private fun linkRootLocked(id: String, beforeId: String?) {
         val list = rootChildIdsState.toMutableList()
@@ -142,6 +145,7 @@ class ComposeRenderer(
         val at = if (beforeId != null) list.indexOf(beforeId) else -1
         if (at >= 0) list.add(at, id) else list.add(id)
         rootChildIdsState = list
+        if (!hasRenderedState) hasRenderedState = true
     }
 
     /** Drop [id] from the root children if it is one. */
@@ -760,6 +764,7 @@ class ComposeRenderer(
             detachedIds.clear()
             batchAnimationSpec = null
             rootChildIdsState = emptyList()
+            hasRenderedState = false
         }
         // Drops in-flight playbacks and their finalize timers without
         // running them — the tree they would tear down is already gone.
@@ -862,6 +867,15 @@ class ComposeRenderer(
      * Kept for single-root callers; use [getRootChildIds] for the full set.
      */
     fun getRootId(): String? = synchronized(lock) { rootChildIdsState.firstOrNull() }
+
+    /**
+     * True once any node has been placed into the root container (Insert or
+     * Attach into "root") since construction or the last [clear]. Stays true
+     * when the root later empties (a root `If` turning off), so hosts show
+     * their loading content only before the first render — an empty root
+     * after that renders nothing, as the DOM container does. Snapshot-backed.
+     */
+    fun hasRendered(): Boolean = synchronized(lock) { hasRenderedState }
 
     /**
      * Get the component registry.

@@ -130,8 +130,13 @@ the IR root with siblings). `ComposeRenderer` keeps them as a snapshot-backed
 list (`getRootChildIds()`; `getRootId()` is the first): Insert / Move / Attach
 into "root" place by `beforeId` (unknown or absent anchor appends), Detach and
 Remove drop the id, and an animated-exit root keeps its slot until finalize.
-`HypenApp` renders one root directly (unchanged) and several in a
-`fillMaxSize` Column with `LocalColumnScope`. Tests: `RootChildrenTest`.
+`HypenApp.HypenRootChildren` renders them through one stable `Layout` with
+`key(id)` per root (no remount across one <-> several roots): one root gets the
+host Box's policy (loose constraints, TopStart, parent data ignored — identical
+to before); several stack vertically with `.weight` via `RootColumnScope`.
+`hasRendered()` latches on the first root placement (reset by `clear()`): the
+loading content shows only before it, and an empty root afterwards renders
+nothing, like the DOM container. Tests: `RootChildrenTest`.
 
 ### Strategy 3 hook (limbo container)
 
