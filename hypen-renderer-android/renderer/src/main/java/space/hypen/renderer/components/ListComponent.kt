@@ -6,17 +6,29 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.lazy.LazyListScope
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.VirtLazyListReporter
+import space.hypen.renderer.virt.VirtMeasure
+import space.hypen.renderer.virt.VirtPlaceholder
+import space.hypen.renderer.virt.VirtSlot
+import space.hypen.renderer.virt.VirtSlots
+import space.hypen.renderer.virt.VirtWindow
+import space.hypen.renderer.virt.virtPadded
+import space.hypen.renderer.virt.virtWindow
 
 /**
  * Known control-flow element types that should be flattened (transparent containers).
@@ -95,10 +107,14 @@ class ListComponent : ComponentHandler {
             ?: "vertical"
         val isHorizontal = direction.lowercase() == "horizontal"
 
+        // Engine windowing (`__virt.window`): the children are only items
+        // [start, end) of `total`. docs/virtualization.md.
+        val window = element.virtWindow()
+
         if (isHorizontal) {
-            renderHorizontalList(element, listModifier, children, renderer)
+            renderHorizontalList(element, listModifier, children, renderer, window)
         } else {
-            renderVerticalList(element, listModifier, children, renderer, hasDynamicItems)
+            renderVerticalList(element, listModifier, children, renderer, hasDynamicItems, window)
         }
     }
 
@@ -109,6 +125,7 @@ class ListComponent : ComponentHandler {
         children: List<HypenElement>,
         renderer: space.hypen.renderer.render.ComposeRenderer,
         hasDynamicItems: Boolean,
+        window: VirtWindow?,
     ) {
         val verticalStr = element.getStringProp("verticalAlignment.0")
             ?: element.getStringProp("justifyContent.0")
@@ -134,7 +151,25 @@ class ListComponent : ComponentHandler {
         val gap = element.getFloatProp("gap.0") ?: element.getFloatProp("gap") ?: 0f
         val layout = resolveListLayout(element, hasDynamicItems)
 
-        if (layout.scrollsVertically) {
+        val spacedVertical = if (gap > 0 && verticalArrangement == Arrangement.Top) {
+            Arrangement.spacedBy(gap.dp)
+        } else {
+            verticalArrangement
+        }
+
+        if (layout.scrollsVertically && window != null) {
+            WindowedLazyList(
+                element = element,
+                window = window,
+                modifier = modifier,
+                children = children,
+                renderer = renderer,
+                horizontal = false,
+                verticalArrangement = spacedVertical,
+                horizontalAlignment = horizontalAlignment,
+                fillsWidth = true,
+            )
+        } else if (layout.scrollsVertically) {
             LazyColumn(
                 modifier = modifier,
                 verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
@@ -154,8 +189,10 @@ class ListComponent : ComponentHandler {
                 }
             }
         } else {
+            // Not its own scroller: a windowed list pads for the items
+            // outside the window and reports from its ancestor scroller.
             Column(
-                modifier = modifier,
+                modifier = modifier.virtPadded(element, window, renderer),
                 verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
                     Arrangement.spacedBy(gap.dp)
                 } else {
@@ -178,6 +215,7 @@ class ListComponent : ComponentHandler {
         modifier: Modifier,
         children: List<HypenElement>,
         renderer: space.hypen.renderer.render.ComposeRenderer,
+        window: VirtWindow?,
     ) {
         val horizontalStr = element.getStringProp("horizontalAlignment.0")
             ?: element.getStringProp("justifyContent.0")
@@ -200,6 +238,21 @@ class ListComponent : ComponentHandler {
             else -> Alignment.Top
         }
 
+        if (window != null) {
+            WindowedLazyList(
+                element = element,
+                window = window,
+                modifier = modifier,
+                children = children,
+                renderer = renderer,
+                horizontal = true,
+                horizontalArrangement = horizontalArrangement,
+                verticalAlignment = verticalAlignment,
+                fillsWidth = false,
+            )
+            return
+        }
+
         LazyRow(
             modifier = modifier,
             horizontalArrangement = horizontalArrangement,
@@ -220,6 +273,92 @@ class ListComponent : ComponentHandler {
         private const val TAG = "ListComponent"
     }
 }
+
+/**
+ * A windowed list as a native lazy container (docs/virtualization.md §5):
+ * `total` slots, slot `i` the materialized child(ren) of item `i` when
+ * `start <= i < end`, else a placeholder of the estimated item size. Keys are
+ * node ids for rows and item indices for placeholders ([VirtSlots]), and the
+ * container's own `layoutInfo` drives the viewport reports. Compose's lazy
+ * containers expose `total` as the collection size to accessibility, so
+ * TalkBack announces the full list position.
+ *
+ * Also the path for a scrollable `Column` / `Row` whose sole child is a lazy
+ * `ForEach` (see `HypenElement` in HypenApp.kt).
+ */
+@Composable
+internal fun WindowedLazyList(
+    element: HypenElement,
+    window: VirtWindow,
+    modifier: Modifier,
+    children: List<HypenElement>,
+    renderer: space.hypen.renderer.render.ComposeRenderer,
+    horizontal: Boolean,
+    verticalArrangement: Arrangement.Vertical = Arrangement.Top,
+    horizontalAlignment: Alignment.Horizontal = Alignment.Start,
+    horizontalArrangement: Arrangement.Horizontal = Arrangement.Start,
+    verticalAlignment: Alignment.Vertical = Alignment.Top,
+    fillsWidth: Boolean,
+) {
+    val state = rememberLazyListState()
+    val measure = remember(element.id) { VirtMeasure() }
+    VirtLazyListReporter(element, state, measure, renderer)
+
+    val slots = VirtSlots(window, children) { it.id }
+    val placeholderSize = measure.itemSize(window)
+    val content: LazyListScope.() -> Unit = {
+        items(count = slots.count, key = { slots.key(it) }) { index ->
+            when (val slot = slots[index]) {
+                is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal)
+                is VirtSlot.Item -> {
+                    val nodes = slot.nodes
+                    if (nodes.size == 1) {
+                        ListItemRenderer(element = nodes[0], renderer = renderer, fillsWidth = fillsWidth)
+                    } else if (horizontal) {
+                        // A multi-node template: one slot holds the item's
+                        // children in the list's own direction.
+                        Row(horizontalArrangement = horizontalArrangement, verticalAlignment = verticalAlignment) {
+                            nodes.forEach { node -> key(node.id) { ListItemRenderer(element = node, renderer = renderer) } }
+                        }
+                    } else {
+                        Column(verticalArrangement = verticalArrangement, horizontalAlignment = horizontalAlignment) {
+                            nodes.forEach { node ->
+                                key(node.id) { ListItemRenderer(element = node, renderer = renderer, fillsWidth = fillsWidth) }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if (horizontal) {
+        LazyRow(
+            modifier = modifier,
+            state = state,
+            horizontalArrangement = horizontalArrangement,
+            verticalAlignment = verticalAlignment,
+            content = content,
+        )
+    } else {
+        LazyColumn(
+            modifier = modifier,
+            state = state,
+            verticalArrangement = verticalArrangement,
+            horizontalAlignment = horizontalAlignment,
+            content = content,
+        )
+    }
+}
+
+/**
+ * The renderable children of [element], control-flow wrappers flattened —
+ * the item rows of a windowed container.
+ */
+internal fun renderableChildren(
+    element: HypenElement,
+    renderer: space.hypen.renderer.render.ComposeRenderer,
+): List<HypenElement> = flattenControlFlowChildren(renderer.getChildren(element.id), renderer)
 
 internal data class ListLayout(
     val fillsFiniteWidth: Boolean = true,

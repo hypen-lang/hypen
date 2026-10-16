@@ -12,6 +12,8 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import space.hypen.renderer.HypenLoggers
+import space.hypen.renderer.virt.VIRT_WINDOW_PROP
+import space.hypen.renderer.virt.Virtualization
 import space.hypen.renderer.anim.AlwaysAnimate
 import space.hypen.renderer.anim.MotionPreference
 import kotlin.math.max
@@ -186,6 +188,14 @@ class DndCoordinator(
     /** Nodes carrying any `__dnd.*` channel or an `__anim.statePoses` table. */
     private val nodes = HashMap<String, DndNode>()
 
+    /**
+     * First materialized item of each windowed list (`__virt.window.start`).
+     * A sortable inside a virtualized list only sees the composed rows, so
+     * its child indices are window-relative; the reserved write and the
+     * event locations add this offset to name positions in the whole list.
+     */
+    private val virtStarts = HashMap<String, Int>()
+
     /** Layout rects in root px, with this runtime's own offsets subtracted. */
     private val bounds = HashMap<String, DndRect>()
     private var density = 1f
@@ -237,6 +247,7 @@ class DndCoordinator(
         val effects = mutableListOf<() -> Unit>()
         synchronized(lock) {
             types[id] = elementType
+            noteVirtWindowLocked(id, props[VIRT_WINDOW_PROP])
             val kids = children[id]
             if (kids != null) {
                 for (kid in kids) parents[kid] = null
@@ -374,6 +385,7 @@ class DndCoordinator(
             parents.clear()
             children.clear()
             types.clear()
+            virtStarts.clear()
             bounds.clear()
             states.clear()
             fileInfo = null
@@ -809,6 +821,7 @@ class DndCoordinator(
 
     private fun notePropLocked(id: String, name: String, value: Any?, present: Boolean, effects: MutableList<() -> Unit>) {
         when {
+            name == VIRT_WINDOW_PROP -> noteVirtWindowLocked(id, if (present) value else null)
             name.startsWith(DND_PROP_PREFIX) -> {
                 val node = nodes[id] ?: if (present) DndNode(id).also { nodes[id] = it } else return
                 assignChannel(node, name, value, present)
@@ -875,6 +888,15 @@ class DndCoordinator(
     // Tree mirror helpers
     // ------------------------------------------------------------------
 
+    private fun noteVirtWindowLocked(id: String, value: Any?) {
+        val window = Virtualization.parse(value)
+        if (window != null && window.start > 0) virtStarts[id] = window.start else virtStarts.remove(id)
+    }
+
+    /** [index] among [container]'s composed children, as a whole-list index. */
+    private fun absIndexLocked(container: DndNode, index: Int?): Int? =
+        index?.let { it + (virtStarts[container.id] ?: 0) }
+
     private fun isControlFlowLocked(id: String): Boolean {
         val type = types[id] ?: return false
         return type in CONTROL_FLOW_TYPES
@@ -890,6 +912,7 @@ class DndCoordinator(
         if (kids != null) for (kid in kids.toList()) forgetSubtreeLocked(kid, effects)
         parents.remove(id)
         types.remove(id)
+        virtStarts.remove(id)
         bounds.remove(id)
         states.remove(id)
         fileEntered.remove(id)
@@ -1134,7 +1157,7 @@ class DndCoordinator(
         val itemId = if (origin?.sort != null) itemOfLocked(origin.id, source.id) ?: source.id else source.id
         val originIndex = origin?.let { indexOfLocked(it, itemId) }
         val from =
-            if (origin != null) DndLocation(containerLabel(origin), originIndex)
+            if (origin != null) DndLocation(containerLabel(origin), absIndexLocked(origin, originIndex))
             else DndLocation(looseZoneLabelLocked(source), null)
         val itemRect = bounds[itemId] ?: DndRect.Zero
         return Drag(source, itemId, origin, originIndex, from, itemRect, mode)
@@ -1363,9 +1386,9 @@ class DndCoordinator(
     private fun targetLocationLocked(d: Drag, target: DropTarget?): DndLocation =
         when (target) {
             null -> d.from
-            is DropTarget.Sort -> DndLocation(containerLabel(target.container), target.index)
+            is DropTarget.Sort -> DndLocation(containerLabel(target.container), absIndexLocked(target.container, target.index))
             is DropTarget.Zone -> DndLocation(intoLabel(target.node), null)
-            is DropTarget.Pin -> DndLocation(containerLabel(target.container), d.originIndex)
+            is DropTarget.Pin -> DndLocation(containerLabel(target.container), d.origin?.let { absIndexLocked(it, d.originIndex) } ?: d.originIndex)
         }
 
     private fun setTargetLocked(d: Drag, target: DropTarget?, effects: MutableList<() -> Unit>) {
@@ -1498,14 +1521,23 @@ class DndCoordinator(
                         dispatchReservedLocked(
                             d,
                             DND_REORDER_ACTION,
-                            linkedMapOf("path" to toPath, "from" to originIndex, "to" to target.index),
+                            linkedMapOf(
+                                "path" to toPath,
+                                "from" to absIndexLocked(dest, originIndex),
+                                "to" to absIndexLocked(dest, target.index),
+                            ),
                             effects,
                         )
                     } else if (!sameList && fromPath != null && toPath != null && originIndex != null) {
                         dispatchReservedLocked(
                             d,
                             DND_REORDER_ACTION,
-                            linkedMapOf("fromPath" to fromPath, "from" to originIndex, "toPath" to toPath, "to" to target.index),
+                            linkedMapOf(
+                                "fromPath" to fromPath,
+                                "from" to (origin?.let { absIndexLocked(it, originIndex) } ?: originIndex),
+                                "toPath" to toPath,
+                                "to" to absIndexLocked(dest, target.index),
+                            ),
                             effects,
                         )
                     } else if (!sameList && ((fromPath != null) != (toPath != null)) && !warnedMixedBind) {

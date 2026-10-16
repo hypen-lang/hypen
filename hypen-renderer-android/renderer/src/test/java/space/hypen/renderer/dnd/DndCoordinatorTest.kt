@@ -188,6 +188,39 @@ class DndCoordinatorTest {
         assertEquals(DndRole.None, h.dnd.roleFor("col-fe"))
     }
 
+    // ------------------------------------------- virtualized sortable (List)
+
+    @Test
+    fun `windowed sortable - reorder indices name positions in the whole list`() = runTest {
+        val h = Harness(backgroundScope)
+        // A sortable List windowed to items [40, 43) of 100: its composed
+        // rows are window-relative, the reserved write must not be.
+        h.sortable(
+            "col",
+            listOf("t1", "t2", "t3"),
+            extra = mapOf("onSort.0" to "@reorder", "__virt.window" to mapOf("total" to 100.0, "start" to 40.0, "end" to 43.0)),
+        )
+        assertTrue(h.dnd.claim("col-text-t1", 10f, 10f))
+        h.dnd.move("col-text-t1", 0f, 150f)
+        assertEquals(DndLocation("col", 41), h.dnd.currentTarget())
+        h.dnd.drop("col-text-t1")
+        assertEquals(mapOf("path" to "tasks", "from" to 40, "to" to 41), h.host.dispatched[0].second)
+        assertEquals(mapOf("zone" to "col", "index" to 40), h.host.dispatched[1].second["from"])
+        assertEquals(mapOf("zone" to "col", "index" to 41), h.host.dispatched[1].second["to"])
+    }
+
+    @Test
+    fun `windowed sortable - the offset follows the window and goes with it`() = runTest {
+        val h = Harness(backgroundScope)
+        h.sortable("col", listOf("t1", "t2"), extra = mapOf("onSort.0" to "@reorder"))
+        h.dnd.noteSetProp("col", "__virt.window", mapOf("total" to 50.0, "start" to 10.0, "end" to 12.0))
+        h.dnd.noteRemoveProp("col", "__virt.window")
+        assertTrue(h.dnd.claim("col-text-t1", 10f, 10f))
+        h.dnd.move("col-text-t1", 0f, 150f)
+        h.dnd.drop("col-text-t1")
+        assertEquals(mapOf("path" to "tasks", "from" to 0, "to" to 1), h.host.dispatched[0].second)
+    }
+
     // ---------------------------------------------------- sortable reorder
 
     @Test

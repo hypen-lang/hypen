@@ -141,6 +141,24 @@ class ComposeRenderer(
     // Listeners
     private val stateListeners = mutableListOf<RendererStateListener>()
 
+    // Viewport reporter for windowed lists (`__virt.window`).
+    @Volatile
+    private var viewportReporter: ViewportReporter? = null
+
+    /** Route windowed lists' viewport reports (docs/virtualization.md §3). */
+    fun setViewportReporter(reporter: ViewportReporter?) {
+        this.viewportReporter = reporter
+    }
+
+    /**
+     * Report that the list element [listId] wants items `[start, end)`.
+     * A no-op without a reporter; ids naming no windowed list are ignored by
+     * the engine, so a stale report is harmless.
+     */
+    fun reportViewport(listId: String, start: Int, end: Int) {
+        viewportReporter?.setListViewport(listId, start, end)
+    }
+
     /**
      * Set the action dispatcher for handling actions from the UI.
      */

@@ -56,6 +56,20 @@ data class DispatchActionMessage(
 ) : RemoteMessage
 
 /**
+ * Client -> server viewport report for a windowed list
+ * (hypen-web/docs/virtualization.md section 4): the items `[start, end)` the
+ * renderer wants materialized in the list element [listId] (the node
+ * carrying `__virt.window`). Per client; never an action.
+ */
+@JsonClass(generateAdapter = true)
+data class ViewportMessage(
+    @Json(name = "type") override val type: String = "viewport",
+    val listId: String,
+    val start: Int,
+    val end: Int,
+) : RemoteMessage
+
+/**
  * Message sent by the server with state updates.
  */
 @JsonClass(generateAdapter = true)

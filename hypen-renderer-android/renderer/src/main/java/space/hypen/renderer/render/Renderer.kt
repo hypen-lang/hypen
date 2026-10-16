@@ -33,6 +33,15 @@ interface Renderer {
 }
 
 /**
+ * Receives a windowed list's viewport reports (docs/virtualization.md §3):
+ * the remote client sends them as `viewport` messages, a host embedding a
+ * local engine calls its `setListViewport`.
+ */
+fun interface ViewportReporter {
+    fun setListViewport(listId: String, start: Int, end: Int)
+}
+
+/**
  * Listener for action dispatches from the renderer.
  */
 fun interface ActionDispatcher {

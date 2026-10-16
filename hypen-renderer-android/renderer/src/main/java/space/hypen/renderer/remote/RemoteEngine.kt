@@ -262,6 +262,22 @@ class RemoteEngine(
     }
 
     /**
+     * Report a windowed list's wanted item range `[start, end)` to the server
+     * (docs/virtualization.md section 4). Fire-and-forget: the resulting
+     * patches stream back as ordinary `patch` messages. Dropped while not
+     * connected; the list re-reports from its own scroll state.
+     */
+    fun setListViewport(listId: String, start: Int, end: Int) {
+        if (_connectionState.value != ConnectionState.CONNECTED) {
+            log.debug("Dropping viewport for $listId: not connected")
+            return
+        }
+        val json = messageParser.serializeMessage(viewportMessage(listId, start, end))
+        log.debug("Viewport $listId [$start, $end)")
+        webSocket?.send(json)
+    }
+
+    /**
      * Get the current revision number.
      */
     fun getRevision(): Int = currentRevision
@@ -549,6 +565,9 @@ class RemoteEngine(
                     is HelloMessage -> {
                         log.warn("Unexpected hello message from server")
                     }
+                    is ViewportMessage -> {
+                        log.warn("Unexpected viewport message from server")
+                    }
                 }
             } catch (e: CancellationException) {
                 throw e
@@ -675,4 +694,10 @@ internal class OkHttpDeviceTransport(
     override fun close(code: Int, reason: String) {
         socket.close(code, reason)
     }
+}
+
+/** The wire message for a viewport report; bounds clamped to `0 <= start <= end`. */
+internal fun viewportMessage(listId: String, start: Int, end: Int): ViewportMessage {
+    val s = start.coerceAtLeast(0)
+    return ViewportMessage(listId = listId, start = s, end = end.coerceAtLeast(s))
 }
