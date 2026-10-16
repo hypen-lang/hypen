@@ -74,6 +74,7 @@ The shared math is in `@hypen-space/core` (`packages/core/src/virtualization.ts`
 | `itemSize(window, measuredTotal, measuredCount)` | §2 estimating. |
 | `windowPadding(window, size, columns)` | §2 leading / trailing padding. |
 | `visibleRange`, `wantedRange`, `shouldReport` | §3 steps 2–4. |
+| `windowChanged(previous, next)` | §3 step 4: whether an incoming `__virt.window` differs in value (`total`, `start`, `end`, `estimatedSize`) from the previous one, so the renderer forgets its last report. `true` when there was no previous window. |
 | `viewportReport(window, geometry, lastReported)` | Steps 2–4 in one call (with the below-the-top rule of step 2): the range to send now, or `null`. The caller keeps what it sent as `lastReported`. |
 
 ## 4. Remote protocol
