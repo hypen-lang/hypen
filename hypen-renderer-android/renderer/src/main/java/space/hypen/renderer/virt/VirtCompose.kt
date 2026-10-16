@@ -138,15 +138,42 @@ fun VirtPlaceholder(sizeDp: Double, horizontal: Boolean) {
  */
 @Composable
 fun VirtItem(index: Int, horizontal: Boolean, columns: Int = 1, content: @Composable () -> Unit) {
-    val cols = columns.coerceAtLeast(1)
-    val info = if (horizontal) {
-        CollectionItemInfo(rowIndex = 0, rowSpan = 1, columnIndex = index, columnSpan = 1)
-    } else {
-        CollectionItemInfo(rowIndex = index / cols, rowSpan = 1, columnIndex = index % cols, columnSpan = 1)
-    }
-    Box(modifier = Modifier.semantics { collectionItemInfo = info }, propagateMinConstraints = true) {
+    Box(modifier = Modifier.virtItemInfo(Virtualization.itemPosition(index, horizontal, columns)), propagateMinConstraints = true) {
         content()
     }
+}
+
+/** `collectionItemInfo` for one item's whole-list cell. */
+fun Modifier.virtItemInfo(position: ItemPosition): Modifier = this.semantics {
+    collectionItemInfo = CollectionItemInfo(
+        rowIndex = position.rowIndex,
+        rowSpan = 1,
+        columnIndex = position.columnIndex,
+        columnSpan = 1,
+    )
+}
+
+/**
+ * Padded-path rows' whole-list cells, by child node id
+ * ([Virtualization.childPositions]). A padded container provides it around
+ * its children ([ProvideVirtItemPositions]); `HypenElement` adds
+ * [virtItemInfo] to its own modifier when its id is listed, so the row needs
+ * no wrapper and its layout (weights, scopes) is untouched. Ids of deeper
+ * descendants are never listed, so they are unaffected.
+ */
+val LocalVirtItemPositions = compositionLocalOf<Map<String, ItemPosition>?> { null }
+
+/** Provide the padded rows' positions for [window] (a no-op when null). */
+@Composable
+fun ProvideVirtItemPositions(
+    window: VirtWindow?,
+    children: List<HypenElement>,
+    horizontal: Boolean,
+    columns: Int = 1,
+    content: @Composable () -> Unit,
+) {
+    val positions = window?.let { Virtualization.childPositions(it, children, horizontal, columns) { c -> c.id } }
+    CompositionLocalProvider(LocalVirtItemPositions provides positions, content = content)
 }
 
 /** One layout pass of a lazy container, as the reporters read it. */

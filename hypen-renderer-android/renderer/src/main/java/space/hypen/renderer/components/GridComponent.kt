@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.ProvideVirtItemPositions
 import space.hypen.renderer.virt.ProvideVirtScroller
 import space.hypen.renderer.virt.VirtItem
 import space.hypen.renderer.virt.VirtLazyGridReporter
@@ -104,44 +105,47 @@ class GridComponent : ComponentHandler {
                 // `chunked(columns)` would put `columns` items in a row
                 // regardless and silently ignore the span. Mirrors the Swift
                 // renderer's `HypenGridLayout.computeGrid`.
-                packGridRows(children, columns).forEach { rowChildren ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(columnGap),
-                    ) {
-                        rowChildren.forEach { child ->
-                            key(child.id) {
-                                Box(
-                                    // A spanning item takes its tracks' share
-                                    // of the row, plus the gaps it swallows.
-                                    modifier = Modifier.weight(child.gridSpan(columns).toFloat()),
-                                    // CSS grid stretches an item to fill its
-                                    // cell (`justify-items: stretch`) unless
-                                    // the item sets its own width. A plain
-                                    // Box hands the child min-width 0, so an
-                                    // item with no width hugs its content —
-                                    // which is why every calculator key
-                                    // rendered as a narrow strip of
-                                    // background behind its glyph instead of
-                                    // filling the key. Propagating the cell's
-                                    // min constraint is Compose's native
-                                    // expression of that default; items that
-                                    // DO declare a width keep it.
-                                    propagateMinConstraints = child.stretchesToGridCell(),
-                                ) {
-                                    GridItemRenderer(
-                                        element = child,
-                                        renderer = renderer,
-                                    )
+                // Each item's whole-grid position for TalkBack (§2).
+                ProvideVirtItemPositions(window, children, horizontal = false, columns = columns) {
+                    packGridRows(children, columns).forEach { rowChildren ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(columnGap),
+                        ) {
+                            rowChildren.forEach { child ->
+                                key(child.id) {
+                                    Box(
+                                        // A spanning item takes its tracks' share
+                                        // of the row, plus the gaps it swallows.
+                                        modifier = Modifier.weight(child.gridSpan(columns).toFloat()),
+                                        // CSS grid stretches an item to fill its
+                                        // cell (`justify-items: stretch`) unless
+                                        // the item sets its own width. A plain
+                                        // Box hands the child min-width 0, so an
+                                        // item with no width hugs its content —
+                                        // which is why every calculator key
+                                        // rendered as a narrow strip of
+                                        // background behind its glyph instead of
+                                        // filling the key. Propagating the cell's
+                                        // min constraint is Compose's native
+                                        // expression of that default; items that
+                                        // DO declare a width keep it.
+                                        propagateMinConstraints = child.stretchesToGridCell(),
+                                    ) {
+                                        GridItemRenderer(
+                                            element = child,
+                                            renderer = renderer,
+                                        )
+                                    }
                                 }
                             }
-                        }
-                        // Pad the final row so partial rows align with a
-                        // fully-populated row instead of stretching the
-                        // last cell across the remaining columns.
-                        val filled = rowChildren.sumOf { it.gridSpan(columns) }
-                        repeat(columns - filled) {
-                            Spacer(modifier = Modifier.weight(1f))
+                            // Pad the final row so partial rows align with a
+                            // fully-populated row instead of stretching the
+                            // last cell across the remaining columns.
+                            val filled = rowChildren.sumOf { it.gridSpan(columns) }
+                            repeat(columns - filled) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
                         }
                     }
                 }

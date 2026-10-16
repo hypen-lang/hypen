@@ -68,6 +68,9 @@ data class ViewportGeometry(
 /** One padded layout: the window and the per-row padding size ([Virtualization.paddedItemSize]). */
 data class PaddedLayout(val window: VirtWindow, val padSize: Double)
 
+/** One item's whole-list cell, for accessibility's `CollectionItemInfo`. */
+data class ItemPosition(val rowIndex: Int, val columnIndex: Int)
+
 /** Rows and columns of a whole windowed list, for accessibility's `CollectionInfo`. */
 data class CollectionShape(val rowCount: Int, val columnCount: Int)
 
@@ -377,6 +380,40 @@ object Virtualization {
             cols > 1 -> CollectionShape(rowCount = ceilDiv(window.total, cols), columnCount = cols)
             else -> CollectionShape(rowCount = window.total, columnCount = 1)
         }
+    }
+
+    /**
+     * Item [index]'s whole-list cell for accessibility's `CollectionItemInfo`,
+     * matching [collectionShape]: row [index] of a vertical list, column
+     * [index] of a horizontal one, `(index / columns, index % columns)` in a
+     * grid.
+     */
+    fun itemPosition(index: Int, horizontal: Boolean, columns: Int = 1): ItemPosition {
+        val cols = max(1, columns)
+        return if (horizontal) ItemPosition(rowIndex = 0, columnIndex = index)
+        else ItemPosition(rowIndex = index / cols, columnIndex = index % cols)
+    }
+
+    /**
+     * The whole-list cell of every materialized child on the padded path,
+     * keyed by child id: child `i` belongs to item `start + i / childrenPerItem`
+     * (§1 grouping, as [VirtSlots] does on the lazy path). Children beyond
+     * the window (a transient batch) get none.
+     */
+    fun <T> childPositions(
+        window: VirtWindow,
+        children: List<T>,
+        horizontal: Boolean,
+        columns: Int = 1,
+        idOf: (T) -> String,
+    ): Map<String, ItemPosition> {
+        val per = childrenPerItem(window, children.size)
+        val out = HashMap<String, ItemPosition>(children.size * 2)
+        children.forEachIndexed { i, child ->
+            val index = window.start + i / per
+            if (index < window.end) out[idOf(child)] = itemPosition(index, horizontal, columns)
+        }
+        return out
     }
 
     private fun ceilDiv(a: Int, b: Int): Int = (a + b - 1) / b

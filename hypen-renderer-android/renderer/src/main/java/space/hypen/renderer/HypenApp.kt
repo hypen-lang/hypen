@@ -43,6 +43,9 @@ import space.hypen.renderer.render.LocalComposeRenderer
 import space.hypen.renderer.components.WindowedLazyList
 import space.hypen.renderer.components.renderableChildren
 import space.hypen.renderer.virt.WindowedShape
+import space.hypen.renderer.virt.LocalVirtItemPositions
+import space.hypen.renderer.virt.ProvideVirtItemPositions
+import space.hypen.renderer.virt.virtItemInfo
 import space.hypen.renderer.virt.virtPadded
 import space.hypen.renderer.virt.virtWindow
 import kotlinx.coroutines.flow.collectLatest
@@ -329,6 +332,9 @@ internal fun HypenElement(
     // Re-applied on every recomposition, so a SET_SEMANTICS reactive
     // re-emit lands here too.
     finalModifier = finalModifier.applyHypenSemantics(element.semantics)
+    // A row of a padded windowed list: its whole-list position (§2), as the
+    // lazy path's VirtItem gives it.
+    LocalVirtItemPositions.current?.get(element.id)?.let { finalModifier = finalModifier.virtItemInfo(it) }
 
     // Animation channels (`__anim.*`). The playback layer sits OUTSIDE the
     // base chain so a graphicsLayer pose transforms the whole element — and
@@ -396,7 +402,9 @@ internal fun HypenElement(
                     element = element,
                     modifier = renderModifier.virtPadded(element, virtWindow, renderer, horizontal = shape.horizontal),
                     renderChildren = {
-                        RenderChildren(element, renderer)
+                        ProvideVirtItemPositions(virtWindow, renderableChildren(element, renderer), shape.horizontal) {
+                            RenderChildren(element, renderer)
+                        }
                     },
                 )
             }

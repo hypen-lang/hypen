@@ -149,7 +149,8 @@ commits atomically with the batch's rows) but no applicator handles it.
   `anchorDelta`), `collectionShape`, and
   `WindowedShape`. `VirtualizationMathTest` mirrors
   `hypen-web/tests/virtualization-math.test.ts` case for case — keep aligned;
-  `VirtAnchorTest` covers `anchorDelta` / `collectionShape`.
+  `VirtAnchorTest` covers `anchorDelta` / `collectionShape` /
+  `itemPosition` / `childPositions`.
 - `virt/VirtCompose.kt` — Compose glue. Lazy shape (`List`/`Grid` that scroll,
   and a scrollable Column/Row via `WindowedLazyList` from `HypenElement`):
   `total` slots, rows keyed by node id, placeholders by item index, reports
@@ -186,12 +187,16 @@ commits atomically with the batch's rows) but no applicator handles it.
   list, 1×`total` horizontally, `ceil(total/columns)`×`columns` for a grid) on
   both paths. On the lazy path it must be in the `modifier` passed to the lazy
   container: ui 1.7 applies a node's semantics modifiers tail-to-head, so the
-  outer one overrides the lazy layout's own `-1` (unknown) count.
+  outer one overrides the lazy layout's own `-1` (unknown) count. Each row
+  carries its whole-list `collectionItemInfo` from `Virtualization.itemPosition`
+  on both paths: lazy rows via `VirtItem`; padded rows without a wrapper — the
+  padded container provides `childPositions` (child id → cell, §1 grouping)
+  through `ProvideVirtItemPositions` / `LocalVirtItemPositions`, and
+  `HypenElement` adds `virtItemInfo` to a listed row's own modifier.
 
 Known gaps:
-- Padded-path rows carry no per-row `collectionItemInfo` (only the lazy path
-  wraps rows in `VirtItem`); anchoring assumes LTR for horizontal lists and
-  approximates the rows above the anchor by the measured average size.
+- Anchoring assumes LTR for horizontal lists and approximates the rows above
+  the anchor by the measured average size.
 - None of the Compose glue is exercised by unit tests (no Robolectric/Compose UI
   test setup); only the pure functions in `Virtualization.kt` are.
 

@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.ProvideVirtItemPositions
 import space.hypen.renderer.virt.ProvideVirtScroller
 import space.hypen.renderer.virt.VirtItem
 import space.hypen.renderer.virt.VirtLazyListReporter
@@ -207,9 +208,12 @@ class ListComponent : ComponentHandler {
                 },
                 horizontalAlignment = horizontalAlignment,
             ) {
-                children.forEach { child ->
-                    key(child.id) {
-                        ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                // Each row's whole-list position for TalkBack (§2).
+                ProvideVirtItemPositions(window, children, horizontal = false) {
+                    children.forEach { child ->
+                        key(child.id) {
+                            ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                        }
                     }
                 }
             }

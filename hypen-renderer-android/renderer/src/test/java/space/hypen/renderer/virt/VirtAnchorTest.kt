@@ -116,4 +116,50 @@ class VirtAnchorTest {
         assertEquals(CollectionShape(rowCount = 0, columnCount = 3),
             Virtualization.collectionShape(VirtWindow(0, 0, 0), horizontal = false, columns = 3))
     }
+
+    // ---- itemPosition / childPositions (per-row CollectionItemInfo)
+
+    @Test
+    fun `itemPosition places an item in the whole list`() {
+        assertEquals(ItemPosition(rowIndex = 42, columnIndex = 0), Virtualization.itemPosition(42, horizontal = false))
+        assertEquals(ItemPosition(rowIndex = 0, columnIndex = 42), Virtualization.itemPosition(42, horizontal = true))
+        assertEquals(ItemPosition(rowIndex = 14, columnIndex = 0), Virtualization.itemPosition(42, horizontal = false, columns = 3))
+        assertEquals(ItemPosition(rowIndex = 14, columnIndex = 2), Virtualization.itemPosition(44, horizontal = false, columns = 3))
+    }
+
+    @Test
+    fun `padded rows get their whole-list position from the window start`() {
+        val positions = Virtualization.childPositions(VirtWindow(1000, 40, 43), listOf("a", "b", "c"), horizontal = false) { it }
+        assertEquals(
+            mapOf("a" to ItemPosition(40, 0), "b" to ItemPosition(41, 0), "c" to ItemPosition(42, 0)),
+            positions,
+        )
+        val row = Virtualization.childPositions(VirtWindow(1000, 40, 42), listOf("a", "b"), horizontal = true) { it }
+        assertEquals(mapOf("a" to ItemPosition(0, 40), "b" to ItemPosition(0, 41)), row)
+    }
+
+    @Test
+    fun `padded grid items get their row and column`() {
+        val positions = Virtualization.childPositions(VirtWindow(95, 30, 34), listOf("a", "b", "c", "d"), horizontal = false, columns = 3) { it }
+        assertEquals(
+            mapOf("a" to ItemPosition(10, 0), "b" to ItemPosition(10, 1), "c" to ItemPosition(10, 2), "d" to ItemPosition(11, 0)),
+            positions,
+        )
+    }
+
+    @Test
+    fun `a multi-node template shares its item's position`() {
+        // Two children per item (§1 grouping).
+        val positions = Virtualization.childPositions(VirtWindow(100, 10, 12), listOf("t1", "b1", "t2", "b2"), horizontal = false) { it }
+        assertEquals(ItemPosition(10, 0), positions["t1"])
+        assertEquals(ItemPosition(10, 0), positions["b1"])
+        assertEquals(ItemPosition(11, 0), positions["t2"])
+        assertEquals(ItemPosition(11, 0), positions["b2"])
+    }
+
+    @Test
+    fun `children beyond the window get no position`() {
+        // A transient batch: children arrive for a window that holds no items.
+        assertEquals(emptyMap<String, ItemPosition>(), Virtualization.childPositions(VirtWindow(100, 10, 10), listOf("x"), horizontal = false) { it })
+    }
 }
