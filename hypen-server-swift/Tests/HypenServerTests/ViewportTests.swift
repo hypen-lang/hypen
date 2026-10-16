@@ -211,6 +211,35 @@ final class ViewportTests: XCTestCase {
         XCTAssertFalse(transport.wasClosed, "never a disconnect")
     }
 
+    /// The rows every server SDK agrees on (see hypen-sdk-rs
+    /// `viewport_contract_table_rows`): re-reporting the current window
+    /// (spelled `-0` / `NeM`) sends nothing and keeps the revision; an empty
+    /// `listId` is malformed; `start > end` is forwarded and the engine keeps
+    /// the single item at `start`.
+    func testViewportContractTableRows() throws {
+        let server = try makeServer()
+        defer { server.stop() }
+        let (session, transport) = try ready(server)
+        let virt = try XCTUnwrap(virtWindow(in: transport.all))
+        let end = try XCTUnwrap(virt.window["end"] as? Int)
+        let before = transport.all.count
+        let revBefore = session.currentRevision
+
+        session.receive(#"{"type":"viewport","listId":"\#(virt.id)","start":-0,"end":\#(end)e0}"#)
+        session.receive(#"{"type":"viewport","listId":"","start":0,"end":10}"#)
+        XCTAssertEqual(transport.all.count, before, "a no-op or empty-id report sends nothing")
+        XCTAssertEqual(session.currentRevision, revBefore)
+
+        session.receive(#"{"type":"viewport","listId":"\#(virt.id)","start":50,"end":10}"#)
+        let after = Array(transport.all.dropFirst(before))
+        XCTAssertEqual(after.count, 1)
+        let moved = try XCTUnwrap(virtWindow(in: transport.all))
+        XCTAssertEqual(moved.window["start"] as? Int, 50)
+        XCTAssertEqual(moved.window["end"] as? Int, 51, "start > end keeps one item at start")
+        XCTAssertEqual(session.currentRevision, revBefore + 1)
+        XCTAssertFalse(transport.wasClosed)
+    }
+
     func testViewportOnlyAffectsThisSession() throws {
         let server = try makeServer()
         defer { server.stop() }

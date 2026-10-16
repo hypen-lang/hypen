@@ -81,6 +81,7 @@ class HypenServerViewportTest {
             """{"type":"viewport","start":0,"end":10}""",
             """{"type":"viewport","listId":7,"start":0,"end":10}""",
             """{"type":"viewport","listId":null,"start":0,"end":10}""",
+            """{"type":"viewport","listId":"","start":0,"end":10}""",
             """{"type":"viewport","listId":"7","end":10}""",
             """{"type":"viewport","listId":"7","start":0}""",
             """{"type":"viewport","listId":"7","start":-1,"end":10}""",
@@ -301,6 +302,32 @@ class HypenServerViewportTest {
         c.await { t -> t.any { it.contains("\"patch\"") } }
         assertEquals(Window(listId, 100, 90, 100), windowOf(uiMessages(c.texts())))
         assertEquals(listOf(1L), c.ofType("patch").map { it["revision"]!!.jsonPrimitive.long }, "the first real patch is revision 1")
+    }
+
+    /**
+     * The rows every server SDK agrees on (see hypen-sdk-rs
+     * `viewport_contract_table_rows`): re-reporting the current window
+     * (spelled `-0` / `1e1`) sends nothing and keeps the revision; `start >
+     * end` is forwarded and the engine keeps the single item at `start`.
+     */
+    @Test
+    fun `contract table rows - a no-op report is silent and start past end keeps one item`() = withServer(listServer()) { s ->
+        requireNative()
+        val c = Conn(s)
+        c.send("""{"type":"hello"}""")
+        c.await { t -> t.any { it.contains("\"initialTree\"") } }
+        val initial = windowOf(uiMessages(c.texts()))
+        val sent = c.texts().size
+
+        c.send("""{"type":"viewport","listId":"${initial.listId}","start":-0,"end":${initial.end}e0}""")
+        delay(50)
+        assertEquals(sent, c.texts().size, "a report that moves nothing sends nothing: ${c.texts().drop(sent)}")
+
+        c.send("""{"type":"viewport","listId":"${initial.listId}","start":50,"end":10}""")
+        c.await { t -> t.any { it.contains("\"patch\"") } }
+        assertEquals(Window(initial.listId, 100, 50, 51), windowOf(uiMessages(c.texts())))
+        assertEquals(listOf(1L), c.ofType("patch").map { it["revision"]!!.jsonPrimitive.long }, "the no-op bumped no revision")
+        assertNull(c.closed)
     }
 
     @Test

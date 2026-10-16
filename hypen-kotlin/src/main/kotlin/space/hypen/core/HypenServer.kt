@@ -1832,12 +1832,12 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
 
         /**
          * Parse `{"type":"viewport","listId":"…","start":n,"end":n}`
-         * (virtualization.md §4): `listId` a string, `start`/`end`
+         * (virtualization.md §4): `listId` a non-empty string, `start`/`end`
          * non-negative integers clamped to `u32`. Anything else is
          * malformed: `null`, ignored by the caller. Never throws.
          */
         internal fun parseViewportMessage(msg: JsonObject): ViewportRequest? {
-            val listId = msg.stringMember("listId") ?: return null
+            val listId = msg.stringMember("listId")?.takeIf { it.isNotEmpty() } ?: return null
             val start = msg.u32Member("start") ?: return null
             val end = msg.u32Member("end") ?: return null
             return ViewportRequest(listId, start, end)

@@ -1441,13 +1441,17 @@ impl RemoteSession {
     /// `hypen-web/docs/virtualization.md` §4): move that list's window on
     /// **this session's engine only**.
     ///
-    /// Ignored before `hello`; the engine itself ignores a malformed id or
-    /// one naming no windowed list. The resulting
+    /// Ignored before `hello` and for an empty `listId` (malformed, like a
+    /// bad bound — those never decode); the engine itself ignores an id
+    /// naming no windowed list. The resulting
     /// patches go out as an ordinary `patch` message with the next
     /// revision; a report that changes nothing sends nothing and keeps the
     /// revision. It is not an action: nothing is replayed to other
     /// sessions, no handler runs and no `stateUpdate` follows.
     fn handle_viewport(&self, list_id: &str, start: usize, end: usize, emit: &mut dyn FnMut(&str)) {
+        if list_id.is_empty() {
+            return;
+        }
         let mut inner = self.inner.lock().unwrap();
         if inner.acked_session_id.is_none() {
             return;
@@ -3014,6 +3018,33 @@ mod tests {
         let replies = session.handle_message(&msg);
         let (_, window) = virt_windows(&replies[0]).pop().expect("window moved");
         assert_eq!(window["end"], 100, "the engine clamps to the list");
+    }
+
+    /// The cross-server table (every SDK pins the same rows): an empty
+    /// `listId` is malformed; `-0`, `40.0` and `4e1` are integers;
+    /// `start > end` is forwarded and the engine materializes the single
+    /// item at `start`; repeating the current window sends nothing.
+    #[test]
+    fn viewport_contract_table_rows() {
+        let session = list_session();
+        let id = hello_list(&session);
+        let before = session.revision();
+        let empty = r#"{"type":"viewport","listId":"","start":0,"end":5}"#;
+        assert!(session.handle_message(empty).is_empty(), "empty listId");
+        // The initial window again, spelled with -0 / float integers: no-op.
+        let same = format!(r#"{{"type":"viewport","listId":"{id}","start":-0,"end":1e1}}"#);
+        assert!(session.handle_message(&same).is_empty(), "unchanged window");
+        assert_eq!(session.revision(), before);
+
+        let inverted = session.handle_message(&viewport_json(&id, 50, 10));
+        assert_eq!(inverted.len(), 1);
+        let (_, window) = virt_windows(&inverted[0]).pop().expect("window moved");
+        assert_eq!(
+            (window["start"].as_u64(), window["end"].as_u64()),
+            (Some(50), Some(51)),
+            "start > end: the engine keeps one item at start"
+        );
+        assert_eq!(session.revision(), before + 1);
     }
 
     #[test]

@@ -452,3 +452,38 @@ func TestViewport_RemoteEngineClient(t *testing.T) {
 		t.Errorf("client revision = %d, want 1", client.GetRevision())
 	}
 }
+
+// TestViewport_ContractTableRows pins the rows every server SDK agrees on
+// (see hypen-sdk-rs viewport_contract_table_rows): `-0` and `1e1` are
+// integers; re-reporting the current window sends nothing and keeps the
+// revision; `start > end` is forwarded and the engine keeps the single
+// item at `start`.
+func TestViewport_ContractTableRows(t *testing.T) {
+	var actionCalls atomic.Int32
+	server := newVirtServer(t, newVirtDef(t, &actionCalls))
+	sess, tr := newVirtSession(t, server)
+	listID := helloAndList(t, sess, tr)
+	for nextMessage(tr, 100*time.Millisecond) != nil {
+	}
+
+	// The initial window [0, 10) again, spelled -0 / 1e1: a no-op.
+	if err := sess.Receive([]byte(`{"type":"viewport","listId":"` + listID + `","start":-0,"end":1e1}`)); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	expectSilence(t, tr, 300*time.Millisecond, "viewport repeating the current window")
+	if sess.Revision() != 0 {
+		t.Fatalf("revision moved to %d on a no-op viewport", sess.Revision())
+	}
+
+	sendJSON(t, sess, map[string]any{"type": "viewport", "listId": listID, "start": 50, "end": 10})
+	pm, ok := nextMessage(tr, 5*time.Second).(*PatchMessage)
+	if !ok {
+		t.Fatal("start > end produced no patch")
+	}
+	if w := windowOf(pm.Patches, listID); w == nil || w["start"] != float64(50) || w["end"] != float64(51) {
+		t.Fatalf("__virt.window = %v, want 50..51", w)
+	}
+	if pm.Revision != 1 {
+		t.Errorf("patch revision = %d, want 1", pm.Revision)
+	}
+}
