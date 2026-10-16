@@ -690,7 +690,8 @@ pub(crate) fn handle_incoming(
         // Client→server variants — ignore if they ever bounce back.
         RemoteMessage::Hello { .. }
         | RemoteMessage::DispatchAction { .. }
-        | RemoteMessage::SubscribeState { .. } => {}
+        | RemoteMessage::SubscribeState { .. }
+        | RemoteMessage::Viewport { .. } => {}
     }
 }
 
@@ -744,6 +745,21 @@ impl HypenModule for RemoteModule {
         };
         if let Err(e) = self.outbound.send(msg) {
             log::warn!("remote: action dispatch dropped (worker gone): {e}");
+        }
+    }
+
+    /// `viewport` message (virtualization contract §4). Queued like an
+    /// action; while disconnected it waits for the next session, whose
+    /// server ignores a stale list id.
+    fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
+        let clamp = |n: usize| u32::try_from(n).unwrap_or(u32::MAX);
+        let msg = RemoteMessage::Viewport {
+            list_id: list_id.to_string(),
+            start: clamp(start),
+            end: clamp(end),
+        };
+        if let Err(e) = self.outbound.send(msg) {
+            log::warn!("remote: viewport report dropped (worker gone): {e}");
         }
     }
 }
@@ -863,6 +879,27 @@ mod tests {
                 assert_eq!(payload, Some(json!({"value": 42})));
             }
             other => panic!("expected DispatchAction, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn set_list_viewport_sends_a_viewport_message() {
+        let (tx, mut rx) = mpsc::unbounded_channel::<RemoteMessage>();
+        let module = RemoteModule {
+            module_name: "Feed".into(),
+            inner: Arc::new(Mutex::new(Inner::default())),
+            outbound: tx,
+        };
+        module.set_list_viewport("4294967301", 40, 70);
+        module.set_list_viewport("7", 0, usize::MAX);
+        let wire = rx.try_recv().expect("queued").to_json().unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&wire).unwrap(),
+            json!({ "type": "viewport", "listId": "4294967301", "start": 40, "end": 70 })
+        );
+        match rx.try_recv().expect("queued") {
+            RemoteMessage::Viewport { end, .. } => assert_eq!(end, u32::MAX, "clamped"),
+            other => panic!("expected Viewport, got {other:?}"),
         }
     }
 

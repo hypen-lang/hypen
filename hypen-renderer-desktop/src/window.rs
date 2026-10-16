@@ -543,6 +543,9 @@ pub struct App {
     /// or `overflow: auto`. Clamped against each container's
     /// `ScrollMeta::content_h` after every layout.
     scrollables: HashMap<String, f32>,
+    /// Windowed lists (`__virt.window`, list virtualization): their
+    /// windows, measured row sizes, padding and last viewport report.
+    virt: crate::virt::VirtLists,
     /// Rolling 1-second window for `flush_patches` calls. If the
     /// engine enters a render loop (the suspected culprit behind the
     /// idle-RAM leak), this counts the per-second flush rate and logs
@@ -717,6 +720,7 @@ impl App {
             last_ime_target: None,
             scroll_y: 0.0,
             scrollables: HashMap::new(),
+            virt: crate::virt::VirtLists::default(),
             patch_window_start: None,
             patch_window_flushes: 0,
             is_occluded: false,
@@ -1318,6 +1322,10 @@ impl App {
         // animator, Tree, Taffy mirror) consumes the plain wire.
         let mut patches = self.template_expander.expand(self.queue.drain());
         reconcile_optimistic_input_echoes(&mut patches, &mut self.optimistic_inputs);
+        // List virtualization: `__virt.window` never reaches the tree; it
+        // becomes the renderer-private `__virt.pad` layout prop, appended
+        // after the batch's structural patches.
+        self.virt.ingest(&mut patches, scale);
         let n = patches.len();
         if n == 0 {
             // Overdue-exit backbone: even a patch-less flush (occluded
@@ -1756,6 +1764,161 @@ impl App {
         }
     }
 
+    /// Per-frame list virtualization pass, after this frame's layout and
+    /// before paint (`crate::virt`, `virtualization.md` §2–§3):
+    ///
+    /// 1. measure each windowed list's materialized rows (Taffy geometry,
+    ///    so culled rows count) and queue a `__virt.pad` write when the
+    ///    stand-in padding moved;
+    /// 2. if a padding change landed since the last frame, shift the scroll
+    ///    container so the first visible row stays where it was (applied
+    ///    to this frame's rects in place, like the scroll fast paths);
+    /// 3. compute the visible range against the list's scroll container —
+    ///    itself if it scrolls, else the page, clipped by every clipping
+    ///    ancestor — and report the overscanned range to the module when
+    ///    the window doesn't cover it.
+    fn sync_virtual_lists(&mut self, w: u32, h: u32, scale: f32) {
+        if self.virt.is_empty() {
+            return;
+        }
+        let mut pad_patches = Vec::new();
+        let mut reports = Vec::new();
+        let mut page_shift = 0.0f32;
+        let mut container_shifts: Vec<(String, f32)> = Vec::new();
+        for id in self.virt.ids() {
+            let Some(node) = self.tree.get(&id) else {
+                self.virt.forget(&id);
+                continue;
+            };
+            let columns = crate::virt::columns_of(node);
+            let Some(geom) = self.taffy.virt_geometry(&self.tree, &id) else {
+                continue;
+            };
+            if let Some(p) = self.virt.remeasure(&id, &geom, columns, scale) {
+                pad_patches.push(p);
+            }
+            // Not emitted: culled (off screen) or not laid out yet.
+            let Some(layout) = self.layout.as_ref() else {
+                continue;
+            };
+            let Some(item) = layout.item_by_id(&id) else {
+                continue;
+            };
+            let hz = geom.horizontal;
+            let near = |r: &crate::layout::Rect| if hz { r.x } else { r.y };
+            let far = |r: &crate::layout::Rect| if hz { r.x + r.w } else { r.y + r.h };
+            let mut lo = 0.0f32;
+            let mut hi = if hz { w as f32 } else { h as f32 };
+            if let Some(clip) = item.clip_to.as_ref() {
+                lo = lo.max(near(clip));
+                hi = hi.min(far(clip));
+            }
+            // Containers scroll vertically only.
+            let own = item.scrollable.is_some() && !hz;
+            let own_scroll = if own {
+                lo = lo.max(near(&item.rect));
+                hi = hi.min(far(&item.rect));
+                self.scrollables.get(&id).copied().unwrap_or(0.0)
+            } else {
+                0.0
+            };
+            let list_near = near(&item.rect);
+
+            // Scroll anchoring (vertical lists). Content positions are
+            // offsets inside the scroll container, independent of how far
+            // it is scrolled.
+            if !hz {
+                let ancestor = if own {
+                    None
+                } else {
+                    let mut cur = self.tree.parent_of(&id);
+                    let mut found = None;
+                    while let Some(p) = cur {
+                        if let Some(meta) = layout.item_by_id(p).and_then(|it| {
+                            it.scrollable
+                                .map(|m| (p.to_string(), it.rect.y, m.baked_offset))
+                        }) {
+                            found = Some(meta);
+                            break;
+                        }
+                        cur = self.tree.parent_of(p);
+                    }
+                    found
+                };
+                let page_offset = self.last_scroll_y_in_layout;
+                let content_of = |rel: f32| -> f32 {
+                    if own {
+                        rel
+                    } else {
+                        let screen = list_near + rel;
+                        match &ancestor {
+                            Some((_, top, baked)) => screen - top + baked,
+                            None => screen + page_offset,
+                        }
+                    }
+                };
+                let delta = self.virt.anchor_shift(&id, |row| {
+                    geom.children
+                        .iter()
+                        .find(|(cid, _, _)| cid == row)
+                        .map(|(_, rel, _)| content_of(*rel))
+                });
+                if delta != 0.0 {
+                    match (own, &ancestor) {
+                        (true, _) => container_shifts.push((id.clone(), delta)),
+                        (false, Some((sid, _, _))) => container_shifts.push((sid.clone(), delta)),
+                        (false, None) => page_shift += delta,
+                    }
+                }
+                let first_visible = geom
+                    .children
+                    .iter()
+                    .find(|(_, rel, ext)| list_near + rel + ext - own_scroll > lo)
+                    .map(|(cid, rel, _)| (cid.clone(), content_of(*rel)));
+                self.virt.set_anchor(&id, first_visible);
+            }
+
+            let vp = crate::virt::ListViewport {
+                list_near,
+                own_scroll,
+                vis_lo: lo,
+                vis_hi: hi,
+            };
+            if let Some(visible) = self.virt.visible(&id, &geom, columns, vp, scale) {
+                if let Some(range) = self.virt.plan_report(&id, visible) {
+                    reports.push((id.clone(), range));
+                }
+            }
+        }
+
+        if page_shift != 0.0 {
+            self.scroll_y += page_shift;
+            if let Some(layout) = self.layout.as_mut() {
+                shift_page_items(layout, page_shift);
+            }
+            self.last_scroll_y_in_layout += page_shift;
+        }
+        if !container_shifts.is_empty() {
+            let vp_logical = crate::layout::logical_viewport((w, h), scale);
+            for (cid, delta) in container_shifts {
+                *self.scrollables.entry(cid.clone()).or_insert(0.0) += delta;
+                if let Some(layout) = self.layout.as_mut() {
+                    layout.shift_container_scroll(&self.tree, &cid, delta, vp_logical, scale);
+                }
+            }
+            self.layout_generation = self.layout_generation.wrapping_add(1);
+        }
+        if !pad_patches.is_empty() {
+            self.queue.push(&pad_patches);
+            if let Some(window) = self.window.as_ref() {
+                window.request_redraw();
+            }
+        }
+        for (id, range) in reports {
+            self.module.set_list_viewport(&id, range.start, range.end);
+        }
+    }
+
     fn redraw(&mut self) {
         #[cfg(feature = "dev-overlay")]
         let frame_started = std::time::Instant::now();
@@ -2097,22 +2260,7 @@ impl App {
                 // on every scroll fast-path frame.
                 let delta = self.scroll_y - self.last_scroll_y_in_layout;
                 if let Some(layout) = self.layout.as_mut() {
-                    for it in layout.items.iter_mut() {
-                        it.rect.y -= delta;
-                        if let Some(clip) = it.clip_to.as_mut() {
-                            clip.y -= delta;
-                        }
-                        // Cumulative transforms embed the emit-time rect
-                        // centers as origin terms; a uniform y-shift of
-                        // every rect conjugates every cumulative transform
-                        // by the same shift (exact — see
-                        // `Affine2::conjugate_translate`). Without this, a
-                        // scaled/rotated item would pivot about its stale
-                        // pre-scroll center on every fast-path frame.
-                        if !it.transform.is_identity() {
-                            it.transform = it.transform.conjugate_translate(0.0, -delta);
-                        }
-                    }
+                    shift_page_items(layout, delta);
                 }
                 self.last_scroll_y_in_layout = self.scroll_y;
                 self.layout_generation = self.layout_generation.wrapping_add(1);
@@ -2136,6 +2284,10 @@ impl App {
                 self.layout_generation = self.layout_generation.wrapping_add(1);
             }
         }
+        // List virtualization: measure windowed lists against the layout
+        // this frame paints, keep their first visible row anchored, and
+        // report viewports (`virtualization.md` §3).
+        self.sync_virtual_lists(w, h, scale);
         // Route this frame's `.onAnimationComplete` dispatches to the module:
         // enter/exit/finite-preset/states settles from the tick above, plus
         // any zero-delta shared-element settle from `play_shared_flips`.
@@ -4683,6 +4835,30 @@ pub(crate) fn wheel_route(
         (_, Some(target)) => WheelRoute::Container(target),
         (true, None) => WheelRoute::Blocked,
         (false, None) => WheelRoute::Page,
+    }
+}
+
+/// Shift every cached item by a page-scroll `delta` (physical px) in
+/// place — the page-scroll fast path, also used by list-virtualization
+/// scroll anchoring.
+fn shift_page_items(layout: &mut LayoutPass, delta: f32) {
+    if delta == 0.0 {
+        return;
+    }
+    for it in layout.items.iter_mut() {
+        it.rect.y -= delta;
+        if let Some(clip) = it.clip_to.as_mut() {
+            clip.y -= delta;
+        }
+        // Cumulative transforms embed the emit-time rect centers as
+        // origin terms; a uniform y-shift of every rect conjugates every
+        // cumulative transform by the same shift (exact — see
+        // `Affine2::conjugate_translate`). Without this, a scaled/rotated
+        // item would pivot about its stale pre-scroll center on every
+        // fast-path frame.
+        if !it.transform.is_identity() {
+            it.transform = it.transform.conjugate_translate(0.0, -delta);
+        }
     }
 }
 

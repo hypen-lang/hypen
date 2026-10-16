@@ -52,6 +52,7 @@ pub mod tree;
 /// Video v2 — player states, the `playback` bind struct, and composition
 /// slots. Mirrors `hypen-web/packages/core/src/types.ts`.
 pub mod video_v2;
+pub mod virt;
 pub mod window;
 
 pub use app::DesktopApp;
