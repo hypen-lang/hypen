@@ -406,42 +406,65 @@ removeProp, which restores the normal container rendering.
   same names and cases as the TS reference and Android's
   `virt/Virtualization.kt`), the §5 slot mapping (`Virtualization.Slots`, a
   `RandomAccessCollection` resolved on demand), the §4 `viewportMessage`,
-  `anchorUnitPoint` (§2 anchoring via `scrollTo`), the accessibility strings
-  (`accessibilityPosition` "Row 41 of 10000" / "Item 5 of 30",
-  `accessibilitySummary` "10000 rows"), and `VirtViewportTracker`.
+  `anchorUnitPoint` (§2 anchoring via `scrollTo`), `anchorCandidate` (anchor
+  = first visible materialized row, else first visible placeholder),
+  `visibleSlotRange` (slot frames ∩ viewport), the accessibility formatters
+  (`accessibilityPosition` "Row 41 of 10,000" / "Item 5 of 30",
+  `accessibilitySummary` "10,000 rows": injected `localize` lookup, numbers
+  via `NumberFormatter` for the locale, object-only `%@`/`%n$@` formats
+  validated and substituted by hand, English fallback), and
+  `VirtViewportTracker`.
   `VirtualizationMathTests` mirrors `hypen-web/tests/virtualization-math.test.ts`
   case for case (plus tracker / anchoring / a11y cases) — keep aligned.
+- `Virtualization/HypenAccessibility.swift` — public, host-overridable
+  `HypenAccessibility.listPosition: (index, total, isGrid) -> String` and
+  `listSummary: (total, isGrid) -> String` (`@MainActor` vars). Defaults read
+  `Resources/<lang>.lproj/Localizable.strings` from `Bundle.module` (en, de,
+  es, fr, it, ja, pt-BR, zh-Hans; `defaultLocalization: "en"` +
+  `resources: [.process("Resources")]` in Package.swift). Add a language by
+  adding an `.lproj` with all six `hypen.a11y.list.*` keys —
+  `testEveryBundledLocalizationHasEveryKeyWithTheSameArguments` checks it.
 - `VirtViewportTracker` (pure) owns every decision: the visible range (best
-  first: slot frames intersecting the viewport → list-edge geometry through
-  the item size → `onAppear`/`onDisappear` slots), §3 step 4 (`observe` /
-  `evaluate` forget `lastReported` only when `__virt.window` changes value;
-  an identical re-send keeps it), and `anchorCorrection(slots, mode:)` (the
-  first visible item since the last evaluation, found again by the node it
-  showed — an insert/removal above moves it to another index — else by its
-  index; `.contentOffset` corrects any move within the list, `.slotPosition`
-  only a move to another index, since `scrollPosition(id:)` already held the
-  index).
+  first: slot frames intersecting a Hypen scroller's viewport → list-edge
+  geometry through the item size → slots the enclosing scroll view reports
+  visible (`slotVisibility`) → slots' `.global` frames ∩ the screen
+  (`slotGlobalFrame` + `globalViewport`) → `onAppear`/`onDisappear` slots),
+  §3 step 4 (`observe` / `evaluate` forget `lastReported` only when
+  `__virt.window` changes value; an identical re-send keeps it), and
+  `anchorCorrection(slots, mode:)` (the anchor since the last evaluation —
+  the first visible materialized row, else the first visible placeholder —
+  found again by the node it showed — an insert/removal above moves it to
+  another index — else by its index; `.contentOffset` corrects any move
+  within the list, `.slotPosition` only a move to another index, since
+  `scrollPosition(id:)` already held the index).
 - `Virtualization/VirtualizedLazyStack.swift` — `LazyVStack` / `LazyHStack` /
-  `LazyVGrid` of `total` slots. Slot identity (`ForEach` id and the
-  `scrollPosition(id:)` target) is the whole-list item index `i:<index>`, so
-  it does not change when a placeholder materializes; a row's content is
+  `LazyVGrid` of `total` slots. Slot identity (`ForEach` id, the
+  `scrollPosition(id:)` and `scrollTo` target) is the list id plus the
+  whole-list item index, `<listId>/i:<index>` (`Slots.identified`), so it
+  does not change when a placeholder materializes and is unique in an outer
+  scroll view holding several lists; a row's content is
   keyed inside the slot by `.id("n:<nodeId>")` in a one-child stack (view
   state follows the node; the stack keeps that `.id` from standing in for the
   slot's). Placeholders are sized at the measured average. Used by List, Column, Row and
   Grid; any other windowed element (`Box`, `Stack`, unknown types) renders as
   a Column (`HypenElementContentView.componentHandler(for:)`). Evaluated once
   per main-actor turn.
-  - **Geometry**: `.hypenVirtScrollContainer(axis)` (same file) gives a
-    `ScrollView` a unique named coordinate space and puts
-    `{space, axis, viewport extent}` in the environment. It is on the stack's
-    own `ScrollView` and on the scrollable Column / Row / List / Grid
-    `ScrollView`s in `LayoutComponents.swift`, so a list under an ancestor
-    Hypen scroller measures against it too. Each slot and the stack report
-    their frames in that space (`GeometryReader` + `onChange`); a container
-    on the other axis is ignored. `onScrollGeometryChange` (iOS 18 / macOS 15)
-    still feeds the owned case. Only under a host app's own `ScrollView` does
-    it fall back to `onAppear`/`onDisappear` (a few slots wide).
-  - **Scroll anchoring (§2)**, owned `ScrollView` only: iOS 17 / macOS 14 /
+  - **Geometry**: `.hypenVirtScrollContainer(axis)` (same file) wraps a
+    `ScrollView` in a `ScrollViewReader`, gives it a unique named coordinate
+    space and puts `{space, axis, viewport extent, handle (its proxy)}` in
+    the environment. It is on the stack's own `ScrollView` and on the
+    scrollable Column / Row / List / Grid `ScrollView`s in
+    `LayoutComponents.swift`, so a list under an ancestor Hypen scroller
+    measures against it (and anchors through it) too. Each slot and the
+    stack report their frames in that space (`GeometryReader` + `onChange`);
+    a container on the other axis is ignored. `onScrollGeometryChange`
+    (iOS 18 / macOS 15) still feeds the owned case. With no Hypen scroller
+    on the axis (a host app's `ScrollView`): each slot's
+    `onScrollVisibilityChange(threshold:)` on iOS 18 / macOS 15 / tvOS 18 /
+    watchOS 11; before that its `.global` frame against the screen
+    (`VirtScreen`: `UIScreen.main.bounds` / `NSScreen.main.frame`; none on
+    watchOS / visionOS → `onAppear`).
+  - **Scroll anchoring (§2)**. Owned `ScrollView`: iOS 17 / macOS 14 /
     tvOS 17 / watchOS 10 — `scrollPosition(id:anchor:)` +
     `scrollTargetLayout()` (SwiftUI keeps the first visible slot in place;
     the bound id lives in a reference box so it never re-renders the stack),
@@ -450,12 +473,16 @@ removeProp, which restores the normal container rendering.
     Earlier — `tracker.anchorCorrection(slots, mode: .contentOffset)`. Either
     way the correction is `ScrollViewProxy.scrollTo(slotId, anchor:
     UnitPoint(…, anchorUnitPoint))`, which keeps the item's partial offset
-    (rebinding the scroll position would snap it to the edge).
-  - **Accessibility (§2)**: rows carry `.accessibilityHint("Row N of total")`
-    (SwiftUI has no set-position API for arbitrary views; the hint reaches
-    every element in the row); the stack is `.accessibilityElement(children:
-    .contain)` with `.accessibilityValue("<total> rows")`. Placeholders are
-    `accessibilityHidden`.
+    (rebinding the scroll position would snap it to the edge). Nested in a
+    Hypen scroller (no own `ScrollView`): `.contentOffset` corrections through
+    the ancestor's published proxy (`scrollTo` reaches any identified
+    descendant; frames and the unit point are in the outer viewport).
+  - **Accessibility (§2)**: rows carry
+    `.accessibilityHint(HypenAccessibility.listPosition(…))` (SwiftUI has no
+    set-position API for arbitrary views; the hint reaches every element in
+    the row); the stack is `.accessibilityElement(children: .contain)` with
+    `.accessibilityValue(HypenAccessibility.listSummary(…))`. Placeholders
+    are `accessibilityHidden`.
 - Reports go `HypenRenderer.reportListViewport` → `viewportReporter` (wired
   in `HypenView` and the embedded app) → `RemoteEngine.setListViewport` /
   the embedded engine's `setListViewport`.
@@ -463,20 +490,26 @@ removeProp, which restores the normal container rendering.
   in its reserved writes and event locations (`HypenDndCoordinator.listIndex`).
 
 The SwiftUI files cannot be compiled on Linux; verify on macOS/Xcode. The
-pure file can: symlink it and its tests into a scratch SwiftPM package.
+pure files can (`VirtualizationMath.swift`, `HypenAccessibility.swift` with
+the `Resources` dir): symlink them and the tests into a scratch SwiftPM
+package that declares `defaultLocalization: "en"` and the resources.
 
 Known gaps:
-- **Anchoring under an ancestor scroller**: no correction (a `ScrollViewProxy`
-  only reaches scroll views inside its reader). Placeholders use the measured
-  average, which keeps any shift small.
-- **Anchoring across an insert above when the anchored item was a
-  placeholder** (or left the window): nothing names it, so its index is held
-  and the view shows whichever item now sits there.
-- **Visible range under a host app's `ScrollView`** (not Hypen's) still comes
-  from `onAppear`/`onDisappear`, a few slots wide. Harmless (a slightly larger
-  window), not wrong.
-- **Accessibility strings** are English, and the hint replaces a hint a row's
-  own semantics set.
+- **Anchoring under a host app's own `ScrollView`** (not Hypen's): no
+  correction — nothing exposes its `ScrollViewProxy` (or its iOS 18
+  `ScrollPosition`) to a descendant. Placeholders use the measured average,
+  which keeps any shift small.
+- **Only placeholders visible across an insert above**: with no materialized
+  row on screen the anchor is a placeholder, named by index only, so its
+  index is held. (Rare: the window covers what is visible once the engine
+  answers the report.)
+- **Visible range under a host `ScrollView` before iOS 18 / macOS 15** is the
+  slots on screen, not in the host's viewport: a few slots wide when the host
+  scroll view is shorter than the screen (harmless, a slightly larger
+  window); on watchOS 10 / visionOS (no screen API) it is `onAppear`.
+- **Accessibility**: the hint replaces a hint a row's own semantics set; the
+  summary's plural is one / other (`HypenAccessibility.listSummary` can be
+  overridden for languages with more plural forms).
 
 ## Feature Parity with hypen-android
 

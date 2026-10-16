@@ -225,21 +225,167 @@ public enum Virtualization {
 
     // MARK: - Accessibility (§2)
 
+    /// Localization keys of the list accessibility strings (the package's
+    /// `Resources/<lang>.lproj/Localizable.strings`). Every format uses only
+    /// object specifiers — `%@`, or positional `%1$@` / `%2$@` so a language
+    /// may name the total first — and receives numbers already formatted for
+    /// the locale (``formatCount(_:locale:)``).
+    public enum A11yKey {
+        /// "Row %1$@ of %2$@": position, total.
+        public static let rowPosition = "hypen.a11y.list.rowPosition"
+        /// "Item %1$@ of %2$@" (a grid): position, total.
+        public static let itemPosition = "hypen.a11y.list.itemPosition"
+        /// "%@ row" / "%@ rows": the list's total.
+        public static let rowsOne = "hypen.a11y.list.rows.one"
+        public static let rowsOther = "hypen.a11y.list.rows.other"
+        /// "%@ item" / "%@ items": a grid's total.
+        public static let itemsOne = "hypen.a11y.list.items.one"
+        public static let itemsOther = "hypen.a11y.list.items.other"
+
+        public static let all = [rowPosition, itemPosition, rowsOne, rowsOther, itemsOne, itemsOther]
+
+        /// The English text, used when a lookup has no (valid) translation.
+        public static func english(_ key: String) -> String {
+            switch key {
+            case rowPosition: return "Row %1$@ of %2$@"
+            case itemPosition: return "Item %1$@ of %2$@"
+            case rowsOne: return "%@ row"
+            case rowsOther: return "%@ rows"
+            case itemsOne: return "%@ item"
+            case itemsOther: return "%@ items"
+            default: return key
+            }
+        }
+
+        /// Arguments the key's format receives.
+        public static func argumentCount(_ key: String) -> Int {
+            key == rowPosition || key == itemPosition ? 2 : 1
+        }
+    }
+
     /// What a materialized row says about its place in the whole list, the
     /// SwiftUI stand-in for `aria-posinset` / `aria-setsize` and Android's
     /// `CollectionItemInfo` (SwiftUI has no set-position API for arbitrary
-    /// views): "Row 41 of 10000", or "Item 41 of 10000" in a grid.
-    public static func accessibilityPosition(index: Int, total: Int, columns: Int = 1) -> String {
-        let noun = columns > 1 ? "Item" : "Row"
-        return "\(noun) \(max(0, index) + 1) of \(max(0, total))"
+    /// views): "Row 41 of 10,000", or "Item 41 of 10,000" in a grid.
+    ///
+    /// - Parameters:
+    ///   - locale: formats the numbers (grouping, digits)
+    ///   - localize: the translated format for an ``A11yKey`` (nil = none);
+    ///     a missing or malformed translation falls back to English
+    public static func accessibilityPosition(
+        index: Int,
+        total: Int,
+        columns: Int = 1,
+        locale: Locale = .current,
+        localize: (String) -> String? = { _ in nil }
+    ) -> String {
+        let key = columns > 1 ? A11yKey.itemPosition : A11yKey.rowPosition
+        return localizedFormat(key, localize: localize, arguments: [
+            formatCount(max(0, index) + 1, locale: locale),
+            formatCount(total, locale: locale),
+        ])
     }
 
     /// The list container's size, for its accessibility value:
-    /// "10000 rows", "1 row", "30 items".
-    public static func accessibilitySummary(total: Int, columns: Int = 1) -> String {
+    /// "10,000 rows", "1 row", "30 items". Plural choice is one (exactly 1)
+    /// vs other; a host needing a language's full plural rules overrides
+    /// ``HypenAccessibility/listSummary``.
+    public static func accessibilitySummary(
+        total: Int,
+        columns: Int = 1,
+        locale: Locale = .current,
+        localize: (String) -> String? = { _ in nil }
+    ) -> String {
         let n = max(0, total)
-        let noun = columns > 1 ? (n == 1 ? "item" : "items") : (n == 1 ? "row" : "rows")
-        return "\(n) \(noun)"
+        let key = columns > 1
+            ? (n == 1 ? A11yKey.itemsOne : A11yKey.itemsOther)
+            : (n == 1 ? A11yKey.rowsOne : A11yKey.rowsOther)
+        return localizedFormat(key, localize: localize, arguments: [formatCount(n, locale: locale)])
+    }
+
+    /// A non-negative count with the locale's digits and grouping
+    /// ("10,000", "10.000").
+    public static func formatCount(_ n: Int, locale: Locale) -> String {
+        let formatter = NumberFormatter()
+        formatter.locale = locale
+        formatter.numberStyle = .decimal
+        formatter.maximumFractionDigits = 0
+        let value = max(0, n)
+        return formatter.string(from: NSNumber(value: value)) ?? String(value)
+    }
+
+    /// The number of distinct object arguments `format` consumes, or nil
+    /// when it contains anything but `%@`, `%n$@` and `%%` (or mixes
+    /// positional and sequential specifiers). Translations are checked with
+    /// this before use, so a bad one can never crash formatting.
+    public static func objectArgumentCount(_ format: String) -> Int? {
+        guard let tokens = formatTokens(format) else { return nil }
+        var positional = Set<Int>()
+        var sequential = 0
+        for case let .argument(position) in tokens {
+            if let position { positional.insert(position) } else { sequential += 1 }
+        }
+        if !positional.isEmpty && sequential > 0 { return nil }
+        if positional.isEmpty { return sequential }
+        // Positions must be exactly 1...n.
+        return positional == Set(1...positional.count) ? positional.count : nil
+    }
+
+    /// `localize(key)` filled with `arguments`, or the English format when
+    /// the translation is missing or takes different arguments.
+    static func localizedFormat(_ key: String, localize: (String) -> String?, arguments: [String]) -> String {
+        if let format = localize(key), objectArgumentCount(format) == arguments.count {
+            return substitute(format, arguments)
+        }
+        return substitute(A11yKey.english(key), arguments)
+    }
+
+    private enum FormatToken {
+        case text(String)
+        case argument(Int?)
+    }
+
+    private static func formatTokens(_ format: String) -> [FormatToken]? {
+        var tokens: [FormatToken] = []
+        var text = ""
+        var chars = Array(format)[...]
+        while let c = chars.popFirst() {
+            guard c == "%" else { text.append(c); continue }
+            if chars.first == "%" { chars.removeFirst(); text.append("%"); continue }
+            var digits = ""
+            while let d = chars.first, d.isASCII, d.isNumber { digits.append(d); chars.removeFirst() }
+            var position: Int?
+            if !digits.isEmpty {
+                guard chars.first == "$", let n = Int(digits), n > 0 else { return nil }
+                chars.removeFirst()
+                position = n
+            }
+            guard chars.first == "@" else { return nil }
+            chars.removeFirst()
+            if !text.isEmpty { tokens.append(.text(text)); text = "" }
+            tokens.append(.argument(position))
+        }
+        if !text.isEmpty { tokens.append(.text(text)) }
+        return tokens
+    }
+
+    /// Fill a format validated by ``objectArgumentCount(_:)``. Done by hand
+    /// rather than `String(format:)` so it behaves identically on every
+    /// platform and never reads a missing vararg.
+    private static func substitute(_ format: String, _ arguments: [String]) -> String {
+        guard let tokens = formatTokens(format) else { return format }
+        var next = 0
+        var out = ""
+        for token in tokens {
+            switch token {
+            case let .text(t): out += t
+            case let .argument(position):
+                let i = position.map { $0 - 1 } ?? next
+                next += 1
+                if i >= 0 && i < arguments.count { out += arguments[i] }
+            }
+        }
+        return out
     }
 
     // MARK: - Native lazy containers (§5)
@@ -268,6 +414,10 @@ public enum Virtualization {
         /// anchored item's node to its new index.
         public var id: String { Virtualization.slotId(index) }
 
+        /// The slot's id among several lists sharing one scroll view
+        /// (``Virtualization/slotId(_:scope:)``).
+        public func id(scope: String) -> String { Virtualization.slotId(index, scope: scope) }
+
         /// Identity of what the slot shows, for keying its content inside the
         /// stably identified slot (so per-row view state follows the node, not
         /// the index): the first child's node id for a materialized row, the
@@ -285,16 +435,24 @@ public enum Virtualization {
         }
     }
 
-    /// The slot id of whole-list item `index` (``Slot/id``).
-    public static func slotId(_ index: Int) -> String { "i:\(index)" }
+    /// The slot id of whole-list item `index` (``Slot/id``). With a `scope`
+    /// (the list's element id) it is unique within an OUTER scroll view that
+    /// holds several lists, so the outer `ScrollViewProxy.scrollTo` finds
+    /// exactly this list's slot: `"<scope>/i:<index>"`.
+    public static func slotId(_ index: Int, scope: String = "") -> String {
+        scope.isEmpty ? "i:\(index)" : "\(scope)/i:\(index)"
+    }
 
     /// Map the list element's children onto `total` slots. Slot `i` is
     /// `.item` when `start ≤ i < end` and its children exist, else
     /// `.placeholder`. Children are grouped per item (``childrenPerItem(_:childCount:)``);
     /// a short child list (a batch still settling) leaves the uncovered items
     /// as placeholders rather than throwing.
-    public static func slots(_ window: VirtWindow, childIds: [String]) -> Slots {
-        Slots(window: window, childIds: childIds)
+    ///
+    /// `scope` (the list's element id) prefixes the slot ids
+    /// (``Slots/slotId(_:)``, ``Slots/identified``).
+    public static func slots(_ window: VirtWindow, childIds: [String], scope: String = "") -> Slots {
+        Slots(window: window, childIds: childIds, scope: scope)
     }
 
     /// The `total` slots of a windowed list, resolved on demand: O(1) to
@@ -304,12 +462,22 @@ public enum Virtualization {
         public let window: VirtWindow
         public let childIds: [String]
         public let childrenPerItem: Int
+        /// Prefix of the slot ids (the list's element id; "" = none).
+        public let scope: String
 
-        public init(window: VirtWindow, childIds: [String]) {
+        public init(window: VirtWindow, childIds: [String], scope: String = "") {
             self.window = window
             self.childIds = childIds
             self.childrenPerItem = Virtualization.childrenPerItem(window, childCount: childIds.count)
+            self.scope = scope
         }
+
+        /// The scoped id of slot `index`: what the lazy container's `ForEach`
+        /// identifies it by, and what `scrollTo` / `scrollPosition(id:)` name.
+        public func slotId(_ index: Int) -> String { Virtualization.slotId(index, scope: scope) }
+
+        /// The slots paired with their scoped ids, for `ForEach(…, id: \.id)`.
+        public var identified: IdentifiedSlots { IdentifiedSlots(slots: self) }
 
         public var startIndex: Int { 0 }
         public var endIndex: Int { window.total }
@@ -332,6 +500,68 @@ public enum Virtualization {
             let index = window.start + k / childrenPerItem
             return index < window.end ? index : nil
         }
+    }
+
+    /// A slot with its scoped id.
+    public struct IdentifiedSlot: Equatable, Sendable {
+        public let id: String
+        public let slot: Slot
+    }
+
+    /// ``Slots`` paired with their scoped ids, resolved on demand.
+    public struct IdentifiedSlots: RandomAccessCollection, Sendable {
+        public let slots: Slots
+        public var startIndex: Int { slots.startIndex }
+        public var endIndex: Int { slots.endIndex }
+        public subscript(index: Int) -> IdentifiedSlot {
+            IdentifiedSlot(id: slots.slotId(index), slot: slots[index])
+        }
+    }
+
+    // MARK: - Visible range from slot frames (§3 step 2)
+
+    /// The items whose slot frames intersect the viewport `(viewportMin,
+    /// viewportMax)` (open: a frame only touching an edge is not visible),
+    /// clamped to `[0, total)`; nil when none do. Frames and viewport share
+    /// one coordinate space along the scroll axis: the Hypen scroller's named
+    /// space, or `.global` against the screen.
+    public static func visibleSlotRange<Frames: Sequence>(
+        _ frames: Frames,
+        viewportMin: Double,
+        viewportMax: Double,
+        total: Int
+    ) -> ItemRange? where Frames.Element == VirtSlotFrame {
+        guard viewportMax > viewportMin else { return nil }
+        var lo = Int.max
+        var hi = Int.min
+        for frame in frames where frame.index >= 0 && frame.index < total
+            && frame.max > viewportMin && frame.min < viewportMax {
+            lo = Swift.min(lo, frame.index)
+            hi = Swift.max(hi, frame.index)
+        }
+        return lo <= hi ? ItemRange(start: lo, end: hi + 1) : nil
+    }
+
+    // MARK: - Scroll anchoring: which row (§2)
+
+    /// The slot to anchor on: the first visible MATERIALIZED row (one with a
+    /// node, so an insert or removal above can be followed by identity),
+    /// else the first visible placeholder; nil when nothing is visible.
+    /// "Visible" = the frame intersects `(0, viewportExtent)`.
+    public static func anchorCandidate<Frames: Sequence>(
+        _ frames: Frames,
+        slots: Slots,
+        viewportExtent: Double
+    ) -> VirtSlotFrame? where Frames.Element == VirtSlotFrame {
+        guard viewportExtent > 0 else { return nil }
+        var firstRow: VirtSlotFrame?
+        var firstAny: VirtSlotFrame?
+        for frame in frames where frame.max > 0 && frame.min < viewportExtent {
+            if firstAny.map({ frame.index < $0.index }) ?? true { firstAny = frame }
+            let materialized = frame.index >= 0 && frame.index < slots.endIndex && slots[frame.index].nodeId != nil
+            if materialized, firstRow.map({ frame.index < $0.index }) ?? true { firstRow = frame }
+        }
+        return firstRow ?? firstAny
     }
 
     // MARK: - Helpers
@@ -443,7 +673,7 @@ public struct VirtAnchorCorrection: Equatable, Sendable {
 /// the §3 overscan and reporting rules. Pure — the SwiftUI view owns one and
 /// calls the engine with what `evaluate` returns.
 ///
-/// Three sources of the visible range, best first:
+/// Sources of the visible range, best first:
 /// - **Slot frames** (``slotFrame(id:index:min:max:)`` with
 ///   ``listFrame(leading:viewportExtent:)``, from a `GeometryReader` per slot
 ///   in the scroll container's named coordinate space): the slots that
@@ -454,13 +684,21 @@ public struct VirtAnchorCorrection: Equatable, Sendable {
 ///   `onScrollGeometryChange` on iOS 18 / macOS 15): the visible extent
 ///   mapped through the item size, the reference `visibleRange` math. Used
 ///   when no slot is on screen (the list is scrolled out of view).
+/// - **Scroll visibility** (``slotVisibility(id:index:visible:)``, SwiftUI
+///   `onScrollVisibilityChange` on iOS 18 / macOS 15): the slots the
+///   enclosing scroll view — any scroll view, a host app's own included —
+///   reports visible. Used when no Hypen scroller is known.
+/// - **Global frames** (``slotGlobalFrame(id:index:min:max:)`` with
+///   ``globalViewport(min:max:)``, before iOS 18): each slot's `.global`
+///   frame intersected with the screen. Exact when the host's scroll view
+///   spans the screen along the axis, a little wide when it is shorter.
 /// - **Slot appearance** (``slotAppeared(_:)`` / ``slotDisappeared(_:)``,
-///   SwiftUI `onAppear` / `onDisappear`): when no geometry is known (an
-///   ancestor scroller that is not Hypen's). Lazy stacks prefetch beyond the
-///   screen, so this range runs a few slots wide.
+///   SwiftUI `onAppear` / `onDisappear`): when nothing above is known. Lazy
+///   stacks prefetch beyond the screen, so this range runs a few slots wide.
 ///
-/// It also remembers the first visible slot's position in the list's
-/// content, so a layout change above it (a window move, a new placeholder
+/// It also remembers the anchor — the first visible materialized row, else
+/// the first visible slot (``Virtualization/anchorCandidate(_:slots:viewportExtent:)``)
+/// — and its position in the list's content, so a layout change above it (a window move, a new placeholder
 /// size, an insert above) can be undone by ``anchorCorrection(_:mode:)``
 /// (§2 scroll anchoring).
 public final class VirtViewportTracker: @unchecked Sendable {
@@ -477,7 +715,13 @@ public final class VirtViewportTracker: @unchecked Sendable {
     /// The list's leading edge and the viewport's extent, in the same
     /// viewport coordinates as `frames`.
     private var list: (leading: Double, extent: Double)?
-    /// The first visible slot at the last ``anchorCorrection(_:mode:)``: its
+    /// Slots the enclosing scroll view reports visible (id → index).
+    private var scrollVisible: [String: Int] = [:]
+    /// Live slots' `.global` frames, keyed by slot id.
+    private var globalFrames: [String: VirtSlotFrame] = [:]
+    /// The screen's extent along the axis in `.global` coordinates.
+    private var globalClip: (min: Double, max: Double)?
+    /// The anchor at the last ``anchorCorrection(_:mode:)``: its
     /// item index, the node it showed (nil for a placeholder), and its
     /// leading edge relative to the list's leading edge.
     private var anchor: (index: Int, nodeId: String?, offsetInList: Double)?
@@ -534,9 +778,32 @@ public final class VirtViewportTracker: @unchecked Sendable {
         frames[id] = VirtSlotFrame(index: index, min: min, max: max)
     }
 
-    /// Forget a slot's frame (it left the lazy container).
+    /// Forget everything about a slot's position (it left the lazy
+    /// container): its frames and its scroll visibility.
     public func slotFrameRemoved(id: String) {
         frames.removeValue(forKey: id)
+        globalFrames.removeValue(forKey: id)
+        scrollVisible.removeValue(forKey: id)
+    }
+
+    /// Record whether the enclosing scroll view shows a slot (iOS 18
+    /// `onScrollVisibilityChange`).
+    public func slotVisibility(id: String, index: Int, visible: Bool) {
+        if visible { scrollVisible[id] = index } else { scrollVisible.removeValue(forKey: id) }
+    }
+
+    /// Record a live slot's `.global` frame along the axis.
+    public func slotGlobalFrame(id: String, index: Int, min: Double, max: Double) {
+        guard min.isFinite, max.isFinite, max >= min else { return }
+        globalFrames[id] = VirtSlotFrame(index: index, min: min, max: max)
+    }
+
+    /// Record the screen's extent along the axis in `.global` coordinates,
+    /// the clip for ``slotGlobalFrame(id:index:min:max:)``. An empty or
+    /// non-finite extent is ignored.
+    public func globalViewport(min: Double, max: Double) {
+        guard min.isFinite, max.isFinite, max > min else { return }
+        globalClip = (min, max)
     }
 
     /// Record a materialized item's extent along the scroll axis.
@@ -546,17 +813,16 @@ public final class VirtViewportTracker: @unchecked Sendable {
     }
 
     /// The items on screen, clamped to `total`; nil when nothing is. From the
-    /// slot frames that intersect the viewport when any do; else from the
-    /// scroll geometry (rows are `itemSize + spacing` apart); else from the
-    /// appeared slots `[min, max + 1)`.
+    /// slot frames that intersect the Hypen scroller's viewport when any do;
+    /// else from its scroll geometry (rows are `itemSize + spacing` apart);
+    /// else from the slots the enclosing scroll view reports visible; else
+    /// from the slots' global frames on screen; else from the appeared slots
+    /// `[min, max + 1)`.
     public func visibleRange(_ window: VirtWindow, spacing: Double = 0, columns: Int = 1) -> ItemRange? {
-        if let list {
-            let onScreen = frames.values.filter {
-                $0.index >= 0 && $0.index < window.total && $0.max > 0 && $0.min < list.extent
-            }.map(\.index)
-            if let lo = onScreen.min(), let hi = onScreen.max() {
-                return ItemRange(start: lo, end: hi + 1)
-            }
+        if let list, let range = Virtualization.visibleSlotRange(
+            frames.values, viewportMin: 0, viewportMax: list.extent, total: window.total
+        ) {
+            return range
         }
         if let g = geometry(window, spacing: spacing, columns: columns) {
             return Virtualization.visibleRange(
@@ -566,6 +832,15 @@ public final class VirtViewportTracker: @unchecked Sendable {
                 viewportExtent: g.viewportExtent + min(0, g.scrolledPast),
                 columns: columns
             )
+        }
+        let reported = scrollVisible.values.filter { $0 >= 0 && $0 < window.total }
+        if let lo = reported.min(), let hi = reported.max() {
+            return ItemRange(start: lo, end: hi + 1)
+        }
+        if let clip = globalClip, let range = Virtualization.visibleSlotRange(
+            globalFrames.values, viewportMin: clip.min, viewportMax: clip.max, total: window.total
+        ) {
+            return range
         }
         let indices = appeared.keys.filter { $0 >= 0 && $0 < window.total }
         guard let lo = indices.min(), let hi = indices.max() else { return nil }
@@ -595,9 +870,13 @@ public final class VirtViewportTracker: @unchecked Sendable {
         return wanted
     }
 
-    /// §2 scroll anchoring. Compares the item that was first visible at the
-    /// previous call with where it sits now and returns the `scrollTo` that
-    /// puts it back, or nil; then remembers the current first visible slot.
+    /// §2 scroll anchoring. Compares the anchor of the previous call with
+    /// where it sits now and returns the `scrollTo` that puts it back, or nil;
+    /// then remembers the current anchor: the first visible materialized row,
+    /// else the first visible slot
+    /// (``Virtualization/anchorCandidate(_:slots:viewportExtent:)``), so an
+    /// insert or removal above is followed by the row's node even while a
+    /// placeholder is the first thing on screen.
     ///
     /// The item is found again by the node it showed (`slots`: an insert or
     /// removal above moved it to another index), else by its index (a
@@ -611,9 +890,7 @@ public final class VirtViewportTracker: @unchecked Sendable {
     ///   to where its old index is now.
     public func anchorCorrection(_ slots: Virtualization.Slots, mode: VirtAnchorMode) -> VirtAnchorCorrection? {
         guard let list else { anchor = nil; return nil }
-        let first = frames.values
-            .filter { $0.max > 0 && $0.min < list.extent }
-            .min { $0.index < $1.index }
+        let first = Virtualization.anchorCandidate(frames.values, slots: slots, viewportExtent: list.extent)
         defer {
             anchor = first.map {
                 (
@@ -625,13 +902,13 @@ public final class VirtViewportTracker: @unchecked Sendable {
         }
         guard let previous = anchor else { return nil }
         let index = previous.nodeId.flatMap { slots.itemIndex(ofNode: $0) } ?? previous.index
-        guard let frame = liveFrame(at: index) else { return nil }
+        guard let frame = liveFrame(at: index, slots) else { return nil }
         let target: Double
         switch mode {
         case .contentOffset:
             target = list.leading + previous.offsetInList
         case .slotPosition:
-            guard index != previous.index, let held = liveFrame(at: previous.index) else { return nil }
+            guard index != previous.index, let held = liveFrame(at: previous.index, slots) else { return nil }
             target = held.min
         }
         guard abs(frame.min - target) >= 0.5 else { return nil }
@@ -640,12 +917,12 @@ public final class VirtViewportTracker: @unchecked Sendable {
             rowExtent: frame.max - frame.min,
             viewportExtent: list.extent
         ) else { return nil }
-        return VirtAnchorCorrection(slotId: Virtualization.slotId(index), unitPoint: unit)
+        return VirtAnchorCorrection(slotId: slots.slotId(index), unitPoint: unit)
     }
 
     /// The live frame of item `index`'s slot.
-    private func liveFrame(at index: Int) -> VirtSlotFrame? {
-        frames[Virtualization.slotId(index)] ?? frames.values.first { $0.index == index }
+    private func liveFrame(at index: Int, _ slots: Virtualization.Slots) -> VirtSlotFrame? {
+        frames[slots.slotId(index)] ?? frames.values.first { $0.index == index }
     }
 
     private func geometry(_ window: VirtWindow, spacing: Double, columns: Int) -> ViewportGeometry? {

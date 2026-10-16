@@ -1,0 +1,20 @@
+/* VoiceOver strings for windowed lists (Virtualization/HypenAccessibility.swift).
+   Only object specifiers: %@ or positional %1$@ / %2$@. */
+
+/* A list row's position: %1$@ = position (1-based), %2$@ = total. Both are already formatted numbers. */
+"hypen.a11y.list.rowPosition" = "%2$@ 行中 %1$@ 行目";
+
+/* A grid item's position: %1$@ = position (1-based), %2$@ = total. */
+"hypen.a11y.list.itemPosition" = "%2$@ 件中 %1$@ 件目";
+
+/* A list's size when it holds exactly one row. %@ = the formatted count. */
+"hypen.a11y.list.rows.one" = "%@ 行";
+
+/* A list's size for any other count. %@ = the formatted count. */
+"hypen.a11y.list.rows.other" = "%@ 行";
+
+/* A grid's size when it holds exactly one item. %@ = the formatted count. */
+"hypen.a11y.list.items.one" = "%@ 件";
+
+/* A grid's size for any other count. %@ = the formatted count. */
+"hypen.a11y.list.items.other" = "%@ 件";

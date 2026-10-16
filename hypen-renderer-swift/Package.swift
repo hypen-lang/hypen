@@ -5,6 +5,7 @@ import PackageDescription
 
 let package = Package(
     name: "HypenSwift",
+    defaultLocalization: "en",
     platforms: [
         .iOS(.v15),
         .macOS(.v12),
@@ -20,7 +21,10 @@ let package = Package(
     targets: [
         .target(
             name: "HypenSwift",
-            path: "Sources/HypenSwift"
+            path: "Sources/HypenSwift",
+            // Localizable.strings for the windowed-list VoiceOver strings
+            // (Virtualization/HypenAccessibility.swift).
+            resources: [.process("Resources")]
         ),
         .testTarget(
             name: "HypenSwiftTests",

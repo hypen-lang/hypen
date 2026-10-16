@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (list virtualization)
+- `HypenAccessibility.listPosition` / `listSummary`: host-overridable
+  VoiceOver strings for windowed lists, localized by default (en, de, es, fr,
+  it, ja, pt-BR, zh-Hans) with locale-formatted numbers ("Row 41 of 10,000").
+  The package now declares `defaultLocalization: "en"` and processes
+  `Sources/HypenSwift/Resources`.
+- A windowed list nested in a Hypen scrollable Column / Row / List / Grid
+  keeps its first visible row in place (scroll anchoring through the outer
+  scroller's `ScrollViewProxy`), and the anchor is the first visible
+  materialized row, so an insert above is followed by identity.
+- Under a host app's own `ScrollView` the reported visible range comes from
+  `onScrollVisibilityChange` (iOS 18 / macOS 15) or the slots' on-screen
+  frames, instead of the prefetch-wide `onAppear` range.
+
 ### Changed (Device Capability Protocol — one advertisement rule; provisional API)
 - **Advertisement rule** (RFC 001 §2.2, shared with the Android host): a
   capability is advertised iff (1) its hardware is present, (2) the app

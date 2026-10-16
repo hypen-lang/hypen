@@ -599,17 +599,215 @@ final class VirtualizationMathTests: XCTestCase {
 
     // MARK: Accessibility (§2)
 
+    private let en = Locale(identifier: "en_US")
+
     func testAccessibilityPositionCountsFromOneInTheWholeList() {
-        XCTAssertEqual(V.accessibilityPosition(index: 0, total: 10_000), "Row 1 of 10000")
-        XCTAssertEqual(V.accessibilityPosition(index: 40, total: 10_000), "Row 41 of 10000")
-        XCTAssertEqual(V.accessibilityPosition(index: 4, total: 30, columns: 3), "Item 5 of 30")
+        XCTAssertEqual(V.accessibilityPosition(index: 0, total: 10_000, locale: en), "Row 1 of 10,000")
+        XCTAssertEqual(V.accessibilityPosition(index: 40, total: 10_000, locale: en), "Row 41 of 10,000")
+        XCTAssertEqual(V.accessibilityPosition(index: 4, total: 30, columns: 3, locale: en), "Item 5 of 30")
     }
 
     func testAccessibilitySummaryNamesTheTotal() {
-        XCTAssertEqual(V.accessibilitySummary(total: 10_000), "10000 rows")
-        XCTAssertEqual(V.accessibilitySummary(total: 1), "1 row")
-        XCTAssertEqual(V.accessibilitySummary(total: 0), "0 rows")
-        XCTAssertEqual(V.accessibilitySummary(total: 30, columns: 3), "30 items")
-        XCTAssertEqual(V.accessibilitySummary(total: 1, columns: 3), "1 item")
+        XCTAssertEqual(V.accessibilitySummary(total: 10_000, locale: en), "10,000 rows")
+        XCTAssertEqual(V.accessibilitySummary(total: 1, locale: en), "1 row")
+        XCTAssertEqual(V.accessibilitySummary(total: 0, locale: en), "0 rows")
+        XCTAssertEqual(V.accessibilitySummary(total: 30, columns: 3, locale: en), "30 items")
+        XCTAssertEqual(V.accessibilitySummary(total: 1, columns: 3, locale: en), "1 item")
+    }
+
+    func testAccessibilityNumbersFollowTheLocale() {
+        let de = Locale(identifier: "de_DE")
+        XCTAssertEqual(V.formatCount(10_000, locale: de), "10.000")
+        XCTAssertEqual(V.formatCount(10_000, locale: en), "10,000")
+        XCTAssertEqual(V.formatCount(-3, locale: en), "0", "never negative")
+    }
+
+    func testAccessibilityStringsComeFromTheInjectedLookupWithPositionalArguments() {
+        // A language that names the total first: positional specifiers.
+        let ja: [String: String] = [
+            V.A11yKey.rowPosition: "%2$@ 行中 %1$@ 行目",
+            V.A11yKey.rowsOther: "%@ 行",
+        ]
+        let lookup: (String) -> String? = { ja[$0] }
+        XCTAssertEqual(V.accessibilityPosition(index: 40, total: 10_000, locale: en, localize: lookup),
+                       "10,000 行中 41 行目")
+        XCTAssertEqual(V.accessibilitySummary(total: 5, locale: en, localize: lookup), "5 行")
+        // A key the lookup lacks falls back to English.
+        XCTAssertEqual(V.accessibilityPosition(index: 0, total: 3, columns: 2, locale: en, localize: lookup),
+                       "Item 1 of 3")
+        XCTAssertEqual(V.accessibilitySummary(total: 1, locale: en, localize: lookup), "1 row")
+    }
+
+    func testAccessibilityRejectsATranslationWithTheWrongArguments() {
+        // A broken translation (a %d where an object is expected, or a missing
+        // argument) must not crash VoiceOver: English instead.
+        let broken: [String: String] = [
+            V.A11yKey.rowPosition: "Row %d of %@",
+            V.A11yKey.rowsOther: "rows",
+        ]
+        let lookup: (String) -> String? = { broken[$0] }
+        XCTAssertEqual(V.accessibilityPosition(index: 0, total: 2, locale: en, localize: lookup), "Row 1 of 2")
+        XCTAssertEqual(V.accessibilitySummary(total: 2, locale: en, localize: lookup), "2 rows")
+    }
+
+    @MainActor
+    func testTheHostCanOverrideTheAccessibilityFormatters() {
+        let position = HypenAccessibility.listPosition
+        let summary = HypenAccessibility.listSummary
+        defer {
+            HypenAccessibility.listPosition = position
+            HypenAccessibility.listSummary = summary
+        }
+        HypenAccessibility.listPosition = { index, total, isGrid in "\(isGrid ? "cell" : "line") \(index)/\(total)" }
+        HypenAccessibility.listSummary = { total, _ in "n=\(total)" }
+        XCTAssertEqual(HypenAccessibility.listPosition(4, 9, true), "cell 4/9")
+        XCTAssertEqual(HypenAccessibility.listSummary(9, false), "n=9")
+    }
+
+    func testEveryBundledLocalizationHasEveryKeyWithTheSameArguments() throws {
+        let languages = HypenAccessibility.bundledLocalizations
+        XCTAssertTrue(languages.contains("en"))
+        XCTAssertGreaterThanOrEqual(languages.count, 5)
+        for language in languages {
+            for key in V.A11yKey.all {
+                let format = try XCTUnwrap(HypenAccessibility.format(key, localization: language), "\(language) \(key)")
+                XCTAssertEqual(V.objectArgumentCount(format), V.A11yKey.argumentCount(key), "\(language) \(key): \(format)")
+            }
+        }
+        XCTAssertEqual(HypenAccessibility.format(V.A11yKey.rowPosition, localization: "de"), "Zeile %1$@ von %2$@")
+        XCTAssertNil(HypenAccessibility.format("no.such.key", localization: "en"))
+    }
+
+    // MARK: Scoped slot ids (anchoring through an outer scroller)
+
+    func testScopedSlotIdsAreUniqueAcrossListsAndStableAcrossMaterialization() {
+        let w = VirtWindow(total: 50, start: 10, end: 12)
+        let a = V.slots(w, childIds: ["x", "y"], scope: "7")
+        let b = V.slots(w, childIds: ["x", "y"], scope: "8")
+        XCTAssertEqual(a.slotId(3), "7/i:3")
+        XCTAssertEqual(V.slotId(3, scope: "7"), "7/i:3")
+        XCTAssertEqual(V.slotId(3), "i:3", "unscoped ids are unchanged")
+        XCTAssertEqual(V.slots(w, childIds: []).slotId(3), "i:3")
+        let ids = a.identified.map(\.id)
+        XCTAssertEqual(ids.count, 50)
+        XCTAssertEqual(Set(ids).count, 50)
+        XCTAssertTrue(Set(ids).isDisjoint(with: Set(b.identified.map(\.id))))
+        XCTAssertEqual(a.identified[10].slot, .item(index: 10, childIds: ["x"]))
+        XCTAssertEqual(a.identified[10].id, "7/i:10")
+        // The placeholder that becomes item 9 keeps its id.
+        let moved = V.slots(VirtWindow(total: 50, start: 9, end: 11), childIds: ["w", "x"], scope: "7")
+        XCTAssertEqual(moved.identified[9].id, a.identified[9].id)
+    }
+
+    func testAnchorCorrectionNamesTheScopedSlot() throws {
+        // A list nested in an outer scroller: frames in the outer viewport,
+        // keyed by scoped ids; the correction targets the scoped id so the
+        // outer ScrollViewProxy finds exactly this list's row.
+        let slots = V.slots(VirtWindow(total: 1000, start: 0, end: 0), childIds: [], scope: "42")
+        let tracker = VirtViewportTracker()
+        tracker.listFrame(leading: -1000, viewportExtent: 600)
+        tracker.slotFrame(id: "42/i:10", index: 10, min: -20, max: 40)
+        XCTAssertNil(tracker.anchorCorrection(slots, mode: .contentOffset))
+        tracker.slotFrame(id: "42/i:10", index: 10, min: 30, max: 90)
+        let c = try XCTUnwrap(tracker.anchorCorrection(slots, mode: .contentOffset))
+        XCTAssertEqual(c.slotId, "42/i:10")
+        XCTAssertEqual(c.unitPoint * (600 - 60), -20, accuracy: 1e-9)
+    }
+
+    // MARK: Anchor choice: the first visible materialized row (§2)
+
+    func testAnchorCandidatePrefersTheFirstVisibleMaterializedRow() {
+        let slots = V.slots(VirtWindow(total: 1000, start: 101, end: 110), childIds: (101..<110).map { "n\($0)" })
+        let frames = [
+            VirtSlotFrame(index: 99, min: -80, max: -20),  // off screen
+            VirtSlotFrame(index: 100, min: -20, max: 40), // placeholder, visible
+            VirtSlotFrame(index: 101, min: 40, max: 100), // row, visible
+            VirtSlotFrame(index: 102, min: 100, max: 160),
+        ]
+        XCTAssertEqual(V.anchorCandidate(frames, slots: slots, viewportExtent: 600)?.index, 101)
+        // Only placeholders visible: the first of them.
+        let none = V.slots(VirtWindow(total: 1000, start: 0, end: 0), childIds: [])
+        XCTAssertEqual(V.anchorCandidate(frames, slots: none, viewportExtent: 600)?.index, 100)
+        // Nothing visible.
+        XCTAssertNil(V.anchorCandidate(frames, slots: slots, viewportExtent: -1))
+        XCTAssertNil(V.anchorCandidate([], slots: slots, viewportExtent: 600))
+    }
+
+    func testAnchorCorrectionFollowsARowEvenWhenAPlaceholderIsFirstVisible() throws {
+        // Item 100 is a placeholder at the top, 101.. are rows "n101"...
+        // Two items are inserted at 50 (above everything): "n101" is now 103.
+        // Anchoring the placeholder would hold index 100 and show the wrong
+        // item; anchoring the first visible row follows "n101".
+        let before = V.slots(VirtWindow(total: 1000, start: 101, end: 110), childIds: (101..<110).map { "n\($0)" })
+        let after = V.slots(VirtWindow(total: 1002, start: 101, end: 110), childIds: (99..<108).map { "n\($0)" })
+        for mode in [VirtAnchorMode.contentOffset, .slotPosition] {
+            let tracker = VirtViewportTracker()
+            tracker.listFrame(leading: -6000, viewportExtent: 600)
+            for i in 99..<108 {
+                let min = -20 + Double(i - 100) * 60
+                tracker.slotFrame(id: "i:\(i)", index: i, min: min, max: min + 60)
+            }
+            XCTAssertNil(tracker.anchorCorrection(before, mode: mode))
+            XCTAssertEqual(after.itemIndex(ofNode: "n101"), 103)
+            // Index 101 held its place (offset or scrollPosition) and now shows "n99".
+            let c = try XCTUnwrap(tracker.anchorCorrection(after, mode: mode), "\(mode)")
+            XCTAssertEqual(c.slotId, "i:103")
+            XCTAssertEqual(c.unitPoint * (600 - 60), 40, accuracy: 1e-9, "n101 back at +40")
+        }
+    }
+
+    // MARK: Visible range under a host app's ScrollView (§3 step 1)
+
+    func testVisibleSlotRangeIntersectsFramesWithTheViewport() {
+        let frames = (0..<10).map { VirtSlotFrame(index: $0, min: Double($0) * 100 - 250, max: Double($0 + 1) * 100 - 250) }
+        XCTAssertEqual(V.visibleSlotRange(frames, viewportMin: 0, viewportMax: 600, total: 1000), ItemRange(start: 2, end: 9))
+        // A viewport that does not start at 0 (global coordinates).
+        XCTAssertEqual(V.visibleSlotRange(frames, viewportMin: 150, viewportMax: 350, total: 1000), ItemRange(start: 4, end: 6))
+        // Touching edges do not count; out-of-list indices are ignored.
+        XCTAssertNil(V.visibleSlotRange([VirtSlotFrame(index: 0, min: -50, max: 0)], viewportMin: 0, viewportMax: 600, total: 10))
+        XCTAssertNil(V.visibleSlotRange([VirtSlotFrame(index: 12, min: 0, max: 50)], viewportMin: 0, viewportMax: 600, total: 10))
+    }
+
+    func testTrackerUsesScrollVisibilityUnderAHostScrollView() {
+        // iOS 18 onScrollVisibilityChange: exact, in any enclosing scroll view.
+        let tracker = VirtViewportTracker()
+        let w = VirtWindow(total: 1000, start: 0, end: 30)
+        for i in 0..<20 { tracker.slotAppeared(i) } // prefetched well past the screen
+        for i in 3..<9 { tracker.slotVisibility(id: "i:\(i)", index: i, visible: true) }
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 3, end: 9))
+        tracker.slotVisibility(id: "i:3", index: 3, visible: false)
+        tracker.slotFrameRemoved(id: "i:8")
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 4, end: 8))
+        // Nothing reported visible: back to appearances.
+        for i in 4..<8 { tracker.slotVisibility(id: "i:\(i)", index: i, visible: false) }
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 20))
+    }
+
+    func testTrackerIntersectsGlobalFramesWithTheScreenUnderAHostScrollView() {
+        // Before iOS 18: each slot's .global frame against the screen.
+        let tracker = VirtViewportTracker()
+        let w = VirtWindow(total: 1000, start: 0, end: 30)
+        for i in 0..<20 { tracker.slotAppeared(i) }
+        for i in 0..<20 {
+            tracker.slotGlobalFrame(id: "i:\(i)", index: i, min: Double(i) * 100 - 250, max: Double(i + 1) * 100 - 250)
+        }
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 20), "no screen bounds yet: appearances")
+        tracker.globalViewport(min: 0, max: 800)
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 2, end: 11))
+        tracker.slotFrameRemoved(id: "i:10")
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 2, end: 10))
+        // Scroll visibility, when reported, wins over the screen bounds.
+        tracker.slotVisibility(id: "i:5", index: 5, visible: true)
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 5, end: 6))
+        // A Hypen scroller (named space) wins over both.
+        tracker.listFrame(leading: 0, viewportExtent: 300)
+        tracker.slotFrame(id: "i:0", index: 0, min: 0, max: 100)
+        XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 1))
+        // Invalid bounds are ignored.
+        let fresh = VirtViewportTracker()
+        fresh.slotAppeared(3)
+        fresh.slotGlobalFrame(id: "i:3", index: 3, min: 0, max: 50)
+        fresh.globalViewport(min: 0, max: 0)
+        XCTAssertEqual(fresh.visibleRange(w), ItemRange(start: 3, end: 4))
     }
 }

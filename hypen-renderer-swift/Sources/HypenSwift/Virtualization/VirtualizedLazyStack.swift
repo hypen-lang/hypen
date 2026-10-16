@@ -1,4 +1,9 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#elseif canImport(AppKit)
+import AppKit
+#endif
 
 /// A windowed list rendered in a native lazy container
 /// (hypen-web/docs/virtualization.md §5).
@@ -10,23 +15,30 @@ import SwiftUI
 /// Visible range: each slot's frame in the nearest Hypen scroll container's
 /// named coordinate space (the owned `ScrollView`, or an ancestor's — see
 /// ``View/hypenVirtScrollContainer(_:)``), plus `onScrollGeometryChange` on
-/// iOS 18 / macOS 15; with no known container (a host app's own
-/// `ScrollView`), each slot's `onAppear` / `onDisappear` (a few slots wide:
-/// lazy stacks prefetch). Once per main-actor turn a ``VirtViewportTracker``
-/// applies the §3 overscan and reporting rules and the wanted range goes to
-/// the engine through ``HypenRenderer/reportListViewport(listId:start:end:)``.
+/// iOS 18 / macOS 15. With no Hypen container (a host app's own
+/// `ScrollView`): each slot's `onScrollVisibilityChange` on iOS 18 /
+/// macOS 15, before that each slot's `.global` frame against the screen;
+/// `onAppear` / `onDisappear` (a few slots wide: lazy stacks prefetch) only
+/// when neither says anything. Once per main-actor turn a
+/// ``VirtViewportTracker`` applies the §3 overscan and reporting rules and
+/// the wanted range goes to the engine through
+/// ``HypenRenderer/reportListViewport(listId:start:end:)``.
 ///
-/// Scroll anchoring (§2), owned `ScrollView` only: `scrollPosition(id:anchor:)`
-/// (iOS 17 / macOS 14) keeps the first visible slot in place; before that
-/// the tracker measures how far that slot moved within the list and
-/// `ScrollViewProxy.scrollTo` puts it back. Slots are identified by item
-/// index, so the anchor survives a placeholder materializing; when an insert
-/// or removal above moves the anchored item to another index, the tracker
-/// follows its node and `scrollTo` puts it back on every OS
-/// (``VirtViewportTracker/anchorCorrection(_:mode:)``).
+/// Scroll anchoring (§2): in the owned `ScrollView`,
+/// `scrollPosition(id:anchor:)` (iOS 17 / macOS 14) keeps the first visible
+/// slot in place; before that the tracker measures how far the anchor moved
+/// within the list and `ScrollViewProxy.scrollTo` puts it back. Nested in a
+/// Hypen scroller, the same correction goes through that scroller's proxy
+/// (published by ``View/hypenVirtScrollContainer(_:)``; slot ids carry the
+/// list id, so they are unique in the outer scroll view). The anchor is the
+/// first visible materialized row, so when an insert or removal above moves
+/// it to another index the tracker follows its node and `scrollTo` puts it
+/// back (``VirtViewportTracker/anchorCorrection(_:mode:)``). Under a host
+/// app's own `ScrollView` there is no proxy to reach: no correction.
 ///
 /// Accessibility (§2): every row's hint is its whole-list position ("Row 41
-/// of 10000"); the container's value is the total ("10000 rows").
+/// of 10,000"); the container's value is the total ("10,000 rows"); both
+/// localized and host-overridable (``HypenAccessibility``).
 ///
 /// The slot mapping, size estimate and reporting decisions are pure
 /// (`VirtualizationMath.swift`, unit-tested); this view only wires them to
@@ -58,6 +70,9 @@ struct VirtualizedLazyStack: View {
     /// `@State` values: SwiftUI writes the scroll position on every row
     /// boundary and nothing here needs to re-render for it.
     @State private var scrollBox = VirtScrollBox()
+    /// The nearest Hypen scroll container outside this view. Used to anchor
+    /// a list without its own `ScrollView` through the ancestor's proxy.
+    @Environment(\.hypenVirtScrollViewport) private var ancestorViewport
 
     /// Component handlers (`typeName`) that render `__virt.window` through
     /// this view. Any other windowed element renders as a `Column`
@@ -94,7 +109,7 @@ struct VirtualizedLazyStack: View {
     }
 
     var body: some View {
-        let slots = Virtualization.slots(window, childIds: childIds)
+        let slots = Virtualization.slots(window, childIds: childIds, scope: listId)
         let size = CGFloat(tracker.itemSize(window))
         let box = scrollBox
         Group {
@@ -123,7 +138,7 @@ struct VirtualizedLazyStack: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityValue(Text(verbatim: Virtualization.accessibilitySummary(total: window.total, columns: columns)))
+        .accessibilityValue(Text(verbatim: HypenAccessibility.listSummary(window.total, columns > 1)))
         .onAppear { scheduleEvaluation() }
         .onChange(of: window) { newWindow in
             tracker.observe(newWindow)
@@ -167,19 +182,42 @@ struct VirtualizedLazyStack: View {
 
     private func slotViews(_ slots: Virtualization.Slots, size: CGFloat, viewport: VirtScrollViewport?) -> some View {
         let tracker = self.tracker
-        return ForEach(slots, id: \.id) { slot in
+        let vertical = isVertical
+        // Slot ids carry the list id (`<listId>/i:<index>`): unique even in
+        // an outer scroll view holding several lists, for its proxy's
+        // `scrollTo` and the owned `scrollPosition(id:)` alike.
+        return ForEach(slots.identified, id: \.id) { entry in
+            let slot = entry.slot
+            let slotId = entry.id
             slotView(slot, size: size)
                 .background(frameReader(viewport) { span in
-                    tracker.slotFrame(id: slot.id, index: slot.index, min: span.min, max: span.max)
+                    tracker.slotFrame(id: slotId, index: slot.index, min: span.min, max: span.max)
                     scheduleEvaluation()
                 })
+                // No Hypen scroller on this axis (a host app's ScrollView,
+                // or none): ask the enclosing scroll view / the screen.
+                .modifier(VirtHostVisibilityReader(
+                    enabled: viewport == nil,
+                    vertical: vertical,
+                    visibility: { visible in
+                        tracker.slotVisibility(id: slotId, index: slot.index, visible: visible)
+                        scheduleEvaluation()
+                    },
+                    globalFrame: { span in
+                        if let screen = VirtScreen.extent(vertical: vertical) {
+                            tracker.globalViewport(min: 0, max: screen)
+                        }
+                        tracker.slotGlobalFrame(id: slotId, index: slot.index, min: span.min, max: span.max)
+                        scheduleEvaluation()
+                    }
+                ))
                 .onAppear {
                     tracker.slotAppeared(slot.index)
                     scheduleEvaluation()
                 }
                 .onDisappear {
                     tracker.slotDisappeared(slot.index)
-                    tracker.slotFrameRemoved(id: slot.id)
+                    tracker.slotFrameRemoved(id: slotId)
                     scheduleEvaluation()
                 }
         }
@@ -217,8 +255,8 @@ struct VirtualizedLazyStack: View {
         case let .item(index, ids):
             keyed {
                 itemView(ids)
-                    .accessibilityHint(Text(verbatim: Virtualization.accessibilityPosition(
-                        index: index, total: window.total, columns: columns
+                    .accessibilityHint(Text(verbatim: HypenAccessibility.listPosition(
+                        index, window.total, columns > 1
                     )))
                     .background(
                         GeometryReader { geometry in
@@ -291,9 +329,15 @@ struct VirtualizedLazyStack: View {
         let spacing = Double(self.spacing)
         let columns = self.columns
         let box = self.scrollBox
-        let correctsAnchor = scrolls
-        let anchorMode: VirtAnchorMode = Self.scrollPositionAnchors ? .slotPosition : .contentOffset
         let vertical = isVertical
+        // Who scrolls this list: its own ScrollView (anchored by
+        // `scrollPosition(id:)` from iOS 17), else the nearest Hypen scroller
+        // on the same axis (keeps its content offset), else a host app's
+        // ScrollView we cannot reach (no correction).
+        let outer: VirtScrollHandle? = scrolls ? nil
+            : ancestorViewport.flatMap { $0.vertical == vertical ? $0.handle : nil }
+        let correctsAnchor = scrolls || outer != nil
+        let anchorMode: VirtAnchorMode = scrolls && Self.scrollPositionAnchors ? .slotPosition : .contentOffset
         Task { @MainActor in
             tracker.evaluationScheduled = false
             guard let element = renderer.getElement(listId), let window = element.virtWindow else { return }
@@ -306,11 +350,15 @@ struct VirtualizedLazyStack: View {
             // (an item index) while an insert or removal above moved the item
             // to another index. Scroll the item back to where it was.
             if correctsAnchor, let correction = tracker.anchorCorrection(
-                Virtualization.slots(window, childIds: element.virtChildIds(renderer: renderer)),
+                Virtualization.slots(window, childIds: element.virtChildIds(renderer: renderer), scope: listId),
                 mode: anchorMode
             ) {
                 let u = CGFloat(correction.unitPoint)
-                box.proxy?.scrollTo(
+                // `scrollTo` reaches any identified descendant of the
+                // reader's scroll view, so the outer proxy finds this
+                // list's slot; the unit point was computed against the
+                // outer viewport (the frames are in its coordinate space).
+                (outer?.proxy ?? (scrolls ? box.proxy : nil))?.scrollTo(
                     correction.slotId,
                     anchor: vertical ? UnitPoint(x: 0, y: u) : UnitPoint(x: u, y: 0)
                 )
@@ -342,11 +390,26 @@ struct VirtSpan: Equatable, Sendable {
 }
 
 /// The nearest Hypen scroll container around a view (§3 step 1): its named
-/// coordinate space, axis and viewport extent along that axis.
+/// coordinate space, axis, viewport extent along that axis, and its
+/// `ScrollViewProxy` (for §2 anchoring of a list nested in it).
 struct VirtScrollViewport: Equatable, Sendable {
     let space: String
     let vertical: Bool
     let extent: Double
+    let handle: VirtScrollHandle
+
+    static func == (lhs: VirtScrollViewport, rhs: VirtScrollViewport) -> Bool {
+        lhs.space == rhs.space && lhs.vertical == rhs.vertical && lhs.extent == rhs.extent
+            && lhs.handle === rhs.handle
+    }
+}
+
+/// A Hypen scroll container's `ScrollViewProxy`, published by
+/// ``View/hypenVirtScrollContainer(_:)``. A reference so the proxy can be
+/// set once the reader exists without re-rendering the subtree. Main-actor
+/// use only.
+final class VirtScrollHandle: @unchecked Sendable {
+    var proxy: ScrollViewProxy?
 }
 
 private struct VirtScrollViewportKey: EnvironmentKey {
@@ -364,7 +427,9 @@ extension EnvironmentValues {
 extension View {
     /// Make this `ScrollView` a scroll container windowed lists inside it can
     /// measure against: a unique named coordinate space plus its viewport
-    /// extent in the environment (hypen-web/docs/virtualization.md §3 step 1).
+    /// extent in the environment (hypen-web/docs/virtualization.md §3 step 1),
+    /// and a `ScrollViewReader` around it whose proxy a nested list uses to
+    /// keep its first visible row in place (§2).
     func hypenVirtScrollContainer(_ axis: Axis) -> some View {
         modifier(VirtScrollContainerModifier(axis: axis))
     }
@@ -374,6 +439,7 @@ private struct VirtScrollContainerModifier: ViewModifier {
     let axis: Axis
     @State private var space = "hypen.virt.scroll.\(UUID().uuidString)"
     @State private var extent: Double = 0
+    @State private var handle = VirtScrollHandle()
 
     init(axis: Axis) {
         self.axis = axis
@@ -381,22 +447,28 @@ private struct VirtScrollContainerModifier: ViewModifier {
 
     func body(content: Content) -> some View {
         let vertical = axis == .vertical
-        content
-            .environment(
-                \.hypenVirtScrollViewport,
-                extent > 0 ? VirtScrollViewport(space: space, vertical: vertical, extent: extent) : nil
-            )
-            .coordinateSpace(name: space)
-            .background(
-                GeometryReader { proxy in
-                    let size = Double(vertical ? proxy.size.height : proxy.size.width)
-                    Color.clear
-                        .onAppear { extent = size }
-                        .onChange(of: size) { newSize in extent = newSize }
-                }
-                .allowsHitTesting(false)
-                .accessibilityHidden(true)
-            )
+        let handle = self.handle
+        ScrollViewReader { proxy in
+            content
+                .environment(
+                    \.hypenVirtScrollViewport,
+                    extent > 0
+                        ? VirtScrollViewport(space: space, vertical: vertical, extent: extent, handle: handle)
+                        : nil
+                )
+                .coordinateSpace(name: space)
+                .background(
+                    GeometryReader { geometry in
+                        let size = Double(vertical ? geometry.size.height : geometry.size.width)
+                        Color.clear
+                            .onAppear { extent = size }
+                            .onChange(of: size) { newSize in extent = newSize }
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                )
+                .onAppear { handle.proxy = proxy }
+        }
     }
 }
 
@@ -466,6 +538,66 @@ private struct VirtScrollGeometryReader: ViewModifier {
         } else {
             content
         }
+    }
+}
+
+/// A slot's visibility where no Hypen scroller is known (a host app's own
+/// `ScrollView`, or none), for the tracker: iOS 18 / macOS 15 / tvOS 18 /
+/// watchOS 11 — `onScrollVisibilityChange` (the enclosing scroll view, any
+/// scroll view, says whether the slot shows); before — the slot's `.global`
+/// frame (the tracker intersects it with the screen). A no-op when
+/// `enabled` is false.
+private struct VirtHostVisibilityReader: ViewModifier {
+    let enabled: Bool
+    let vertical: Bool
+    let visibility: @MainActor (Bool) -> Void
+    let globalFrame: @MainActor (VirtSpan) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if enabled {
+            if #available(iOS 18.0, macOS 15.0, tvOS 18.0, watchOS 11.0, *) {
+                // Any visible fraction counts: the range is about what is on
+                // screen at all, not mostly on screen.
+                content.onScrollVisibilityChange(threshold: 0.001) { visible in
+                    visibility(visible)
+                }
+            } else {
+                content.background(
+                    GeometryReader { geometry in
+                        let frame = geometry.frame(in: .global)
+                        let span = vertical
+                            ? VirtSpan(min: Double(frame.minY), max: Double(frame.maxY), extent: 0)
+                            : VirtSpan(min: Double(frame.minX), max: Double(frame.maxX), extent: 0)
+                        Color.clear
+                            .onAppear { globalFrame(span) }
+                            .onChange(of: span) { newSpan in globalFrame(newSpan) }
+                    }
+                    .allowsHitTesting(false)
+                    .accessibilityHidden(true)
+                )
+            }
+        } else {
+            content
+        }
+    }
+}
+
+/// The screen's extent along an axis in SwiftUI's `.global` space (window
+/// coordinates; a window never exceeds its screen, so this bounds what can
+/// be visible). Nil where there is no screen API (watchOS, visionOS).
+@MainActor
+enum VirtScreen {
+    static func extent(vertical: Bool) -> Double? {
+        #if canImport(UIKit) && !os(watchOS) && !os(visionOS)
+        let bounds = UIScreen.main.bounds
+        return Double(vertical ? bounds.height : bounds.width)
+        #elseif canImport(AppKit)
+        guard let frame = NSScreen.main?.frame else { return nil }
+        return Double(vertical ? frame.height : frame.width)
+        #else
+        return nil
+        #endif
     }
 }
 
