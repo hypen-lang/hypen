@@ -133,6 +133,30 @@ a hidden `Box` overlay (`Modifier.size(0.dp).alpha(0f)`) keyed by
 animations across the detach → attach cycle. Not implemented today;
 ship if/when scroll-position loss becomes a real complaint.
 
+## List Virtualization (`__virt.window`)
+
+Always on (contract: `hypen-web/docs/virtualization.md`). The engine windows
+every List/Grid/lazy ForEach and sets `__virt.window` = `{total,start,end,
+estimatedSize?}` on the list element; it stays in the element's props (so it
+commits atomically with the batch's rows) but no applicator handles it.
+
+- `virt/Virtualization.kt` — plain-Kotlin port of `@hypen-space/core/virtualization`
+  (parse, itemSize, windowPadding, visibleRange, wantedRange, shouldReport),
+  plus the slot mapping (`VirtSlots`), report state (`ViewportTracker`) and
+  `WindowedShape`. Tests in `src/test/.../virt/` mirror
+  `hypen-web/tests/virtualization-math.test.ts` — keep them aligned.
+- `virt/VirtCompose.kt` — Compose glue. Lazy shape (`List`/`Grid` that scroll,
+  and a scrollable Column/Row via `WindowedLazyList` from `HypenElement`):
+  `total` slots, rows keyed by node id, placeholders by item index, reports
+  from `layoutInfo` via `snapshotFlow`. Padded shape (non-scrolling containers):
+  `Modifier.virtPadded` pads leading/trailing and reports from the clipped
+  bounds in root; padding is capped by `MAX_PADDED_EXTENT_DP` (Compose
+  `Constraints` limit).
+- Reports go `ComposeRenderer.reportViewport` → `ViewportReporter` →
+  `RemoteEngine.setListViewport` → `{"type":"viewport","listId","start","end"}`.
+- DnD: a sortable inside a windowed list offsets its reserved-write and event
+  indices by `__virt.window.start` (`DndCoordinator.virtStarts`).
+
 ## Device Capability Protocol (RFC 001)
 
 `renderer/.../device/` is the Android DeviceHost: a JVM-pure protocol core

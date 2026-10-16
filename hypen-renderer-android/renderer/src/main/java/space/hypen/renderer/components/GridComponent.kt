@@ -11,15 +11,24 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.key
+import androidx.compose.runtime.remember
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.VirtLazyGridReporter
+import space.hypen.renderer.virt.VirtMeasure
+import space.hypen.renderer.virt.VirtPlaceholder
+import space.hypen.renderer.virt.VirtSlot
+import space.hypen.renderer.virt.VirtSlots
+import space.hypen.renderer.virt.virtPadded
+import space.hypen.renderer.virt.virtWindow
 
 /**
  * Handler for Grid component - displays children in a grid layout.
@@ -76,9 +85,15 @@ class GridComponent : ComponentHandler {
             ?: element.getStringProp("scrollable.0")?.lowercase()?.let { it == "vertical" || it == "both" || it == "true" }
             ?: false
 
+        // Engine windowing (`__virt.window`, docs/virtualization.md): the
+        // children are only items [start, end) of `total`.
+        val window = element.virtWindow()
+
         if (!scrollable) {
             Column(
-                modifier = gridModifier,
+                // Not its own scroller: pad for the rows outside the window
+                // and report from the ancestor scroller.
+                modifier = gridModifier.virtPadded(element, window, renderer, columns = columns),
                 verticalArrangement = Arrangement.spacedBy(rowGap),
             ) {
                 // Rows are packed by SPAN, not by count: a `gridColumn:
@@ -124,6 +139,37 @@ class GridComponent : ComponentHandler {
                         val filled = rowChildren.sumOf { it.gridSpan(columns) }
                         repeat(columns - filled) {
                             Spacer(modifier = Modifier.weight(1f))
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        if (window != null) {
+            // Native lazy grid over `total` slots: materialized items, or
+            // placeholders one estimated row tall (§5).
+            val state = rememberLazyGridState()
+            val measure = remember(element.id) { VirtMeasure() }
+            VirtLazyGridReporter(element, state, measure, renderer)
+            val slots = VirtSlots(window, children) { it.id }
+            val placeholderSize = measure.itemSize(window)
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                modifier = gridModifier,
+                state = state,
+                horizontalArrangement = Arrangement.spacedBy(columnGap),
+                verticalArrangement = Arrangement.spacedBy(rowGap),
+            ) {
+                items(count = slots.count, key = { slots.key(it) }) { index ->
+                    when (val slot = slots[index]) {
+                        is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal = false)
+                        is VirtSlot.Item -> if (slot.nodes.size == 1) {
+                            GridItemRenderer(element = slot.nodes[0], renderer = renderer)
+                        } else Column {
+                            slot.nodes.forEach { node ->
+                                key(node.id) { GridItemRenderer(element = node, renderer = renderer) }
+                            }
                         }
                     }
                 }

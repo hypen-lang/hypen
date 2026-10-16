@@ -52,6 +52,8 @@ internal class HypenSession(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     init {
+        // Windowed lists report what they show; the server moves the window.
+        renderer.setViewportReporter { listId, start, end -> engine.setListViewport(listId, start, end) }
         scope.launch {
             try {
                 engine.connect()

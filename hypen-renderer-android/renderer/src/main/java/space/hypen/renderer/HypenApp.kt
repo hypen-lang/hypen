@@ -40,6 +40,11 @@ import space.hypen.renderer.render.ComposeRenderer
 import space.hypen.renderer.render.LocalActionDispatcher
 import space.hypen.renderer.render.applyHypenSemantics
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.components.WindowedLazyList
+import space.hypen.renderer.components.renderableChildren
+import space.hypen.renderer.virt.WindowedShape
+import space.hypen.renderer.virt.virtPadded
+import space.hypen.renderer.virt.virtWindow
 import kotlinx.coroutines.flow.collectLatest
 
 /**
@@ -369,14 +374,42 @@ internal fun HypenElement(
     CompositionLocalProvider(LocalActionDispatcher provides nodeDispatcher) {
         val renderModifier = finalModifier.videoIntentClickable(element)
 
-        // Render the component
-        handler.Render(
-            element = element,
-            modifier = renderModifier,
-            renderChildren = {
-                RenderChildren(element, renderer)
-            },
-        )
+        // A windowed container other than List/Grid (the sole child is a lazy
+        // ForEach): a self-scrolling one renders through the lazy slot path,
+        // any other keeps its handler and pads for the missing items.
+        // List/Grid handle `__virt.window` themselves.
+        val virtWindow = element.virtWindow()
+        if (virtWindow != null && handler.typeName != "list" && handler.typeName != "grid") {
+            val shape = WindowedShape.of(element.elementType, element.props["scrollable.0"] ?: element.props["scrollable"])
+            if (shape.lazy) {
+                WindowedLazyList(
+                    element = element,
+                    window = virtWindow,
+                    modifier = renderModifier,
+                    children = renderableChildren(element, renderer),
+                    renderer = renderer,
+                    horizontal = shape.horizontal,
+                    fillsWidth = false,
+                )
+            } else {
+                handler.Render(
+                    element = element,
+                    modifier = renderModifier.virtPadded(element, virtWindow, renderer, horizontal = shape.horizontal),
+                    renderChildren = {
+                        RenderChildren(element, renderer)
+                    },
+                )
+            }
+        } else {
+            // Render the component
+            handler.Render(
+                element = element,
+                modifier = renderModifier,
+                renderChildren = {
+                    RenderChildren(element, renderer)
+                },
+            )
+        }
     }
 }
 
