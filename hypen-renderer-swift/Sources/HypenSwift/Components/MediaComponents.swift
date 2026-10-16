@@ -649,6 +649,7 @@ private struct VideoPlayerView: View {
                         .overlay {
                             HypenCachedImage(
                                 url: posterURL,
+                                targetSize: HypenImageCache.displayBounds,
                                 placeholder: { Color.clear },
                                 failure: { Color.clear },
                                 transform: { image in

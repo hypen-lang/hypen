@@ -329,6 +329,26 @@ private struct GridAwareImageContent: View {
         hasExplicitSize || parentStretchesBareGridImage
     }
 
+    private var decodeTargetSize: CGSize? {
+        let display = HypenImageCache.displayBounds
+        var width = modifier.width
+        var height = modifier.height
+        if width == nil && (modifier.fillMaxWidth || parentStretchesBareGridImage) {
+            width = display.width
+        }
+        if height == nil && modifier.fillMaxHeight {
+            height = display.height
+        }
+        if let maxWidth = modifier.maxWidth {
+            width = min(width ?? maxWidth, maxWidth)
+        }
+        if let maxHeight = modifier.maxHeight {
+            height = min(height ?? maxHeight, maxHeight)
+        }
+        guard width != nil || height != nil else { return nil }
+        return CGSize(width: width ?? 0, height: height ?? 0)
+    }
+
     var body: some View {
         Group {
                 if let src = src {
@@ -341,6 +361,7 @@ private struct GridAwareImageContent: View {
                         // batch, producing the constant-reload symptom.
                         HypenCachedImage(
                             url: URL(string: src),
+                            targetSize: decodeTargetSize,
                             placeholder: { AnyView(ProgressView()) },
                             failure: {
                                 AnyView(

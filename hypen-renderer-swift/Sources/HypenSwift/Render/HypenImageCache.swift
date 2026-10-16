@@ -1,4 +1,5 @@
 import SwiftUI
+import ImageIO
 
 #if canImport(UIKit)
 import UIKit
@@ -17,8 +18,8 @@ public typealias HypenPlatformImage = NSImage
 /// Against a feed full of Unsplash-sized photos this produces the
 /// "images constantly reload" symptom.
 ///
-/// `HypenImageCache` memoizes fully-decoded `UIImage` / `NSImage`
-/// instances in an `NSCache` keyed by URL. On cache hit the view renders
+/// `HypenImageCache` memoizes pre-decoded `UIImage` / `NSImage`
+/// instances in an `NSCache` keyed by URL and requested pixel size. On cache hit the view renders
 /// the decoded image synchronously — no flash, no network, no decode
 /// cost. On cache miss we fall through to `URLSession.shared`, which
 /// consults `URLCache.shared` for HTTP-level caching (honors
@@ -35,6 +36,18 @@ public typealias HypenPlatformImage = NSImage
 public final class HypenImageCache {
     public static let shared = HypenImageCache()
 
+    /// Conservative display bound for fill-sized images whose parent has not
+    /// provided a numeric width or height (for example a full-screen story).
+    public static var displayBounds: CGSize {
+        #if canImport(UIKit)
+        UIScreen.main.bounds.size
+        #elseif canImport(AppKit)
+        NSScreen.main?.visibleFrame.size ?? .zero
+        #else
+        .zero
+        #endif
+    }
+
     private let cache: NSCache<NSString, HypenPlatformImage> = {
         let c = NSCache<NSString, HypenPlatformImage>()
         // Budget by entry count AND approximate byte count. We don't know
@@ -45,9 +58,9 @@ public final class HypenImageCache {
         return c
     }()
 
-    // In-flight downloads yield raw `Data` — decoding happens on the
-    // MainActor so we never ship a non-Sendable platform image across
-    // an actor boundary (NSImage is only Sendable on macOS 14+).
+    // Downloads are shared by URL even when callers need different decoded sizes.
+    // ImageIO returns a Sendable CGImage from the detached decode task; only
+    // the cheap UIImage/NSImage wrapper is made on the MainActor.
     private var inflight: [String: Task<Data?, Never>] = [:]
 
     private init() {
@@ -79,21 +92,23 @@ public final class HypenImageCache {
         #endif
     }
 
-    public func cached(for url: URL) -> HypenPlatformImage? {
-        cache.object(forKey: url.absoluteString as NSString)
+    public func cached(for url: URL, targetSize: CGSize? = nil, scale: CGFloat = 1) -> HypenPlatformImage? {
+        let request = HypenImageDecodeRequest(targetSize: targetSize, scale: scale)
+        return cache.object(forKey: request.cacheKey(for: url) as NSString)
     }
 
     /// Fetch (cache or network) the decoded image for `url`.
     ///
-    /// Concurrent calls for the same URL share one in-flight download so
-    /// we never fire duplicate requests for the same image. The detached
-    /// task returns `Data` (Sendable); decoding happens on the MainActor
-    /// so `NSImage` / `UIImage` never cross actor boundaries.
-    public func load(url: URL) async -> HypenPlatformImage? {
-        let key = url.absoluteString
-        if let hit = cache.object(forKey: key as NSString) {
+    /// Concurrent calls for the same URL share one download. ImageIO creates
+    /// and decodes a size-appropriate CGImage off the main actor, so SwiftUI's
+    /// first draw does not inherit the compressed image's decode work.
+    public func load(url: URL, targetSize: CGSize? = nil, scale: CGFloat = 1) async -> HypenPlatformImage? {
+        let request = HypenImageDecodeRequest(targetSize: targetSize, scale: scale)
+        let cacheKey = request.cacheKey(for: url)
+        if let hit = cache.object(forKey: cacheKey as NSString) {
             return hit
         }
+        let key = url.absoluteString
         let data: Data?
         if let existing = inflight[key] {
             data = await existing.value
@@ -106,15 +121,66 @@ public final class HypenImageCache {
             inflight[key] = nil
         }
         guard let data = data else { return nil }
+        let decoded = await Task.detached(priority: .utility) {
+            HypenImageDecoder.decode(data: data, request: request)
+        }.value
+        guard let decoded, !Task.isCancelled else { return nil }
         #if canImport(UIKit)
-        guard let image = UIImage(data: data) else { return nil }
-        let cost = Int(image.size.width * image.size.height * image.scale * image.scale) * 4
+        let image = UIImage(cgImage: decoded)
         #else
-        guard let image = NSImage(data: data) else { return nil }
-        let cost = Int(image.size.width * image.size.height) * 4
+        let image = NSImage(cgImage: decoded, size: .zero)
         #endif
-        cache.setObject(image, forKey: key as NSString, cost: max(cost, 1))
+        let cost = decoded.bytesPerRow * decoded.height
+        cache.setObject(image, forKey: cacheKey as NSString, cost: max(cost, 1))
         return image
+    }
+}
+
+struct HypenImageDecodeRequest: Hashable, Sendable {
+    let pixelWidth: Int
+    let pixelHeight: Int
+
+    init(targetSize: CGSize?, scale: CGFloat) {
+        let safeScale = scale.isFinite && scale > 0 ? scale : 1
+        func pixels(_ points: CGFloat?) -> Int {
+            guard let points, points.isFinite, points > 0 else { return 0 }
+            return max(1, min(8192, Int(min(points * safeScale, 8192).rounded(.up))))
+        }
+        pixelWidth = pixels(targetSize?.width)
+        pixelHeight = pixels(targetSize?.height)
+    }
+
+    func cacheKey(for url: URL) -> String {
+        "\(pixelWidth)x\(pixelHeight):\(url.absoluteString)"
+    }
+}
+
+enum HypenImageDecoder {
+    static func decode(data: Data, request: HypenImageDecodeRequest) -> CGImage? {
+        guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
+        let immediate = [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
+        guard request.pixelWidth > 0 || request.pixelHeight > 0,
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let sourceWidth = (properties[kCGImagePropertyPixelWidth] as? NSNumber)?.intValue,
+              let sourceHeight = (properties[kCGImagePropertyPixelHeight] as? NSNumber)?.intValue,
+              sourceWidth > 0, sourceHeight > 0 else {
+            return CGImageSourceCreateImageAtIndex(source, 0, immediate)
+        }
+
+        // Use the larger axis ratio so cover/crop layouts retain enough pixels
+        // in both dimensions. A one-axis constraint uses the source aspect ratio.
+        let ratio = min(1, max(
+            Double(request.pixelWidth) / Double(sourceWidth),
+            Double(request.pixelHeight) / Double(sourceHeight)
+        ))
+        let maxPixelSize = max(1, Int(ceil(Double(max(sourceWidth, sourceHeight)) * ratio)))
+        let options: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: maxPixelSize,
+        ]
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary)
     }
 }
 
@@ -126,54 +192,71 @@ public final class HypenImageCache {
 /// stores the decoded image in the cache for all future renders.
 @MainActor
 public struct HypenCachedImage<Placeholder: View, Failure: View>: View {
+    @Environment(\.displayScale) private var displayScale
+
     private let url: URL?
+    private let targetSize: CGSize?
     private let placeholder: () -> Placeholder
     private let failure: () -> Failure
     private let transform: (Image) -> AnyView
 
     @State private var image: HypenPlatformImage?
-    @State private var failed: Bool = false
+    @State private var imageKey: String?
+    @State private var failedKey: String?
 
     public init(
         url: URL?,
+        targetSize: CGSize? = nil,
         @ViewBuilder placeholder: @escaping () -> Placeholder,
         @ViewBuilder failure: @escaping () -> Failure,
         transform: @escaping (Image) -> AnyView = { AnyView($0) }
     ) {
         self.url = url
+        self.targetSize = targetSize
         self.placeholder = placeholder
         self.failure = failure
         self.transform = transform
-        // Prime synchronously from the cache so we avoid a one-frame
-        // placeholder flash when the URL is already resident.
-        if let url = url, let cached = HypenImageCache.shared.cached(for: url) {
-            _image = State(initialValue: cached)
-        }
+    }
+
+    private var requestKey: String? {
+        guard let url else { return nil }
+        return HypenImageDecodeRequest(targetSize: targetSize, scale: displayScale).cacheKey(for: url)
+    }
+
+    private var displayedImage: HypenPlatformImage? {
+        guard let url, let requestKey else { return nil }
+        if imageKey == requestKey { return image }
+        return HypenImageCache.shared.cached(for: url, targetSize: targetSize, scale: displayScale)
     }
 
     public var body: some View {
         content
-            .task(id: url?.absoluteString) {
+            .task(id: requestKey) {
                 guard let url = url else { return }
-                if image != nil { return }
-                failed = false
-                if let fetched = await HypenImageCache.shared.load(url: url) {
+                if displayedImage != nil { return }
+                image = nil
+                imageKey = nil
+                failedKey = nil
+                if let fetched = await HypenImageCache.shared.load(url: url, targetSize: targetSize, scale: displayScale) {
+                    guard !Task.isCancelled else { return }
                     image = fetched
+                    imageKey = requestKey
                 } else {
-                    failed = true
+                    guard !Task.isCancelled else { return }
+                    failedKey = requestKey
                 }
             }
     }
 
     @ViewBuilder
     private var content: some View {
-        if let image = image {
+        if let image = displayedImage {
             #if canImport(UIKit)
             transform(Image(uiImage: image))
             #else
             transform(Image(nsImage: image))
             #endif
-        } else if failed {
+        } else if failedKey == requestKey {
             failure()
         } else {
             placeholder()
