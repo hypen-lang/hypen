@@ -53,6 +53,8 @@ import space.hypen.renderer.render.LocalComposeRenderer
 import space.hypen.renderer.components.WindowedLazyList
 import space.hypen.renderer.components.renderableChildren
 import space.hypen.renderer.virt.WindowedShape
+import space.hypen.renderer.virt.LazyOrPadded
+import space.hypen.renderer.virt.LocalSuppressOwnScroll
 import space.hypen.renderer.virt.LocalVirtItemPositions
 import space.hypen.renderer.virt.ProvideVirtItemPositions
 import space.hypen.renderer.virt.virtItemInfo
@@ -382,26 +384,40 @@ internal fun HypenElement(
         val virtWindow = element.virtWindow()
         if (virtWindow != null && handler.typeName != "list" && handler.typeName != "grid") {
             val shape = WindowedShape.of(element.elementType, element.props["scrollable.0"] ?: element.props["scrollable"])
-            if (shape.lazy) {
-                WindowedLazyList(
-                    element = element,
-                    window = virtWindow,
-                    modifier = renderModifier,
-                    children = renderableChildren(element, renderer),
-                    renderer = renderer,
-                    horizontal = shape.horizontal,
-                    fillsWidth = false,
-                )
-            } else {
+            val padded: @Composable (Modifier) -> Unit = { paddedModifier ->
                 handler.Render(
                     element = element,
-                    modifier = renderModifier.virtPadded(element, virtWindow, renderer, horizontal = shape.horizontal),
+                    modifier = paddedModifier.virtPadded(element, virtWindow, renderer, horizontal = shape.horizontal),
                     renderChildren = {
                         ProvideVirtItemPositions(virtWindow, renderableChildren(element, renderer), shape.horizontal) {
                             RenderChildren(element, renderer)
                         }
                     },
                 )
+            }
+            if (shape.lazy) {
+                // Lazy only where its main axis is bounded; inside an
+                // ancestor scroller along that axis it pads instead, and its
+                // own scroll modifier is off (it would be unbounded too).
+                LazyOrPadded(horizontal = shape.horizontal, modifier = renderModifier) { bounded ->
+                    if (bounded) {
+                        WindowedLazyList(
+                            element = element,
+                            window = virtWindow,
+                            modifier = Modifier,
+                            children = renderableChildren(element, renderer),
+                            renderer = renderer,
+                            horizontal = shape.horizontal,
+                            fillsWidth = false,
+                        )
+                    } else {
+                        CompositionLocalProvider(LocalSuppressOwnScroll provides true) {
+                            padded(Modifier)
+                        }
+                    }
+                }
+            } else {
+                padded(renderModifier)
             }
         } else {
             // Render the component

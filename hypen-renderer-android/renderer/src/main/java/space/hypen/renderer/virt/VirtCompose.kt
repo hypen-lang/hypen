@@ -2,6 +2,7 @@ package space.hypen.renderer.virt
 
 import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -355,3 +356,36 @@ private class PaddedAnchor {
     var geometry: ViewportGeometry? = null
     var pendingPx: Float = 0f
 }
+
+/**
+ * Pick between a container's lazy shape and its padded shape from the
+ * constraints it is actually measured with, not from the element tree: a
+ * lazy container (`LazyColumn` / `LazyRow` / `LazyVerticalGrid`) cannot
+ * measure under an unbounded main axis — it sits inside an ancestor scroller
+ * along that axis (a scrollable Column holding a `.scrollable(true)` List)
+ * and has no fixed size of its own — so it lays out padded there and scrolls
+ * with the ancestor (§2), and lazily everywhere else.
+ *
+ * [modifier] (the element's applicators) goes on a wrapping box that
+ * propagates its min constraints, so the inner container is sized exactly as
+ * it was when it carried [modifier] itself; [content] gets whether the main
+ * axis is bounded and lays out its container with a plain modifier.
+ */
+@Composable
+fun LazyOrPadded(
+    horizontal: Boolean,
+    modifier: Modifier,
+    content: @Composable (bounded: Boolean) -> Unit,
+) {
+    BoxWithConstraints(modifier = modifier, propagateMinConstraints = true) {
+        content(if (horizontal) constraints.hasBoundedWidth else constraints.hasBoundedHeight)
+    }
+}
+
+/**
+ * True while a windowed container that would scroll itself renders padded
+ * because its main axis is unbounded ([LazyOrPadded]): the Column / Row
+ * handler must not add its own scroll modifier there (it would hit the same
+ * unbounded constraint). Read once by the handler and reset for its children.
+ */
+val LocalSuppressOwnScroll = compositionLocalOf { false }

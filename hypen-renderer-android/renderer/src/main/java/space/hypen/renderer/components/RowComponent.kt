@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.render.ComposeRenderer
 import space.hypen.renderer.render.LocalComposeRenderer
 import space.hypen.renderer.model.HypenElement
+import space.hypen.renderer.virt.LocalSuppressOwnScroll
 import space.hypen.renderer.virt.ProvideVirtScroller
 import kotlin.math.roundToInt
 
@@ -122,9 +123,12 @@ class RowComponent : ComponentHandler {
         // Accept bool true or the string values web uses so Hypen source authored once
         // (e.g. `.scrollable("horizontal")`) works on Android too. "vertical" on a Row is
         // a no-op — a Row scrolls horizontally by nature.
-        val scrollable = element.getBoolProp("scrollable.0")
+        val declaredScrollable = element.getBoolProp("scrollable.0")
             ?: element.getStringProp("scrollable.0")?.lowercase()?.let { it == "horizontal" || it == "both" || it == "true" }
             ?: false
+        // A windowed scrollable container laid out padded because its main
+        // axis is unbounded (`LazyOrPadded`) must not scroll itself there.
+        val scrollable = declaredScrollable && !LocalSuppressOwnScroll.current
 
         val renderer = LocalComposeRenderer.current
         val managedChildren = renderer?.let { managedRowChildren(element, it) }.orEmpty()
@@ -150,6 +154,7 @@ class RowComponent : ComponentHandler {
                 // ColumnScope capture Spacer/flex modifiers from these children.
                 LocalColumnScope provides null,
                 LocalStretchCrossAxis provides isStretch,
+                LocalSuppressOwnScroll provides false,
             ) {
                 ManagedRowLayout(
                     modifier = finalModifier.fillMaxWidth(),
@@ -172,6 +177,7 @@ class RowComponent : ComponentHandler {
                         LocalManagedRowId provides null,
                         LocalRowScope provides this,
                         LocalStretchCrossAxis provides isStretch,
+                        LocalSuppressOwnScroll provides false,
                     ) {
                         ProvideHypenContentColor(element, renderChildren)
                     }

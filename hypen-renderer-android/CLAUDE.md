@@ -97,7 +97,7 @@ through `HypenRoot` (what `HypenApp` renders once connected) with
 and has a `FakeViewportEngine` for viewport reports. Use
 `@Config(qualifiers = "w400dp-h800dp-mdpi")` so dp == px. Existing:
 `RootChildrenRenderTest`, `ChildListRenderTest`, `virt/VirtLazyListRenderTest`,
-`virt/VirtPaddedRenderTest`.
+`virt/VirtPaddedRenderTest`, `virt/VirtShapesRenderTest`, `virt/VirtUnboundedRenderTest`.
 
 ## Architecture
 
@@ -255,15 +255,30 @@ materializes the rows in place, `removeProp` unwindows, `CollectionInfo` /
 whole-list `CollectionItemInfo`) and `VirtPaddedRenderTest` (a windowed
 `Column { ForEach }` in a scrollable `Column`: padding sizes, report on outer
 scroll, anchoring keeps the first visible row's on-screen position across a
-window move, padded rows' `CollectionItemInfo`).
+window move, padded rows' `CollectionItemInfo`), `VirtShapesRenderTest` (lazy
+`Grid` rows x columns, horizontal `List`, self-scrolling windowed `Column` /
+`Row`, padded anchoring inside a lazy `List`) and `VirtUnboundedRenderTest`.
+
+Lazy vs padded is decided from constraints, not the element tree:
+`LazyOrPadded` (`BoxWithConstraints`, the element's modifier on the box with
+min constraints propagated) lays a would-be lazy container (`List` that
+scrolls, `.scrollable(true)` `Grid`, horizontal `List`, windowed scrollable
+`Column` / `Row`) out lazily only when its main axis is bounded. Unbounded —
+inside an ancestor scroller on the same axis with no size of its own — it
+renders padded and scrolls with the ancestor (a lazy container there threw
+"measured with an infinity maximum height/width"); a scrollable Column / Row
+drops its own scroll modifier there via `LocalSuppressOwnScroll`.
 
 Known gaps:
 - Anchoring assumes LTR for horizontal lists and approximates the rows above
   the anchor by the measured average size.
-- Not yet rendered in tests: `Grid` (lazy and padded), horizontal lists, the
-  lazy path for a scrollable `Column` / `Row` (`WindowedLazyList` from
-  `HypenElement`), padded anchoring inside a lazy scroller, and `HypenApp`
-  itself (session / connection states — the tests mount `HypenRoot`).
+- Not yet rendered in tests: multi-node item templates (several children per
+  item), padded horizontal anchoring, DnD inside a windowed list, and
+  `HypenApp` itself (session / connection states — the tests mount
+  `HypenRoot`).
+- A non-windowed `.scrollable(true)` Column / Row nested in a scroller on the
+  same axis with no size of its own still hits Compose's unbounded-scroll
+  check (only the windowed case falls back).
 
 ## Device Capability Protocol (RFC 001)
 

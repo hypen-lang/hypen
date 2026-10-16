@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.LazyOrPadded
 import space.hypen.renderer.virt.ProvideVirtItemPositions
 import space.hypen.renderer.virt.ProvideVirtScroller
 import space.hypen.renderer.virt.VirtItem
@@ -161,51 +162,13 @@ class ListComponent : ComponentHandler {
             verticalArrangement
         }
 
-        if (layout.scrollsVertically && window != null) {
-            WindowedLazyList(
-                element = element,
-                window = window,
-                modifier = modifier,
-                children = children,
-                renderer = renderer,
-                horizontal = false,
-                verticalArrangement = spacedVertical,
-                horizontalAlignment = horizontalAlignment,
-                fillsWidth = true,
-            )
-        } else if (layout.scrollsVertically) {
-            val state = rememberLazyListState()
-            ProvideVirtScroller(state, horizontal = false) {
-                LazyColumn(
-                    modifier = modifier,
-                    state = state,
-                    verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
-                        Arrangement.spacedBy(gap.dp)
-                    } else {
-                        verticalArrangement
-                    },
-                    horizontalAlignment = horizontalAlignment,
-                ) {
-                    items(
-                        items = children,
-                        key = { child -> child.id }
-                    ) { child ->
-                        key(child.id) {
-                            ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
-                        }
-                    }
-                }
-            }
-        } else {
-            // Not its own scroller: a windowed list pads for the items
-            // outside the window and reports from its ancestor scroller.
+        // Not its own scroller (or it would be, but sits unbounded inside an
+        // ancestor scroller): a windowed list pads for the items outside the
+        // window and reports from its ancestor scroller.
+        val padded: @Composable (Modifier) -> Unit = { paddedModifier ->
             Column(
-                modifier = modifier.virtPadded(element, window, renderer),
-                verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
-                    Arrangement.spacedBy(gap.dp)
-                } else {
-                    verticalArrangement
-                },
+                modifier = paddedModifier.virtPadded(element, window, renderer),
+                verticalArrangement = spacedVertical,
                 horizontalAlignment = horizontalAlignment,
             ) {
                 // Each row's whole-list position for TalkBack (§2).
@@ -213,6 +176,46 @@ class ListComponent : ComponentHandler {
                     children.forEach { child ->
                         key(child.id) {
                             ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                        }
+                    }
+                }
+            }
+        }
+
+        if (!layout.scrollsVertically) {
+            padded(modifier)
+            return
+        }
+        LazyOrPadded(horizontal = false, modifier = modifier) { bounded ->
+            if (!bounded) {
+                padded(Modifier)
+            } else if (window != null) {
+                WindowedLazyList(
+                    element = element,
+                    window = window,
+                    modifier = Modifier,
+                    children = children,
+                    renderer = renderer,
+                    horizontal = false,
+                    verticalArrangement = spacedVertical,
+                    horizontalAlignment = horizontalAlignment,
+                    fillsWidth = true,
+                )
+            } else {
+                val state = rememberLazyListState()
+                ProvideVirtScroller(state, horizontal = false) {
+                    LazyColumn(
+                        state = state,
+                        verticalArrangement = spacedVertical,
+                        horizontalAlignment = horizontalAlignment,
+                    ) {
+                        items(
+                            items = children,
+                            key = { child -> child.id }
+                        ) { child ->
+                            key(child.id) {
+                                ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                            }
                         }
                     }
                 }
@@ -249,35 +252,49 @@ class ListComponent : ComponentHandler {
             else -> Alignment.Top
         }
 
-        if (window != null) {
-            WindowedLazyList(
-                element = element,
-                window = window,
-                modifier = modifier,
-                children = children,
-                renderer = renderer,
-                horizontal = true,
-                horizontalArrangement = horizontalArrangement,
-                verticalAlignment = verticalAlignment,
-                fillsWidth = false,
-            )
-            return
-        }
-
-        val state = rememberLazyListState()
-        ProvideVirtScroller(state, horizontal = true) {
-            LazyRow(
-                modifier = modifier,
-                state = state,
-                horizontalArrangement = horizontalArrangement,
-                verticalAlignment = verticalAlignment,
-            ) {
-                items(
-                    items = children,
-                    key = { child -> child.id }
-                ) { child ->
-                    key(child.id) {
-                        ListItemRenderer(element = child, renderer = renderer)
+        LazyOrPadded(horizontal = true, modifier = modifier) { bounded ->
+            if (!bounded) {
+                // Inside a horizontal scroller with no width of its own: lay
+                // the rows out in a Row, padded for the items outside the window.
+                Row(
+                    modifier = Modifier.virtPadded(element, window, renderer, horizontal = true),
+                    horizontalArrangement = horizontalArrangement,
+                    verticalAlignment = verticalAlignment,
+                ) {
+                    ProvideVirtItemPositions(window, children, horizontal = true) {
+                        children.forEach { child ->
+                            key(child.id) { ListItemRenderer(element = child, renderer = renderer) }
+                        }
+                    }
+                }
+            } else if (window != null) {
+                WindowedLazyList(
+                    element = element,
+                    window = window,
+                    modifier = Modifier,
+                    children = children,
+                    renderer = renderer,
+                    horizontal = true,
+                    horizontalArrangement = horizontalArrangement,
+                    verticalAlignment = verticalAlignment,
+                    fillsWidth = false,
+                )
+            } else {
+                val state = rememberLazyListState()
+                ProvideVirtScroller(state, horizontal = true) {
+                    LazyRow(
+                        state = state,
+                        horizontalArrangement = horizontalArrangement,
+                        verticalAlignment = verticalAlignment,
+                    ) {
+                        items(
+                            items = children,
+                            key = { child -> child.id }
+                        ) { child ->
+                            key(child.id) {
+                                ListItemRenderer(element = child, renderer = renderer)
+                            }
+                        }
                     }
                 }
             }

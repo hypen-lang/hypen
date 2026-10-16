@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.model.HypenElement
+import space.hypen.renderer.virt.LocalSuppressOwnScroll
 import space.hypen.renderer.virt.ProvideVirtScroller
 
 /**
@@ -116,9 +117,12 @@ class ColumnComponent : ComponentHandler {
         // Accept bool true or the string values web uses so Hypen source authored once
         // (e.g. `.scrollable("vertical")`) works on Android too. "horizontal" on a Column
         // is a no-op — a Column scrolls vertically by nature.
-        val scrollable = element.getBoolProp("scrollable.0")
+        val declaredScrollable = element.getBoolProp("scrollable.0")
             ?: element.getStringProp("scrollable.0")?.lowercase()?.let { it == "vertical" || it == "both" || it == "true" }
             ?: false
+        // A windowed scrollable container laid out padded because its main
+        // axis is unbounded (`LazyOrPadded`) must not scroll itself there.
+        val scrollable = declaredScrollable && !LocalSuppressOwnScroll.current
 
         // For arrangement (verticalAlignment) to have visible effect,
         // the Column needs to fill available height unless scrollable
@@ -154,6 +158,7 @@ class ColumnComponent : ComponentHandler {
                     CompositionLocalProvider(
                         LocalColumnScope provides this,
                         LocalStretchCrossAxis provides isStretch,
+                        LocalSuppressOwnScroll provides false,
                         LocalParentAllowsHorizontalExpansion provides allowsHorizontalExpansion,
                         LocalContentColor provides contentColor
                     ) {
@@ -163,6 +168,7 @@ class ColumnComponent : ComponentHandler {
                     CompositionLocalProvider(
                         LocalColumnScope provides this,
                         LocalStretchCrossAxis provides isStretch,
+                        LocalSuppressOwnScroll provides false,
                         LocalParentAllowsHorizontalExpansion provides allowsHorizontalExpansion
                     ) {
                         renderChildren()

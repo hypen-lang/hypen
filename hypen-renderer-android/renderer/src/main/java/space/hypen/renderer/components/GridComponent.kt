@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.LazyOrPadded
 import space.hypen.renderer.virt.ProvideVirtItemPositions
 import space.hypen.renderer.virt.ProvideVirtScroller
 import space.hypen.renderer.virt.VirtItem
@@ -76,7 +77,9 @@ class GridComponent : ComponentHandler {
 
         // A Grid declared with `.scrollable(true)` owns its own scrolling
         // viewport, so `LazyVerticalGrid` is safe (and desirable — it
-        // windows rows for free).
+        // windows rows for free) — as long as its height is bounded: inside
+        // an ancestor scroller with no height of its own it lays out like a
+        // non-scrollable one (`LazyOrPadded`, decided from constraints).
         //
         // A Grid WITHOUT `.scrollable(true)` is expected to lay out at its
         // natural content height and scroll with some ancestor — e.g. the
@@ -93,11 +96,16 @@ class GridComponent : ComponentHandler {
         // children are only items [start, end) of `total`.
         val window = element.virtWindow()
 
-        if (!scrollable) {
+        // Lays the grid out at its natural height, packed by span: a Grid
+        // that is not its own scroller, or one whose main axis is unbounded
+        // (inside an ancestor scroller with no height of its own), where
+        // `LazyVerticalGrid` cannot measure. Pads for the rows outside the
+        // window and reports from the ancestor scroller.
+        val padded: @Composable (Modifier) -> Unit = { paddedModifier ->
             Column(
                 // Not its own scroller: pad for the rows outside the window
                 // and report from the ancestor scroller.
-                modifier = gridModifier.virtPadded(element, window, renderer, columns = columns),
+                modifier = paddedModifier.virtPadded(element, window, renderer, columns = columns),
                 verticalArrangement = Arrangement.spacedBy(rowGap),
             ) {
                 // Rows are packed by SPAN, not by count: a `gridColumn:
@@ -150,64 +158,70 @@ class GridComponent : ComponentHandler {
                     }
                 }
             }
+        }
+
+        if (!scrollable) {
+            padded(gridModifier)
             return
         }
 
-        if (window != null) {
-            // Native lazy grid over `total` slots: materialized items, or
-            // placeholders one estimated row tall (§5).
-            val state = rememberLazyGridState()
-            val measure = remember(element.id) { VirtMeasure() }
-            VirtLazyGridReporter(element, state, measure, renderer)
-            val slots = VirtSlots(window, children) { it.id }
-            val placeholderSize = measure.itemSize(window)
-            ProvideVirtScroller(state, horizontal = false) {
-                LazyVerticalGrid(
-                    columns = GridCells.Fixed(columns),
-                    // Whole-grid size for TalkBack; outermost on the lazy node, so it
-                    // overrides the lazy grid's own (unknown-count) collectionInfo.
-                    modifier = gridModifier.virtCollectionInfo(window, horizontal = false, columns = columns),
-                    state = state,
-                    horizontalArrangement = Arrangement.spacedBy(columnGap),
-                    verticalArrangement = Arrangement.spacedBy(rowGap),
-                ) {
-                    items(count = slots.count, key = { slots.key(it) }) { index ->
-                        when (val slot = slots[index]) {
-                            is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal = false)
-                            is VirtSlot.Item -> VirtItem(index, horizontal = false, columns = columns) {
-                                if (slot.nodes.size == 1) {
-                                    GridItemRenderer(element = slot.nodes[0], renderer = renderer)
-                                } else Column {
-                                    slot.nodes.forEach { node ->
-                                        key(node.id) { GridItemRenderer(element = node, renderer = renderer) }
+        LazyOrPadded(horizontal = false, modifier = gridModifier) { bounded ->
+            if (!bounded) {
+                padded(Modifier)
+            } else if (window != null) {
+                // Native lazy grid over `total` slots: materialized items, or
+                // placeholders one estimated row tall (§5).
+                val state = rememberLazyGridState()
+                val measure = remember(element.id) { VirtMeasure() }
+                VirtLazyGridReporter(element, state, measure, renderer)
+                val slots = VirtSlots(window, children) { it.id }
+                val placeholderSize = measure.itemSize(window)
+                ProvideVirtScroller(state, horizontal = false) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(columns),
+                        // Whole-grid size for TalkBack; outermost on the lazy node, so it
+                        // overrides the lazy grid's own (unknown-count) collectionInfo.
+                        modifier = Modifier.virtCollectionInfo(window, horizontal = false, columns = columns),
+                        state = state,
+                        horizontalArrangement = Arrangement.spacedBy(columnGap),
+                        verticalArrangement = Arrangement.spacedBy(rowGap),
+                    ) {
+                        items(count = slots.count, key = { slots.key(it) }) { index ->
+                            when (val slot = slots[index]) {
+                                is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal = false)
+                                is VirtSlot.Item -> VirtItem(index, horizontal = false, columns = columns) {
+                                    if (slot.nodes.size == 1) {
+                                        GridItemRenderer(element = slot.nodes[0], renderer = renderer)
+                                    } else Column {
+                                        slot.nodes.forEach { node ->
+                                            key(node.id) { GridItemRenderer(element = node, renderer = renderer) }
+                                        }
                                     }
                                 }
                             }
                         }
                     }
                 }
-            }
-            return
-        }
-
-        val state = rememberLazyGridState()
-        ProvideVirtScroller(state, horizontal = false) {
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(columns),
-                modifier = gridModifier,
-                state = state,
-                horizontalArrangement = Arrangement.spacedBy(columnGap),
-                verticalArrangement = Arrangement.spacedBy(rowGap),
-            ) {
-                items(
-                    items = children,
-                    key = { child -> child.id }
-                ) { child ->
-                    key(child.id) {
-                        GridItemRenderer(
-                            element = child,
-                            renderer = renderer,
-                        )
+            } else {
+                val state = rememberLazyGridState()
+                ProvideVirtScroller(state, horizontal = false) {
+                    LazyVerticalGrid(
+                        columns = GridCells.Fixed(columns),
+                        state = state,
+                        horizontalArrangement = Arrangement.spacedBy(columnGap),
+                        verticalArrangement = Arrangement.spacedBy(rowGap),
+                    ) {
+                        items(
+                            items = children,
+                            key = { child -> child.id }
+                        ) { child ->
+                            key(child.id) {
+                                GridItemRenderer(
+                                    element = child,
+                                    renderer = renderer,
+                                )
+                            }
+                        }
                     }
                 }
             }
