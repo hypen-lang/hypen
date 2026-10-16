@@ -74,12 +74,12 @@ non-TTY runs (CI, pipes, teleport web sessions), when `CI` or
 `hypen init` asks for a language (`promptLanguage`) and module layout
 (`promptModuleLayout`), then dispatches to `typescript.ts` / `go.ts` /
 `kotlin.ts` to scaffold a Counter starter (Router + Home + Counter). SDK
-versions follow each ecosystem's "latest" so they never go stale: TS pins
+versions follow each ecosystem's release process: TS pins
 `@hypen-space/*` to `"latest"` and runs `bun install`; Go ships a `go.mod`
 without the hypen require and runs `go mod tidy` to pin the latest
-`github.com/hypen-space/core`; Kotlin uses
-`space.hypen:hypen-kotlin:latest.release`, resolved from Maven Central on
-the first `./gradlew` build.
+`github.com/hypen-lang/hypen/hypen-golang`; Kotlin pins
+`space.hypen:hypen-kotlin:0.6.6` so the generated project uses the SDK
+version verified with this CLI release.
 
 ### Dev Server
 Two implementations with intentionally different architectures:

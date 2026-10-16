@@ -36,7 +36,11 @@ jobs:
         with:
           node-version: 20
 
-      # Build parser WASM that the LSP imports
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      # The LSP imports both parser and engine WASM through checked-in symlinks.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -52,26 +56,39 @@ jobs:
         run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features wasm
         working-directory: parser
 
-      - name: Setup WASM symlink
+      - name: Build engine WASM
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        working-directory: hypen-engine-rs
+
+      # VSCE does not follow the checked-in wasm and wasm-engine symlinks.
+      - name: Copy WASM into extension package
         run: |
-          cd hypen-lsp
-          rm -rf wasm
-          ln -sf ../parser/pkg/nodejs wasm
+          rm hypen-lsp/wasm hypen-lsp/wasm-engine
+          cp -R parser/pkg/nodejs hypen-lsp/wasm
+          cp -R hypen-engine-rs/pkg/nodejs hypen-lsp/wasm-engine
 
       - name: Install dependencies
-        run: npm ci
+        run: bun install --frozen-lockfile
         working-directory: hypen-lsp
 
       - name: Compile
-        run: npx tsc -b
+        run: bunx tsc -b
         working-directory: hypen-lsp
 
       - name: Lint
-        run: npx eslint ./src --ext .ts
+        run: bunx eslint ./src --ext .ts
+        working-directory: hypen-lsp
+
+      # VSIX uses .vscodeignore; npm publication uses package.json files.
+      - name: Prepare marketplace manifest
+        run: |
+          npm pkg set name=hypen-lsp
+          npm pkg delete files
+          cp ../LICENSE ./LICENSE
         working-directory: hypen-lsp
 
       - name: Package VSIX
-        run: npx vsce package
+        run: bunx vsce package
         working-directory: hypen-lsp
 
       - name: Upload VSIX
@@ -92,13 +109,25 @@ jobs:
         with:
           node-version: 20
 
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
       - uses: actions/download-artifact@v4
         with:
           name: hypen-lsp-vsix
           path: hypen-lsp
 
+      - name: Install publishing tool
+        run: bun install --frozen-lockfile
+        working-directory: hypen-lsp
+
+      - name: Set marketplace extension name
+        run: npm pkg set name=hypen-lsp
+        working-directory: hypen-lsp
+
       - name: Publish
-        run: npx vsce publish --packagePath *.vsix
+        run: bunx vsce publish --packagePath *.vsix
         working-directory: hypen-lsp
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}

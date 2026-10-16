@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // agent.go — attach mode for the agent surface.

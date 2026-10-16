@@ -8,7 +8,7 @@ import (
 	"sync"
 	"time"
 
-	wire "github.com/hypen-space/core/remote/device"
+	wire "github.com/hypen-lang/hypen/hypen-golang/remote/device"
 )
 
 // Option tunes one device operation.

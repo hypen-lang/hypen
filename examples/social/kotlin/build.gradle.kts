@@ -12,7 +12,7 @@ repositories {
 }
 
 dependencies {
-    implementation("space.hypen:hypen-kotlin:0.1.0")
+    implementation("space.hypen:hypen-kotlin:0.6.6")
     implementation("io.ktor:ktor-server-core:3.1.1")
     implementation("io.ktor:ktor-server-netty:3.1.1")
     implementation("io.ktor:ktor-server-websockets:3.1.1")

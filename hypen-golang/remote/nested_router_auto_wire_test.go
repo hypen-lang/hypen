@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // writeComponents materialises a component tree on disk so

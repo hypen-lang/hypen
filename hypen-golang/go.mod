@@ -1,4 +1,4 @@
-module github.com/hypen-space/core
+module github.com/hypen-lang/hypen/hypen-golang
 
 go 1.25.0
 

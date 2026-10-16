@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/hypen-space/core"
-	"github.com/hypen-space/core/remote"
+	core "github.com/hypen-lang/hypen/hypen-golang"
+	"github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 func main() {

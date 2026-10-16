@@ -236,12 +236,13 @@ function ensureRunnersDir(): void {
 
 export async function downloadFile(
   url: string,
-  destPath: string
+  destPath: string,
+  quiet = false
 ): Promise<boolean> {
   try {
     const response = await fetch(url);
     if (!response.ok) {
-      console.error(`  Failed to download: HTTP ${response.status}`);
+      if (!quiet) console.error(`  Failed to download: HTTP ${response.status}`);
       return false;
     }
     const arrayBuffer = await response.arrayBuffer();
@@ -252,7 +253,7 @@ export async function downloadFile(
     }
     return true;
   } catch (err: any) {
-    console.error(`  Download error: ${err.message}`);
+    if (!quiet) console.error(`  Download error: ${err.message}`);
     return false;
   }
 }
@@ -378,8 +379,24 @@ export async function ensureDesktopRunner(): Promise<boolean> {
   const url = `${RUNNER_URLS.desktop}/hypen-browser-${target}.tar.gz`;
   console.log(`  ${pink("Downloading desktop runner...")}`);
   console.log(`  ${dim("From:")} ${url}`);
-  const downloaded = await downloadFile(url, RUNNER_PATHS.desktopTar);
-  if (!downloaded) return false;
+  let downloaded = await downloadFile(url, RUNNER_PATHS.desktopTar, true);
+  // The source repository is private, so its direct release URL returns 404
+  // without credentials. GitHub CLI can download the same asset using the
+  // developer's existing GitHub authentication.
+  if (!downloaded && await commandExists("gh")) {
+    console.log(`  ${dim("Trying authenticated GitHub release download...")}`);
+    const result = await exec([
+      "gh", "release", "download", "--repo", "hypen-lang/hypen-engine-rs",
+      "--pattern", `hypen-browser-${target}.tar.gz`,
+      "--output", RUNNER_PATHS.desktopTar, "--clobber",
+    ]);
+    downloaded = result.exitCode === 0 && existsSync(RUNNER_PATHS.desktopTar);
+  }
+  if (!downloaded) {
+    rmSync(RUNNER_PATHS.desktopTar, { force: true });
+    console.error("  Could not download the desktop runner. This release is private; install GitHub CLI and authenticate with `gh auth login`, then retry.");
+    return false;
+  }
 
   console.log(`  Extracting...`);
   // tar handles .tar.gz on macOS, Linux, and Windows 10+ (bsdtar).

@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // attachCartState is the primary module's state for these tests. `total`

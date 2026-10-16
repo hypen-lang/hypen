@@ -138,7 +138,7 @@ mavenPublishing {
     pom {
         name.set("Hypen Kotlin SDK")
         description.set("Kotlin/JVM SDK for building Hypen server-driven applications.")
-        url.set("https://github.com/hypenlang/hypen-rs")
+        url.set("https://github.com/hypen-lang/hypen")
 
         licenses {
             license {
@@ -155,9 +155,9 @@ mavenPublishing {
             }
         }
         scm {
-            url.set("https://github.com/hypenlang/hypen-rs")
-            connection.set("scm:git:git://github.com/hypenlang/hypen-rs.git")
-            developerConnection.set("scm:git:ssh://git@github.com:hypenlang/hypen-rs.git")
+            url.set("https://github.com/hypen-lang/hypen")
+            connection.set("scm:git:https://github.com/hypen-lang/hypen.git")
+            developerConnection.set("scm:git:ssh://git@github.com/hypen-lang/hypen.git")
         }
     }
 }

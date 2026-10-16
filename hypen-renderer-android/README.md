@@ -16,7 +16,7 @@ Add the renderer from Maven Central:
 
 ```kotlin
 dependencies {
-    implementation("space.hypen:hypen-renderer:0.4.80")
+    implementation("space.hypen:hypen-renderer:0.6.6")
 }
 ```
 

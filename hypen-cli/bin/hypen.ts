@@ -283,7 +283,7 @@ async function initProject(name?: string) {
     }
   } else if (language === "go") {
     // go.mod ships without a hypen require; `go mod tidy` reads the import
-    // in main.go and pins the latest published github.com/hypen-space/core.
+    // in main.go and pins the latest published github.com/hypen-lang/hypen/hypen-golang.
     console.log(`\n  ${dim("Resolving Go modules...")}`);
     try {
       execSync("go mod tidy", { cwd: projectDir, stdio: "inherit" });

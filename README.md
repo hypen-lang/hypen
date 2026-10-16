@@ -209,7 +209,7 @@ await engine.connect();
 </details>
 
 <details>
-<summary><b>Go</b> — <code>github.com/hypen-space/core</code></summary>
+<summary><b>Go</b> — <code>github.com/hypen-lang/hypen/hypen-golang</code></summary>
 
 Go auto-registers every named module onto the package-level `core.App` singleton at `.Build()` time. Serve the primary with `RemoteServer.WithDefinition(...)`; nested modules are discovered from the registry.
 
@@ -404,7 +404,7 @@ Hypen has SDKs for multiple platforms, all driven by the same engine:
 All server SDKs share the same module system (typed state, typed actions, lifecycle hooks, nested modules, session persistence) and speak the same WebSocket patch protocol.
 
 - **Node.js / Bun** (`@hypen-space/server` + `@hypen-space/core`) — [README](hypen-web/packages/server/README.md)
-- **Go** (`github.com/hypen-space/core`) — [README](hypen-golang/README.md)
+- **Go** (`github.com/hypen-lang/hypen/hypen-golang`) — [README](hypen-golang/README.md)
 - **Rust** (crate: `hypen-server`) — [README](hypen-sdk-rs/README.md)
 - **Swift** (`HypenServer`) — [README](hypen-server-swift/README.md)
 - **Kotlin / JVM** (`space.hypen:hypen-kotlin`) — [README](hypen-kotlin/README.md)

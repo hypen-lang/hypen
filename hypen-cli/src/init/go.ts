@@ -1,7 +1,7 @@
 /**
  * Go project generator for `hypen init`.
  *
- * Produces a minimal Hypen Go project using the `github.com/hypen-space/core`
+ * Produces a minimal Hypen Go project using the `github.com/hypen-lang/hypen/hypen-golang`
  * SDK. Layouts are analogous to the TypeScript generator:
  *
  *   - `file-based`: `main.go` plus a `components/<Name>/<Name>.hypen`
@@ -36,7 +36,7 @@ function ensureDir(projectDir: string, relPath: string): void {
 function goMod(projectName: string): string {
   // Go module paths must be lowercase and cannot contain spaces.
   const modName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
-  // The `github.com/hypen-space/core` require is intentionally omitted —
+  // The `github.com/hypen-lang/hypen/hypen-golang` require is intentionally omitted —
   // `go mod tidy` (run during `hypen init`) resolves it to the latest
   // published version from the import in main.go, the same way the
   // TypeScript scaffold pins `@hypen-space/*` to "latest".
@@ -205,8 +205,8 @@ import (
 \t"os"
 \t"path/filepath"
 
-\tcore "github.com/hypen-space/core"
-\t"github.com/hypen-space/core/remote"
+\tcore "github.com/hypen-lang/hypen/hypen-golang"
+\t"github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // loadTemplate reads \`components/<Name>/<Name>.hypen\` from disk. Go's
@@ -332,8 +332,8 @@ import (
 \t"fmt"
 \t"os"
 
-\tcore "github.com/hypen-space/core"
-\t"github.com/hypen-space/core/remote"
+\tcore "github.com/hypen-lang/hypen/hypen-golang"
+\t"github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 type AppState struct {

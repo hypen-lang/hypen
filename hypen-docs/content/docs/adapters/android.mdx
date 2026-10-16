@@ -13,13 +13,13 @@ Add to your `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("space.hypen:hypen-renderer:0.4.80")
+    implementation("space.hypen:hypen-renderer:0.6.6")
 }
 
 // In settings.gradle.kts
 dependencyResolutionManagement {
     repositories {
-        maven { url = uri("https://maven.hypen.space") }
+        mavenCentral()
     }
 }
 ```

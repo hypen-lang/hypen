@@ -105,6 +105,15 @@ done
 [[ ${#SELECTED[@]} -eq 0 ]] && SELECTED=("${DEFAULT_SET[@]}")
 
 command -v bun >/dev/null || { echo "bun is required (https://bun.sh)" >&2; exit 1; }
+command -v node >/dev/null || { echo "Node.js 22 or newer is required by Wrangler" >&2; exit 1; }
+node_major="$(node -p 'parseInt(process.versions.node, 10)' 2>/dev/null)" || {
+  echo "Could not determine the Node.js version (Wrangler requires Node.js 22 or newer)" >&2
+  exit 1
+}
+if [[ ! "$node_major" =~ ^[0-9]+$ ]] || (( node_major < 22 )); then
+  echo "Node.js 22 or newer is required by Wrangler (found $(node --version))" >&2
+  exit 1
+fi
 
 # ---- 1. Engine WASM (web target) ----------------------------------------
 if [[ $FRESH -eq 1 || ! -f "$ENGINE_DIR/pkg/web/package.json" ]]; then
@@ -215,15 +224,26 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-inspector=9230
+# Ask the OS for an unused inspector port for each Wrangler process. Keep the
+# selected ports distinct even if an ephemeral port is returned twice.
+inspector_ports=" "
+next_inspector_port() {
+  local candidate
+  while true; do
+    candidate="$(node -e 'const server = require("node:net").createServer(); server.listen(0, "127.0.0.1", () => { console.log(server.address().port); server.close(); });')"
+    [[ "$inspector_ports" == *" $candidate "* ]] || break
+  done
+  inspector_ports+="$candidate "
+  inspector="$candidate"
+}
 for name in "${SELECTED[@]}"; do
   read -r rel port <<<"$(example_entry "$name")"
   dir="$REPO_ROOT/$rel"
   log="$LOG_DIR/$name.log"
+  next_inspector_port
   echo "==> Starting $name on :$port (inspector :$inspector, log: $log)"
   (cd "$dir" && bun x wrangler dev --port "$port" --inspector-port "$inspector" >"$log" 2>&1) &
   PIDS+=($!)
-  inspector=$((inspector + 1))
 done
 
 # ---- 5. Wait for readiness -------------------------------------------------
