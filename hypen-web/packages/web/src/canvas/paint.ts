@@ -9,7 +9,7 @@ import { pinOffset } from "./pin-position";
 import type { VirtualNode, PainterFunction, Rectangle } from "./types.js";
 import { measureText, renderText } from "./text.js";
 import { ScrollManager, isScrollable } from "./scroll.js";
-import { getVisibleChildren, VIRTUALIZE_THRESHOLD } from "./virtualize.js";
+import { getVisibleChildren } from "./virtualize.js";
 import type { SelectionManager } from "./selection.js";
 import type { TextEditController } from "./editing.js";
 import {
@@ -393,12 +393,6 @@ export function paintNode(
     }
   }
 
-  // Paint children -- use windowed rendering for large scrollable lists
-  const shouldVirtualize =
-    isScrollable(node) &&
-    node.children.length > VIRTUALIZE_THRESHOLD &&
-    node.layout != null;
-
   // A Video's children are composition slots, not flow content: only the
   // ones the normative visibility table shows in the current player state
   // paint (hidden ≠ removed — the subtree keeps its state, it is simply
@@ -408,14 +402,7 @@ export function paintNode(
     ? []
     : isVideoNode(node)
     ? visibleVideoSlotChildren(node)
-    : shouldVirtualize
-    ? getVisibleChildren(node, {
-        x: node.layout!.x,
-        y: node.layout!.y,
-        width: node.layout!.width,
-        height: node.layout!.height,
-      })
-    : node.children;
+    : getVisibleChildren(node); // scroll containers cull off-screen children
 
   if (type === "stack" && childrenToPaint.length > 1) {
     // Layout child indices are keyed to retained tree order. Never mutate

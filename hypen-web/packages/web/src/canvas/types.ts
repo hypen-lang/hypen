@@ -5,6 +5,7 @@
  */
 
 import type { Semantics } from "@hypen-space/core/types";
+import type { VirtWindow, ItemRange } from "@hypen-space/core/virtualization";
 import type { SafeAreaInsets } from "../safe-area.js";
 
 export interface VirtualNode {
@@ -44,6 +45,11 @@ export interface VirtualNode {
   // Scroll state (managed by ScrollManager, not serialised)
   scrollState?: ScrollState;
 
+  // Windowed-list state (managed by VirtListController from the engine's
+  // `__virt.window` prop, never stored in `props`). Present only while the
+  // node is a windowed List/Grid/lazy-ForEach host.
+  virt?: VirtListState;
+
   // Pointer-pressed (active) state, tracked by the event manager from
   // mousedown/mouseup so `:active` paint variants can resolve.
   pressed?: boolean;
@@ -69,6 +75,40 @@ export interface VirtualNode {
   // first time a variant override is applied so each frame resolves from the
   // un-overridden base instead of compounding overrides.
   variantOriginals?: Record<string, unknown>;
+}
+
+/**
+ * Renderer-side state of a windowed list (docs/virtualization.md §1–§3).
+ * The engine materializes only items `[window.start, window.end)`; the
+ * renderer stands in for the rest with `leading`/`trailing` space along the
+ * scroll axis and reports the visible range back through `setListViewport`.
+ */
+export interface VirtListState {
+  window: VirtWindow;
+  /** Scroll axis: true for horizontal flow (`Row`, `List(direction: horizontal)`). */
+  horizontal: boolean;
+  /** Items per row across the scroll axis (`Grid` `columns`), else 1. */
+  columns: number;
+  /** Extent assumed per row of items along the scroll axis. */
+  itemSize: number;
+  /** Whether `itemSize` comes from measured rows (vs. estimate / default). */
+  measured: boolean;
+  /** Space standing in for the rows before / after the window. */
+  leading: number;
+  trailing: number;
+  /**
+   * The list scrolls itself on its axis. The stand-in space then cannot be
+   * layout padding (padding would grow the box past its own size), so the
+   * children are shifted by `leading` after layout and the scroll extent
+   * grows by `trailing` instead.
+   */
+  selfScroll: boolean;
+  /** Last range sent with `setListViewport` (never sent twice in a row). */
+  lastReported: ItemRange | null;
+  /** `leading` the previous layout pass used (scroll anchoring). */
+  laidOutLeading: number | null;
+  /** First visible materialized row and its layout position (scroll anchoring). */
+  anchor: { node: VirtualNode; pos: number } | null;
 }
 
 export interface Layout {

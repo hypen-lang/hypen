@@ -14,6 +14,11 @@ const log = frameworkLoggers.canvas;
 // Interface for the engine that canvas renderer needs
 interface IEngine {
   dispatchAction(name: string, payload?: any): void;
+  /**
+   * Viewport report for a windowed list (docs/virtualization.md §3). Every
+   * real engine has it; optional so a bare test/dispatch-only engine works.
+   */
+  setListViewport?(listId: string, start: number, end: number): void;
 }
 import type {
   VirtualNode,
@@ -54,6 +59,7 @@ import { CanvasDnd, ANIM_STATE_POSES_PROP } from "./dnd.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
 import { DND_PROP_PREFIX, DND_SOURCE_PROP } from "@hypen-space/core/dnd";
 import { setSafeAreaInsetOverrides } from "../safe-area.js";
+import { VirtListController, VIRT_WINDOW_PROP } from "./virt-list.js";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
   devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
@@ -113,7 +119,19 @@ export class CanvasRenderer implements Renderer {
    */
   private dnd: CanvasDnd;
 
+  /**
+   * `__virt.window` runtime: windowed List/Grid layout (stand-in padding),
+   * row measurement, scroll anchoring, and the per-frame viewport report
+   * to `engine.setListViewport`. See `virt-list.ts`.
+   */
+  private virt: VirtListController;
+
   private rafId: number | null = null;
+  // Synchronous (rAF-less) rendering only: a redraw requested while a frame
+  // is rendering — e.g. the engine answering a viewport report with patches
+  // synchronously — re-runs the frame after it instead of nesting.
+  private rendering = false;
+  private rerenderRequested = false;
   private needsRedraw = false;
   private captureFrozen = false;
 
@@ -177,12 +195,7 @@ export class CanvasRenderer implements Renderer {
       scheduleRedraw: () => this.scheduleRedraw(),
       removeNode: (id) => this.onRemove(id),
       getNode: (id) => this.nodes.get(id),
-      isNodeAttached: (node) => {
-        if (this.rootNode === null) return false;
-        let current: VirtualNode = node;
-        while (current.parent) current = current.parent;
-        return current === this.rootNode;
-      },
+      isNodeAttached: (node) => this.isAttached(node),
       // Option F `.onAnimationComplete` completions dispatch through the
       // same engine channel as pointer/keyboard events.
       dispatchAction: (name, payload) => this.engine.dispatchAction(name, payload),
@@ -216,6 +229,20 @@ export class CanvasRenderer implements Renderer {
       // Re-resolve the drop target after a mid-drag list rebuild (the event
       // manager is constructed below; the closure binds at call time).
       hitTest: (point) => this.eventManager.hitTest(point),
+    });
+
+    this.virt = new VirtListController({
+      getNode: (id) => this.nodes.get(id),
+      isAttached: (node) => this.isAttached(node),
+      viewport: () => {
+        const dpr = this.options.devicePixelRatio || 1;
+        return { width: this.canvas.width / dpr, height: this.canvas.height / dpr };
+      },
+      setListViewport: (id, start, end) => this.engine.setListViewport?.(id, start, end),
+      mirrorElement: (id) =>
+        this.accessibilityLayer?.getElement(id) as
+          | { setAttribute?: (n: string, v: string) => void; removeAttribute?: (n: string) => void }
+          | undefined,
     });
 
     // Initialize subsystems
@@ -320,6 +347,14 @@ export class CanvasRenderer implements Renderer {
     // Don't schedule initial render - wait for patches
   }
 
+  /** Whether `node` is in the rendered tree (its root is the root node). */
+  private isAttached(node: VirtualNode): boolean {
+    if (this.rootNode === null) return false;
+    let current: VirtualNode = node;
+    while (current.parent) current = current.parent;
+    return current === this.rootNode;
+  }
+
   /**
    * Setup HiDPI rendering
    */
@@ -384,6 +419,10 @@ export class CanvasRenderer implements Renderer {
     for (const patch of patches) {
       this.applyPatch(patch);
     }
+
+    // `__virt.window` describes the batch's rows: apply it only now, after
+    // every structural patch of the batch landed (§1).
+    this.virt.flush();
 
     // On first render (root just appeared), mark the entire canvas dirty
     if (this.options.enableDirtyRects && !hadRoot && this.rootNode !== null) {
@@ -493,6 +532,12 @@ export class CanvasRenderer implements Renderer {
     // we own the prop bag and can mutate it during applicator normalisation.
     const rawProps: Record<string, any> =
       props instanceof Map ? Object.fromEntries(props) : { ...props };
+    // The window prop is never an ordinary prop (§1) — queue it instead.
+    const windowValue = rawProps[VIRT_WINDOW_PROP];
+    if (windowValue !== undefined) {
+      delete rawProps[VIRT_WINDOW_PROP];
+      this.virt.noteSet(id, windowValue);
+    }
     normalizeAllApplicators(rawProps);
 
     // Engine emits the element type capitalised (`"Button"`, `"Text"`, …);
@@ -558,6 +603,13 @@ export class CanvasRenderer implements Renderer {
   private onSetProp(id: string, name: string, value: any, fromDnd = false): void {
     const node = this.nodes.get(id);
     if (!node) return;
+
+    // `__virt.window` is list-window state, not a prop: queued for the
+    // post-batch flush, never stored in `node.props` (§1).
+    if (name === VIRT_WINDOW_PROP) {
+      this.virt.noteSet(id, value);
+      return;
+    }
 
     // `__anim.*` channel props configure the animator, never layout/paint —
     // route them there and skip the applicator/variant machinery (which
@@ -657,6 +709,12 @@ export class CanvasRenderer implements Renderer {
   private onRemoveProp(id: string, name: string, fromDnd = false): void {
     const node = this.nodes.get(id);
     if (!node) return;
+
+    // The list is no longer windowed: drop its stand-in space (§1).
+    if (name === VIRT_WINDOW_PROP) {
+      this.virt.noteRemove(id);
+      return;
+    }
 
     // `__anim.*` channel props route to the animator (clearing `.animate`
     // stops playback and restores the touched props).
@@ -1008,15 +1066,39 @@ export class CanvasRenderer implements Renderer {
         this.render();
       });
     } else {
-      // In non-browser environments (tests), render immediately
+      // In non-browser environments (tests), render immediately — or, when
+      // a frame is already rendering, right after it.
+      if (this.rendering) {
+        this.rerenderRequested = true;
+        return;
+      }
       this.render();
     }
   }
 
   /**
-   * Main render function
+   * Main render function. Re-runs the frame (bounded) while a redraw was
+   * requested during it on the synchronous path.
    */
   private render(): void {
+    if (this.rendering) {
+      this.rerenderRequested = true;
+      return;
+    }
+    this.rendering = true;
+    try {
+      let frames = 0;
+      do {
+        this.rerenderRequested = false;
+        this.renderFrame();
+      } while (this.rerenderRequested && ++frames < 16);
+    } finally {
+      this.rendering = false;
+      this.rerenderRequested = false;
+    }
+  }
+
+  private renderFrame(): void {
     const startTime = performance.now();
     const dpr = this.options.devicePixelRatio || 1;
 
@@ -1041,6 +1123,13 @@ export class CanvasRenderer implements Renderer {
     // Keep the semantics overlay's element boxes on the painted bounds so
     // screen-reader browse modes (geometry-driven) track layout changes.
     this.accessibilityLayer.syncPositions(this.rootNode);
+
+    // Windowed lists: report the visible range + overscan for this frame's
+    // layout and scroll offsets (§3.5: after layout, on scroll / resize /
+    // window change — every one of those renders a frame). Deduplicated by
+    // `shouldReport`; the engine may answer synchronously with patches,
+    // which schedule the next frame.
+    if (this.rootNode && this.virt.active) this.virt.report();
 
     // Ticker: while animations are in flight, keep the coalescing scheduler
     // re-armed; when the last one settles this stops firing — no runaway
@@ -1113,12 +1202,14 @@ export class CanvasRenderer implements Renderer {
     // canvases with different overrides each lay out against their own.
     setSafeAreaInsetOverrides(this.options.safeAreaInsets);
 
-    computeLayout(
-      this.ctx,
-      this.rootNode,
-      contentWidth,
-      this.canvas.height / dpr
-    );
+    const root = this.rootNode;
+    const layout = () => computeLayout(this.ctx, root, contentWidth, this.canvas.height / dpr);
+    // Windowed lists size their stand-in padding before layout, then refine
+    // it from the measured rows (one extra pass when it moved) and shift /
+    // anchor rows after it.
+    this.virt.beforeLayout();
+    layout();
+    this.virt.afterLayout(layout);
 
     ScrollManager.updateScrollBounds(this.rootNode);
     this.layoutDirty = false;
@@ -1284,6 +1375,7 @@ export class CanvasRenderer implements Renderer {
     this.animator.reset();
     this.textEditor.endEditing();
     this.releaseAllVideos();
+    this.virt.reset();
     this.rootNode = null;
     this.nodes.clear();
     this.eventManager.setRootNode(null);
