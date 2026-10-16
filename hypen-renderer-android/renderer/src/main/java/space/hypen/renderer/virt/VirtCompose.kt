@@ -290,9 +290,9 @@ fun Modifier.virtPadded(
     SideEffect {
         val before = anchor.layout
         anchor.layout = layout
-        val past = anchor.scrolledPastDp
-        if (before == null || before == layout || past == null || scroller == null) return@SideEffect
-        val deltaDp = Virtualization.anchorDelta(before, layout, size, past, anchor.viewportDp, columns)
+        val geometry = anchor.geometry
+        if (before == null || before == layout || geometry == null || scroller == null) return@SideEffect
+        val deltaDp = Virtualization.anchorDelta(before, layout, size, geometry)
         val deltaPx = (deltaDp * density.density).toFloat()
         if (abs(deltaPx) < 0.5f) return@SideEffect
         // A scroller clamps to its last measured range; a larger padding
@@ -318,23 +318,23 @@ fun Modifier.virtPadded(
 
         val clipped = coords.boundsInRoot()
         if (clipped.width <= 0f || clipped.height <= 0f) {
-            anchor.scrolledPastDp = null
+            anchor.geometry = null
             return@onGloballyPositioned
         }
         val origin = coords.positionInRoot()
         val listTop = (if (horizontal) origin.x else origin.y).toDouble()
         val viewTop = (if (horizontal) clipped.left else clipped.top).toDouble()
         val viewExtent = (if (horizontal) clipped.width else clipped.height).toDouble()
-        anchor.scrolledPastDp = (viewTop - listTop) / px
-        anchor.viewportDp = viewExtent / px
-        val visible = Virtualization.paddedVisibleRange(
-            w,
-            padSize = latestPadSize * px,
-            rowSize = latestSize * px,
-            scrolledPast = viewTop - listTop,
-            viewportExtent = viewExtent,
+        // One geometry (dp) for both the report and the next anchoring, so
+        // they agree on which part of the list is on screen (§3 step 2).
+        val geometry = ViewportGeometry(
+            size = latestSize,
+            scrolledPast = (viewTop - listTop) / px,
+            viewportExtent = viewExtent / px,
             columns = columns,
         )
+        anchor.geometry = geometry
+        val visible = Virtualization.paddedVisibleRange(w, latestPadSize, latestSize, geometry)
         tracker.next(w, visible)?.let { renderer.reportViewport(element.id, it.start, it.end) }
     }
     val padding = if (horizontal) {
@@ -352,7 +352,6 @@ fun Modifier.virtPadded(
  */
 private class PaddedAnchor {
     var layout: PaddedLayout? = null
-    var scrolledPastDp: Double? = null
-    var viewportDp: Double = 0.0
+    var geometry: ViewportGeometry? = null
     var pendingPx: Float = 0f
 }

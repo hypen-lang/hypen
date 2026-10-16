@@ -74,6 +74,23 @@ class VirtAnchorTest {
     }
 
     @Test
+    fun `a list starting below the viewport top counts only the viewport over it`() {
+        // The list starts 100 below the viewport's top; of a 500 viewport only
+        // [0, 400) of the list is on screen (§3 step 2), for reporting and
+        // anchoring alike: one geometry, the same visible span.
+        val geometry = ViewportGeometry(size = 50.0, scrolledPast = -100.0, viewportExtent = 500.0)
+        assertEquals(0.0 to 400.0, Virtualization.visibleSpan(geometry))
+        val window = VirtWindow(1000, 0, 30)
+        // Rows 0..7 are on screen, row 8 starts at 400: off screen.
+        assertEquals(ItemRange(0, 8), Virtualization.paddedVisibleRange(window, 50.0, 50.0, geometry))
+        // Row 8 at 400 (padding 8 * 50 under [8,40)) is below the visible part:
+        // nothing on screen to hold still, so no correction.
+        assertEquals(0.0, Virtualization.anchorDelta(layout(8, 40, 50.0), layout(8, 40, 10.0), 50.0, geometry), 1e-9)
+        // The first row on screen is anchored: lead 7 * 50 = 350 -> 7 * 10 = 70.
+        assertEquals(-280.0, Virtualization.anchorDelta(layout(7, 40, 50.0), layout(7, 40, 10.0), 50.0, geometry), 1e-9)
+    }
+
+    @Test
     fun `grids anchor by rows`() {
         // 3 columns, rows 100 tall, padding 20 per row. Grid row 6 (items
         // 18..20) at 600 under [0,30); under [15,45) it is 5 rows of padding

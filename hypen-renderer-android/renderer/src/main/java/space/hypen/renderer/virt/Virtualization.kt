@@ -221,8 +221,8 @@ object Virtualization {
      * over the list counts as visible.
      */
     fun viewportReport(window: VirtWindow, geometry: ViewportGeometry, lastReported: ItemRange?): ItemRange? {
-        val extent = geometry.viewportExtent + min(0.0, geometry.scrolledPast)
-        val visible = visibleRange(window.total, geometry.size, geometry.scrolledPast, extent, geometry.columns)
+        val (start, end) = visibleSpan(geometry)
+        val visible = visibleRange(window.total, geometry.size, start, end - start, geometry.columns)
         val wanted = wantedRange(visible, window.total)
         return if (shouldReport(window, visible, wanted, lastReported)) wanted else null
     }
@@ -306,11 +306,35 @@ object Virtualization {
             y < lead + mid -> rowsBefore + (y - lead) / row
             else -> rowsBefore + rowsIn + (y - lead - mid) / pad
         }
-        val past = max(0.0, scrolledPast)
-        val firstRow = floor(rowAt(past))
-        val lastRow = ceil(rowAt(past + max(0.0, viewportExtent)))
+        val (start, end) = visibleSpan(scrolledPast, viewportExtent)
+        val firstRow = floor(rowAt(start))
+        val lastRow = ceil(rowAt(end))
         return ItemRange(clamp(firstRow * cols, window.total), clamp(lastRow * cols, window.total))
     }
+
+    /**
+     * The part of the list on screen, in list coordinates: `[start, end)`.
+     * The one geometry rule (§3 step 2) shared by reporting
+     * ([viewportReport], [paddedVisibleRange]) and anchoring ([anchorDelta]):
+     * `start` is how far the viewport has scrolled past the list's leading
+     * edge (0 when it hasn't), and while the list starts below the top of the
+     * viewport only the part of the viewport over the list counts.
+     */
+    fun visibleSpan(geometry: ViewportGeometry): Pair<Double, Double> =
+        visibleSpan(geometry.scrolledPast, geometry.viewportExtent)
+
+    private fun visibleSpan(scrolledPast: Double, viewportExtent: Double): Pair<Double, Double> {
+        val start = max(0.0, scrolledPast)
+        return start to max(start, scrolledPast + max(0.0, viewportExtent))
+    }
+
+    /** [paddedVisibleRange] from a [ViewportGeometry] (its `size` is ignored: the sizes are per part). */
+    fun paddedVisibleRange(window: VirtWindow, padSize: Double, rowSize: Double, geometry: ViewportGeometry): ItemRange =
+        paddedVisibleRange(window, padSize, rowSize, geometry.scrolledPast, geometry.viewportExtent, geometry.columns)
+
+    /** [anchorDelta] from the same [ViewportGeometry] the report path uses. */
+    fun anchorDelta(before: PaddedLayout, after: PaddedLayout, rowSize: Double, geometry: ViewportGeometry): Double =
+        anchorDelta(before, after, rowSize, geometry.scrolledPast, geometry.viewportExtent, geometry.columns)
 
     /**
      * Scroll anchoring on the padded path (§2/§3): how far (same unit as the
@@ -353,10 +377,11 @@ object Virtualization {
         val lead = windowPadding(before.window, before.padSize, cols).leading
         // First window row whose bottom is below the viewport's top (row k
         // spans [lead + k*row, lead + (k+1)*row)).
-        val k = max(0.0, floor((scrolledPast - lead) / row)).toInt()
+        val (start, end) = visibleSpan(scrolledPast, viewportExtent)
+        val k = max(0.0, floor((start - lead) / row)).toInt()
         if (k >= rowsIn) return 0.0
         val rowTop = lead + k * row
-        if (rowTop >= scrolledPast + max(0.0, viewportExtent)) return 0.0
+        if (rowTop >= end) return 0.0
         val anchor = before.window.start + k * cols
         if (anchor >= before.window.end) return 0.0
         if (anchor < after.window.start || anchor >= after.window.end) return 0.0
