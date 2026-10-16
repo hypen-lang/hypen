@@ -95,6 +95,33 @@ fn padding_counts_grid_rows() {
     assert_eq!(window_padding(&w(30, 9, 18), 100.0, 3), (300.0, 400.0));
 }
 
+// ── windowRows ──
+
+#[test]
+fn window_rows_is_the_item_count_for_a_list() {
+    assert_eq!(window_rows(&w(100, 40, 70), 1), 30);
+}
+
+#[test]
+fn window_rows_counts_every_grid_row_the_window_touches() {
+    assert_eq!(window_rows(&w(30, 9, 18), 3), 3);
+    assert_eq!(window_rows(&w(30, 10, 17), 3), 3);
+}
+
+// ── childrenPerItem ──
+
+#[test]
+fn children_per_item_groups_a_multi_node_templates_children() {
+    assert_eq!(children_per_item(&w(100, 10, 20), 10), 1);
+    assert_eq!(children_per_item(&w(100, 10, 20), 30), 3);
+}
+
+#[test]
+fn children_per_item_is_at_least_one() {
+    assert_eq!(children_per_item(&w(100, 10, 10), 0), 1);
+    assert_eq!(children_per_item(&w(100, 10, 20), 0), 1);
+}
+
 // ── visibleRange ──
 
 #[test]
@@ -316,7 +343,6 @@ fn visible_range_follows_the_scroll_container() {
     let mut lists = VirtLists::default();
     let mut batch = vec![set_window("list", 1000, 0, 30)];
     lists.ingest(&mut batch, 1.0);
-    lists.ingest(&mut batch.clone(), 1.0); // the pad write reaches the tree
     let g = geom(&[(0.0, 48.0)], 0.0);
     // List top at screen 100; the window shows screen 0..600.
     let vp = ListViewport {
@@ -362,12 +388,85 @@ fn plan_report_applies_overscan_and_never_repeats() {
     assert_eq!(lists.plan_report("list", r(100, 113)), None);
 }
 
+/// The padding appended for a new window reaches the tree in the same
+/// flush: it is the list's current padding (`visible` measures from it) and
+/// arms anchoring — no second trip through `ingest` needed.
+#[test]
+fn a_window_move_records_its_padding_and_arms_the_anchor() {
+    let mut lists = VirtLists::default();
+    lists.ingest(&mut vec![set_window("list", 1000, 0, 30)], 1.0);
+    lists.set_anchor("list", Some(("r5".into(), 240.0)));
+    assert_eq!(lists.anchor_shift("list", |_| Some(240.0)), 0.0);
+
+    lists.ingest(&mut vec![set_window("list", 1000, 10, 40)], 1.0);
+    lists.set_anchor("list", Some(("r15".into(), 720.0)));
+    assert_eq!(
+        lists.anchor_shift("list", |_| Some(730.0)),
+        10.0,
+        "the window's own padding change keeps the row in place"
+    );
+    // `visible` measures item 0 from the recorded leading padding (480).
+    let vp = ListViewport {
+        list_near: 0.0,
+        own_scroll: 0.0,
+        vis_lo: 0.0,
+        vis_hi: 96.0,
+    };
+    let g = geom(&[(480.0, 48.0)], 480.0);
+    assert_eq!(lists.visible("list", &g, 1, vp, 1.0), Some(r(0, 2)));
+}
+
+#[test]
+fn set_positions_place_rows_in_the_whole_list() {
+    use crate::tree::{Tree, ROOT_ID};
+    let mut tree = Tree::new();
+    let mut batch = vec![
+        Patch::Create {
+            id: "list".into(),
+            element_type: "List".into(),
+            props: Arc::new(IndexMap::new()),
+            semantics: None,
+        },
+        Patch::Insert {
+            parent_id: ROOT_ID.into(),
+            id: "list".into(),
+            before_id: None,
+        },
+    ];
+    // Items 40..42, two children each.
+    for i in 0..4 {
+        let id = format!("c{i}");
+        batch.push(Patch::Create {
+            id: id.as_str().into(),
+            element_type: "Text".into(),
+            props: Arc::new(IndexMap::new()),
+            semantics: None,
+        });
+        batch.push(Patch::Insert {
+            parent_id: "list".into(),
+            id: id.as_str().into(),
+            before_id: None,
+        });
+    }
+    tree.apply_batch(&batch);
+    let mut lists = VirtLists::default();
+    lists.ingest(&mut vec![set_window("list", 100, 40, 42)], 1.0);
+    assert_eq!(
+        lists.set_positions(&tree),
+        vec![
+            ("c0".to_string(), 41, 100),
+            ("c1".to_string(), 41, 100),
+            ("c2".to_string(), 42, 100),
+            ("c3".to_string(), 42, 100),
+        ]
+    );
+}
+
 #[test]
 fn anchor_shift_keeps_the_first_visible_row_in_place() {
     let mut lists = VirtLists::default();
     let mut batch = vec![set_window("list", 1000, 0, 30)];
     lists.ingest(&mut batch, 1.0);
-    lists.ingest(&mut batch, 1.0); // pad write reaches the tree
     lists.set_anchor("list", Some(("r5".into(), 240.0)));
     // A pad change landed and the row moved 32px down in its container.
     assert_eq!(lists.anchor_shift("list", |_| Some(272.0)), 32.0);
@@ -544,6 +643,25 @@ mod layout {
         // Every materialized row is within the cull buffer here; the list
         // element itself is emitted even though it is 300k px tall.
         assert!(pass.items.iter().any(|it| it.node_id == "row29"));
+    }
+
+    /// Containers with their own `build_subtree` branch (Center, Stack,
+    /// Button) are padded on the first build, not only on a later restyle.
+    #[test]
+    fn special_containers_are_padded_on_their_first_build() {
+        for list_type in ["Center", "Stack", "Button"] {
+            let mut rig = Rig::new();
+            let pass = rig.list(
+                list_type,
+                1,
+                json!({ "total": 4, "start": 1, "end": 2, "estimatedSize": 30 }),
+            );
+            let list = item(&pass, "list").rect;
+            assert!(
+                list.h >= 4.0 * 30.0 - 1.0,
+                "{list_type}: one row plus 3 stand-ins, got {list:?}"
+            );
+        }
     }
 
     #[test]

@@ -4545,6 +4545,7 @@ fn build_subtree(
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
+            apply_virt_padding(&mut style, node, scale);
             let children = tree
                 .children_of(node_id)
                 .iter()
@@ -4643,6 +4644,7 @@ fn build_subtree(
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
+            apply_virt_padding(&mut style, node, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4695,6 +4697,7 @@ fn build_subtree(
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             apply_stack_fill_min_size(&mut style);
+            apply_virt_padding(&mut style, node, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(

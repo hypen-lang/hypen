@@ -7,8 +7,9 @@
 //!
 //! - ports the shared renderer math from `@hypen-space/core`
 //!   (`packages/core/src/virtualization.ts`): [`parse_virt_window`],
-//!   [`item_size`], [`window_padding`], [`visible_range`],
-//!   [`wanted_range`], [`should_report`] — its tests mirror
+//!   [`children_per_item`], [`window_rows`], [`item_size`],
+//!   [`window_padding`], [`visible_range`], [`wanted_range`],
+//!   [`should_report`] — its tests mirror
 //!   `hypen-web/tests/virtualization-math.test.ts`;
 //! - keeps `__virt.window` out of the renderer tree ([`VirtLists::ingest`]):
 //!   the prop is consumed from each batch and replaced, at the END of the
@@ -21,7 +22,9 @@
 //! - measures the materialized rows after each layout and re-pads when the
 //!   average moves ([`VirtLists::remeasure`]), keeps the first visible row
 //!   in place across window / padding changes ([`VirtLists::anchor_shift`]),
-//!   and decides what to report ([`VirtLists::plan_report`]).
+//!   and decides what to report ([`VirtLists::plan_report`]);
+//! - gives every materialized row its place in the whole list for
+//!   assistive tech ([`VirtLists::set_positions`], §2 Accessibility).
 //!
 //! Culling (`layout::emit_items`) composes with this unchanged: rows
 //! outside the window do not exist, the padded list element's rect spans
@@ -105,6 +108,25 @@ pub fn parse_virt_window(value: &Value) -> Option<VirtWindow> {
     })
 }
 
+/// Children per item (§1): a multi-node template renders several children
+/// for each item. Never less than 1, so `start + child_index / n` is always
+/// the item a child belongs to.
+pub fn children_per_item(window: &VirtWindow, child_count: usize) -> usize {
+    let items = window.end.saturating_sub(window.start);
+    if items == 0 || child_count == 0 {
+        return 1;
+    }
+    ((child_count as f64 / items as f64).round() as usize).max(1)
+}
+
+/// Rows the materialized items occupy: `end - start` for a list; for a grid
+/// with `columns > 1`, every row any of them touches. The divisor for a
+/// measured average ([`item_size`]).
+pub fn window_rows(window: &VirtWindow, columns: usize) -> usize {
+    let cols = columns.max(1);
+    window.end.div_ceil(cols) - window.start / cols
+}
+
 /// Size to assume per item: the average measured size of the materialized
 /// items, else the template's estimate, else [`DEFAULT_ITEM_SIZE`].
 pub fn item_size(window: &VirtWindow, measured_total: f32, measured_count: f32) -> f32 {
@@ -121,14 +143,14 @@ pub fn window_padding(window: &VirtWindow, size: f32, columns: usize) -> (f32, f
     let cols = columns.max(1);
     let rows_before = window.start.div_ceil(cols);
     let rows_total = window.total.div_ceil(cols);
-    let rows_in_window = window.end.div_ceil(cols) - window.start / cols;
-    let rows_after = rows_total.saturating_sub(rows_before + rows_in_window);
+    let rows_after = rows_total.saturating_sub(rows_before + window_rows(window, cols));
     (rows_before as f32 * size, rows_after as f32 * size)
 }
 
 /// Items the user can see. `scrolled_past` is how far the scroll container
 /// has scrolled past the list's leading edge (0 when it hasn't reached the
-/// list); `viewport_extent` is the visible extent.
+/// list); `viewport_extent` is the visible extent. [`VirtLists::visible`]
+/// clips the extent to the list before calling this.
 pub fn visible_range(
     total: usize,
     size: f32,
@@ -218,9 +240,8 @@ pub fn measure(window: &VirtWindow, geom: &ListGeometry, columns: usize) -> Opti
     if items == 0 || geom.children.is_empty() {
         return None;
     }
-    let cols = columns.max(1);
-    let per_item = (geom.children.len() / items).max(1);
-    let rows = window.end.div_ceil(cols) - window.start / cols;
+    let per_item = children_per_item(window, geom.children.len());
+    let rows = window_rows(window, columns);
     let first_near = geom.children[0].1;
     let total = if rows > 1 {
         let last_first_child = ((items - 1) * per_item).min(geom.children.len() - 1);
@@ -259,8 +280,8 @@ struct VirtList {
     measured: Option<(f32, f32)>,
     /// Padding last requested, `(leading, trailing)` logical px.
     requested: Option<(f32, f32)>,
-    /// Padding the tree holds (the last `__virt.pad` that went through
-    /// `ingest`), logical px.
+    /// Padding the tree holds (the last `__virt.pad` that left `ingest`),
+    /// logical px.
     in_tree: Option<(f32, f32)>,
     last_reported: Option<ItemRange>,
     /// First visible materialized row and its content position in its scroll
@@ -303,82 +324,65 @@ impl VirtLists {
     /// touched is appended at the END of the batch, after the structural
     /// patches the window describes. `scale` converts measured (physical)
     /// sizes into the logical padding value.
+    ///
+    /// Every [`VIRT_PAD_PROP`] write that leaves here — one already in the
+    /// batch (a re-pad queued by [`remeasure`](Self::remeasure)) or one
+    /// appended for a new window — reaches the tree in this flush, so it is
+    /// recorded as the list's current padding and arms scroll anchoring.
     pub fn ingest(&mut self, patches: &mut Vec<Patch>, scale: f32) {
         let mut touched: Vec<(String, Option<VirtWindow>)> = Vec::new();
-        let mut i = 0;
-        while i < patches.len() {
-            let drop_it = match &mut patches[i] {
-                Patch::SetProp { id, name, value } if name == VIRT_WINDOW_PROP => {
-                    // Malformed: keep the previous window.
-                    if let Some(w) = parse_virt_window(value) {
-                        touched.push((id.to_string(), Some(w)));
-                    }
-                    true
+        patches.retain_mut(|patch| match patch {
+            Patch::SetProp { id, name, value } if name == VIRT_WINDOW_PROP => {
+                // Malformed: keep the previous window.
+                if let Some(w) = parse_virt_window(value) {
+                    touched.push((id.to_string(), Some(w)));
                 }
-                Patch::RemoveProp { id, name } if name == VIRT_WINDOW_PROP => {
-                    touched.push((id.to_string(), None));
-                    true
-                }
-                Patch::SetProp { id, name, value } if name == VIRT_PAD_PROP => {
-                    if let Some(list) = self.lists.get_mut(id.as_ref()) {
-                        list.in_tree = pad_of(value);
-                        list.anchor_pending = true;
-                    }
-                    false
-                }
-                Patch::Create { id, props, .. } if props.contains_key(VIRT_WINDOW_PROP) => {
-                    let value = Arc::make_mut(props)
-                        .shift_remove(VIRT_WINDOW_PROP)
-                        .unwrap_or(Value::Null);
-                    // A (re-)created element starts with no padding.
-                    if let Some(list) = self.lists.get_mut(id.as_ref()) {
-                        list.in_tree = None;
-                        list.requested = None;
-                    }
-                    if let Some(w) = parse_virt_window(&value) {
-                        touched.push((id.to_string(), Some(w)));
-                    }
-                    false
-                }
-                Patch::Create { id, .. } => {
-                    // A re-created list element lost its padding prop.
-                    if let Some(list) = self.lists.get_mut(id.as_ref()) {
-                        list.in_tree = None;
-                        list.requested = None;
-                    }
-                    false
-                }
-                Patch::Remove { id, .. } => {
-                    self.lists.remove(id.as_ref());
-                    false
-                }
-                _ => false,
-            };
-            if drop_it {
-                patches.remove(i);
-            } else {
-                i += 1;
+                false
             }
-        }
+            Patch::RemoveProp { id, name } if name == VIRT_WINDOW_PROP => {
+                touched.push((id.to_string(), None));
+                false
+            }
+            Patch::SetProp { id, name, value } if name == VIRT_PAD_PROP => {
+                if let Some(list) = self.lists.get_mut(id.as_ref()) {
+                    list.landed(pad_of(value));
+                }
+                true
+            }
+            Patch::Create { id, props, .. } => {
+                // A (re-)created element starts with no padding.
+                if let Some(list) = self.lists.get_mut(id.as_ref()) {
+                    list.in_tree = None;
+                    list.requested = None;
+                }
+                if props.contains_key(VIRT_WINDOW_PROP) {
+                    let value = Arc::make_mut(props).shift_remove(VIRT_WINDOW_PROP);
+                    if let Some(w) = value.as_ref().and_then(parse_virt_window) {
+                        touched.push((id.to_string(), Some(w)));
+                    }
+                }
+                true
+            }
+            Patch::Remove { id, .. } => {
+                self.lists.remove(id.as_ref());
+                true
+            }
+            _ => true,
+        });
         for (id, window) in touched {
             match window {
                 Some(window) => {
-                    let list = self.lists.entry(id.clone()).or_insert(VirtList {
-                        window,
-                        columns: 1,
-                        measured: None,
-                        requested: None,
-                        in_tree: None,
-                        last_reported: None,
-                        anchor: None,
-                        anchor_pending: false,
-                    });
+                    let list = self
+                        .lists
+                        .entry(id.clone())
+                        .or_insert_with(|| VirtList::new(window));
                     list.window = window;
                     // A new window answers (or supersedes) the last report:
                     // the next one may legitimately ask for the same range
                     // again (e.g. after a reconnect re-rendered the list).
                     list.last_reported = None;
                     if let Some(p) = list.pad_patch(&id, scale, true) {
+                        list.landed(list.requested);
                         patches.push(p);
                     }
                 }
@@ -479,6 +483,27 @@ impl VirtLists {
         ))
     }
 
+    /// Every materialized row's place in its whole list, for assistive tech
+    /// (§2 Accessibility): `(row id, position in set (1-based), set size)`.
+    /// Rows are the list's children, grouped into items
+    /// ([`children_per_item`]); every child of an item shares its position.
+    /// Sorted by row id.
+    pub fn set_positions(&self, tree: &crate::tree::Tree) -> Vec<(String, usize, usize)> {
+        let mut out = Vec::new();
+        for (id, list) in &self.lists {
+            let w = list.window;
+            let children = tree.children_of(id);
+            let per = children_per_item(&w, children.len());
+            for (i, child) in children.iter().enumerate() {
+                let pos = (w.start + i / per + 1).min(w.total.max(1));
+                out.push((child.clone(), pos, w.total));
+            }
+        }
+        // Stable order (the lists are a HashMap): callers fingerprint it.
+        out.sort_unstable();
+        out
+    }
+
     /// What to report for `id` given its visible range: the overscanned
     /// range, when [`should_report`] says so. Records it as reported.
     pub fn plan_report(&mut self, id: &str, visible: ItemRange) -> Option<ItemRange> {
@@ -493,6 +518,26 @@ impl VirtLists {
 }
 
 impl VirtList {
+    fn new(window: VirtWindow) -> Self {
+        Self {
+            window,
+            columns: 1,
+            measured: None,
+            requested: None,
+            in_tree: None,
+            last_reported: None,
+            anchor: None,
+            anchor_pending: false,
+        }
+    }
+
+    /// A padding write reached the tree: remember it, and keep the anchor
+    /// row in place on the next sync.
+    fn landed(&mut self, pad: Option<(f32, f32)>) {
+        self.in_tree = pad;
+        self.anchor_pending = true;
+    }
+
     fn size_px(&self, scale: f32) -> f32 {
         let (total, count) = self.measured.unwrap_or((0.0, 0.0));
         if count > 0.0 && total > 0.0 {

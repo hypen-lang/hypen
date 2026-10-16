@@ -134,6 +134,26 @@ pub fn tree_update_for_layout_excluding(
     }
 }
 
+/// Give windowed-list rows their place in the whole list (list
+/// virtualization, `virtualization.md` §2): `(renderer id, 1-based
+/// position, set size)` from [`crate::virt::VirtLists::set_positions`].
+/// Rows not in `update` (culled, excluded) are skipped.
+pub fn apply_set_positions(update: &mut TreeUpdate, positions: &[(String, usize, usize)]) {
+    if positions.is_empty() {
+        return;
+    }
+    let by_id: std::collections::HashMap<NodeId, (usize, usize)> = positions
+        .iter()
+        .map(|(id, pos, size)| (ak_node_id(id), (*pos, *size)))
+        .collect();
+    for (id, node) in update.nodes.iter_mut() {
+        if let Some(&(pos, size)) = by_id.get(id) {
+            node.set_position_in_set(pos);
+            node.set_size_of_set(size);
+        }
+    }
+}
+
 /// Map an engine semantic role ([`hypen_engine::ir::Role`]) to its AccessKit
 /// counterpart. Every current engine role has a faithful AccessKit 0.24
 /// variant, so the match is total; keeping it exhaustive (no `_` arm) means a

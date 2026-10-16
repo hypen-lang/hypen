@@ -2633,7 +2633,17 @@ impl App {
             .filter(|it| self.animator.is_exit_excluded(&self.tree, &it.node_id))
             .map(|it| it.node_id.clone())
             .collect();
-        let fp = a11y_fingerprint(layout, &exit_excluded);
+        // Windowed list rows carry their place in the whole list (set
+        // size / position, `virtualization.md` §2). A window move that
+        // leaves the visible rows' rects alone still changes them.
+        let set_positions = self.virt.set_positions(&self.tree);
+        let fp = {
+            use std::hash::{Hash, Hasher};
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            a11y_fingerprint(layout, &exit_excluded).hash(&mut hasher);
+            set_positions.hash(&mut hasher);
+            hasher.finish()
+        };
         if Some(fp) == self.last_a11y_fingerprint && !overlay_changed {
             return;
         }
@@ -2646,6 +2656,7 @@ impl App {
         adapter.update_if_active(|| {
             let mut update =
                 tree_update_for_layout_excluding(layout, &|id| exit_excluded.iter().any(|e| e == id));
+            crate::accessibility::apply_set_positions(&mut update, &set_positions);
             // Device host UI: its nodes join the window root; a modal
             // dialog (or F6 into the indicators) takes the focus.
             let (nodes, roots, focus) = overlay.a11y_nodes();
