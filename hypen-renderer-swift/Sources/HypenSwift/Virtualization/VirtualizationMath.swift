@@ -258,15 +258,35 @@ public enum Virtualization {
             }
         }
 
-        /// Stable identity for a lazy container's `ForEach`: the item index
-        /// for placeholders, the first child's node id for materialized rows.
-        public var id: String {
-            switch self {
-            case let .placeholder(index): return "p:\(index)"
-            case let .item(index, childIds): return childIds.first.map { "n:\($0)" } ?? "p:\(index)"
-            }
+        /// The slot's identity in a lazy container's `ForEach` and for
+        /// `scrollPosition(id:)`: its whole-list item index
+        /// (``Virtualization/slotId(_:)``). Unique among the `total` slots and
+        /// unchanged when the engine materializes the item, which is exactly
+        /// when scroll anchoring needs the anchored slot to keep its id. An
+        /// insert or removal above shifts which item an index holds;
+        /// ``VirtViewportTracker/anchorCorrection(_:mode:)`` follows the
+        /// anchored item's node to its new index.
+        public var id: String { Virtualization.slotId(index) }
+
+        /// Identity of what the slot shows, for keying its content inside the
+        /// stably identified slot (so per-row view state follows the node, not
+        /// the index): the first child's node id for a materialized row, the
+        /// item index for a placeholder.
+        public var contentId: String {
+            if let nodeId { return "n:\(nodeId)" }
+            return "p:\(index)"
+        }
+
+        /// The first child's node id of a materialized row; nil for a
+        /// placeholder.
+        public var nodeId: String? {
+            if case let .item(_, childIds) = self { return childIds.first }
+            return nil
         }
     }
+
+    /// The slot id of whole-list item `index` (``Slot/id``).
+    public static func slotId(_ index: Int) -> String { "i:\(index)" }
 
     /// Map the list element's children onto `total` slots. Slot `i` is
     /// `.item` when `start ≤ i < end` and its children exist, else
@@ -303,6 +323,14 @@ public enum Virtualization {
                 }
             }
             return .placeholder(index: index)
+        }
+
+        /// The whole-list index of the item whose first child is `nodeId`,
+        /// or nil when no materialized item starts with it. O(window).
+        public func itemIndex(ofNode nodeId: String) -> Int? {
+            guard let k = childIds.firstIndex(of: nodeId), k % childrenPerItem == 0 else { return nil }
+            let index = window.start + k / childrenPerItem
+            return index < window.end ? index : nil
         }
     }
 
@@ -384,6 +412,19 @@ public struct VirtSlotFrame: Equatable, Sendable {
     }
 }
 
+/// Who keeps the scroll position when content above the viewport changes,
+/// for ``VirtViewportTracker/anchorCorrection(_:mode:)``.
+public enum VirtAnchorMode: Equatable, Sendable {
+    /// The scroll view keeps its content offset (SwiftUI before
+    /// `scrollPosition(id:)`): every shift of the first visible item within
+    /// the list needs correcting.
+    case contentOffset
+    /// `scrollPosition(id:)` keeps the anchored slot (an item index) in place
+    /// (iOS 17 / macOS 14): only a change of which index holds the anchored
+    /// item (an insert or removal above it) needs correcting.
+    case slotPosition
+}
+
 /// Scroll the slot `slotId` so its leading edge is back where it was before
 /// a layout change above it (§2 scroll anchoring): pass `unitPoint` as the
 /// scroll-axis coordinate of `ScrollViewProxy.scrollTo(_:anchor:)`.
@@ -420,11 +461,12 @@ public struct VirtAnchorCorrection: Equatable, Sendable {
 ///
 /// It also remembers the first visible slot's position in the list's
 /// content, so a layout change above it (a window move, a new placeholder
-/// size) can be undone by ``anchorCorrection()`` (§2 scroll anchoring).
+/// size, an insert above) can be undone by ``anchorCorrection(_:mode:)``
+/// (§2 scroll anchoring).
 public final class VirtViewportTracker: @unchecked Sendable {
-    /// Appearance count per slot index. A count, not a set: when a slot's
-    /// identity changes (placeholder → row) SwiftUI may deliver the new
-    /// view's `onAppear` before the old one's `onDisappear`.
+    /// Appearance count per slot index. A count, not a set: should SwiftUI
+    /// recreate a slot it may deliver the new view's `onAppear` before the
+    /// old one's `onDisappear`.
     private var appeared: [Int: Int] = [:]
     private var measured: [Int: Double] = [:]
     /// The scroll container's visible extent along the axis, in content
@@ -435,9 +477,10 @@ public final class VirtViewportTracker: @unchecked Sendable {
     /// The list's leading edge and the viewport's extent, in the same
     /// viewport coordinates as `frames`.
     private var list: (leading: Double, extent: Double)?
-    /// The first visible slot at the last ``anchorCorrection()``, and its
+    /// The first visible slot at the last ``anchorCorrection(_:mode:)``: its
+    /// item index, the node it showed (nil for a placeholder), and its
     /// leading edge relative to the list's leading edge.
-    private var anchor: (id: String, index: Int, offsetInList: Double)?
+    private var anchor: (index: Int, nodeId: String?, offsetInList: Double)?
     public private(set) var lastReported: ItemRange?
     /// The last `__virt.window` seen by ``observe(_:)``.
     public private(set) var lastWindow: VirtWindow?
@@ -552,42 +595,57 @@ public final class VirtViewportTracker: @unchecked Sendable {
         return wanted
     }
 
-    /// §2 scroll anchoring, for a scroll view that keeps its content offset
-    /// when content above the viewport changes size (SwiftUI before
-    /// `scrollPosition(id:)`). Compares the slot that was first visible at
-    /// the previous call — found again by id, else by item index (a
-    /// placeholder that became a row) — with where it sits in the list now.
-    /// If it moved within the list (rows above it changed size), returns the
-    /// `scrollTo` that puts it back at its expected on-screen position; a
-    /// plain scroll moves the list and the slot together and corrects
-    /// nothing. Then remembers the current first visible slot.
-    public func anchorCorrection() -> VirtAnchorCorrection? {
+    /// §2 scroll anchoring. Compares the item that was first visible at the
+    /// previous call with where it sits now and returns the `scrollTo` that
+    /// puts it back, or nil; then remembers the current first visible slot.
+    ///
+    /// The item is found again by the node it showed (`slots`: an insert or
+    /// removal above moved it to another index), else by its index (a
+    /// placeholder, or a placeholder that became a row: slot ids are item
+    /// indices, so the slot keeps its id). Where it belongs depends on `mode`:
+    /// - ``VirtAnchorMode/contentOffset``: at the same offset within the
+    ///   list as before (a plain scroll moves the list and the item together
+    ///   and corrects nothing), so any layout change above it is undone.
+    /// - ``VirtAnchorMode/slotPosition``: `scrollPosition(id:)` already kept
+    ///   the anchored index in place, so only a moved item is corrected, back
+    ///   to where its old index is now.
+    public func anchorCorrection(_ slots: Virtualization.Slots, mode: VirtAnchorMode) -> VirtAnchorCorrection? {
         guard let list else { anchor = nil; return nil }
-        let first = frames
-            .filter { $0.value.max > 0 && $0.value.min < list.extent }
-            .min { ($0.value.index, $0.key) < ($1.value.index, $1.key) }
+        let first = frames.values
+            .filter { $0.max > 0 && $0.min < list.extent }
+            .min { $0.index < $1.index }
         defer {
-            anchor = first.map { (id: $0.key, index: $0.value.index, offsetInList: $0.value.min - list.leading) }
+            anchor = first.map {
+                (
+                    index: $0.index,
+                    nodeId: $0.index < slots.endIndex ? slots[$0.index].nodeId : nil,
+                    offsetInList: $0.min - list.leading
+                )
+            }
         }
         guard let previous = anchor else { return nil }
-        let match: (id: String, frame: VirtSlotFrame)?
-        if let frame = frames[previous.id] {
-            match = (previous.id, frame)
-        } else {
-            match = frames
-                .filter { $0.value.index == previous.index }
-                .min { $0.key < $1.key }
-                .map { (id: $0.key, frame: $0.value) }
+        let index = previous.nodeId.flatMap { slots.itemIndex(ofNode: $0) } ?? previous.index
+        guard let frame = liveFrame(at: index) else { return nil }
+        let target: Double
+        switch mode {
+        case .contentOffset:
+            target = list.leading + previous.offsetInList
+        case .slotPosition:
+            guard index != previous.index, let held = liveFrame(at: previous.index) else { return nil }
+            target = held.min
         }
-        guard let match else { return nil }
-        let shift = (match.frame.min - list.leading) - previous.offsetInList
-        guard abs(shift) >= 0.5 else { return nil }
+        guard abs(frame.min - target) >= 0.5 else { return nil }
         guard let unit = Virtualization.anchorUnitPoint(
-            rowOffset: match.frame.min - shift,
-            rowExtent: match.frame.max - match.frame.min,
+            rowOffset: target,
+            rowExtent: frame.max - frame.min,
             viewportExtent: list.extent
         ) else { return nil }
-        return VirtAnchorCorrection(slotId: match.id, unitPoint: unit)
+        return VirtAnchorCorrection(slotId: Virtualization.slotId(index), unitPoint: unit)
+    }
+
+    /// The live frame of item `index`'s slot.
+    private func liveFrame(at index: Int) -> VirtSlotFrame? {
+        frames[Virtualization.slotId(index)] ?? frames.values.first { $0.index == index }
     }
 
     private func geometry(_ window: VirtWindow, spacing: Double, columns: Int) -> ViewportGeometry? {

@@ -240,9 +240,35 @@ final class VirtualizationMathTests: XCTestCase {
         XCTAssertTrue(V.slots(VirtWindow(total: 0, start: 0, end: 0), childIds: []).isEmpty)
     }
 
-    func testSlotIdsKeyRowsByNodeAndPlaceholdersByIndex() {
-        XCTAssertEqual(Virtualization.Slot.item(index: 7, childIds: ["42", "43"]).id, "n:42")
-        XCTAssertEqual(Virtualization.Slot.placeholder(index: 7).id, "p:7")
+    func testSlotIdsAreTheItemIndexAcrossMaterialization() {
+        // scrollPosition(id:) anchors on the slot id: it must not change when
+        // the engine materializes the item.
+        let row = Virtualization.Slot.item(index: 7, childIds: ["42", "43"])
+        let placeholder = Virtualization.Slot.placeholder(index: 7)
+        XCTAssertEqual(row.id, "i:7")
+        XCTAssertEqual(placeholder.id, row.id)
+        XCTAssertEqual(V.slotId(7), "i:7")
+        // The content inside the slot is keyed by node (row) or index.
+        XCTAssertEqual(row.contentId, "n:42")
+        XCTAssertEqual(row.nodeId, "42")
+        XCTAssertEqual(placeholder.contentId, "p:7")
+        XCTAssertNil(placeholder.nodeId)
+    }
+
+    func testSlotIdsAreUniqueAcrossTheList() {
+        let w = VirtWindow(total: 50, start: 10, end: 20)
+        let slots = V.slots(w, childIds: (10..<20).map { "n\($0)" })
+        XCTAssertEqual(Set(slots.map(\.id)).count, 50)
+        XCTAssertEqual(Set(slots.map(\.contentId)).count, 50)
+    }
+
+    func testSlotsFindAnItemByItsFirstNode() {
+        let w = VirtWindow(total: 10, start: 4, end: 6)
+        let slots = V.slots(w, childIds: ["a1", "a2", "b1", "b2"])
+        XCTAssertEqual(slots.itemIndex(ofNode: "a1"), 4)
+        XCTAssertEqual(slots.itemIndex(ofNode: "b1"), 5)
+        XCTAssertNil(slots.itemIndex(ofNode: "b2"), "not an item's first child")
+        XCTAssertNil(slots.itemIndex(ofNode: "zz"))
     }
 
     // MARK: Remote message (§4)
@@ -403,17 +429,17 @@ final class VirtualizationMathTests: XCTestCase {
         XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 15))
         // Frames say rows 0..5 (100pt each) are on screen; 6..9 are prefetched below.
         for i in 0..<10 {
-            tracker.slotFrame(id: "n:\(i)", index: i, min: Double(i) * 100, max: Double(i + 1) * 100)
+            tracker.slotFrame(id: "i:\(i)", index: i, min: Double(i) * 100, max: Double(i + 1) * 100)
         }
         XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 6))
         // Scrolled 250pt: rows 2 (partly) ..8 (partly).
         tracker.listFrame(leading: -250, viewportExtent: 600)
         for i in 0..<10 {
-            tracker.slotFrame(id: "n:\(i)", index: i, min: Double(i) * 100 - 250, max: Double(i + 1) * 100 - 250)
+            tracker.slotFrame(id: "i:\(i)", index: i, min: Double(i) * 100 - 250, max: Double(i + 1) * 100 - 250)
         }
         XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 2, end: 9))
         // A slot that left the container no longer counts.
-        tracker.slotFrameRemoved(id: "n:8")
+        tracker.slotFrameRemoved(id: "i:8")
         XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 2, end: 8))
     }
 
@@ -424,7 +450,7 @@ final class VirtualizationMathTests: XCTestCase {
         tracker.listFrame(leading: 300, viewportExtent: 800)
         XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 10))
         // Frames entirely off screen are ignored.
-        tracker.slotFrame(id: "n:0", index: 0, min: 900, max: 950)
+        tracker.slotFrame(id: "i:0", index: 0, min: 900, max: 950)
         XCTAssertEqual(tracker.visibleRange(w), ItemRange(start: 0, end: 10))
         // Scrolled far past it (an outer scroller): geometry, not appearances.
         tracker.slotAppeared(3)
@@ -454,59 +480,121 @@ final class VirtualizationMathTests: XCTestCase {
         XCTAssertEqual(tall * (600 - 1000), -100, accuracy: 1e-9)
     }
 
+    /// All placeholders: the anchor is found by index.
+    private let unwindowed = V.slots(VirtWindow(total: 1000, start: 0, end: 0), childIds: [])
+
     func testAnchorCorrectionIgnoresAPlainScroll() {
-        let tracker = VirtViewportTracker()
-        tracker.listFrame(leading: -1000, viewportExtent: 600)
-        tracker.slotFrame(id: "n:a", index: 10, min: -20, max: 40)
-        tracker.slotFrame(id: "n:b", index: 11, min: 40, max: 100)
-        XCTAssertNil(tracker.anchorCorrection(), "first call only records the anchor")
-        // The user scrolls 30pt: list and rows move together.
-        tracker.listFrame(leading: -1030, viewportExtent: 600)
-        tracker.slotFrame(id: "n:a", index: 10, min: -50, max: 10)
-        tracker.slotFrame(id: "n:b", index: 11, min: 10, max: 70)
-        XCTAssertNil(tracker.anchorCorrection())
+        for mode in [VirtAnchorMode.contentOffset, .slotPosition] {
+            let tracker = VirtViewportTracker()
+            tracker.listFrame(leading: -1000, viewportExtent: 600)
+            tracker.slotFrame(id: "i:10", index: 10, min: -20, max: 40)
+            tracker.slotFrame(id: "i:11", index: 11, min: 40, max: 100)
+            XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: mode), "first call only records the anchor")
+            // The user scrolls 30pt: list and rows move together.
+            tracker.listFrame(leading: -1030, viewportExtent: 600)
+            tracker.slotFrame(id: "i:10", index: 10, min: -50, max: 10)
+            tracker.slotFrame(id: "i:11", index: 11, min: 10, max: 70)
+            XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: mode))
+        }
     }
 
     func testAnchorCorrectionUndoesALayoutShiftAboveTheFirstVisibleRow() throws {
         let tracker = VirtViewportTracker()
         tracker.listFrame(leading: -1000, viewportExtent: 600)
-        tracker.slotFrame(id: "n:a", index: 10, min: -20, max: 40)
-        XCTAssertNil(tracker.anchorCorrection())
+        tracker.slotFrame(id: "i:10", index: 10, min: -20, max: 40)
+        XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: .contentOffset))
         // The window moved and the placeholders above grew by 50pt in total;
         // the scroll view kept its offset, so the row slid down 50pt.
-        tracker.slotFrame(id: "n:a", index: 10, min: 30, max: 90)
-        let c = try XCTUnwrap(tracker.anchorCorrection())
-        XCTAssertEqual(c.slotId, "n:a")
+        tracker.slotFrame(id: "i:10", index: 10, min: 30, max: 90)
+        let c = try XCTUnwrap(tracker.anchorCorrection(unwindowed, mode: .contentOffset))
+        XCTAssertEqual(c.slotId, "i:10")
         XCTAssertEqual(c.unitPoint * (600 - 60), -20, accuracy: 1e-9, "back at -20")
         // Once corrected (list moved by the shift, row back at -20), nothing more.
         tracker.listFrame(leading: -1050, viewportExtent: 600)
-        tracker.slotFrame(id: "n:a", index: 10, min: -20, max: 40)
-        XCTAssertNil(tracker.anchorCorrection())
+        tracker.slotFrame(id: "i:10", index: 10, min: -20, max: 40)
+        XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: .contentOffset))
+    }
+
+    func testAnchorCorrectionLeavesAHeldSlotToScrollPosition() {
+        // scrollPosition(id:) kept slot 10 in place while the rows above grew
+        // (the list's leading edge moved instead): nothing to correct.
+        let tracker = VirtViewportTracker()
+        tracker.listFrame(leading: -1000, viewportExtent: 600)
+        tracker.slotFrame(id: "i:10", index: 10, min: -20, max: 40)
+        XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: .slotPosition))
+        tracker.listFrame(leading: -1050, viewportExtent: 600)
+        XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: .slotPosition))
     }
 
     func testAnchorCorrectionFollowsAPlaceholderThatBecameARow() throws {
         let tracker = VirtViewportTracker()
         tracker.listFrame(leading: -4800, viewportExtent: 500)
-        tracker.slotFrame(id: "p:100", index: 100, min: 0, max: 48)
-        tracker.slotFrame(id: "p:101", index: 101, min: 48, max: 96)
-        XCTAssertNil(tracker.anchorCorrection())
-        // Item 100 materialized (new slot id) and the placeholder size above
+        tracker.slotFrame(id: "i:100", index: 100, min: 0, max: 48)
+        tracker.slotFrame(id: "i:101", index: 101, min: 48, max: 96)
+        XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: .contentOffset))
+        // Item 100 materialized (same slot id) and the placeholder size above
         // changed from 48 to 50: 100 × 2pt further down.
-        tracker.slotFrameRemoved(id: "p:100")
-        tracker.slotFrameRemoved(id: "p:101")
-        tracker.slotFrame(id: "n:x", index: 100, min: 200, max: 270)
-        tracker.slotFrame(id: "n:y", index: 101, min: 270, max: 330)
-        let c = try XCTUnwrap(tracker.anchorCorrection())
-        XCTAssertEqual(c.slotId, "n:x")
+        let window = V.slots(VirtWindow(total: 1000, start: 100, end: 102), childIds: ["x", "y"])
+        tracker.slotFrame(id: "i:100", index: 100, min: 200, max: 270)
+        tracker.slotFrame(id: "i:101", index: 101, min: 270, max: 330)
+        let c = try XCTUnwrap(tracker.anchorCorrection(window, mode: .contentOffset))
+        XCTAssertEqual(c.slotId, "i:100")
         XCTAssertEqual(c.unitPoint, 0, accuracy: 1e-9, "its leading edge back at the viewport top")
+    }
+
+    /// Items 90..<110 materialized as nodes "n90".."n109", rows 60pt; then two
+    /// items inserted at 95: "n100" is now item 102.
+    private func insertAbove() -> (before: Virtualization.Slots, after: Virtualization.Slots) {
+        let before = V.slots(VirtWindow(total: 1000, start: 90, end: 110), childIds: (90..<110).map { "n\($0)" })
+        let nodes = (90..<95).map { "n\($0)" } + ["new1", "new2"] + (95..<108).map { "n\($0)" }
+        let after = V.slots(VirtWindow(total: 1002, start: 90, end: 110), childIds: nodes)
+        return (before, after)
+    }
+
+    private func rowFrames(_ tracker: VirtViewportTracker, firstAt top: Double) {
+        for i in 98..<106 {
+            let min = top + Double(i - 100) * 60
+            tracker.slotFrame(id: "i:\(i)", index: i, min: min, max: min + 60)
+        }
+    }
+
+    func testAnchorCorrectionFollowsTheAnchoredNodeAfterAnInsertAbove() throws {
+        for mode in [VirtAnchorMode.contentOffset, .slotPosition] {
+            let (before, after) = insertAbove()
+            let tracker = VirtViewportTracker()
+            tracker.listFrame(leading: -5000, viewportExtent: 600)
+            rowFrames(tracker, firstAt: -20)
+            XCTAssertNil(tracker.anchorCorrection(before, mode: mode))
+            XCTAssertEqual(after.itemIndex(ofNode: "n100"), 102)
+            // Index 100 stayed where it was (by offset or by scrollPosition),
+            // but now shows "n98": the anchored "n100" is two rows down.
+            let c = try XCTUnwrap(tracker.anchorCorrection(after, mode: mode), "\(mode)")
+            XCTAssertEqual(c.slotId, "i:102")
+            XCTAssertEqual(c.unitPoint * (600 - 60), -20, accuracy: 1e-9, "n100 back at -20")
+            // Corrected: everything moved up two rows with the scroll.
+            tracker.listFrame(leading: -5120, viewportExtent: 600)
+            rowFrames(tracker, firstAt: -140)
+            XCTAssertNil(tracker.anchorCorrection(after, mode: mode))
+        }
+    }
+
+    func testAnchorCorrectionFallsBackToTheIndexWhenTheNodeLeftTheWindow() {
+        let (before, _) = insertAbove()
+        let shifted = V.slots(VirtWindow(total: 1000, start: 0, end: 20), childIds: (0..<20).map { "m\($0)" })
+        let tracker = VirtViewportTracker()
+        tracker.listFrame(leading: -5000, viewportExtent: 600)
+        rowFrames(tracker, firstAt: -20)
+        XCTAssertNil(tracker.anchorCorrection(before, mode: .slotPosition))
+        // "n100" is gone: index 100 is all there is, and scrollPosition holds it.
+        XCTAssertNil(tracker.anchorCorrection(shifted, mode: .slotPosition))
     }
 
     func testAnchorCorrectionNeedsTheListGeometry() {
         let tracker = VirtViewportTracker()
-        tracker.slotFrame(id: "n:a", index: 0, min: 0, max: 10)
-        XCTAssertNil(tracker.anchorCorrection())
-        tracker.slotFrame(id: "n:a", index: 0, min: 50, max: 60)
-        XCTAssertNil(tracker.anchorCorrection())
+        tracker.slotFrame(id: "i:0", index: 0, min: 0, max: 10)
+        XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: .contentOffset))
+        tracker.slotFrame(id: "i:0", index: 0, min: 50, max: 60)
+        XCTAssertNil(tracker.anchorCorrection(unwindowed, mode: .contentOffset))
     }
 
     // MARK: Accessibility (§2)

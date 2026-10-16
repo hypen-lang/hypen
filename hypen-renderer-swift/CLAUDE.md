@@ -398,12 +398,19 @@ removeProp, which restores the normal container rendering.
   first: slot frames intersecting the viewport → list-edge geometry through
   the item size → `onAppear`/`onDisappear` slots), §3 step 4 (`observe` /
   `evaluate` forget `lastReported` only when `__virt.window` changes value;
-  an identical re-send keeps it), and `anchorCorrection()` (how far the first
-  visible slot moved within the list since the last evaluation — found by
-  slot id, else by item index when a placeholder became a row).
+  an identical re-send keeps it), and `anchorCorrection(slots, mode:)` (the
+  first visible item since the last evaluation, found again by the node it
+  showed — an insert/removal above moves it to another index — else by its
+  index; `.contentOffset` corrects any move within the list, `.slotPosition`
+  only a move to another index, since `scrollPosition(id:)` already held the
+  index).
 - `Virtualization/VirtualizedLazyStack.swift` — `LazyVStack` / `LazyHStack` /
-  `LazyVGrid` of `total` slots (rows keyed `n:<nodeId>`, placeholders
-  `p:<index>` sized at the measured average). Used by List, Column, Row and
+  `LazyVGrid` of `total` slots. Slot identity (`ForEach` id and the
+  `scrollPosition(id:)` target) is the whole-list item index `i:<index>`, so
+  it does not change when a placeholder materializes; a row's content is
+  keyed inside the slot by `.id("n:<nodeId>")` in a one-child stack (view
+  state follows the node; the stack keeps that `.id` from standing in for the
+  slot's). Placeholders are sized at the measured average. Used by List, Column, Row and
   Grid; any other windowed element (`Box`, `Stack`, unknown types) renders as
   a Column (`HypenElementContentView.componentHandler(for:)`). Evaluated once
   per main-actor turn.
@@ -420,9 +427,13 @@ removeProp, which restores the normal container rendering.
   - **Scroll anchoring (§2)**, owned `ScrollView` only: iOS 17 / macOS 14 /
     tvOS 17 / watchOS 10 — `scrollPosition(id:anchor:)` +
     `scrollTargetLayout()` (SwiftUI keeps the first visible slot in place;
-    the bound id lives in a reference box so it never re-renders the stack).
-    Earlier — `tracker.anchorCorrection()` + `ScrollViewProxy.scrollTo(id,
-    anchor: UnitPoint(…, anchorUnitPoint))`.
+    the bound id lives in a reference box so it never re-renders the stack),
+    plus `tracker.anchorCorrection(slots, mode: .slotPosition)` for an insert
+    or removal above (index identity would otherwise hold the wrong item).
+    Earlier — `tracker.anchorCorrection(slots, mode: .contentOffset)`. Either
+    way the correction is `ScrollViewProxy.scrollTo(slotId, anchor:
+    UnitPoint(…, anchorUnitPoint))`, which keeps the item's partial offset
+    (rebinding the scroll position would snap it to the edge).
   - **Accessibility (§2)**: rows carry `.accessibilityHint("Row N of total")`
     (SwiftUI has no set-position API for arbitrary views; the hint reaches
     every element in the row); the stack is `.accessibilityElement(children:
@@ -441,8 +452,9 @@ Known gaps:
 - **Anchoring under an ancestor scroller**: no correction (a `ScrollViewProxy`
   only reaches scroll views inside its reader). Placeholders use the measured
   average, which keeps any shift small.
-- **Anchoring by identity on iOS 17+**: when the anchored slot changes id
-  (a placeholder materializing into a row), SwiftUI's own behaviour applies.
+- **Anchoring across an insert above when the anchored item was a
+  placeholder** (or left the window): nothing names it, so its index is held
+  and the view shows whichever item now sits there.
 - **Visible range under a host app's `ScrollView`** (not Hypen's) still comes
   from `onAppear`/`onDisappear`, a few slots wide. Harmless (a slightly larger
   window), not wrong.

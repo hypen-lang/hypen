@@ -19,7 +19,11 @@ import SwiftUI
 /// Scroll anchoring (§2), owned `ScrollView` only: `scrollPosition(id:anchor:)`
 /// (iOS 17 / macOS 14) keeps the first visible slot in place; before that
 /// the tracker measures how far that slot moved within the list and
-/// `ScrollViewProxy.scrollTo` puts it back.
+/// `ScrollViewProxy.scrollTo` puts it back. Slots are identified by item
+/// index, so the anchor survives a placeholder materializing; when an insert
+/// or removal above moves the anchored item to another index, the tracker
+/// follows its node and `scrollTo` puts it back on every OS
+/// (``VirtViewportTracker/anchorCorrection(_:mode:)``).
 ///
 /// Accessibility (§2): every row's hint is its whole-list position ("Row 41
 /// of 10000"); the container's value is the total ("10000 rows").
@@ -211,19 +215,37 @@ struct VirtualizedLazyStack: View {
             placeholder(size: size)
                 .accessibilityHidden(true)
         case let .item(index, ids):
-            itemView(ids)
-                .accessibilityHint(Text(verbatim: Virtualization.accessibilityPosition(
-                    index: index, total: window.total, columns: columns
-                )))
-                .background(
-                    GeometryReader { geometry in
-                        Color.clear.onAppear {
-                            let extent = axis == .vertical || columns > 1
-                                ? geometry.size.height : geometry.size.width
-                            tracker.recordSize(index, extent: Double(extent))
+            keyed {
+                itemView(ids)
+                    .accessibilityHint(Text(verbatim: Virtualization.accessibilityPosition(
+                        index: index, total: window.total, columns: columns
+                    )))
+                    .background(
+                        GeometryReader { geometry in
+                            Color.clear.onAppear {
+                                let extent = axis == .vertical || columns > 1
+                                    ? geometry.size.height : geometry.size.width
+                                tracker.recordSize(index, extent: Double(extent))
+                            }
                         }
-                    }
-                )
+                    )
+                    .id(slot.contentId)
+            }
+        }
+    }
+
+    /// A one-child stack around a row keyed by its node (`.id(contentId)`):
+    /// the slot itself is identified by item index (stable for
+    /// `scrollPosition(id:)` when a placeholder materializes), the row's view
+    /// state follows the node when an insert above shifts indices. The stack
+    /// keeps that inner `.id` off the slot, where it could stand in for the
+    /// `ForEach` id as the scroll target's identity.
+    @ViewBuilder
+    private func keyed<Content: View>(@ViewBuilder _ content: () -> Content) -> some View {
+        if isVertical {
+            VStack(alignment: horizontalAlignment, spacing: 0, content: content)
+        } else {
+            HStack(alignment: verticalAlignment, spacing: 0, content: content)
         }
     }
 
@@ -269,18 +291,24 @@ struct VirtualizedLazyStack: View {
         let spacing = Double(self.spacing)
         let columns = self.columns
         let box = self.scrollBox
-        let correctsAnchor = scrolls && !Self.scrollPositionAnchors
+        let correctsAnchor = scrolls
+        let anchorMode: VirtAnchorMode = Self.scrollPositionAnchors ? .slotPosition : .contentOffset
         let vertical = isVertical
         Task { @MainActor in
             tracker.evaluationScheduled = false
-            guard let window = renderer.getElement(listId)?.virtWindow else { return }
+            guard let element = renderer.getElement(listId), let window = element.virtWindow else { return }
             if let wanted = tracker.evaluate(window, spacing: spacing, columns: columns) {
                 renderer.reportListViewport(listId: listId, start: wanted.start, end: wanted.end)
             }
-            // §2 anchoring before `scrollPosition(id:)`: the scroll view kept
-            // its offset while content above the first visible slot changed
-            // size; scroll that slot back to where it was.
-            if correctsAnchor, let correction = tracker.anchorCorrection() {
+            // §2 anchoring the scroll view did not do itself: before
+            // `scrollPosition(id:)` it kept its offset while content above the
+            // first visible item changed; with it, it kept the anchored slot
+            // (an item index) while an insert or removal above moved the item
+            // to another index. Scroll the item back to where it was.
+            if correctsAnchor, let correction = tracker.anchorCorrection(
+                Virtualization.slots(window, childIds: element.virtChildIds(renderer: renderer)),
+                mode: anchorMode
+            ) {
                 let u = CGFloat(correction.unitPoint)
                 box.proxy?.scrollTo(
                     correction.slotId,
@@ -298,8 +326,8 @@ struct VirtualizedLazyStack: View {
     }
 }
 
-/// The owned `ScrollView`'s proxy (for anchoring before iOS 17) and the slot
-/// id `scrollPosition(id:)` anchors (iOS 17+). Main-actor use only.
+/// The owned `ScrollView`'s proxy (for ``VirtViewportTracker/anchorCorrection(_:mode:)``)
+/// and the slot id `scrollPosition(id:)` anchors (iOS 17+). Main-actor use only.
 final class VirtScrollBox: @unchecked Sendable {
     var proxy: ScrollViewProxy?
     var anchorId: String?
