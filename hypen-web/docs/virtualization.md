@@ -90,6 +90,23 @@ Server rules (every server SDK):
 - `start`/`end` are non-negative integers; clamp them to `u32` and ignore a malformed message (no error, no disconnect).
 - Call `setListViewport(listId, start, end)` on **this session's engine only**. The resulting patches stream back as ordinary `patch` messages. A viewport is per client: never replay it to other sessions (`syncActions`), never treat it as an action, and never send a `stateUpdate` because of it.
 
+Every server (TypeScript, Go, Kotlin, Swift, Rust) behaves identically, pinned by each SDK's tests:
+
+| Case | Behaviour |
+|---|---|
+| Before `hello` | Ignored; nothing sent |
+| `listId` missing, empty, or not a string | Malformed: ignored, no error, no disconnect |
+| Bound negative, fractional, string, bool, null or missing | Malformed: ignored |
+| Bound written `-0`, `40.0`, `4e1` | Accepted (it is an integer) |
+| Bound above `u32` | Clamped to `u32` |
+| `start > end` | Forwarded; the engine materializes one item, `[start, start + 1)` |
+| Unknown or stale `listId` | No patch, no revision bump |
+| Report that moves nothing | No message, no revision bump |
+| Report that moves the window | One ordinary `patch` at revision + 1, to the reporting connection only |
+| Other sessions, `syncActions`, `allow-multiple` peers | Never sent there; never an action |
+| `stateUpdate` | Never sent |
+| Engine error | Logged and dropped; no disconnect, no revision bump |
+
 There is no capability negotiation: every client must send viewports, and every server must handle them.
 
 ## 5. Native lazy containers
