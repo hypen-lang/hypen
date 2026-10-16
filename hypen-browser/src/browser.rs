@@ -873,6 +873,32 @@ impl HypenModule for BrowserModule {
         self.shell.mount();
     }
 
+    /// A windowed list's viewport report goes to the stream that owns the
+    /// list element — routed and de-prefixed exactly like a node-addressed
+    /// UI envelope (see [`route_ui_envelope`]).
+    fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
+        let route = {
+            let g = self.inner.lock().expect("inner poisoned");
+            route_ui_envelope(&g, serde_json::json!({ "node": list_id }))
+        };
+        let local_id = |env: &Value| env.get("node").and_then(Value::as_str).map(str::to_string);
+        match route {
+            UiRoute::Shell(env) => {
+                if let Some(id) = local_id(&env) {
+                    self.shell.set_list_viewport(&id, start, end);
+                }
+            }
+            UiRoute::Remote(remote, env) => {
+                if let Some(id) = local_id(&env) {
+                    remote.set_list_viewport(&id, start, end);
+                }
+            }
+            UiRoute::Drop(why) => {
+                log::debug!("hypen-browser: viewport report dropped — {why}");
+            }
+        }
+    }
+
     fn dispatch_action(&self, name: &str, payload: Option<Value>) {
         // Node-addressed UI envelopes (`__hypen_dispatch`: drag-and-drop
         // events and writes, `.onFileDragEnter`, two-way binds) name a

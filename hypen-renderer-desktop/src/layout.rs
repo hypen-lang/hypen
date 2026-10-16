@@ -2016,6 +2016,51 @@ impl TaffyState {
         }
     }
 
+    /// Solved geometry of a windowed list (`crate::virt`): its scroll axis,
+    /// the content edge's offset inside its border box (virtual padding
+    /// included) and each child's `(near, extent)` along that axis — all
+    /// physical px, relative to the list's border box, so independent of
+    /// scrolling and of culling. `None` when the list has no Taffy node.
+    pub(crate) fn virt_geometry(
+        &self,
+        tree: &Tree,
+        list_id: &str,
+    ) -> Option<crate::virt::ListGeometry> {
+        let &tid = self.node_map.get(list_id)?;
+        let layout = self.tree.layout(tid).ok()?;
+        let horizontal = self
+            .tree
+            .style(tid)
+            .map(lays_out_horizontally)
+            .unwrap_or(false);
+        let content_start = if horizontal {
+            layout.border.left + layout.padding.left
+        } else {
+            layout.border.top + layout.padding.top
+        };
+        let mut children = Vec::new();
+        for child in tree.children_of(list_id) {
+            let Some(cl) = self
+                .node_map
+                .get(child)
+                .and_then(|c| self.tree.layout(*c).ok())
+            else {
+                continue;
+            };
+            let (near, extent) = if horizontal {
+                (cl.location.x, cl.size.width)
+            } else {
+                (cl.location.y, cl.size.height)
+            };
+            children.push((child.clone(), near, extent));
+        }
+        Some(crate::virt::ListGeometry {
+            horizontal,
+            content_start,
+            children,
+        })
+    }
+
     /// Re-style a single node from its current renderer-tree props.
     /// Called by the window when the animation runtime writes a
     /// layout-affecting prop directly into the tree (no patch flows, so
@@ -4729,6 +4774,7 @@ fn build_subtree(
             apply_size_props(&mut style, node, &vs, scale);
             apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
+            apply_virt_padding(&mut style, node, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4771,6 +4817,7 @@ fn build_subtree(
             apply_size_props(&mut style, node, &vs, scale);
             apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
+            apply_virt_padding(&mut style, node, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4832,6 +4879,7 @@ fn build_subtree(
             // silently re-stacked under the post image otherwise).
             apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
+            apply_virt_padding(&mut style, node, scale);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4878,6 +4926,9 @@ fn build_subtree(
 /// (`window::paint_only_affected_ids`) and the fit-pass dirty gate so
 /// the two can never disagree about what counts as layout-affecting.
 pub(crate) fn is_layout_prop_key(name: &str) -> bool {
+    if name == crate::virt::VIRT_PAD_PROP {
+        return true;
+    }
     let base = hypen_engine::portable::parse_prop_key(name).base;
     is_layout_prop(&base) || matches!(base.as_str(), "slot" | "scrollable")
 }
@@ -5275,8 +5326,49 @@ pub(crate) fn node_style_with(
     apply_divider_defaults(&mut style, node, &vs, scale);
     apply_overflow_props(&mut style, node, viewport);
     apply_position_props(&mut style, node, &vs, scale);
+    apply_virt_padding(&mut style, node, scale);
     apply_grid_placement_props(node, &vs, &mut style);
     style
+}
+
+/// Whether a container style lays its children out horizontally — the
+/// scroll axis of a windowed list (`virtualization.md` §2).
+pub(crate) fn lays_out_horizontally(style: &Style) -> bool {
+    style.display == Display::Flex
+        && matches!(
+            style.flex_direction,
+            FlexDirection::Row | FlexDirection::RowReverse
+        )
+}
+
+/// Add a windowed list's stand-in padding (the renderer-private
+/// [`crate::virt::VIRT_PAD_PROP`], logical px) to its own padding on the
+/// scroll axis: top/bottom, or left/right when it lays out horizontally.
+fn apply_virt_padding(style: &mut Style, node: &crate::tree::Node, scale: f32) {
+    let Some((leading, trailing)) = node
+        .props
+        .get(crate::virt::VIRT_PAD_PROP)
+        .and_then(crate::virt::pad_of)
+    else {
+        return;
+    };
+    let add = |lp: LengthPercentage, px: f32| -> LengthPercentage {
+        let raw = lp.into_raw();
+        if raw.tag() == taffy::style::CompactLength::LENGTH_TAG {
+            length(raw.value() + px * scale)
+        } else {
+            // A percentage padding can't be summed into a length here;
+            // the stand-in wins (rare: list padding is lengths).
+            length(px * scale)
+        }
+    };
+    if lays_out_horizontally(style) {
+        style.padding.left = add(style.padding.left, leading);
+        style.padding.right = add(style.padding.right, trailing);
+    } else {
+        style.padding.top = add(style.padding.top, leading);
+        style.padding.bottom = add(style.padding.bottom, trailing);
+    }
 }
 
 /// Apply CSS-like Grid item placement emitted by the DSL. The calculator uses

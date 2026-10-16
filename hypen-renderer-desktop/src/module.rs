@@ -36,6 +36,15 @@ pub trait HypenModule: Send + Sync + 'static {
             Some(serde_json::json!({"node":node,"action":action,"payload":payload})),
         );
     }
+
+    /// Report a windowed list's wanted item range `[start, end)` (list
+    /// virtualization, `hypen-web/docs/virtualization.md` §3). `list_id`
+    /// is the element carrying `__virt.window`. A local module moves its
+    /// engine's window; a remote one sends a `viewport` message. The
+    /// default does nothing, for test doubles and hosts with no engine.
+    fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
+        let _ = (list_id, start, end);
+    }
 }
 
 impl<S: State> HypenModule for ModuleInstance<S> {
@@ -51,6 +60,10 @@ impl<S: State> HypenModule for ModuleInstance<S> {
         if let Err(err) = ModuleInstance::dispatch_action(self, name, payload) {
             log::warn!("dispatch_action({name}) failed: {err}");
         }
+    }
+
+    fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
+        ModuleInstance::set_list_viewport(self, list_id, start, end);
     }
 }
 
@@ -214,6 +227,58 @@ mod tests {
             concrete.get_state().name,
             "Ada",
             "envelope bind writes state"
+        );
+    }
+
+    /// A local module moves its engine's list window when the renderer
+    /// reports a viewport; the new window arrives through `on_patches`.
+    #[test]
+    fn local_module_moves_the_list_window_on_a_viewport_report() {
+        #[derive(Clone, Default, Serialize, Deserialize, Debug)]
+        struct Row {
+            id: u32,
+            name: String,
+        }
+        #[derive(Clone, Default, Serialize, Deserialize, Debug)]
+        struct ListState {
+            items: Vec<Row>,
+        }
+        let items = (0..100)
+            .map(|i| Row {
+                id: i,
+                name: format!("row {i}"),
+            })
+            .collect();
+        let def = ModuleBuilder::<ListState>::new("Feed")
+            .state(ListState { items })
+            .ui(r#"List(@state.items, key: "id", initialCount: 10) { Text("@{item.name}") }"#)
+            .build();
+        let module: Arc<dyn HypenModule> =
+            Arc::new(ModuleInstance::<ListState>::new(Arc::new(def), None).expect("instantiate"));
+        let windows: Arc<Mutex<Vec<(String, serde_json::Value)>>> = Arc::default();
+        let sink = Arc::clone(&windows);
+        module.on_patches(Arc::new(move |patches: &[Patch]| {
+            for p in patches {
+                if let Patch::SetProp { id, name, value } = p {
+                    if name == crate::virt::VIRT_WINDOW_PROP {
+                        sink.lock().unwrap().push((id.to_string(), value.clone()));
+                    }
+                }
+            }
+        }));
+        module.mount();
+        let (list, first) = windows.lock().unwrap().last().cloned().expect("windowed");
+        assert_eq!(
+            (first["start"].as_u64(), first["end"].as_u64()),
+            (Some(0), Some(10))
+        );
+
+        module.set_list_viewport(&list, 40, 70);
+        let (id, moved) = windows.lock().unwrap().last().cloned().unwrap();
+        assert_eq!(id, list);
+        assert_eq!(
+            (moved["start"].as_u64(), moved["end"].as_u64()),
+            (Some(40), Some(70))
         );
     }
 
