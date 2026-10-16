@@ -45,6 +45,14 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     public var semantics: HypenSemantics? {
         willSet { publish() }
     }
+    /// The engine's list window (`__virt.window`, docs/virtualization.md):
+    /// present on a windowed List/Grid/lazy-ForEach parent, whose children
+    /// are then exactly the items `[start, end)` of `total`. Kept out of
+    /// `props` on purpose — it is not a style prop and never reaches the
+    /// applicator pipeline. `nil` = not windowed (render as before).
+    public var virtWindow: VirtWindow? {
+        willSet { publish() }
+    }
 
     // MARK: - Animation state (owned by `HypenAnimator`)
 
