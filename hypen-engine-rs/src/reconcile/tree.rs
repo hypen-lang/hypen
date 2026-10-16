@@ -1,5 +1,5 @@
 use super::layered::LayeredProps;
-use super::resolve::{resolve_props_full, resolve_props_iter};
+use super::resolve::{resolve_props_full, resolve_props_iter, resolve_single_value};
 use crate::ir::{Element, IRNode, NodeId, Props, Semantics, Value};
 use indexmap::IndexMap;
 use slotmap::SlotMap;
@@ -43,6 +43,9 @@ pub enum ControlFlowKind {
     ForEach {
         item_name: String,
         key_path: Option<String>,
+        /// Materialized window of a virtualized (lazy) list; `None` when the
+        /// list expands every item.
+        window: Option<ListWindow>,
     },
     /// Conditional (When/If) container
     Conditional,
@@ -69,6 +72,58 @@ pub enum ControlFlowKind {
         /// Maximum number of routes to cache before LRU eviction.
         max_cache_size: usize,
     },
+}
+
+/// Name of the reserved prop that carries a lazy list's window to the
+/// renderer. Set on the list's render parent as
+/// `{"total": n, "start": s, "end": e}` (plus `"estimatedSize"` when the
+/// template gave one): items `[start, end)` are materialized as children; the
+/// renderer stands in for the rest (spacer padding, placeholders).
+pub const VIRT_WINDOW_PROP: &str = "__virt.window";
+
+/// The materialized slice of a lazy `ForEach` — see [`crate::ir::LazyList`].
+///
+/// The window is anchored on the KEY of its first item, not only its index:
+/// inserting or removing items above the window shifts `start` to follow the
+/// anchor, so the rows on screen keep their identity instead of every row
+/// being rebuilt and the content jumping.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ListWindow {
+    /// Index of the first materialized item.
+    pub start: usize,
+    /// How many items to materialize from `start` (the renderer's visible
+    /// range plus its overscan).
+    pub count: usize,
+    /// Key of the item at `start` when the window was last placed.
+    pub anchor_key: Option<String>,
+    /// Key of the item right after the anchor. A shift (items inserted or
+    /// removed above) moves both together; a reorder that carries the
+    /// anchor item somewhere else separates them, and the window then
+    /// stays with its neighbour instead of following the moved item.
+    pub next_key: Option<String>,
+    /// `(total, start, end)` last sent in [`VIRT_WINDOW_PROP`], so an
+    /// unchanged window emits no patch.
+    pub sent: Option<(usize, usize, usize)>,
+    /// Forwarded as `estimatedSize` in [`VIRT_WINDOW_PROP`].
+    pub estimated_item_size: Option<f64>,
+    /// Set by a viewport report for the pass it triggers: the data did not
+    /// change, so every row leaving the window is an eviction, not a
+    /// deletion. Cleared by that pass.
+    pub viewport_pass: bool,
+}
+
+impl ListWindow {
+    pub fn new(lazy: &crate::ir::LazyList) -> Self {
+        Self {
+            start: 0,
+            count: lazy.initial_count.max(1),
+            anchor_key: None,
+            next_key: None,
+            sent: None,
+            estimated_item_size: lazy.estimated_item_size,
+            viewport_pass: false,
+        }
+    }
 }
 
 /// Instance node - a concrete instance of an element in the tree
@@ -173,6 +228,17 @@ pub struct InstanceNode {
     pub iter_fp_cache: Option<u64>,
 }
 
+/// One resolved-prop change reported by
+/// [`InstanceNode::refresh_dynamic_props`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum PropDelta {
+    /// The prop now resolves to this value (it resolved differently before).
+    Set(String, serde_json::Value),
+    /// The prop resolved to *absent* (a `.states` switch with no match and
+    /// no default) and has been dropped from the node.
+    Removed(String),
+}
+
 /// See [`InstanceNode::iter_memo`].
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct IterMemo {
@@ -257,6 +323,61 @@ impl InstanceNode {
         self.update_props_with_data_sources(state, None);
     }
 
+    /// Re-evaluate only the state-dependent raw props (bindings, template
+    /// strings, `.states` switches) against `state` / `data_sources`, in
+    /// place, and report what changed. A static prop (`Static`, `Action`,
+    /// `Resource`) resolves to the same value on every render, so it is
+    /// neither re-resolved nor compared: a dirty node with forty styling
+    /// props and one bound label costs one binding evaluation, not forty
+    /// clones and forty comparisons.
+    ///
+    /// Returns `None` — with the node untouched — when a previously absent
+    /// prop (a `.states` switch that matched nothing) is now present: the
+    /// in-place path cannot restore that key to its raw-prop position, so
+    /// the caller rebuilds the map wholesale instead.
+    pub fn refresh_dynamic_props(
+        &mut self,
+        state: &serde_json::Value,
+        data_sources: Option<&IndexMap<String, serde_json::Value>>,
+    ) -> Option<Vec<PropDelta>> {
+        let mut evaluator: Option<exprimo::Evaluator> = None;
+        let mut pending: Vec<(String, Option<serde_json::Value>)> = Vec::new();
+        for (key, raw) in self.raw_props.iter() {
+            if matches!(
+                raw,
+                Value::Static(_) | Value::Action(_) | Value::Resource(_)
+            ) {
+                continue;
+            }
+            match resolve_single_value(raw, state, None, data_sources, &mut evaluator) {
+                Some(value) => match self.props.get(key) {
+                    Some(current) if *current == value => {}
+                    Some(_) => pending.push((key.to_string(), Some(value))),
+                    None => return None,
+                },
+                None => {
+                    if self.props.contains_key(key) {
+                        pending.push((key.to_string(), None));
+                    }
+                }
+            }
+        }
+        let mut deltas = Vec::with_capacity(pending.len());
+        for (key, value) in pending {
+            match value {
+                Some(value) => {
+                    self.props.insert(&key, value.clone());
+                    deltas.push(PropDelta::Set(key, value));
+                }
+                None => {
+                    self.props.shift_remove(&key);
+                    deltas.push(PropDelta::Removed(key));
+                }
+            }
+        }
+        Some(deltas)
+    }
+
     /// Update props by re-evaluating bindings against state and data sources
     pub fn update_props_with_data_sources(
         &mut self,
@@ -319,6 +440,19 @@ pub struct InstanceTree {
     /// Exit tombstones — see [`ExitTombstone`]. Oldest first, bounded by
     /// [`MAX_EXIT_TOMBSTONES`].
     exit_tombstones: std::collections::VecDeque<(NodeId, ExitTombstone)>,
+
+    /// Whether the renderer handles `__virt.window` and reports viewports.
+    /// Off by default: a renderer that doesn't know the protocol would show
+    /// only the first window of every `List`, so lazy lists expand fully
+    /// until it opts in. Read when a ForEach is created.
+    pub virtualization: bool,
+
+    /// Set by an element just before it creates a child, when that child is
+    /// its ONLY child; taken (reset) by the next `create_ir_node_tree_full`.
+    /// A lazy ForEach windows only in that slot, so `__virt.window` on the
+    /// render parent describes exactly one list and renderer spacers can't
+    /// collide with sibling content.
+    pub(crate) sole_child_slot: bool,
 }
 
 /// How many exit tombstones the tree retains. An exit plays for a few
@@ -372,6 +506,8 @@ impl InstanceTree {
             registered_templates: std::collections::HashSet::new(),
             remove_stack: Vec::new(),
             exit_tombstones: std::collections::VecDeque::new(),
+            virtualization: false,
+            sole_child_slot: false,
         }
     }
 

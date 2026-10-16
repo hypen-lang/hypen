@@ -2,7 +2,7 @@ use crate::{
     dispatch::{Action, ActionDispatcher},
     engine_core::EngineCore,
     error::EngineError,
-    ir::{ComponentRegistry, IRNode, ResourceRegistry},
+    ir::{ComponentRegistry, IRNode, NodeId, ResourceRegistry},
     lifecycle::{ModuleInstance, ResourceCache},
     reconcile::Patch,
     state::StateChange,
@@ -375,6 +375,27 @@ impl Engine {
     /// Get mutable access to the resource cache
     pub fn resources_mut(&mut self) -> &mut ResourceCache {
         &mut self.resources
+    }
+
+    // ── List Virtualization ─────────────────────────────────────────────
+
+    /// Enable or disable list virtualization. Renderers that handle the
+    /// `__virt.window` prop and report viewports call this before the first
+    /// render; until then lazy lists (`List`, `Grid`, `ForEach(…, lazy:
+    /// true)`) expand every item.
+    pub fn set_virtualization(&mut self, enabled: bool) {
+        self.core.set_virtualization(enabled);
+    }
+
+    /// Report a lazy list's visible range. `list_id` is the element carrying
+    /// `__virt.window`; `[start, end)` is the item range the renderer wants
+    /// materialized (visible rows plus overscan). Emits the patches that
+    /// move the window. Ids naming no windowed list are ignored.
+    pub fn set_list_viewport(&mut self, list_id: NodeId, start: usize, end: usize) {
+        let patches = self.core.set_list_viewport(list_id, start, end);
+        if !patches.is_empty() {
+            self.emit_patches(patches);
+        }
     }
 
     // ── Data Source Context ─────────────────────────────────────────────

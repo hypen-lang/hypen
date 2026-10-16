@@ -35,13 +35,64 @@ impl std::io::Write for HashWriter {
 }
 
 /// Content hash of a list item for the iterable memo — the write side of
-/// [`IterMemo::item_hash`]. Serializes into the hasher, so no allocation.
-pub(crate) fn item_fingerprint(item: &serde_json::Value) -> u64 {
-    let mut w = HashWriter(std::collections::hash_map::DefaultHasher::new());
-    if serde_json::to_writer(&mut w, item).is_err() {
-        w.0.write_u64(u64::MAX);
+/// [`IterMemo::item_hash`]. Walks the JSON structurally, feeding the
+/// hasher raw string bytes and number bits: no allocation, and none of
+/// the formatting (number printing, string escaping) a serialization
+/// pass pays. A wholesale array replacement fingerprints every item even
+/// on a memo hit, so this is the floor of that pass.
+pub fn item_fingerprint(item: &serde_json::Value) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    hash_json(item, &mut hasher);
+    hasher.finish()
+}
+
+/// Structural JSON hash. Each variant writes a tag first so `[1]` and
+/// `{"0":1}` (or `"1"` and `1`) never collide by content alone. Objects
+/// hash in iteration order, the same order serialization would have
+/// visited them.
+fn hash_json(value: &serde_json::Value, h: &mut std::collections::hash_map::DefaultHasher) {
+    use serde_json::Value;
+    match value {
+        Value::Null => h.write_u8(0),
+        Value::Bool(b) => {
+            h.write_u8(1);
+            h.write_u8(*b as u8);
+        }
+        Value::Number(n) => {
+            h.write_u8(2);
+            if let Some(i) = n.as_i64() {
+                h.write_u8(0);
+                h.write_i64(i);
+            } else if let Some(u) = n.as_u64() {
+                h.write_u8(1);
+                h.write_u64(u);
+            } else {
+                h.write_u8(2);
+                h.write_u64(n.as_f64().unwrap_or(f64::NAN).to_bits());
+            }
+        }
+        Value::String(s) => {
+            h.write_u8(3);
+            h.write_usize(s.len());
+            h.write(s.as_bytes());
+        }
+        Value::Array(items) => {
+            h.write_u8(4);
+            h.write_usize(items.len());
+            for item in items {
+                hash_json(item, h);
+            }
+        }
+        Value::Object(map) => {
+            h.write_u8(5);
+            h.write_usize(map.len());
+            for (key, item) in map {
+                h.write_usize(key.len());
+                h.write(key.as_bytes());
+                hash_json(item, h);
+            }
+        }
     }
-    w.0.finish()
 }
 
 /// Templates fingerprint with the per-container cache. `stable` asserts the
@@ -161,6 +212,8 @@ pub(crate) fn reconcile_iterable_children(
         key_path,
         ir_templates,
         stable_templates,
+        0,
+        Eviction::None,
     )
 }
 
@@ -249,6 +302,25 @@ fn create_keyed_row_slow(
     created
 }
 
+/// Why children left a windowed (lazy) list, for choosing how to remove
+/// them: a row that only scrolled out of the window must vanish silently,
+/// while a row whose item was deleted plays its `.exit` transition.
+#[derive(Clone, Copy)]
+pub(crate) enum Eviction<'a> {
+    /// Not a windowed list: every leftover child's item was deleted.
+    None,
+    /// A viewport report moved the window over unchanged data: every
+    /// leftover child only left the window.
+    All,
+    /// A data change on a windowed list: a leftover whose item is still in
+    /// the full `items` list only left the window.
+    Outside {
+        items: &'a [serde_json::Value],
+        key_path: Option<&'a str>,
+        item_name: &'a str,
+    },
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn reconcile_iterable_children_full(
     ctx: &mut ReconcileCtx,
@@ -259,6 +331,11 @@ pub(crate) fn reconcile_iterable_children_full(
     key_path: Option<&str>,
     ir_templates: &[IRNode],
     stable_templates: bool,
+    // Absolute index of `items[0]`. Non-zero when `items` is the window of a
+    // lazy list: fallback keys (`item-<idx>`) must stay absolute so a row
+    // keeps its identity as the window slides.
+    index_offset: usize,
+    eviction: Eviction<'_>,
 ) {
     let parent_id = logical_parent;
     let multi_template = ir_templates.len() > 1;
@@ -320,7 +397,7 @@ pub(crate) fn reconcile_iterable_children_full(
     let item_keys: Vec<String> = items
         .iter()
         .enumerate()
-        .map(|(index, item)| generate_item_key(item, key_path, item_name, index))
+        .map(|(index, item)| generate_item_key(item, key_path, item_name, index_offset + index))
         .collect();
 
     let mut new_child_ids: Vec<NodeId> = Vec::with_capacity(items.len() * ir_templates.len());
@@ -333,8 +410,9 @@ pub(crate) fn reconcile_iterable_children_full(
     let mut created_ids: Vec<NodeId> = Vec::new();
     let mut unkeyed_idx = 0;
 
-    for (item_index, item) in items.iter().enumerate() {
-        let item_key = item_keys[item_index].as_str();
+    for (window_index, item) in items.iter().enumerate() {
+        let item_key = item_keys[window_index].as_str();
+        let item_index = index_offset + window_index;
         let item_hash = item_fingerprint(item);
 
         for (template_idx, template) in ir_templates.iter().enumerate() {
@@ -556,12 +634,57 @@ pub(crate) fn reconcile_iterable_children_full(
     }
 
     // Remove old children that weren't reused.
-    for &old_id in old_keyed.values() {
-        remove_child_subtree(ctx, old_id);
+    let mut live_keys: Option<HashSet<String>> = None;
+    for (child_key, &old_id) in old_keyed.iter() {
+        let evicted = match eviction {
+            Eviction::None => false,
+            Eviction::All => true,
+            Eviction::Outside {
+                items,
+                key_path,
+                item_name,
+            } => {
+                // Built once, and only when a windowed pass actually
+                // removes rows — O(n) keys, the price of telling a
+                // deletion from a scroll-out.
+                let live = live_keys.get_or_insert_with(|| {
+                    items
+                        .iter()
+                        .enumerate()
+                        .map(|(index, item)| generate_item_key(item, key_path, item_name, index))
+                        .collect()
+                });
+                let item_key = if multi_template {
+                    child_key
+                        .rsplit_once('#')
+                        .map_or(child_key.as_str(), |(k, _)| k)
+                } else {
+                    child_key.as_str()
+                };
+                live.contains(item_key)
+            }
+        };
+        if evicted {
+            evict_child_subtree(ctx, old_id);
+        } else {
+            remove_child_subtree(ctx, old_id);
+        }
     }
     for &old_id in &old_unkeyed[unkeyed_idx..] {
-        remove_child_subtree(ctx, old_id);
+        if matches!(eviction, Eviction::All) {
+            evict_child_subtree(ctx, old_id);
+        } else {
+            remove_child_subtree(ctx, old_id);
+        }
     }
+}
+
+/// Remove a row that only left a lazy list's window: a plain `Remove` with
+/// no exit transition and no exit tombstone — nothing was deleted.
+fn evict_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
+    super::diff::emit_plain_removal(ctx.tree, child_id, ctx.patches);
+    ctx.tree
+        .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
 }
 
 /// Find the longest increasing subsequence (LIS) indices.

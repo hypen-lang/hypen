@@ -568,6 +568,68 @@ fn render_dirty_internal(engine: &mut WasiEngine) {
 }
 
 // ============================================================================
+// List Virtualization
+// ============================================================================
+
+/// Opt in (`enabled != 0`) to list virtualization: lazy lists then
+/// materialize only a window of items, described by the `__virt.window`
+/// prop. Call before the first render.
+///
+/// # Returns
+/// 0 on success, non-zero if the engine is not initialized
+#[no_mangle]
+pub extern "C" fn hypen_set_virtualization(enabled: i32) -> i32 {
+    ENGINE.with(|cell| match cell.borrow_mut().as_mut() {
+        Some(engine) => {
+            engine.core.set_virtualization(enabled != 0);
+            0
+        }
+        None => fail(
+            3,
+            "hypen_set_virtualization: engine not initialized (call hypen_init first)",
+        ),
+    })
+}
+
+/// Report the item range `[start, end)` (visible rows plus overscan) of the
+/// lazy list whose element id is `list_id`; emits the patches that move its
+/// window. Ids naming no windowed list are ignored.
+///
+/// # Arguments
+/// * `list_id_ptr/len` - UTF-8 element id (as sent in patches)
+///
+/// # Returns
+/// 0 on success, non-zero on error
+#[no_mangle]
+pub extern "C" fn hypen_set_list_viewport(
+    list_id_ptr: *const u8,
+    list_id_len: usize,
+    start: u32,
+    end: u32,
+) -> i32 {
+    let list_id = match ptr_to_str(list_id_ptr, list_id_len) {
+        Ok(s) => s,
+        Err(_) => return fail(1, "hypen_set_list_viewport: invalid UTF-8 id pointer"),
+    };
+    ENGINE.with(|cell| {
+        let mut engine = cell.borrow_mut();
+        let Some(engine) = engine.as_mut() else {
+            return fail(
+                3,
+                "hypen_set_list_viewport: engine not initialized (call hypen_init first)",
+            );
+        };
+        let patches = engine
+            .core
+            .set_list_viewport_wire(list_id, start as usize, end as usize);
+        if !patches.is_empty() {
+            engine.emit_patches(patches);
+        }
+        0
+    })
+}
+
+// ============================================================================
 // Data Source Context
 // ============================================================================
 

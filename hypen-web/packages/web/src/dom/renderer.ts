@@ -20,6 +20,49 @@ interface TextBinding {
   element: HTMLElement;
   template: string;
   segments: TemplateSegment[];
+  /**
+   * Dotted state paths the template reads (`user.name`), with the leading
+   * `state` segment stripped. Indexed by root segment so a state update can
+   * find the bindings it touches without scanning every bound text node.
+   */
+  paths: string[];
+}
+
+/** Compiled template plus the state paths it reads. */
+function compileTextBinding(template: string): Pick<TextBinding, "segments" | "paths"> {
+  const segments = compileTextTemplate(template);
+  const paths: string[] = [];
+  for (const segment of segments) {
+    if (typeof segment === "string") continue;
+    const keys = segment.keys[0] === "state" ? segment.keys.slice(1) : segment.keys;
+    const path = keys.join(".");
+    if (!paths.includes(path)) paths.push(path);
+  }
+  return { segments, paths };
+}
+
+/** Root segment of a dotted path (`user.name` → `user`). */
+function pathRoot(path: string): string {
+  const dot = path.indexOf(".");
+  return dot === -1 ? path : path.slice(0, dot);
+}
+
+/**
+ * Whether a change at `changed` can affect a binding reading `bound`: one
+ * path is the other, or a segment-wise prefix of it. `user` ↔ `user.name`
+ * both ways; `user.name` ↔ `user.named` never.
+ *
+ * A binding to `items.length` reads the array, not a slot in it: a push
+ * reports only `items.<newIndex>`, so the `.length` suffix is dropped and the
+ * binding is treated as reading `items` itself.
+ */
+function pathsOverlap(bound: string, changed: string): boolean {
+  if (bound.endsWith(".length")) bound = bound.slice(0, -7);
+  if (bound === changed || bound === "" || changed === "") return true;
+  if (bound.length < changed.length) {
+    return changed.startsWith(bound) && changed.charCodeAt(bound.length) === 46; // '.'
+  }
+  return bound.startsWith(changed) && bound.charCodeAt(changed.length) === 46;
 }
 
 /**
@@ -332,7 +375,7 @@ export class DOMRenderer {
        * exactly these bindings, so instantiation does not probe each Text
        * node's `data-text-template` (9 per row in a typical list).
        */
-      textBindings: Array<{ index: number; template: string; segments: TemplateSegment[] }>;
+      textBindings: Array<{ index: number; template: string; segments: TemplateSegment[]; paths: string[] }>;
       /**
        * Per template node, the resolved way to apply each `subs` prop —
        * see [`SubApplier`]. Filled lazily on first use: the `(node, prop)`
@@ -360,6 +403,16 @@ export class DOMRenderer {
    * state changes — static text never re-interpolates.
    */
   private textBindings = new Map<string, TextBinding>();
+  /** Root state segment → ids of text bindings that read under it. */
+  private textBindingsByRoot = new Map<string, Set<string>>();
+
+  /**
+   * Native hosts whose direct children changed during the batch being
+   * applied, notified once each when the batch's DOM writes are done. `null`
+   * outside `applyPatches`, where a change notifies synchronously. A chart
+   * receiving N marks through N insert patches lays out once, not N times.
+   */
+  private pendingChildrenChanged: Set<HTMLElement> | null = null;
 
   // Canvas subtree routing — Canvas components get their own CanvasRenderer
   // and all descendant patches are forwarded to it instead of the DOM.
@@ -678,9 +731,17 @@ export class DOMRenderer {
     // matching and playback happen in `animator.flush()`.
     this.animator.prepareShared(domPatches, (nodeId) => this.nodes.get(nodeId));
 
-    // Apply DOM patches normally
-    for (const patch of domPatches) {
-      this.applyPatch(patch);
+    // Apply DOM patches normally. Child-change notifications to native
+    // hosts are collected for the whole pass and delivered once per host
+    // below, after every insert/move/remove of the batch has landed.
+    const ownsChildrenBatch = this.pendingChildrenChanged === null;
+    if (ownsChildrenBatch) this.pendingChildrenChanged = new Set();
+    try {
+      for (const patch of domPatches) {
+        this.applyPatch(patch);
+      }
+    } finally {
+      if (ownsChildrenBatch) this.flushChildrenChanged();
     }
 
     // Forward canvas-subtree patches to their CanvasRenderer instances
@@ -826,19 +887,24 @@ export class DOMRenderer {
   /**
    * Update state and interpolate text content
    */
-  updateState(state: Record<string, any>): void {
+  updateState(state: Record<string, any>, changedPaths?: readonly string[]): void {
     log.debug("Updating state:", state);
     this.currentState = state;
-    this.interpolateAllText();
+    if (changedPaths) {
+      this.interpolateTextForPaths(changedPaths);
+    } else {
+      this.interpolateAllText();
+    }
   }
 
   /**
-   * Merge component state into current state and re-interpolate
+   * Merge component state into current state and re-interpolate the
+   * bindings that read one of the merged keys.
    */
   private mergeComponentState(componentState: Record<string, any>): void {
     this.currentState = { ...this.currentState, ...componentState };
     log.debug("Merged state:", this.currentState);
-    this.interpolateAllText();
+    this.interpolateTextForPaths(Object.keys(componentState));
   }
 
   /**
@@ -846,12 +912,70 @@ export class DOMRenderer {
    */
   private interpolateAllText(): void {
     for (const [id, binding] of this.textBindings) {
-      const interpolated = this.interpolateSegments(binding.segments, this.currentState);
-      const element = binding.element;
-      if (element.textContent !== interpolated) {
-        this.debugTracker.trackRerender(id, element, "interpolate");
-        setElementText(element, interpolated);
+      this.interpolateBinding(id, binding);
+    }
+  }
+
+  /**
+   * Re-interpolate only the text bindings that read under (or above) one of
+   * `changedPaths`. A keystroke into `form.query` leaves the 1,000 bound
+   * rows under `items` untouched; unrelated bindings are never visited.
+   */
+  private interpolateTextForPaths(changedPaths: readonly string[]): void {
+    if (changedPaths.length === 0) return;
+    let visited: Set<string> | null = null;
+    for (const changed of changedPaths) {
+      if (changed === "") {
+        this.interpolateAllText();
+        return;
       }
+      const candidates = this.textBindingsByRoot.get(pathRoot(changed));
+      if (!candidates) continue;
+      for (const id of candidates) {
+        if (visited?.has(id)) continue;
+        const binding = this.textBindings.get(id);
+        if (!binding || !binding.paths.some((bound) => pathsOverlap(bound, changed))) continue;
+        (visited ??= new Set()).add(id);
+        this.interpolateBinding(id, binding);
+      }
+    }
+  }
+
+  private interpolateBinding(id: string, binding: TextBinding): void {
+    const interpolated = this.interpolateSegments(binding.segments, this.currentState);
+    const element = binding.element;
+    if (element.textContent !== interpolated) {
+      this.debugTracker.trackRerender(id, element, "interpolate");
+      setElementText(element, interpolated);
+    }
+  }
+
+  /** Register (or replace) a text binding and index it by the roots it reads. */
+  private setTextBinding(id: string, binding: TextBinding): void {
+    this.dropTextBinding(id);
+    this.textBindings.set(id, binding);
+    for (const path of binding.paths) {
+      const root = pathRoot(path);
+      let ids = this.textBindingsByRoot.get(root);
+      if (!ids) {
+        ids = new Set();
+        this.textBindingsByRoot.set(root, ids);
+      }
+      ids.add(id);
+    }
+  }
+
+  /** Forget a text binding and its index entries. No-op when unbound. */
+  private dropTextBinding(id: string): void {
+    const existing = this.textBindings.get(id);
+    if (!existing) return;
+    this.textBindings.delete(id);
+    for (const path of existing.paths) {
+      const root = pathRoot(path);
+      const ids = this.textBindingsByRoot.get(root);
+      if (!ids) continue;
+      ids.delete(id);
+      if (ids.size === 0) this.textBindingsByRoot.delete(root);
     }
   }
 
@@ -891,14 +1015,10 @@ export class DOMRenderer {
     if (element.dataset.hypenType === "text" && template && template.includes("@{")) {
       const existing = this.textBindings.get(id);
       if (!existing || existing.template !== template || existing.element !== element) {
-        this.textBindings.set(id, {
-          element,
-          template,
-          segments: compileTextTemplate(template),
-        });
+        this.setTextBinding(id, { element, template, ...compileTextBinding(template) });
       }
     } else {
-      this.textBindings.delete(id);
+      this.dropTextBinding(id);
     }
   }
 
@@ -1025,7 +1145,7 @@ export class DOMRenderer {
 
     const proto = build(root);
     const mask: boolean[] = [];
-    const textBindings: Array<{ index: number; template: string; segments: TemplateSegment[] }> = [];
+    const textBindings: Array<{ index: number; template: string; segments: TemplateSegment[]; paths: string[] }> = [];
     let index = 0;
     walkElements(proto, (el) => {
       const isTemplateNode = el.dataset.hypenType !== undefined;
@@ -1033,7 +1153,7 @@ export class DOMRenderer {
       if (!isTemplateNode) return;
       const template = types[index] === "text" ? el.dataset.textTemplate : undefined;
       if (template && template.includes("@{")) {
-        textBindings.push({ index, template, segments: compileTextTemplate(template) });
+        textBindings.push({ index, template, ...compileTextBinding(template) });
       }
       index++;
     });
@@ -1153,8 +1273,8 @@ export class DOMRenderer {
         this.onSetProp(ids[i], key, value);
       }
     }
-    for (const { index, template, segments } of entry.textBindings) {
-      this.textBindings.set(ids[index], { element: elements[index], template, segments });
+    for (const { index, template, segments, paths } of entry.textBindings) {
+      this.setTextBinding(ids[index], { element: elements[index], template, segments, paths });
     }
 
     // `subs`: the item-dependent props, already resolved by the engine.
@@ -1760,11 +1880,11 @@ export class DOMRenderer {
     }
 
     if (isHostElement(previousParent) && previousParent !== parent) {
-      this.components.notifyChildrenChanged(previousParent);
+      this.queueChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
     if (isHostElement(parent)) {
-      this.components.notifyChildrenChanged(parent);
+      this.queueChildrenChanged(parent);
       reconcileColumnWidthDemandFrom(child);
     }
 
@@ -1863,7 +1983,7 @@ export class DOMRenderer {
       element.parentNode.removeChild(element);
     }
     if (isHostElement(previousParent)) {
-      this.components.notifyChildrenChanged(previousParent);
+      this.queueChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
 
@@ -1959,6 +2079,7 @@ export class DOMRenderer {
 
     // Dispose event listeners and other resources before removing from DOM
     disposeHypenElement(element);
+    this.applicators.release(element);
 
     // Read the parent before the unlink: on the deferred (exit-animated)
     // path the element is still attached until this runs.
@@ -1967,7 +2088,7 @@ export class DOMRenderer {
       element.parentNode.removeChild(element);
     }
     if (isHostElement(previousParent)) {
-      this.components.notifyChildrenChanged(previousParent);
+      this.queueChildrenChanged(previousParent);
       reconcileColumnWidthDemandFrom(previousParent);
     }
 
@@ -1978,7 +2099,7 @@ export class DOMRenderer {
 
     this.nodes.delete(id);
     this.handlerProps.delete(id);
-    this.textBindings.delete(id);
+    this.dropTextBinding(id);
     this.dialogIds.delete(id);
     this.animator.forget(id);
     // A remove mid-drag cancels everything and releases capture cleanly.
@@ -2032,9 +2153,10 @@ export class DOMRenderer {
       // pointing elsewhere must not be swept out from under its live node.
       if (descId === undefined || this.nodes.get(descId) !== desc) return;
       disposeHypenElement(desc);
+      this.applicators.release(desc);
       this.nodes.delete(descId);
       this.handlerProps.delete(descId);
-      this.textBindings.delete(descId);
+      this.dropTextBinding(descId);
       this.dialogIds.delete(descId);
       this.animator.forget(descId);
       this.scrubber.forget(descId);
@@ -2051,7 +2173,29 @@ export class DOMRenderer {
   private notifyParentChildrenChanged(element: HTMLElement): void {
     const parent = element.parentNode;
     if (isHostElement(parent)) {
-      this.components.notifyChildrenChanged(parent);
+      this.queueChildrenChanged(parent);
+    }
+  }
+
+  /**
+   * Notify `host` that its direct children changed — immediately outside a
+   * patch batch, otherwise once at the end of it (`flushChildrenChanged`).
+   */
+  private queueChildrenChanged(host: HTMLElement): void {
+    if (this.pendingChildrenChanged) {
+      this.pendingChildrenChanged.add(host);
+    } else {
+      this.components.notifyChildrenChanged(host);
+    }
+  }
+
+  /** Deliver the batch's coalesced child-change notifications, one per host. */
+  private flushChildrenChanged(): void {
+    const pending = this.pendingChildrenChanged;
+    this.pendingChildrenChanged = null;
+    if (!pending) return;
+    for (const host of pending) {
+      this.components.notifyChildrenChanged(host);
     }
   }
 
@@ -2097,10 +2241,12 @@ export class DOMRenderer {
     // Dispose all element resources before clearing
     for (const element of this.nodes.values()) {
       disposeHypenElement(element);
+      this.applicators.release(element);
     }
     this.container.innerHTML = "";
     this.nodes.clear();
     this.textBindings.clear();
+    this.textBindingsByRoot.clear();
     this.animator.reset();
     this.scrubber.reset();
     this.dnd.reset();

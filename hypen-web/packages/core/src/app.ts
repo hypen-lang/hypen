@@ -34,6 +34,16 @@ export interface IEngine {
     animation?: unknown
   ): void;
 
+  // ── List virtualization (renderer-facing) ─────────────────────────────
+  //
+  // Called by renderers that handle `__virt.window`, never by app code.
+  // Optional for the same structural-contract reason as the surface below.
+
+  /** Opt in to list virtualization (lazy lists materialize a window). */
+  setVirtualization?(enabled: boolean): void;
+  /** Report a lazy list's visible item range `[start, end)` incl. overscan. */
+  setListViewport?(listId: string, start: number, end: number): void;
+
   // ── External capability surface ──────────────────────────────────────
   //
   // For callers that are NOT the rendered UI: MCP servers, REST APIs,
@@ -729,7 +739,7 @@ export class HypenModuleInstance<T extends object = any> {
   private isActive = false;
   private router: HypenRouter | null;
   private globalContext?: HypenGlobalContext;
-  private stateChangeCallbacks: Array<() => void> = [];
+  private stateChangeCallbacks: Array<(change: StateChange) => void> = [];
   private dataSourceManager?: DataSourceManager;
   private dataSourceAccessor: DataSourceAccessor = {};
   private stateStore?: StateStore<T>;
@@ -802,7 +812,7 @@ export class HypenModuleInstance<T extends object = any> {
           change.newValues,
           pending ? pending.spec : undefined
         );
-        this.stateChangeCallbacks.forEach(cb => cb());
+        this.stateChangeCallbacks.forEach(cb => cb(change));
         this.persistIfNeeded();
       },
     });
@@ -1414,9 +1424,11 @@ export class HypenModuleInstance<T extends object = any> {
   }
 
   /**
-   * Register a callback to be notified when state changes
+   * Register a callback to be notified when state changes. The callback
+   * receives the flushed change (the dotted paths written and their new
+   * values) so a consumer can narrow its own work to what moved.
    */
-  onStateChange(callback: () => void): void {
+  onStateChange(callback: (change: StateChange) => void): void {
     this.stateChangeCallbacks.push(callback);
   }
 

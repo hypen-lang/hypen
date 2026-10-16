@@ -6,7 +6,7 @@
 //! and dirty-node rendering.
 
 use crate::{
-    ir::{ComponentRegistry, IRNode, ResourceRegistry},
+    ir::{ComponentRegistry, IRNode, NodeId, ResourceRegistry},
     lifecycle::{Module, ModuleInstance},
     reactive::{DependencyGraph, Scheduler},
     reconcile::{reconcile_ir_with_ds, InstanceTree, Patch},
@@ -370,28 +370,58 @@ impl EngineCore {
     ///
     /// Each path is recorded with its marking (`mark_dirty_for_path`) so the
     /// renderer can narrow iterable re-reconciliation to touched indices.
+    ///
+    /// A batch that writes a nested object records every level of it
+    /// (`user`, `user.name`, `user.email`, …). The dependency lookup for
+    /// `user` already yields every node bound at or beneath it, so the
+    /// descendants are recorded for the hint but not looked up again —
+    /// `get_affected_nodes` on each would re-walk the same prefix-index
+    /// entries and hand the scheduler the same node ids.
     fn schedule_dirty_for_paths<'p>(
         &mut self,
         scope: Option<&str>,
         paths: impl IntoIterator<Item = &'p str>,
     ) {
-        for path in paths {
-            let key = match scope {
+        let keys: Vec<String> = paths
+            .into_iter()
+            .map(|path| match scope {
                 Some(name) => format!("mod:{}:{}", name, path),
                 None => path.to_string(),
-            };
-            let affected = self.dependencies.get_affected_nodes(&key);
-            self.scheduler
-                .mark_dirty_for_path(&key, affected.iter().copied());
-        }
+            })
+            .collect();
+        self.schedule_dirty_for_keys(keys);
     }
 
     /// Schedule dirty nodes from a `StateChange` (primary module paths).
     pub fn schedule_from_state_change(&mut self, change: &StateChange) {
-        for path in change.paths() {
-            let affected = self.dependencies.get_affected_nodes(path);
+        let keys: Vec<String> = change.paths().map(str::to_string).collect();
+        self.schedule_dirty_for_keys(keys);
+    }
+
+    /// Mark every node bound under one of the (already scope-prefixed)
+    /// `keys` dirty, looking each key up in the dependency graph only when
+    /// no ancestor of it is in the same batch. Every key is still recorded
+    /// with the scheduler, so the iterable narrowing hint sees the exact
+    /// paths the host reported.
+    fn schedule_dirty_for_keys(&mut self, keys: Vec<String>) {
+        if keys.len() == 1 {
+            let key = &keys[0];
+            let affected = self.dependencies.get_affected_nodes(key);
             self.scheduler
-                .mark_dirty_for_path(path, affected.iter().copied());
+                .mark_dirty_for_path(key, affected.iter().copied());
+            return;
+        }
+        // Membership probe per ancestor prefix: O(keys × depth), not
+        // O(keys²) — a wholesale list write records thousands of keys.
+        let present: std::collections::HashSet<&str> = keys.iter().map(String::as_str).collect();
+        for key in &keys {
+            if has_present_ancestor(key, &present) {
+                self.scheduler.mark_dirty_for_path(key, std::iter::empty());
+            } else {
+                let affected = self.dependencies.get_affected_nodes(key);
+                self.scheduler
+                    .mark_dirty_for_path(key, affected.iter().copied());
+            }
         }
     }
 
@@ -405,14 +435,27 @@ impl EngineCore {
     /// `ds:spacetime:user.name`) as dirty. The caller must call
     /// `render_dirty()` afterwards.
     ///
-    /// Note: this replaces the entire provider blob, so we invalidate every
-    /// subscriber regardless of which nested key changed — there is no sparse
-    /// diff. Hosts that want granular invalidation should construct their
-    /// own patch strategy at the SDK layer.
+    /// The host hands over the whole provider blob, but invalidation is
+    /// sparse: when a previous value exists and both are objects, the two are
+    /// diffed (`portable::diff`, the same path diff every SDK uses for state)
+    /// and only nodes reading a changed path — or the provider root — are
+    /// scheduled. A data source refreshed every second that changes one
+    /// field no longer re-renders every subscriber. The first `set_context`
+    /// for a provider, or a non-object replacement, still invalidates
+    /// everything bound beneath it.
     pub fn set_context(&mut self, name: &str, data: serde_json::Value) {
         self.dependencies.register_data_source_provider(name);
 
-        let affected = self.dependencies.get_data_source_affected_nodes(name);
+        let affected = match self.data_sources.get(name) {
+            Some(previous) if previous.is_object() && data.is_object() => {
+                let changes = crate::portable::diff::diff_paths(previous, &data);
+                self.dependencies.get_data_source_affected_nodes_for_paths(
+                    name,
+                    changes.iter().map(|change| change.path.as_str()),
+                )
+            }
+            _ => self.dependencies.get_data_source_affected_nodes(name),
+        };
 
         self.data_sources.insert(name.to_string(), data);
 
@@ -656,6 +699,60 @@ impl EngineCore {
         patches
     }
 
+    /// Enable or disable list virtualization (see [`crate::ir::LazyList`]).
+    ///
+    /// A renderer that handles `__virt.window` and reports viewports turns
+    /// this on before the first render. Lists created while it is off expand
+    /// fully and stay that way until rebuilt.
+    pub fn set_virtualization(&mut self, enabled: bool) {
+        self.tree.virtualization = enabled;
+    }
+
+    /// Move a lazy list's window to the renderer's visible range `[start,
+    /// end)` (overscan included) and return the patches that materialize it.
+    ///
+    /// `list_id` is the element carrying `__virt.window`. An id that names no
+    /// windowed list returns no patches.
+    pub fn set_list_viewport(&mut self, list_id: NodeId, start: usize, end: usize) -> Vec<Patch> {
+        let state: &serde_json::Value = self
+            .module
+            .as_ref()
+            .map(|m| m.get_state())
+            .unwrap_or(&NULL_STATE);
+        let mut patches = Vec::new();
+        let mut ctx = crate::reconcile::diff::ReconcileCtx {
+            tree: &mut self.tree,
+            state,
+            patches: &mut patches,
+            dependencies: &mut self.dependencies,
+            data_sources: (!self.data_sources.is_empty()).then_some(&self.data_sources),
+            modules: (!self.modules.is_empty()).then_some(&self.modules),
+        };
+        crate::reconcile::diff::apply_list_viewport(&mut ctx, list_id, start, end);
+        if !patches.is_empty() {
+            self.revision += 1;
+        }
+        patches
+    }
+
+    /// [`set_list_viewport`](Self::set_list_viewport) addressed by the
+    /// patch-wire id string, as the language bindings receive it. A
+    /// malformed id returns no patches.
+    #[cfg_attr(not(any(target_arch = "wasm32", feature = "uniffi")), allow(dead_code))]
+    pub fn set_list_viewport_wire(
+        &mut self,
+        list_id: &str,
+        start: usize,
+        end: usize,
+    ) -> Vec<Patch> {
+        match list_id.parse::<u64>() {
+            Ok(ffi) => {
+                self.set_list_viewport(NodeId::from(slotmap::KeyData::from_ffi(ffi)), start, end)
+            }
+            Err(_) => Vec::new(),
+        }
+    }
+
     /// Filter out Remove patches for elements that were Created in the same
     /// batch. This happens when a conditional re-reconciles module-scoped
     /// children whose stored template doesn't carry module_scope.
@@ -810,6 +907,19 @@ impl Default for EngineCore {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Whether a strict dotted ancestor of `path` (`user` of `user.name`;
+/// never `user` of `username`) is in `present`.
+fn has_present_ancestor(path: &str, present: &std::collections::HashSet<&str>) -> bool {
+    let mut current = path;
+    while let Some(dot) = current.rfind('.') {
+        current = &current[..dot];
+        if present.contains(current) {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]

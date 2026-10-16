@@ -1249,6 +1249,16 @@ pub struct TaffyState {
     /// per-edge over these.
     platform_safe_area: crate::style::Padding,
     image_load_generation: u64,
+    /// Every media source a resolved style asked the decoded-image cache
+    /// about, with the answer it got (`true` = natural size available).
+    /// Filled from `MEDIA_SIZE_PROBES` at the top of each compute. When
+    /// the image-load generation moves, the rebuild it used to force
+    /// unconditionally now happens only if one of these answers flipped:
+    /// a fetch landing for an image sized explicitly, or for one whose
+    /// node this state never styled, changes no style here.
+    media_size_probes: HashMap<String, bool>,
+    #[cfg(test)]
+    bulk_rebuilds: u64,
     /// Scroll panes whose Taffy style [`TaffyState::reconcile_content_sized_scroll_panes`]
     /// rewrote (content-resolving flex basis + `Clip` instead of
     /// `Scroll`), keyed to the overflow the style was built with so the
@@ -1287,6 +1297,9 @@ impl TaffyState {
             safe_area: SafeAreaInsets::default(),
             platform_safe_area: DESKTOP_SAFE_AREA_DEFAULT,
             image_load_generation: crate::paint::image::image_load_generation(),
+            media_size_probes: HashMap::new(),
+            #[cfg(test)]
+            bulk_rebuilds: 0,
             scroll_pane_overrides: HashMap::new(),
         }
     }
@@ -1469,6 +1482,31 @@ impl TaffyState {
         }
         self.wrapped_probes.clear();
         let _ = self.tree.set_node_context(tid, Some(ctx));
+    }
+
+    /// Move the natural-size probes style resolution recorded since the
+    /// last call into `media_size_probes` (a later answer for the same
+    /// source wins).
+    fn drain_media_size_probes(&mut self) {
+        MEDIA_SIZE_PROBES.with(|probes| {
+            for (src, available) in probes.borrow_mut().drain(..) {
+                self.media_size_probes.insert(src, available);
+            }
+        });
+    }
+
+    /// Whether any probed source's natural size became available (or
+    /// went away) since the style that probed it was built.
+    fn media_sizes_changed(&self) -> bool {
+        self.media_size_probes
+            .iter()
+            .any(|(src, had)| crate::paint::image::loaded_natural_size(src).is_some() != *had)
+    }
+
+    /// Number of bulk Taffy rebuilds this state has performed.
+    #[cfg(test)]
+    pub(crate) fn bulk_rebuilds(&self) -> u64 {
+        self.bulk_rebuilds
     }
 
     pub fn mark_needs_rebuild(&mut self) {
@@ -2753,8 +2791,18 @@ impl LayoutPass {
         let interaction_key = interaction_hash(&state.interaction);
         let interaction_changed = interaction_key != state.interaction_key;
         let style_changed = state.structure_key != key;
+        // An image fetch landed (or failed) since the last compute. That
+        // only changes layout when a style was built on the *absence* of
+        // that image's natural size (or on a size that has since been
+        // evicted): consult the probes the styles recorded instead of
+        // rebuilding for every thumbnail in a feed.
+        state.drain_media_size_probes();
         let image_load_generation = crate::paint::image::image_load_generation();
-        let image_intrinsics_changed = image_load_generation != state.image_load_generation;
+        let image_intrinsics_changed =
+            image_load_generation != state.image_load_generation && state.media_sizes_changed();
+        if !image_intrinsics_changed {
+            state.image_load_generation = image_load_generation;
+        }
         let needs_rebuild = state.needs_bulk_rebuild || image_intrinsics_changed;
         // The build / restyle paths read `state.interaction`; clone it
         // up front so the `&mut state.tree` borrow during the bulk
@@ -2771,6 +2819,13 @@ impl LayoutPass {
             state.tree = TaffyTree::new();
             state.renderer_for_taffy.clear();
             state.node_map.clear();
+            // The build below re-probes every media node; entries for
+            // nodes that have since left the tree must not linger.
+            state.media_size_probes.clear();
+            #[cfg(test)]
+            {
+                state.bulk_rebuilds += 1;
+            }
             // NodeIds from the old tree are meaningless in the new one.
             // EVERY `NodeId`-keyed map has to be dropped here: a fresh
             // `TaffyTree` re-issues the SAME id sequence from the start,
@@ -3150,16 +3205,19 @@ impl LayoutPass {
     ///
     /// `affected` ids without an emitted item (culled / detached) are
     /// skipped — the next full pass re-resolves them from the same
-    /// tree when they re-enter the window. The post-passes and index
-    /// rebuild run over ALL items (not just affected) because opacity
-    /// and transforms inherit downward and the indexes are positional;
-    /// both are O(items) with O(1) gates, the same cost every full
-    /// compute already pays.
+    /// tree when they re-enter the window.
     ///
-    /// The a11y semantics map is rebuilt from the tree wholesale:
-    /// `SetSemantics` patches qualify as paint-only but do NOT
-    /// contribute ids to `affected`, so a per-id refresh would miss
-    /// them.
+    /// Everything here is O(affected), not O(visible items): the
+    /// classifier puts every DESCENDANT of a patched node into
+    /// `affected` (opacity and transforms inherit downward, and an
+    /// item with no patched ancestor can see no change), so the
+    /// post-passes run over the affected items alone; the item set and
+    /// order are untouched, so `by_node_id` stands and the positional
+    /// index lists are rebuilt only when an affected item's membership
+    /// actually flipped (adding `onClick` makes it actionable AND
+    /// focusable); and the a11y map is patched per affected id —
+    /// `SetSemantics` ids are in `affected` for exactly this reason —
+    /// with its order-independent hash updated entry by entry.
     pub fn refresh_paint_only(
         &mut self,
         tree: &Tree,
@@ -3167,49 +3225,64 @@ impl LayoutPass {
         viewport: Viewport,
         scale: f32,
     ) {
+        let mut touched: Vec<usize> = Vec::with_capacity(affected.len());
+        let mut membership_changed = false;
         for id in affected {
+            // Semantics first: a `SetSemantics` id may have no item at all.
+            if let Some(old) = self.a11y.remove(id) {
+                self.a11y_hash ^= semantics_entry_hash(id, &old);
+            }
             let Some(&idx) = self.by_node_id.get(id) else {
                 continue;
             };
             let Some(node) = tree.get(id) else {
                 continue;
             };
+            if let Some(sem) = node.semantics.as_ref() {
+                self.a11y_hash ^= semantics_entry_hash(id, sem);
+                self.a11y.insert(id.clone(), sem.clone());
+            }
+            let before = index_membership(&self.items[idx]);
             refresh_item_paint(&mut self.items[idx], node, tree, viewport);
+            if index_membership(&self.items[idx]) != before {
+                membership_changed = true;
+            }
+            touched.push(idx);
         }
         // Same post-pass recipe as `compute_inner_state`, including the
         // gate-closed reset: if the batch REMOVED the tree's last
         // opacity / transform prop, stale non-default values must
-        // return to their defaults, exactly as a fresh emit would.
+        // return to their defaults, exactly as a fresh emit would. The
+        // node that carried the removed prop is affected, and so is
+        // everything under it, so the reset reaches every item it can
+        // concern.
         if tree.has_opacity_props() {
             let mut memo: HashMap<String, f32> = HashMap::new();
-            for it in self.items.iter_mut() {
-                it.opacity = effective_opacity(tree, &it.node_id, viewport, &mut memo);
+            for &idx in &touched {
+                let id = std::mem::take(&mut self.items[idx].node_id);
+                self.items[idx].opacity = effective_opacity(tree, &id, viewport, &mut memo);
+                self.items[idx].node_id = id;
             }
         } else {
-            for it in self.items.iter_mut() {
-                it.opacity = 1.0;
+            for &idx in &touched {
+                self.items[idx].opacity = 1.0;
             }
         }
-        compute_item_transforms_gated(
+        compute_item_transforms_for(
             tree,
             &mut self.items,
+            &touched,
             viewport,
             scale,
             tree.has_transform_props(),
         );
-        // Paint-only writes can still flip derived-index membership
-        // (adding `onClick` makes an item actionable AND focusable;
-        // adding `.onHover` makes it hoverable), so rebuild them with
-        // the same shared helper `compute_inner_state` uses.
-        let indexes = build_item_indexes(&self.items);
-        self.by_node_id = indexes.by_node_id;
-        self.actionable_ids = indexes.actionable_ids;
-        self.focusable_ids = indexes.focusable_ids;
-        self.scrollable_ids = indexes.scrollable_ids;
-        self.hoverable_ids = indexes.hoverable_ids;
-        let (a11y, a11y_hash) = collect_item_semantics(tree, &self.items);
-        self.a11y = a11y;
-        self.a11y_hash = a11y_hash;
+        if membership_changed {
+            let indexes = build_item_indexes(&self.items);
+            self.actionable_ids = indexes.actionable_ids;
+            self.focusable_ids = indexes.focusable_ids;
+            self.scrollable_ids = indexes.scrollable_ids;
+            self.hoverable_ids = indexes.hoverable_ids;
+        }
     }
 
     /// Container-scroll fast path: shift the emitted rects of
@@ -5330,7 +5403,7 @@ fn media_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style
     let fallback_ar = explicit_ar
         .or_else(|| {
             resolve_media_poster(node, vs.viewport)
-                .and_then(|p| crate::paint::image::loaded_natural_size(&p))
+                .and_then(|p| probe_natural_size(&p))
                 .filter(|(_, h)| *h > 0.0)
                 .map(|(w, h)| w / h)
         })
@@ -5758,8 +5831,30 @@ fn image_natural_size(node: &crate::tree::Node) -> Option<(f32, f32)> {
         .get("src")
         .or_else(|| node.props.get("0"))
         .and_then(|value| value.as_str())
-        .and_then(crate::paint::image::loaded_natural_size)
+        .and_then(probe_natural_size)
         .filter(|(w, h)| *w > 0.0 && *h > 0.0)
+}
+
+thread_local! {
+    /// Natural-size lookups style resolution made since the last
+    /// [`TaffyState::drain_media_size_probes`], as `(src, was decoded)`.
+    /// Layout runs on one thread per window (and per test), so a
+    /// thread-local lets the free style functions record without
+    /// threading a collector through every signature.
+    static MEDIA_SIZE_PROBES: std::cell::RefCell<Vec<(String, bool)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// [`crate::paint::image::loaded_natural_size`], recorded: the answer a
+/// style was built on is what decides later whether an image finishing
+/// its fetch changes that style at all (see `image_intrinsics_changed`
+/// in `compute_inner_state`). Call it only where the size actually
+/// feeds the style — a probe that could not matter forces a rebuild
+/// the moment its source lands.
+fn probe_natural_size(src: &str) -> Option<(f32, f32)> {
+    let size = crate::paint::image::loaded_natural_size(src);
+    MEDIA_SIZE_PROBES.with(|probes| probes.borrow_mut().push((src.to_string(), size.is_some())));
+    size
 }
 
 /// Base Taffy style for an [`IMAGE_TYPES`] leaf, shared by the bulk
@@ -5772,9 +5867,21 @@ fn image_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style
     let size_fallback = prop_f32_with(node, "size", vs);
     let w_dim = prop_dim_with(node, "width", vs);
     let h_dim = prop_dim_with(node, "height", vs);
-    let natural_size = image_natural_size(node);
-    let aspect_ratio = crate::style::prop_aspect_ratio_with(node, "aspectRatio", vs)
-        .or_else(|| natural_size.map(|(w, h)| w / h));
+    let explicit_ar = crate::style::prop_aspect_ratio_with(node, "aspectRatio", vs);
+    // The decoded size only matters on an axis the author left open: an
+    // aspect ratio (CSS and Taffy alike) only ever fills in a missing
+    // dimension, so with both set to absolute lengths it is inert and the
+    // natural one is not even looked up. That is what keeps a fixed-
+    // thumbnail feed from relaying out every time one of its sources
+    // lands. A percentage can resolve to "indefinite" against an unsized
+    // parent and let the ratio act after all, so it still probes.
+    let both_fixed = matches!(w_dim, Some(Dim::Length(_))) && matches!(h_dim, Some(Dim::Length(_)));
+    let natural_size = if both_fixed {
+        None
+    } else {
+        image_natural_size(node)
+    };
+    let aspect_ratio = explicit_ar.or_else(|| natural_size.map(|(w, h)| w / h));
 
     // When neither axis is set, fall back to .size or default.
     let component_default = if et.eq_ignore_ascii_case("Avatar") {
@@ -7471,19 +7578,41 @@ pub(crate) fn collect_item_semantics(
     tree: &Tree,
     items: &[LayoutItem],
 ) -> (HashMap<String, hypen_engine::ir::Semantics>, u64) {
-    use std::hash::{Hash, Hasher};
     let mut a11y = HashMap::new();
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut hash = 0u64;
     for it in items {
         if let Some(node) = tree.get(&it.node_id) {
             if let Some(sem) = node.semantics.as_ref() {
-                it.node_id.hash(&mut hasher);
-                format!("{sem:?}").hash(&mut hasher);
+                hash ^= semantics_entry_hash(&it.node_id, sem);
                 a11y.insert(it.node_id.clone(), sem.clone());
             }
         }
     }
-    (a11y, hasher.finish())
+    (a11y, hash)
+}
+
+/// Content hash of one `(id, semantics)` entry. The map hash is the XOR
+/// of these, so it is order-independent and [`LayoutPass::refresh_paint_only`]
+/// can retire and re-add single entries without rehashing every item.
+fn semantics_entry_hash(id: &str, sem: &hypen_engine::ir::Semantics) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    id.hash(&mut hasher);
+    format!("{sem:?}").hash(&mut hasher);
+    // Mix so that XOR-folding two entries never cancels on a shared prefix
+    // pattern; the finish of SipHash is already well distributed.
+    hasher.finish()
+}
+
+/// Which derived index lists an item belongs to — the predicates
+/// `build_item_indexes` applies, in the same order.
+fn index_membership(it: &LayoutItem) -> [bool; 4] {
+    [
+        it.action.is_some() || it.video_intent.is_some(),
+        it.is_focusable(),
+        it.scrollable.is_some(),
+        it.hover_action.is_some(),
+    ]
 }
 
 /// Re-resolve one item's PAINT fields from its (already-mutated) tree
@@ -7851,7 +7980,7 @@ fn cumulative_transform(
     id: &str,
     viewport: Viewport,
     scale: f32,
-    rects: &HashMap<String, Rect>,
+    rects: &HashMap<&str, Rect>,
     memo: &mut HashMap<String, Affine2>,
 ) -> Affine2 {
     if let Some(m) = memo.get(id) {
@@ -7939,14 +8068,58 @@ pub(crate) fn compute_item_transforms_gated(
     }
     // Rect side-map for origin resolution — ancestors of an emitted
     // item are always emitted themselves (culling skips whole
-    // subtrees), so every origin an item needs is present.
-    let rects: HashMap<String, Rect> = items
+    // subtrees), so every origin an item needs is present. Keyed by
+    // borrowed ids: the transforms are computed into a side vector
+    // first, then written back, so the map never has to own a copy of
+    // every id.
+    let rects: HashMap<&str, Rect> = items
         .iter()
-        .map(|it| (it.node_id.clone(), it.rect))
+        .map(|it| (it.node_id.as_str(), it.rect))
         .collect();
     let mut memo: HashMap<String, Affine2> = HashMap::new();
-    for it in items.iter_mut() {
-        it.transform = cumulative_transform(tree, &it.node_id, viewport, scale, &rects, &mut memo);
+    let transforms: Vec<Affine2> = items
+        .iter()
+        .map(|it| cumulative_transform(tree, &it.node_id, viewport, scale, &rects, &mut memo))
+        .collect();
+    for (it, transform) in items.iter_mut().zip(transforms) {
+        it.transform = transform;
+    }
+}
+
+/// [`compute_item_transforms_gated`] for the items at `indices` only.
+/// Sound when every item whose cumulative transform can have changed is
+/// among them — the paint-only classifier's affected set includes all
+/// descendants of a patched node, which is exactly that set.
+pub(crate) fn compute_item_transforms_for(
+    tree: &Tree,
+    items: &mut [LayoutItem],
+    indices: &[usize],
+    viewport: Viewport,
+    scale: f32,
+    has_transform: bool,
+) {
+    if !has_transform {
+        for &idx in indices {
+            items[idx].transform = Affine2::IDENTITY;
+        }
+        return;
+    }
+    if indices.is_empty() {
+        return;
+    }
+    let rects: HashMap<&str, Rect> = items
+        .iter()
+        .map(|it| (it.node_id.as_str(), it.rect))
+        .collect();
+    let mut memo: HashMap<String, Affine2> = HashMap::new();
+    let transforms: Vec<Affine2> = indices
+        .iter()
+        .map(|&idx| {
+            cumulative_transform(tree, &items[idx].node_id, viewport, scale, &rects, &mut memo)
+        })
+        .collect();
+    for (&idx, transform) in indices.iter().zip(transforms) {
+        items[idx].transform = transform;
     }
 }
 

@@ -768,6 +768,29 @@ impl WasmEngine {
         }
     }
 
+    // ── List Virtualization ─────────────────────────────────────────
+
+    /// Opt in to list virtualization: lazy lists (`List`, `Grid`,
+    /// `ForEach(…, lazy: true)`) then materialize only a window of items and
+    /// describe it in the `__virt.window` prop. Call before the first render.
+    #[wasm_bindgen(js_name = setVirtualization)]
+    pub fn set_virtualization(&mut self, enabled: bool) {
+        self.core.set_virtualization(enabled);
+    }
+
+    /// Report the item range `[start, end)` (visible rows plus overscan) of
+    /// the lazy list whose element is `listId`; emits the patches that move
+    /// its window. Ids naming no windowed list are ignored.
+    #[wasm_bindgen(js_name = setListViewport)]
+    pub fn set_list_viewport(&mut self, list_id: &str, start: u32, end: u32) {
+        let patches = self
+            .core
+            .set_list_viewport_wire(list_id, start as usize, end as usize);
+        if !patches.is_empty() {
+            self.emit_patches(patches);
+        }
+    }
+
     // ── Data Source Context ─────────────────────────────────────────
 
     /// Set (or replace) a named data source context.

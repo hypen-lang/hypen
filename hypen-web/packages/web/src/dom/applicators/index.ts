@@ -66,14 +66,31 @@ let variantStyleSheet: CSSStyleSheet | null = null;
 let variantStyleElement: HTMLStyleElement | null = null;
 
 /**
- * Track inserted rules to avoid duplicates. Keyed by full rule text and
- * cleared whenever the stylesheet is (re-)created, so the cache can never
- * suppress an insert into a *different* sheet than the one it was recorded
- * against (tests swap `document`; a host page may drop the style element).
+ * Rules currently in the variant stylesheet, keyed by the class that carries
+ * each one (the class name hashes the rule's whole body, so class and rule
+ * are one-to-one). `refs` counts the elements wearing the class: a rule is
+ * inserted when the first element takes its class and deleted from the sheet
+ * when the last one drops it (`setManagedClass`, `release`). Without that, a
+ * value that changes on every frame — an animated opacity, a dragged
+ * position — leaves one dead rule per distinct value behind for the life of
+ * the page, and every later insert scans the growing rank list.
+ *
+ * Cleared whenever the stylesheet is (re-)created, so the bookkeeping can
+ * never describe a *different* sheet than the one it was recorded against
+ * (tests swap `document`; a host page may drop the style element).
  */
-const insertedRules = new Set<string>();
+const managedRules = new Map<string, { rule: string; refs: number }>();
+/**
+ * Bumped every time the variant stylesheet is (re-)created. An element's
+ * `VariantMeta.counted` is only meaningful for the sheet generation it was
+ * recorded against: after a reset the sheet is empty, nothing is counted,
+ * and the element's classes are counted afresh as their rules re-emit.
+ */
+let variantSheetGeneration = 0;
 /** Precedence rank parallel to `variantStyleSheet.cssRules`. */
 const insertedRuleRanks: number[] = [];
+/** Carrying class parallel to `variantStyleSheet.cssRules`. */
+const insertedRuleClasses: string[] = [];
 
 /**
  * Get or create the variant stylesheet
@@ -91,10 +108,34 @@ function getVariantStyleSheet(): CSSStyleSheet {
     document.head.appendChild(style);
     variantStyleElement = style;
     variantStyleSheet = style.sheet as CSSStyleSheet;
-    insertedRules.clear();
+    managedRules.clear();
     insertedRuleRanks.length = 0;
+    insertedRuleClasses.length = 0;
+    variantSheetGeneration += 1;
   }
   return variantStyleSheet!;
+}
+
+/**
+ * Drop one reference to the rule `className` carries; delete the rule from
+ * the sheet when nobody wears the class any more. A class the bookkeeping
+ * does not know (its sheet was replaced since) is ignored.
+ */
+function releaseRule(className: string): void {
+  const entry = managedRules.get(className);
+  if (!entry) return;
+  entry.refs -= 1;
+  if (entry.refs > 0) return;
+  managedRules.delete(className);
+  const index = insertedRuleClasses.indexOf(className);
+  if (index === -1 || !variantStyleSheet) return;
+  try {
+    variantStyleSheet.deleteRule(index);
+    insertedRuleRanks.splice(index, 1);
+    insertedRuleClasses.splice(index, 1);
+  } catch (error) {
+    log.warn(`Could not retire variant rule "${entry.rule}"`, error);
+  }
 }
 
 /**
@@ -162,6 +203,10 @@ interface VariantMeta {
   bases: Set<string>;
   /** Qualified key (e.g. "opacity:hover", or "opacity" for the default) -> applied class. */
   classes: Map<string, string>;
+  /** Classes this element holds a reference on in `managedRules`. */
+  counted: Set<string>;
+  /** The `variantSheetGeneration` `counted` was recorded against. */
+  generation: number;
   /** Bases already warned about, so the warning fires once per element+base. */
   warned: Set<string>;
 }
@@ -306,8 +351,19 @@ export class ApplicatorRegistry {
   private getVariantMeta(element: HTMLElement): VariantMeta {
     let meta = this.variantMeta.get(element);
     if (!meta) {
-      meta = { bases: new Set(), classes: new Map(), warned: new Set() };
+      meta = {
+        bases: new Set(),
+        classes: new Map(),
+        warned: new Set(),
+        counted: new Set(),
+        generation: variantSheetGeneration,
+      };
       this.variantMeta.set(element, meta);
+    }
+    if (meta.generation !== variantSheetGeneration) {
+      // The sheet those references pointed into is gone.
+      meta.counted.clear();
+      meta.generation = variantSheetGeneration;
     }
     return meta;
   }
@@ -534,19 +590,21 @@ export class ApplicatorRegistry {
     const cssName = this.toKebabCase(base).replace(/[^a-zA-Z0-9-]/g, '');
     const tier =
       breakpoint && state ? `${breakpoint}-${state}` : breakpoint ?? state ?? "base";
-    const className = `hypen-${cssName}-${tier}-${hashValue(Object.values(decls).join('|'))}`;
-
     const body = Object.entries(decls)
       .map(([prop, value]) => `${prop}: ${value};`)
       .join(' ');
+    // Hash the whole body (properties and values): two props that happen to
+    // share a value must not share a class, or the second would wear the
+    // first's rule.
+    const className = `hypen-${cssName}-${tier}-${hashValue(body)}`;
     const selector = state ? `.${className}:${state}` : `.${className}`;
     const minWidth = breakpoint ? BREAKPOINTS[breakpoint] : undefined;
     const rule = minWidth
       ? `@media (min-width: ${minWidth}) { ${selector} { ${body} } }`
       : `${selector} { ${body} }`;
 
-    if (!insertedRules.has(rule)) {
-      const sheet = getVariantStyleSheet();
+    const sheet = getVariantStyleSheet();
+    if (!managedRules.has(className)) {
       try {
         const rank = front ? 0 : variantPrecedenceRank(breakpoint, state);
         const firstHigher = insertedRuleRanks.findIndex(
@@ -555,7 +613,8 @@ export class ApplicatorRegistry {
         const index = firstHigher === -1 ? sheet.cssRules.length : firstHigher;
         sheet.insertRule(rule, index);
         insertedRuleRanks.splice(index, 0, rank);
-        insertedRules.add(rule);
+        insertedRuleClasses.splice(index, 0, className);
+        managedRules.set(className, { rule, refs: 0 });
       } catch (error) {
         log.warn(`Could not insert variant rule for "${base}": ${rule}`, error);
         return;
@@ -568,18 +627,60 @@ export class ApplicatorRegistry {
   /**
    * Swap the class carrying `key`'s rule, dropping the previous one so a
    * changed value cannot leave two competing rules applied to the element.
+   * The previous class's rule is retired from the sheet when this element
+   * was its last wearer.
    */
   private setManagedClass(element: HTMLElement, key: string, className: string | null): void {
     const meta = this.getVariantMeta(element);
     const previous = meta.classes.get(key);
-    if (previous === className) return;
-    if (previous) element.classList.remove(previous);
-    if (className) {
-      element.classList.add(className);
-      meta.classes.set(key, className);
-    } else {
-      meta.classes.delete(key);
+    if (previous !== className) {
+      if (previous) {
+        element.classList.remove(previous);
+        this.uncount(meta, previous);
+      }
+      if (className) {
+        element.classList.add(className);
+        meta.classes.set(key, className);
+      } else {
+        meta.classes.delete(key);
+      }
     }
+    // Counted even when the class is unchanged: after a sheet reset the
+    // rule was just re-inserted with no wearers on record.
+    if (className) this.count(meta, className);
+  }
+
+  /** Take this element's reference on `className`'s rule, once. */
+  private count(meta: VariantMeta, className: string): void {
+    if (meta.counted.has(className)) return;
+    const entry = managedRules.get(className);
+    if (!entry) return;
+    entry.refs += 1;
+    meta.counted.add(className);
+  }
+
+  /** Give back this element's reference on `className`'s rule, if it holds one. */
+  private uncount(meta: VariantMeta, className: string): void {
+    if (!meta.counted.delete(className)) return;
+    releaseRule(className);
+  }
+
+  /**
+   * Drop every variant rule reference this element holds. The renderer
+   * calls it when the element leaves the tree for good, so a rule only one
+   * removed node ever used does not outlive the node. The classes stay on
+   * the element (it is being discarded); only the sheet-side counts move.
+   */
+  release(element: HTMLElement): void {
+    const meta = this.variantMeta.get(element);
+    if (!meta) return;
+    if (meta.generation === variantSheetGeneration) {
+      for (const className of meta.counted) {
+        releaseRule(className);
+      }
+    }
+    meta.counted.clear();
+    meta.classes.clear();
   }
 
   /** Warn once per element+base that a variant group cannot be honoured. */

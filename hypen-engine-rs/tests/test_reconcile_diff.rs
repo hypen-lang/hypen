@@ -2256,6 +2256,7 @@ fn test_foreach_removal_flags_exiting_item_root() {
         template: vec![IRNode::Element(template_root)],
         props: hypen_engine::ir::Props::new(),
         module_scope: None,
+        lazy: None,
     };
     let state = json!({"items": ["a", "b"]});
     reconcile_ir(&mut tree, &ir_node, None, &state, &mut dependencies);
@@ -2374,6 +2375,7 @@ fn foreach_under_column(template: Vec<IRNode>) -> IRNode {
         template,
         props: hypen_engine::ir::Props::new(),
         module_scope: None,
+        lazy: None,
     };
     let mut column = Element::new("Column");
     column.ir_children.push(foreach);

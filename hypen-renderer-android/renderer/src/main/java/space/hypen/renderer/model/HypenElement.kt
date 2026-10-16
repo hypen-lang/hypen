@@ -45,6 +45,15 @@ class HypenElement(
     private var propsState: Map<String, Any?> by mutableStateOf(LinkedHashMap(props))
 
     /**
+     * Prop writes of the patch batch in flight, collected into ONE copy of
+     * the map and published as one snapshot write at [commitStagedProps].
+     * Without staging, a batch that sets M props on a node with P props
+     * copied the map M times (O(M × P)) and bumped the revision M times.
+     * Readers inside the batch ([rawProps], [props]) see the staged values.
+     */
+    private var stagedProps: LinkedHashMap<String, Any?>? = null
+
+    /**
      * Presented values written by an in-flight `.transition` glide, keyed by
      * the same wire prop name (`backgroundColor.0`). They SHADOW the engine
      * values in [props] for the duration of the animation, so every consumer
@@ -79,18 +88,21 @@ class HypenElement(
 
     val props: Map<String, Any?>
         get() {
-            val raw = propsState
+            val staged = stagedProps
+            val raw = staged ?: propsState
             val overrides = animatedOverridesState
             val poses = poseOverridesState
             if (overrides.isEmpty() && poses.isEmpty()) return raw
-            val cached = mergedCache
+            // A staged map is mutated in place, so identity says nothing
+            // about its content: skip the memo until the batch commits.
+            val cached = if (staged == null) mergedCache else null
             if (cached != null && cached.raw === raw && cached.overrides === overrides && cached.poses === poses) {
                 return cached.merged
             }
             val merged = LinkedHashMap(raw)
             merged.putAll(overrides)
             merged.putAll(poses)
-            mergedCache = MergedProps(raw, overrides, poses, merged)
+            if (staged == null) mergedCache = MergedProps(raw, overrides, poses, merged)
             return merged
         }
 
@@ -99,7 +111,7 @@ class HypenElement(
      * driver reads targets from here — reading through [props] would return
      * its own in-flight presented value instead of the new target.
      */
-    val rawProps: Map<String, Any?> get() = propsState
+    val rawProps: Map<String, Any?> get() = stagedProps ?: propsState
 
     /**
      * Write (or clear, with [clearAnimatedOverride]) one presented value.
@@ -148,6 +160,11 @@ class HypenElement(
     val hasPoseOverrides: Boolean get() = poseOverridesState.isNotEmpty()
 
     internal fun setProp(name: String, value: Any?) {
+        val staged = stagedProps
+        if (staged != null) {
+            staged[name] = value
+            return
+        }
         val next = LinkedHashMap(propsState)
         next[name] = value
         propsState = next
@@ -155,6 +172,12 @@ class HypenElement(
 
     /** Removes a prop. Returns true if the prop existed. */
     internal fun removeProp(name: String): Boolean {
+        val staged = stagedProps
+        if (staged != null) {
+            if (!staged.containsKey(name)) return false
+            staged.remove(name)
+            return true
+        }
         if (!propsState.containsKey(name)) return false
         val next = LinkedHashMap(propsState)
         next.remove(name)
@@ -163,10 +186,98 @@ class HypenElement(
     }
 
     internal fun replaceProps(newProps: Map<String, Any?>) {
+        stagedProps = null
         propsState = LinkedHashMap(newProps)
     }
 
+    /**
+     * Start collecting this element's prop writes for the batch in flight.
+     * Idempotent; the first call copies the current map once.
+     */
+    internal fun beginPropStaging() {
+        if (stagedProps == null) stagedProps = LinkedHashMap(propsState)
+    }
+
+    /**
+     * Publish the staged writes as one snapshot write and one revision
+     * bump. Returns false when nothing was staged.
+     */
+    internal fun commitStagedProps(): Boolean {
+        val staged = stagedProps ?: return false
+        stagedProps = null
+        propsState = staged
+        bumpPropsRevision()
+        return true
+    }
+
+    /** True while prop writes are being staged for a batch. */
+    internal val isStagingProps: Boolean get() = stagedProps != null
+
+    /**
+     * Composition-facing child order. Containers read it (and `items(key =
+     * …)` keys off it), so every write is a snapshot write; the canonical
+     * order lives in [order] and reaches this list through [commitChildren]
+     * — one write per batch per parent, however many patches moved its rows.
+     */
     val children: SnapshotStateList<String> = stateListOf(children)
+
+    /**
+     * Canonical child order as a linked list keyed by id: O(1) insert-before,
+     * append and remove, and one O(n) materialisation per batch. Renderer
+     * code that reads children while a batch is being applied must read
+     * [childIds] (this order), never [children], which lags until commit.
+     */
+    private val order = ChildOrder(children)
+
+    /** Child ids in order, as of the latest write (staged or committed). */
+    val childIds: List<String> get() = order.toList()
+
+    /** Structural writes staged since the last [commitChildren]. */
+    private var pendingChildOps: ArrayList<ChildOp>? = null
+
+    /** Start staging structural writes for the batch in flight. Idempotent. */
+    internal fun beginChildStaging() {
+        if (pendingChildOps == null) pendingChildOps = ArrayList(2)
+    }
+
+    /**
+     * Mirror the staged structural writes into [children]: a lone write is
+     * replayed as the same single list operation it would have been, a
+     * dense batch (a reorder, a page of inserts) replaces the contents in
+     * one pass instead of one scan-and-shift per patch. Returns false when
+     * nothing was staged.
+     */
+    internal fun commitChildren(): Boolean {
+        val ops = pendingChildOps ?: return false
+        pendingChildOps = null
+        when (ops.size) {
+            0 -> return false
+            1 -> applyChildOp(ops[0])
+            else -> {
+                children.clear()
+                children.addAll(order.toList())
+            }
+        }
+        return true
+    }
+
+    private fun applyChildOp(op: ChildOp) {
+        when (op) {
+            is ChildOp.Add -> {
+                val before = op.beforeId
+                val at = if (before != null) children.indexOf(before) else -1
+                children.remove(op.id)
+                if (at >= 0) children.add(at.coerceAtMost(children.size), op.id) else children.add(op.id)
+            }
+            is ChildOp.Remove -> children.remove(op.id)
+            ChildOp.Clear -> children.clear()
+        }
+    }
+
+    private fun stageOrApply(op: ChildOp) {
+        val ops = pendingChildOps
+        if (ops != null) ops.add(op) else applyChildOp(op)
+    }
 
     var parentId: String? = parentId
 
@@ -188,29 +299,26 @@ class HypenElement(
         propsRevisionState.intValue++
     }
 
-    // Mirrors [children] for O(1) membership checks while building
-    // large child lists from INSERT/ATTACH patches.
-    private val childIdSet = HashSet(children)
-
     internal fun addChild(childId: String, beforeId: String?) {
         if (beforeId != null) {
-            val index = children.indexOf(beforeId)
-            if (index >= 0) children.add(index, childId) else children.add(childId)
-            childIdSet.add(childId)
-        } else if (childIdSet.add(childId)) {
-            children.add(childId)
+            order.insertBefore(childId, beforeId)
+            stageOrApply(ChildOp.Add(childId, beforeId))
+        } else if (!order.contains(childId)) {
+            order.append(childId)
+            stageOrApply(ChildOp.Add(childId, null))
         }
     }
 
     internal fun removeChild(childId: String) {
-        if (childIdSet.remove(childId)) {
-            children.remove(childId)
+        if (order.remove(childId)) {
+            stageOrApply(ChildOp.Remove(childId))
         }
     }
 
     internal fun clearChildren() {
-        childIdSet.clear()
-        children.clear()
+        if (order.size == 0) return
+        order.clear()
+        stageOrApply(ChildOp.Clear)
     }
 
     /**
@@ -372,5 +480,91 @@ data class ActionValue(
 
             return ActionValue(parsed.actionName, payload)
         }
+    }
+}
+
+/** One staged structural write on a parent's child list. */
+internal sealed class ChildOp {
+    data class Add(val id: String, val beforeId: String?) : ChildOp()
+    data class Remove(val id: String) : ChildOp()
+    data object Clear : ChildOp()
+}
+
+/**
+ * Insertion-ordered set of child ids as a doubly linked list over two hash
+ * maps: insert-before, append and remove are O(1), membership is O(1), and
+ * the ordered list is materialised on demand and cached until the next
+ * write. A batch of M moves under one parent of N children costs O(M + N)
+ * instead of the O(M × N) scan-and-shift of a plain list.
+ */
+internal class ChildOrder(initial: List<String>) {
+    private val next = HashMap<String, String?>()
+    private val prev = HashMap<String, String?>()
+    private var head: String? = null
+    private var tail: String? = null
+    private var cache: List<String>? = null
+
+    init {
+        for (id in initial) append(id)
+    }
+
+    val size: Int get() = next.size
+
+    fun contains(id: String): Boolean = next.containsKey(id)
+
+    fun append(id: String) {
+        if (contains(id)) remove(id)
+        val last = tail
+        prev[id] = last
+        next[id] = null
+        if (last != null) next[last] = id else head = id
+        tail = id
+        cache = null
+    }
+
+    /** Insert before [beforeId]; appends when the anchor is unknown. */
+    fun insertBefore(id: String, beforeId: String) {
+        if (id == beforeId) return
+        if (!contains(beforeId)) {
+            append(id)
+            return
+        }
+        if (contains(id)) remove(id)
+        val before = prev[beforeId]
+        prev[id] = before
+        next[id] = beforeId
+        prev[beforeId] = id
+        if (before != null) next[before] = id else head = id
+        cache = null
+    }
+
+    fun remove(id: String): Boolean {
+        if (!contains(id)) return false
+        val p = prev.remove(id)
+        val n = next.remove(id)
+        if (p != null) next[p] = n else head = n
+        if (n != null) prev[n] = p else tail = p
+        cache = null
+        return true
+    }
+
+    fun clear() {
+        next.clear()
+        prev.clear()
+        head = null
+        tail = null
+        cache = null
+    }
+
+    fun toList(): List<String> {
+        cache?.let { return it }
+        val out = ArrayList<String>(next.size)
+        var cur = head
+        while (cur != null) {
+            out.add(cur)
+            cur = next[cur]
+        }
+        cache = out
+        return out
     }
 }

@@ -76,6 +76,25 @@ struct CachedSubtree {
     /// paint-only patch batch drops exactly the entries whose id set
     /// intersects the affected nodes instead of the whole cache.
     item_ids: Vec<String>,
+    /// Image sources this fragment asked for and did NOT get while it
+    /// was being encoded (still fetching, or failed): every one of
+    /// them drew nothing. The fragment is exact until one of them
+    /// resolves, so an image landing anywhere else in the page leaves
+    /// it alone — see the image-load check in `build_scene`. Empty for
+    /// the overwhelming majority of fragments (bitmap-bearing items are
+    /// painted outside the cache; only a Video poster reaches here).
+    awaiting_images: Vec<String>,
+    /// Digest of the geometry the fragment was encoded for (every
+    /// item's rect, clip and transform, relative to the first item's
+    /// y). A fragment that survived a structural batch
+    /// (`invalidate_structural`) must match this against the new
+    /// layout before it replays — see `validated_epoch`.
+    geometry: u64,
+    /// The `VelloPainter::structural_epoch` this fragment's geometry was
+    /// last confirmed for. Equal to the painter's: trusted. Behind it: a
+    /// structural batch landed since, so the next hit re-digests the
+    /// current items and either re-confirms or misses.
+    validated_epoch: u64,
     /// The first item's cumulative transform at encode time. The
     /// splice-on-hit is a pure y-translate, which is only valid when
     /// the CURRENT transform is that translate's conjugation of this
@@ -125,6 +144,17 @@ pub struct VelloPainter {
     /// the user resized the window (which dropped the cache as a
     /// side-effect of the viewport change).
     last_image_load_gen: u64,
+    /// Sources `draw_image` (or the Video poster path) looked up and
+    /// missed while the current subtree fragment was being encoded.
+    /// Cleared at the start of a cache-miss encode and moved into the
+    /// new `CachedSubtree::awaiting_images` at its end; pushes outside
+    /// an encode are discarded by the next clear.
+    encoding_awaits: Vec<String>,
+    /// Bumped by every `invalidate_structural`. Fragments stamped with
+    /// an older epoch re-validate their geometry on their next hit,
+    /// whenever that is — a fragment that scrolled off before the batch
+    /// and back in three frames later still gets checked.
+    structural_epoch: u64,
     /// Renderer node ids the drag-and-drop runtime wants painted LAST
     /// (the lifted item and its subtree — `DesktopDnd::raised_ids`), so
     /// the ghost floats above its siblings while it is dragged / held.
@@ -186,6 +216,8 @@ impl VelloPainter {
             subtree_cache: indexmap::IndexMap::new(),
             last_viewport: None,
             last_image_load_gen: 0,
+            encoding_awaits: Vec::new(),
+            structural_epoch: 0,
             #[cfg(feature = "dev-overlay")]
             dev_overlay: None,
             device_overlay: None,
@@ -229,6 +261,23 @@ impl VelloPainter {
         }
         self.subtree_cache
             .retain(|_, entry| !entry.item_ids.iter().any(|id| affected.contains(id)));
+    }
+
+    /// A structural batch landed (`window::structural_fragment_invalidation`
+    /// decided what it touched): drop the fragments that encoded one of
+    /// `dropped`, keep every other fragment, and require each survivor
+    /// to re-prove its geometry against the new layout before it
+    /// replays. Rects can shift anywhere after a structural change (a
+    /// removed sibling moves everything below it); a survivor whose
+    /// items still sit where they did relative to one another replays
+    /// through the usual y-translate, one whose geometry changed misses
+    /// and re-encodes.
+    pub fn invalidate_structural(&mut self, dropped: &std::collections::HashSet<String>) {
+        if !dropped.is_empty() {
+            self.subtree_cache
+                .retain(|_, entry| !entry.item_ids.iter().any(|id| dropped.contains(id)));
+        }
+        self.structural_epoch = self.structural_epoch.wrapping_add(1);
     }
 
     #[cfg(test)]
@@ -304,15 +353,24 @@ impl VelloPainter {
             self.last_viewport = Some(viewport);
         }
         // Image worker landed one or more fetches since the last
-        // build. Any subtree whose images were `Loading` at encode
-        // time would have rendered nothing for that Image, so we
-        // drop the cache and let those subtrees re-encode with the
-        // now-loaded bitmap. The cheap monotonic check here keeps
-        // the steady-state hot path (no fetches in flight) free of
-        // cost: AtomicU64 load + integer compare.
+        // build. A subtree whose images were `Loading` at encode time
+        // rendered nothing for that Image, so it must re-encode with
+        // the now-loaded bitmap — but ONLY that subtree. Each fragment
+        // remembers the sources it missed (`awaiting_images`); one
+        // whose list is empty, or whose awaited sources are all still
+        // unloaded, is exact and stays. Dropping everything here used
+        // to make one thumbnail landing in a 600-post feed re-encode
+        // every visible card. The cheap monotonic check keeps the
+        // steady-state hot path (no fetches in flight) free of cost:
+        // AtomicU64 load + integer compare.
         let load_gen = crate::paint::image::image_load_generation();
         if load_gen != self.last_image_load_gen {
-            self.subtree_cache.clear();
+            self.subtree_cache.retain(|_, entry| {
+                !entry
+                    .awaiting_images
+                    .iter()
+                    .any(|src| crate::paint::image::loaded_source(src).is_some())
+            });
             self.last_image_load_gen = load_gen;
         }
 
@@ -644,8 +702,18 @@ impl VelloPainter {
         // method on `self` (that would mutably borrow ALL of self
         // and break the disjointness). We inline the push/append/
         // pop here instead.
-        if let Some(cached) = self.subtree_cache.get(&key) {
+        if let Some(cached) = self.subtree_cache.get_mut(&key) {
             let dy = current_origin_y - cached.origin_y;
+            // A structural batch landed since this fragment was last
+            // confirmed: the items may have moved relative to one
+            // another, so re-digest them before trusting the replay.
+            let geometry_holds = cached.validated_epoch == self.structural_epoch || {
+                let holds = cached.geometry == fragment_geometry_digest(items);
+                if holds {
+                    cached.validated_epoch = self.structural_epoch;
+                }
+                holds
+            };
             // Splice validity: the y-translate replay is exact iff the
             // first item's current cumulative transform is the cached
             // one conjugated by that translate (see
@@ -657,7 +725,8 @@ impl VelloPainter {
             let splice_valid = items[0]
                 .transform
                 .approx_eq(&cached.transform.conjugate_translate(0.0, dy), 1e-3);
-            if cached.clip_to == outer_clip
+            if geometry_holds
+                && cached.clip_to == outer_clip
                 && cached.clip_radius == outer_clip_radius
                 && splice_valid
             {
@@ -684,10 +753,12 @@ impl VelloPainter {
         // without refactoring every draw helper to take a Scene
         // parameter — swap, draw, swap back.
         let prev_scene = std::mem::replace(&mut self.scene, Scene::new());
+        self.encoding_awaits.clear();
         for item in items {
             self.draw_item_no_outer_clip(item, scale_factor, outer_clip, outer_clip_radius);
         }
         let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
+        let awaiting_images = std::mem::take(&mut self.encoding_awaits);
 
         // A same-key miss (splice-invalid re-encode of an existing
         // entry) replaces in place — evicting first would drop an
@@ -703,6 +774,9 @@ impl VelloPainter {
                 clip_to: outer_clip,
                 clip_radius: outer_clip_radius,
                 item_ids: items.iter().map(|it| it.node_id.clone()).collect(),
+                awaiting_images,
+                geometry: fragment_geometry_digest(items),
+                validated_epoch: self.structural_epoch,
                 transform: items[0].transform,
             },
         );
@@ -1445,7 +1519,11 @@ impl VelloPainter {
                             .as_deref()
                             .map(|p| {
                                 crate::paint::image::ensure_loaded_public(p);
-                                crate::paint::image::loaded_source(p).is_some()
+                                let ready = crate::paint::image::loaded_source(p).is_some();
+                                if !ready {
+                                    self.note_awaiting_image(p);
+                                }
+                                ready
                             })
                             .unwrap_or(false);
                     if poster_ready {
@@ -2011,6 +2089,15 @@ impl VelloPainter {
         self.scene.pop_layer();
     }
 
+    /// Record that the fragment being encoded asked for `src` and drew
+    /// nothing because it is not decoded yet. See
+    /// `CachedSubtree::awaiting_images`.
+    fn note_awaiting_image(&mut self, src: &str) {
+        if !self.encoding_awaits.iter().any(|s| s == src) {
+            self.encoding_awaits.push(src.to_string());
+        }
+    }
+
     fn draw_image(
         &mut self,
         rect: LayoutRect,
@@ -2043,6 +2130,7 @@ impl VelloPainter {
                 crate::paint::image::loaded_source(src)
             });
             let Some(pm) = pm else {
+                self.note_awaiting_image(src);
                 return;
             };
             let img = pixmap_to_peniko(&pm);
@@ -2705,6 +2793,41 @@ fn subtree_bounding_rect(items: &[crate::layout::LayoutItem]) -> LayoutRect {
 /// same key iff their root + interaction-overlap is identical; under a
 /// single `tree_generation`, that's exactly the set of inputs the
 /// cached encoding depends on.
+/// Everything a fragment replay assumes about its items' placement:
+/// each rect relative to the first item's y (so a uniform shift — the
+/// replay's translate — leaves it unchanged), each clip rect as is (the
+/// scrollable's own rect does not move with its content; the hit path
+/// compares the outer clip the same way) and radius, and the cumulative
+/// transform. Paint content is not here — a changed node's fragment is
+/// dropped by id instead (`invalidate_structural`).
+fn fragment_geometry_digest(items: &[crate::layout::LayoutItem]) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let origin_y = items.first().map(|it| it.rect.y).unwrap_or(0.0);
+    let rect = |h: &mut std::collections::hash_map::DefaultHasher, r: &LayoutRect, dy: f32| {
+        h.write_u32(r.x.to_bits());
+        h.write_u32((r.y - dy).to_bits());
+        h.write_u32(r.w.to_bits());
+        h.write_u32(r.h.to_bits());
+    };
+    h.write_usize(items.len());
+    for item in items {
+        rect(&mut h, &item.rect, origin_y);
+        match &item.clip_to {
+            Some(clip) => {
+                h.write_u8(1);
+                rect(&mut h, clip, 0.0);
+            }
+            None => h.write_u8(0),
+        }
+        h.write_u32(item.clip_radius.to_bits());
+        for v in item.transform.0 {
+            h.write_u32(v.to_bits());
+        }
+    }
+    h.finish()
+}
+
 fn subtree_cache_key(
     root_id: &str,
     items: &[crate::layout::LayoutItem],
@@ -3477,6 +3600,55 @@ mod tests {
         assert_eq!(painter.subtree_cache_hits(), 3);
     }
 
+    /// An image fetch landing used to drop EVERY cached fragment. Only a
+    /// fragment that drew nothing for a source it was waiting on can be
+    /// stale, and only once that source is decoded — the other cards in
+    /// the feed keep their encodings.
+    #[test]
+    fn image_load_only_reencodes_fragments_that_awaited_the_landed_source() {
+        use std::sync::Arc;
+        let late = "test://vello-painter-late-poster";
+        let mut layout = three_post_layout();
+        // Bitmap-bearing items paint outside the cache; a Video poster is
+        // the one image a cached fragment itself looks up.
+        layout.items[1].kind = ItemKind::Video {
+            poster: Some(late.to_string()),
+            src: None,
+            state: Default::default(),
+            slots: Default::default(),
+        };
+        let mut painter = VelloPainter::new();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 3);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Some other image landed: nothing these fragments awaited has
+        // resolved, so every one of them replays.
+        crate::paint::image::bump_image_load_generation_for_test();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 3);
+        assert_eq!(painter.subtree_cache_hits(), 3);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // The poster lands: exactly the fragment that drew nothing for
+        // it re-encodes; its two neighbours still hit.
+        let mut pm = tiny_skia::Pixmap::new(16, 16).expect("alloc poster pixmap");
+        pm.fill(tiny_skia::Color::from_rgba8(0x10, 0x20, 0x30, 0xff));
+        crate::paint::image::test_seed_decoded(late, Arc::new(pm));
+        crate::paint::image::bump_image_load_generation_for_test();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 4);
+        assert_eq!(painter.subtree_cache_hits(), 5);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Re-encoded against the decoded poster, the fragment awaits
+        // nothing: further loads leave it alone too.
+        crate::paint::image::bump_image_load_generation_for_test();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 4);
+        assert_eq!(painter.subtree_cache_hits(), 8);
+    }
+
     #[test]
     fn subtree_cache_reencodes_when_rounded_clip_changes() {
         let mut painter = VelloPainter::new();
@@ -3551,6 +3723,86 @@ mod tests {
         unknown.insert("ghost".to_string());
         painter.invalidate_subtrees_containing(&unknown);
         assert_eq!(painter.subtree_cache_len(), 3);
+    }
+
+    /// After a structural batch, fragments that encoded a patched node
+    /// are dropped; every other fragment stays and replays once its
+    /// geometry is re-confirmed against the new layout — a uniform shift
+    /// (the posts below a removed one moving up) still replays through
+    /// the translate, a reshaped fragment misses.
+    #[test]
+    fn structural_invalidation_keeps_fragments_whose_geometry_holds() {
+        let mut painter = VelloPainter::new();
+        let mut layout = three_post_layout();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // post_b was patched; post_c shifted up as a whole (its row
+        // above it got shorter) — relative geometry unchanged.
+        let mut dropped = std::collections::HashSet::new();
+        dropped.insert("post_b".to_string());
+        painter.invalidate_structural(&dropped);
+        assert_eq!(painter.subtree_cache_len(), 2);
+        layout.items[2].rect.y -= 40.0;
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(
+            painter.subtree_cache_hits(),
+            2,
+            "post_a and the shifted post_c replay"
+        );
+        assert_eq!(painter.subtree_cache_misses(), 4, "only post_b re-encodes");
+        assert_eq!(painter.subtree_cache_len(), 3);
+
+        // Confirmed once, a survivor is trusted on later frames without
+        // re-digesting (same hit count growth as a plain scroll frame).
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 5);
+        assert_eq!(painter.subtree_cache_misses(), 4);
+
+        // Another structural batch touches nothing by id, but post_c
+        // got wider: its fragment fails validation and re-encodes;
+        // the others re-confirm and replay.
+        painter.invalidate_structural(&std::collections::HashSet::new());
+        assert_eq!(painter.subtree_cache_len(), 3);
+        layout.items[2].rect.w += 30.0;
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 7);
+        assert_eq!(painter.subtree_cache_misses(), 5);
+        assert_eq!(painter.subtree_cache_len(), 3);
+    }
+
+    /// Validation is owed per fragment, not per frame: a fragment that was
+    /// off screen during the frame right after the structural batch is
+    /// still checked when it next comes into view.
+    #[test]
+    fn structural_validation_waits_for_an_offscreen_fragment() {
+        let mut painter = VelloPainter::new();
+        let mut layout = three_post_layout();
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_misses(), 3);
+
+        // post_c reshaped AND scrolled far off screen in the same batch.
+        painter.invalidate_structural(&std::collections::HashSet::new());
+        layout.items[2].rect.w += 30.0;
+        layout.items[2].rect.y += 5000.0;
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 2);
+        assert_eq!(
+            painter.subtree_cache_misses(),
+            3,
+            "post_c was culled, not encoded"
+        );
+
+        // Back on screen, still reshaped: the stale fragment must not
+        // replay just because the validation frame has passed.
+        layout.items[2].rect.y -= 5000.0;
+        painter.build_scene(&layout, (800, 600), 1.0, 0.0);
+        assert_eq!(painter.subtree_cache_hits(), 4);
+        assert_eq!(
+            painter.subtree_cache_misses(),
+            4,
+            "post_c re-encodes on return"
+        );
     }
 
     #[test]

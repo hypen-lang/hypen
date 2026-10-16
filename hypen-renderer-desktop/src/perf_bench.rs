@@ -1506,3 +1506,248 @@ fn perf_bench_resize_scaling_nodes() {
         );
     }
 }
+
+// ── Audit measurements (8 Oct 2026): desktop #1 and the layout half of #3 ──
+
+/// Build the frame fixture at one tier: the laid-out pass and a painter
+/// with the scene already encoded once (warm fragment cache).
+#[allow(clippy::type_complexity)]
+fn tier_fixture(
+    posts: usize,
+    density: u8,
+    viewport: (u32, u32),
+    scale: f32,
+) -> (Tree, TaffyState, VelloPainter, LayoutPass, usize) {
+    let batch = feed_batch_dense(posts, density);
+    let node_count = batch
+        .iter()
+        .filter(|p| matches!(p, Patch::Create { .. }))
+        .count();
+    let vp_logical = crate::layout::logical_viewport(viewport, scale);
+    let mut tree = Tree::new();
+    let mut taffy = TaffyState::new();
+    tree.apply_batch(&batch);
+    if !taffy.apply_patches(&batch, &tree, scale, vp_logical) {
+        taffy.mark_needs_rebuild();
+    }
+    let mut painter = VelloPainter::new();
+    let scrolls: HashMap<String, f32> = HashMap::new();
+    let pass = {
+        let text = painter.text_engine_mut();
+        LayoutPass::compute_with_state(&mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, 0)
+    };
+    let _ = painter.build_scene(&pass, viewport, scale, 0.0);
+    (tree, taffy, painter, pass, node_count)
+}
+
+const PERF_TIERS: [(&str, usize, u8); 3] = [
+    ("light,  20 posts", 20, 0),
+    ("medium, 150 posts", 150, 1),
+    ("heavy,  600 double-dense posts", 600, 2),
+];
+const PERF_VIEWPORTS: [(&str, (u32, u32), f32); 3] = [
+    ("800x600 @1x", (800, 600), 1.0),
+    ("2K 2560x1440 @1x", (2560, 1440), 1.0),
+    ("4K 3840x2160 @2x", (3840, 2160), 2.0),
+];
+
+/// Audit desktop #1: "measure scene encode versus GPU time". Renders the
+/// encoded scene through Vello on a headless device (no window, no
+/// swapchain blit) and waits for the GPU to finish, so the number is the
+/// full Vello pipeline for that frame. Compared against the warm scene
+/// encode of the same frame, printed alongside.
+#[test]
+#[ignore = "manual perf benchmark (needs a GPU)"]
+fn perf_bench_gpu_present() {
+    use vello::{AaConfig, AaSupport, Renderer, RendererOptions};
+    let mut ctx = vello::util::RenderContext::new();
+    let dev_id = pollster::block_on(ctx.device(None)).expect("a GPU adapter");
+    let handle = &ctx.devices[dev_id];
+    let device = &handle.device;
+    let queue = &handle.queue;
+    let mut renderer = Renderer::new(
+        device,
+        RendererOptions {
+            use_cpu: false,
+            antialiasing_support: AaSupport::area_only(),
+            num_init_threads: std::num::NonZeroUsize::new(1),
+            pipeline_cache: None,
+        },
+    )
+    .expect("vello renderer");
+
+    for (vname, viewport, scale) in PERF_VIEWPORTS {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("perf target"),
+            size: wgpu::Extent3d {
+                width: viewport.0,
+                height: viewport.1,
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: wgpu::TextureFormat::Rgba8Unorm,
+            usage: wgpu::TextureUsages::STORAGE_BINDING | wgpu::TextureUsages::TEXTURE_BINDING,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let params = vello::RenderParams {
+            base_color: vello::peniko::Color::from_rgba8(0xfb, 0xfb, 0xfd, 0xff),
+            width: viewport.0,
+            height: viewport.1,
+            antialiasing_method: AaConfig::Area,
+        };
+        for (tname, posts, density) in PERF_TIERS {
+            let (_tree, _taffy, mut painter, pass, node_count) =
+                tier_fixture(posts, density, viewport, scale);
+            let items = pass.items.len();
+            let ctx_label =
+                format!("{vname} | {tname} ({node_count} nodes, {items} items on screen)");
+            time_it(&format!("scene encode WARM | {ctx_label}"), 2, 10, || {
+                std::hint::black_box(painter.build_scene(&pass, viewport, scale, 0.0));
+            });
+            let scene = painter.build_scene(&pass, viewport, scale, 0.0);
+            time_it(
+                &format!("gpu render (vello, wait) | {ctx_label}"),
+                3,
+                10,
+                || {
+                    renderer
+                        .render_to_texture(device, queue, scene, &view, &params)
+                        .expect("render");
+                    device
+                        .poll(wgpu::PollType::wait_indefinitely())
+                        .expect("gpu idle");
+                },
+            );
+        }
+    }
+}
+
+/// Audit desktop #3, the layout half: what a STRUCTURAL batch (one post
+/// inserted into the feed) costs per stage, now that the painter keeps
+/// its fragments across it. Stages: Tree + Taffy mirror, the full
+/// LayoutPass recompute (Taffy solve + emit + indexes + a11y), the scoped
+/// painter invalidation, and the scene encode — against the same encode
+/// after the pre-change full fragment drop.
+#[test]
+#[ignore = "manual perf benchmark"]
+fn perf_bench_structural_insert() {
+    for (vname, viewport, scale) in PERF_VIEWPORTS {
+        for (tname, posts, density) in PERF_TIERS {
+            let (mut tree, mut taffy, mut painter, mut pass, node_count) =
+                tier_fixture(posts, density, viewport, scale);
+            let vp_logical = crate::layout::logical_viewport(viewport, scale);
+            let scrolls: HashMap<String, f32> = HashMap::new();
+            let items = pass.items.len();
+            let ctx_label =
+                format!("{vname} | {tname} ({node_count} nodes, {items} items on screen)");
+            let runs = 10;
+            let mut stage: [Vec<Duration>; 5] = Default::default();
+            let mut generation = 1u64;
+            for k in 0..(runs + 2) {
+                let post = format!("ins{k}");
+                let name = format!("insname{k}");
+                let body = format!("insbody{k}");
+                let batch = vec![
+                    create(
+                        &post,
+                        "Container",
+                        &[
+                            ("padding", json!(12.0)),
+                            ("gap", json!(6.0)),
+                            ("backgroundColor", json!("#ffffff")),
+                        ],
+                    ),
+                    Patch::Insert {
+                        parent_id: "feed".into(),
+                        id: post.as_str().into(),
+                        before_id: Some("post3".into()),
+                    },
+                    create(
+                        &name,
+                        "Text",
+                        &[
+                            ("0", json!(format!("New poster {k}"))),
+                            ("fontSize", json!(15.0)),
+                        ],
+                    ),
+                    insert(&post, &name),
+                    create(
+                        &body,
+                        "Text",
+                        &[
+                            (
+                                "0",
+                                json!("A freshly inserted post that shifts everything below it."),
+                            ),
+                            ("fontSize", json!(14.0)),
+                        ],
+                    ),
+                    insert(&post, &body),
+                ];
+                // 0: tree + taffy mirror
+                let t = Instant::now();
+                tree.apply_batch(&batch);
+                if !taffy.apply_patches(&batch, &tree, scale, vp_logical) {
+                    taffy.mark_needs_rebuild();
+                }
+                let d0 = t.elapsed();
+                // 1: full layout pass recompute
+                let t = Instant::now();
+                generation += 1;
+                {
+                    let text = painter.text_engine_mut();
+                    pass = LayoutPass::compute_with_state(
+                        &mut taffy, &tree, text, viewport, scale, 0.0, &scrolls, generation,
+                    );
+                }
+                let d1 = t.elapsed();
+                // 2: scoped painter invalidation + 3: encode after it
+                let t = Instant::now();
+                match crate::window::structural_fragment_invalidation(
+                    &batch,
+                    &[],
+                    &tree,
+                    vp_logical,
+                ) {
+                    Some(dropped) => painter.invalidate_structural(&dropped),
+                    None => painter.invalidate_subtree_cache(),
+                }
+                let d2 = t.elapsed();
+                let t = Instant::now();
+                std::hint::black_box(painter.build_scene(&pass, viewport, scale, 0.0));
+                let d3 = t.elapsed();
+                // 4: the pre-change recipe for comparison — drop every
+                // fragment, encode the whole visible scene again.
+                painter.invalidate_subtree_cache();
+                let t = Instant::now();
+                std::hint::black_box(painter.build_scene(&pass, viewport, scale, 0.0));
+                let d4 = t.elapsed();
+                if k >= 2 {
+                    for (i, d) in [d0, d1, d2, d3, d4].into_iter().enumerate() {
+                        stage[i].push(d);
+                    }
+                }
+            }
+            let median = |v: &mut Vec<Duration>| {
+                v.sort();
+                v[v.len() / 2]
+            };
+            let [m0, m1, m2, m3, m4] = [
+                median(&mut stage[0]),
+                median(&mut stage[1]),
+                median(&mut stage[2]),
+                median(&mut stage[3]),
+                median(&mut stage[4]),
+            ];
+            println!(
+                "[perf] frame insert | {ctx_label}: tree+taffy {m0:>9.3?}  layout pass {m1:>9.3?}  \
+                 scoped drop {m2:>9.3?}  encode after scoped drop {m3:>9.3?}  \
+                 encode after full drop {m4:>9.3?}  total(scoped) {:>9.3?}",
+                m0 + m1 + m2 + m3
+            );
+        }
+    }
+}

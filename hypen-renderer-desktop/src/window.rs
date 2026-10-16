@@ -1483,7 +1483,28 @@ impl App {
             None => {
                 self.tree_generation = self.tree_generation.wrapping_add(1);
                 self.layout = None;
-                self.painter.invalidate_subtree_cache();
+                // The layout pass is dropped wholesale (FLIP needs the
+                // fresh miss, see above), but the painter's fragments
+                // survive where they can: only the fragments that
+                // encoded a patched node (or a descendant of one) go,
+                // and every survivor re-proves its geometry against the
+                // new pass on the next build before it replays. An
+                // insert into a 600-post feed then re-encodes the
+                // changed card and lets the 380 untouched ones shift.
+                let scoped = if self.has_media_nodes {
+                    None
+                } else {
+                    structural_fragment_invalidation(
+                        &outcome.forwarded,
+                        &outcome.restyle,
+                        &self.tree,
+                        viewport,
+                    )
+                };
+                match scoped {
+                    Some(dropped) => self.painter.invalidate_structural(&dropped),
+                    None => self.painter.invalidate_subtree_cache(),
+                }
             }
         }
         // Rolling 1-second flush-rate counter. The engine sending
@@ -4271,8 +4292,12 @@ pub(crate) fn paint_only_affected_ids(
                 }
                 id
             }
-            // Accessibility-only; repaints nothing.
-            Patch::SetSemantics { .. } => continue,
+            // Accessibility-only; repaints nothing, but the pass's a11y
+            // map is patched per affected id, so the node must be in.
+            Patch::SetSemantics { id, .. } => {
+                affected.insert(id.to_string());
+                continue;
+            }
             _ => return None,
         };
         let mut stack: Vec<&str> = vec![id.as_ref()];
@@ -4283,6 +4308,90 @@ pub(crate) fn paint_only_affected_ids(
         }
     }
     Some(affected)
+}
+
+/// Painter-fragment invalidation for a batch the paint-only classifier
+/// rejected. Returns the node ids whose fragments must be dropped, or
+/// `None` when the whole fragment cache has to go.
+///
+/// What a structural batch can change for a cached fragment:
+/// - the paint of a patched node (`SetProp` / `RemoveProp` / `SetText`,
+///   and the animator's end-of-batch `restyle` writes) and, through
+///   inheritance, of its descendants → every fragment holding one of
+///   them is dropped. A patched node with no scrollable ancestor sits
+///   above every subtree root, so its inheritance can reach any
+///   fragment: the cache is cleared.
+/// - the geometry of anything at all (a removed sibling shifts the
+///   rest) → not decided here: the painter re-validates each survivor's
+///   geometry digest against the new layout before replaying it
+///   (`VelloPainter::invalidate_structural`).
+/// - membership of a subtree (insert / remove / move / detach / attach)
+///   → the moved node's own fragments are dropped; a fragment whose run
+///   gained or lost an item misses on its membership key anyway.
+pub(crate) fn structural_fragment_invalidation(
+    forwarded: &[Patch],
+    restyle: &[String],
+    tree: &Tree,
+    viewport: crate::style::Viewport,
+) -> Option<HashSet<String>> {
+    let mut dropped: HashSet<String> = HashSet::new();
+    let mut paint_roots: Vec<&str> = restyle.iter().map(String::as_str).collect();
+    for patch in forwarded {
+        match patch {
+            Patch::SetProp { id, .. } | Patch::RemoveProp { id, .. } | Patch::SetText { id, .. } => {
+                paint_roots.push(id.as_ref());
+            }
+            Patch::Insert { id, .. }
+            | Patch::Move { id, .. }
+            | Patch::Remove { id, .. }
+            | Patch::Detach { id }
+            | Patch::Attach { id, .. } => {
+                dropped.insert(id.to_string());
+            }
+            // Not yet in any fragment (Create / Instantiate / template
+            // registration) or paints nothing (semantics, animation stamp).
+            Patch::Create { .. }
+            | Patch::Instantiate { .. }
+            | Patch::RegisterTemplate { .. }
+            | Patch::SetSemantics { .. }
+            | Patch::BatchAnimation { .. } => {}
+        }
+    }
+    for root in paint_roots {
+        if !has_scrollable_ancestor(tree, root, viewport) {
+            return None;
+        }
+        let mut stack: Vec<&str> = vec![root];
+        while let Some(cur) = stack.pop() {
+            if dropped.insert(cur.to_string()) {
+                stack.extend(tree.children_of(cur).iter().map(String::as_str));
+            }
+        }
+    }
+    Some(dropped)
+}
+
+/// Whether some strict ancestor of `id` is a scrollable container — i.e.
+/// the node lives inside a painter subtree (one of the direct children of
+/// that scrollable is its subtree root). A node that is not in the tree
+/// counts as inside: it can inherit nothing to anyone.
+fn has_scrollable_ancestor(tree: &Tree, id: &str, viewport: crate::style::Viewport) -> bool {
+    if tree.get(id).is_none() {
+        return true;
+    }
+    let mut cur = tree.parent_of(id);
+    while let Some(parent) = cur {
+        if parent == crate::tree::ROOT_ID {
+            return false;
+        }
+        if let Some(node) = tree.get(parent) {
+            if crate::layout::is_scrollable_node(node, viewport) {
+                return true;
+            }
+        }
+        cur = tree.parent_of(parent);
+    }
+    false
 }
 
 /// Fingerprint of a pass's a11y-relevant shape, so

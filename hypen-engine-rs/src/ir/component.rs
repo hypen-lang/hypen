@@ -555,6 +555,7 @@ impl ComponentRegistry {
                 template,
                 props,
                 module_scope,
+                lazy,
             } => {
                 // Recursively expand template children
                 let expanded_template: Vec<super::IRNode> = template
@@ -569,6 +570,7 @@ impl ComponentRegistry {
                     template: expanded_template,
                     props: props.clone(),
                     module_scope: module_scope.clone(),
+                    lazy: lazy.clone(),
                 }
             }
             super::IRNode::Conditional {

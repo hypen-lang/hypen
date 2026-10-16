@@ -1496,9 +1496,25 @@ public protocol HypenEngineProtocol: AnyObject, Sendable {
     func setContext(name: String, dataJson: String) throws  -> [Patch]
     
     /**
+     * Report the item range `[start, end)` (visible rows plus overscan) of
+     * the lazy list whose element id is `list_id` and return the patches
+     * that move its window. Ids naming no windowed list return none.
+     * Mirrors WASI's `hypen_set_list_viewport` and JS's `setListViewport`.
+     */
+    func setListViewport(listId: String, start: UInt32, end: UInt32) throws  -> [Patch]
+    
+    /**
      * Set module configuration
      */
     func setModule(config: ModuleConfig) 
+    
+    /**
+     * Opt in to list virtualization: lazy lists then materialize only a
+     * window of items, described by the `__virt.window` prop. Call before
+     * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
+     * `setVirtualization`.
+     */
+    func setVirtualization(enabled: Bool) throws 
     
     /**
      * Drop a module and every action it declared.
@@ -1942,12 +1958,43 @@ open func setContext(name: String, dataJson: String)throws  -> [Patch]  {
 }
     
     /**
+     * Report the item range `[start, end)` (visible rows plus overscan) of
+     * the lazy list whose element id is `list_id` and return the patches
+     * that move its window. Ids naming no windowed list return none.
+     * Mirrors WASI's `hypen_set_list_viewport` and JS's `setListViewport`.
+     */
+open func setListViewport(listId: String, start: UInt32, end: UInt32)throws  -> [Patch]  {
+    return try  FfiConverterSequenceTypePatch.lift(try rustCallWithError(FfiConverterTypeHypenError_lift) {
+    uniffi_hypen_engine_fn_method_hypenengine_set_list_viewport(
+            self.uniffiCloneHandle(),
+        FfiConverterString.lower(listId),
+        FfiConverterUInt32.lower(start),
+        FfiConverterUInt32.lower(end),$0
+    )
+})
+}
+    
+    /**
      * Set module configuration
      */
 open func setModule(config: ModuleConfig)  {try! rustCall() {
     uniffi_hypen_engine_fn_method_hypenengine_set_module(
             self.uniffiCloneHandle(),
         FfiConverterTypeModuleConfig_lower(config),$0
+    )
+}
+}
+    
+    /**
+     * Opt in to list virtualization: lazy lists then materialize only a
+     * window of items, described by the `__virt.window` prop. Call before
+     * the first render. Mirrors WASI's `hypen_set_virtualization` and JS's
+     * `setVirtualization`.
+     */
+open func setVirtualization(enabled: Bool)throws   {try rustCallWithError(FfiConverterTypeHypenError_lift) {
+    uniffi_hypen_engine_fn_method_hypenengine_set_virtualization(
+            self.uniffiCloneHandle(),
+        FfiConverterBool.lower(enabled),$0
     )
 }
 }
@@ -4038,7 +4085,13 @@ private let initializationResult: InitializationResult = {
     if (uniffi_hypen_engine_checksum_method_hypenengine_set_context() != 49927) {
         return InitializationResult.apiChecksumMismatch
     }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_set_list_viewport() != 23916) {
+        return InitializationResult.apiChecksumMismatch
+    }
     if (uniffi_hypen_engine_checksum_method_hypenengine_set_module() != 9330) {
+        return InitializationResult.apiChecksumMismatch
+    }
+    if (uniffi_hypen_engine_checksum_method_hypenengine_set_virtualization() != 11207) {
         return InitializationResult.apiChecksumMismatch
     }
     if (uniffi_hypen_engine_checksum_method_hypenengine_unregister_module() != 32749) {

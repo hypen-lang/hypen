@@ -226,6 +226,23 @@ internal data class ListLayout(
     val scrollsVertically: Boolean,
 )
 
+/**
+ * When a `List` virtualises. It composes through `LazyColumn` (only the
+ * visible rows exist) when it scrolls, and it scrolls when any of these
+ * hold and overflow is not `hidden` / `clip`:
+ * - it has dynamic items (a `ForEach` / conditional wrapper among its
+ *   children — the engine-driven feed case),
+ * - it is explicitly `.scrollable(...)`,
+ * - it has a finite height (`height`, `maxHeight`, `size`, `fillMaxHeight`
+ *   or `fillMaxSize`), or
+ * - `overflow` is `auto` / `scroll`.
+ *
+ * Otherwise it is a plain `Column` and composes every child. That is the
+ * only correct choice for a list that must size to its content inside
+ * another scroller (a `LazyColumn` needs a bounded height), so a long
+ * STATIC list that should virtualise must say so: give it a height or mark
+ * it scrollable. Same rule as the Swift renderer's `resolveListLayout`.
+ */
 internal fun resolveListLayout(element: HypenElement, hasDynamicItems: Boolean = false): ListLayout {
     val props = element.props
     val overflow = listOf(

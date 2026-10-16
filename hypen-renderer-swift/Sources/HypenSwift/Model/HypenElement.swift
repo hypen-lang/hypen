@@ -16,25 +16,34 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     public let id: String
     public let elementType: String
     public var props: [String: Any] {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
         didSet {
             cachedApplicatorResult = nil
             cachedAnimSpecs = nil
             cachedDndSpecs = nil
         }
     }
+    /// Child ids in order. Backed by `childOrder`, a linked order keyed by
+    /// id: `addChild` / `removeChild` are O(1) and the array is materialised
+    /// once per read after a write — a batch of M moves under a parent of N
+    /// rows costs O(M + N), not the O(M × N) scan-and-shift of an array.
     public var children: [String] {
-        willSet { objectWillChange.send() }
+        get { childOrder.ids }
+        set {
+            publish()
+            childOrder = HypenChildOrder(newValue)
+        }
     }
+    private var childOrder: HypenChildOrder
     public var parentId: String?
     public var textContent: String? {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
     /// Engine-derived accessibility semantics: set at `create`, replaced
     /// wholesale by `setSemantics` reactive re-emits (nil clears). Translated
     /// to SwiftUI accessibility modifiers in `applyHypenSemantics`.
     public var semantics: HypenSemantics? {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     // MARK: - Animation state (owned by `HypenAnimator`)
@@ -44,19 +53,19 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     /// opacity/offset/scale; the animator flips it and lets the implicit
     /// `.animation(animPoseAnimation, value: animPose)` glide it.
     public var animPose: HypenAnimPose? {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     /// The animation the next `animPose` change should ride.
     public var animPoseAnimation: Animation? {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     /// The animation whitelisted prop changes on this node should glide on,
     /// resolved per batch through the precedence chain (structural >
     /// transaction > node `.transition` > snap). `nil` snaps.
     public var animTransitionAnimation: Animation? {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     /// This node sits inside a subtree playing its exit: engine-side dead,
@@ -65,7 +74,7 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     /// applicator result because the event closures it holds must be
     /// rebuilt against the suppressed dispatcher.
     public var isAnimationExcluded: Bool = false {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
         didSet {
             if oldValue != isAnimationExcluded { cachedApplicatorResult = nil }
         }
@@ -80,7 +89,7 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     /// Bumped whenever the `.animate` channel changes, so the view-local
     /// playback restarts (a changed spec restarts; a removed channel stops).
     public var animateGeneration: Int = 0 {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     // MARK: - Drag-and-drop state (owned by `HypenDndCoordinator`)
@@ -91,34 +100,34 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     /// applicator result; clearing the label restores the base by
     /// construction.
     public var dndPoseLabel: String? {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     /// Ghost translation of the moving item (sortable row, pinboard note, or
     /// loose draggable) while lifted, and the pin snap during the
     /// post-drop hold. Never animated — it follows the finger.
     public var dndPinOffset: CGSize = .zero {
-        willSet { if newValue != dndPinOffset { objectWillChange.send() } }
+        willSet { if newValue != dndPinOffset { publish() } }
     }
 
     public var dndGhostOffset: CGSize = .zero {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     /// Gap-opening shift of a sortable sibling while a drag hovers its list.
     public var dndShift: CGSize = .zero {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     /// The animation the next `dndShift` change should ride (`nil` snaps —
     /// the release, and reduced motion).
     public var dndShiftAnimation: Animation? {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     /// The moving item is raised above its siblings for the drag's duration.
     public var dndRaised: Bool = false {
-        willSet { objectWillChange.send() }
+        willSet { publish() }
     }
 
     private var cachedDndSpecs: NodeDndSpecs?
@@ -163,6 +172,29 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     /// control-flow wrapper's children, or a child prop the parent's
     /// layout reads) must re-render this element's view.
     func notifyChanged() {
+        publish()
+    }
+
+    /// The batch this element's publications are coalesced into while a
+    /// patch batch is being applied; set by `HypenRenderer` at creation.
+    weak var publishBatch: HypenPublishBatch?
+
+    /// Route every `objectWillChange` through the renderer's batch when one
+    /// is open: a batch that writes a dozen props on a row, re-parents it
+    /// and bumps its host used to publish each of those separately, and
+    /// every publication is a SwiftUI invalidation. Outside a batch (the
+    /// animator's per-frame writes, drag updates) it publishes at once.
+    @inline(__always)
+    private func publish() {
+        if let batch = publishBatch, batch.isActive {
+            batch.defer(self)
+        } else {
+            objectWillChange.send()
+        }
+    }
+
+    /// Emit the coalesced publication. Called by `HypenPublishBatch` only.
+    func publishNow() {
         objectWillChange.send()
     }
 
@@ -177,7 +209,7 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
         self.id = id
         self.elementType = elementType
         self.props = props
-        self.children = children
+        self.childOrder = HypenChildOrder(children)
         self.parentId = parentId
         self.textContent = textContent
     }
@@ -359,17 +391,120 @@ public final class HypenElement: ObservableObject, @unchecked Sendable {
     }
 
     public func addChild(_ childId: String, beforeId: String? = nil) {
-        if let beforeId = beforeId, let index = children.firstIndex(of: beforeId) {
-            children.insert(childId, at: index)
+        publish()
+        if let beforeId = beforeId, childOrder.contains(beforeId) {
+            childOrder.insert(childId, before: beforeId)
         } else {
-            children.append(childId)
+            childOrder.append(childId)
         }
     }
 
     public func removeChild(_ childId: String) {
-        if let index = children.firstIndex(of: childId) {
-            children.remove(at: index)
+        guard childOrder.contains(childId) else { return }
+        publish()
+        childOrder.remove(childId)
+    }
+}
+
+/// Coalesces `HypenElement` publications over one patch batch: each element
+/// that changed publishes exactly once, when the batch ends, instead of once
+/// per touched field. `HypenRenderer` owns one and opens it around
+/// `applyPatches`.
+///
+/// Same thread-safety contract as `HypenElement`: only ever touched from
+/// the main actor (the renderer and the view layer), hence the unchecked
+/// conformance rather than actor isolation the element cannot express.
+final class HypenPublishBatch: @unchecked Sendable {
+    private(set) var isActive = false
+    private var pending: [ObjectIdentifier: HypenElement] = [:]
+
+    func begin() {
+        isActive = true
+    }
+
+    func `defer`(_ element: HypenElement) {
+        pending[ObjectIdentifier(element)] = element
+    }
+
+    /// Close the batch and publish every deferred element once.
+    func end() {
+        isActive = false
+        let elements = pending
+        pending.removeAll(keepingCapacity: true)
+        for element in elements.values {
+            element.publishNow()
         }
+    }
+
+    /// Elements deferred so far (tests).
+    var pendingCount: Int { pending.count }
+}
+
+/// Insertion-ordered set of child ids as a doubly linked list over
+/// dictionaries, with the ordered array cached until the next write. A
+/// class so the cache can fill on a read through a non-mutating path.
+final class HypenChildOrder {
+    private var next: [String: String?] = [:]
+    private var prev: [String: String?] = [:]
+    private var head: String?
+    private var tail: String?
+    private var cache: [String]?
+
+    init(_ initial: [String]) {
+        for id in initial { append(id) }
+    }
+
+    var count: Int { next.count }
+
+    func contains(_ id: String) -> Bool { next[id] != nil }
+
+    func append(_ id: String) {
+        if contains(id) { remove(id) }
+        prev[id] = .some(tail)
+        next[id] = .some(nil)
+        if let last = tail { next[last] = .some(id) } else { head = id }
+        tail = id
+        cache = nil
+    }
+
+    func insert(_ id: String, before anchor: String) {
+        guard id != anchor else { return }
+        guard contains(anchor) else {
+            append(id)
+            return
+        }
+        if contains(id) { remove(id) }
+        let before = prev[anchor] ?? nil
+        prev[id] = .some(before)
+        next[id] = .some(anchor)
+        prev[anchor] = .some(id)
+        if let before { next[before] = .some(id) } else { head = id }
+        cache = nil
+    }
+
+    @discardableResult
+    func remove(_ id: String) -> Bool {
+        guard contains(id) else { return false }
+        let p = prev.removeValue(forKey: id) ?? nil
+        let n = next.removeValue(forKey: id) ?? nil
+        if let p { next[p] = .some(n) } else { head = n }
+        if let n { prev[n] = .some(p) } else { tail = p }
+        cache = nil
+        return true
+    }
+
+    /// The ordered ids, materialised once per write.
+    var ids: [String] {
+        if let cache { return cache }
+        var out: [String] = []
+        out.reserveCapacity(next.count)
+        var cur = head
+        while let id = cur {
+            out.append(id)
+            cur = next[id] ?? nil
+        }
+        cache = out
+        return out
     }
 }
 
