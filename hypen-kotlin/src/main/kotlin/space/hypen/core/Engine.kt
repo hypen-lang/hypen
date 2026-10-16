@@ -109,6 +109,13 @@ interface IEngine {
     fun clearTree() {}
 
     /**
+     * Report the visible item range `[start, end)` of the lazy list whose
+     * element id is [listId] (list virtualization, always on) and return the
+     * patches that move its window. Ids naming no windowed list return none.
+     */
+    fun setListViewport(listId: String, start: UInt, end: UInt): List<Patch> = emptyList()
+
+    /**
      * Get the current revision number.
      */
     fun getRevision(): ULong = 0u

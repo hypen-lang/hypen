@@ -89,6 +89,21 @@ class NativeEngine : IEngine, AutoCloseable {
     }
 
     /**
+     * Report the item range `[start, end)` (visible rows plus overscan) of
+     * the lazy list whose element id is [listId] and return the patches that
+     * move its window (hypen-web/docs/virtualization.md §3). Ids naming no
+     * windowed list return none. Also invokes the render callback if patches
+     * are produced, like every other engine entry point.
+     */
+    override fun setListViewport(listId: String, start: UInt, end: UInt): List<Patch> {
+        val patches = native.setListViewport(listId, start, end).map { it.toPatch() }
+        if (patches.isNotEmpty()) {
+            renderCallback?.invoke(patches)
+        }
+        return patches
+    }
+
+    /**
      * Register resources from a flat JSON map of name → raw SVG string.
      * Example: `{"heart": "<svg>...</svg>", "search": "<svg>...</svg>"}`
      */
