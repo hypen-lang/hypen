@@ -176,7 +176,22 @@ export class FakeElement {
     bottom: number;
     width: number;
     height: number;
-  } = () => ({ left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 });
+  } = () => FakeElement.layoutHook?.(this) ?? { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 };
+
+  /**
+   * Test-wide layout hook: when set, every element without its own
+   * `getBoundingClientRect` override (including `cloneNode` copies, which
+   * template instantiation creates without `document.createElement`) asks it
+   * for a rect; `null` falls back to the all-zero rect.
+   */
+  static layoutHook: ((el: FakeElement) => {
+    left: number;
+    top: number;
+    right: number;
+    bottom: number;
+    width: number;
+    height: number;
+  } | null) | null = null;
 
   private listeners: Map<string, Set<Listener>> = new Map();
 
