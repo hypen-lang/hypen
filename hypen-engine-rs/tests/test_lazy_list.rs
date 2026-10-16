@@ -606,20 +606,6 @@ fn hot_reload_resends_a_changed_estimate() {
 }
 
 #[test]
-fn gaining_a_sibling_withdraws_the_window() {
-    let mut h = Harness::new(
-        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } }"#,
-        json!({ "items": items(0..50) }),
-    );
-    let column = h.screen.find("Column");
-    assert!(h.screen.window(&column).is_some());
-    h.render(
-        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } Text("footer") }"#,
-    );
-    assert_eq!(h.screen.window(&column), None);
-}
-
-#[test]
 fn replacing_the_list_withdraws_the_window() {
     let mut h = Harness::new(
         r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } }"#,
@@ -833,4 +819,65 @@ fn removing_a_router_releases_its_cached_routes() {
     // receiving patches through its old bindings.
     h.engine.update_state(None, json!({ "label": "two" }));
     assert!(h.flush().is_empty());
+}
+
+#[test]
+fn hot_reloaded_row_template_survives_a_viewport_report() {
+    let mut h = Harness::new(LIST, json!({ "items": items(0..100) }));
+    let list = h.screen.find("List");
+    h.render(r#"List(@state.items, key: "id", initialCount: 10) { Text("n@{item.id}") }"#);
+    assert_eq!(h.screen.rows(&list)[0], "n0");
+    h.viewport(&list, 20, 30);
+    assert_eq!(h.screen.rows(&list)[0], "n20");
+}
+
+#[test]
+fn hot_reloaded_row_template_survives_a_state_update() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id") { Text("@{item.name}") } }"#,
+        json!({ "items": items(0..3) }),
+    );
+    let column = h.screen.find("Column");
+    h.render(r#"Column { ForEach(items: @state.items, key: "id") { Text("n@{item.id}") } }"#);
+    h.set_items(items(0..4));
+    assert_eq!(h.screen.rows(&column), ["n0", "n1", "n2", "n3"]);
+}
+
+#[test]
+fn gaining_a_sibling_expands_the_list() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } }"#,
+        json!({ "items": items(0..20) }),
+    );
+    let column = h.screen.find("Column");
+    h.render(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } Text("footer") }"#,
+    );
+    // Every row, and no window. (Order is not asserted: rows created after
+    // a sibling exists are appended behind it — a general control-flow
+    // placement limitation, not a windowing one.)
+    let mut rows = h.screen.rows(&column);
+    rows.sort();
+    let mut expected = names(0..20);
+    expected.push("footer".into());
+    expected.sort();
+    assert_eq!(rows, expected);
+    assert_eq!(h.screen.window(&column), None);
+}
+
+#[test]
+fn losing_a_sibling_windows_the_list() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } Text("footer") }"#,
+        json!({ "items": items(0..20) }),
+    );
+    let column = h.screen.find("Column");
+    h.render(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } }"#,
+    );
+    assert_eq!(h.screen.rows(&column), names(0..5));
+    assert_eq!(
+        h.screen.window(&column),
+        Some(json!({ "total": 20, "start": 0, "end": 5 }))
+    );
 }

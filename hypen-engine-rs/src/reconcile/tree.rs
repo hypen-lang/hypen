@@ -572,6 +572,23 @@ impl InstanceTree {
         self.nodes.get_mut(id)
     }
 
+    /// The window of `id` when it is a windowed (lazy) ForEach.
+    pub fn list_window(&self, id: NodeId) -> Option<&ListWindow> {
+        match self.get(id)?.control_flow.as_deref()? {
+            ControlFlowKind::ForEach { window, .. } => window.as_ref(),
+            _ => None,
+        }
+    }
+
+    /// The window slot of `id` when it is a ForEach (`Some(None)` for one
+    /// that expands every item); `None` for any other node.
+    pub(crate) fn list_window_slot(&mut self, id: NodeId) -> Option<&mut Option<ListWindow>> {
+        match self.get_mut(id)?.control_flow.as_deref_mut()? {
+            ControlFlowKind::ForEach { window, .. } => Some(window),
+            _ => None,
+        }
+    }
+
     /// Remove a node and all its descendants, returning the root.
     pub fn remove(&mut self, id: NodeId) -> Option<InstanceNode> {
         let root = self.nodes.remove(id)?;

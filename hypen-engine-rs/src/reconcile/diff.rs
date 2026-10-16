@@ -605,24 +605,9 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
         };
         let new_children = &element.ir_children;
 
-        for (i, new_child_ir) in new_children.iter().enumerate() {
-            if let Some(&old_child_id) = old_children.get(i) {
-                reconcile_ir_node_impl(ctx, old_child_id, new_child_ir);
-            } else {
-                ctx.tree.sole_child_slot = new_children.len() == 1;
-                create_ir_node_tree_impl(ctx, new_child_ir, Some(node_id), false);
-            }
-        }
-
-        // A list that was this element's only child and gained a sibling
-        // (hot reload) can no longer own the element's `__virt.window`.
-        if new_children.len() > 1 {
-            let children = ctx.tree.get(node_id).map(|n| n.children.clone());
-            for child in children.into_iter().flatten() {
-                drop_window(ctx, child, node_id);
-            }
-        }
-
+        // Children beyond the new count go first, so a lazy list that loses
+        // its siblings (hot reload) is already the sole child — and windows —
+        // when it is reconciled below.
         if old_children.len() > new_children.len() {
             let doomed: Vec<NodeId> = old_children
                 .iter()
@@ -637,6 +622,31 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
             // so calling it per doomed child made this loop O(n²).
             if let Some(parent) = ctx.tree.get_mut(node_id) {
                 parent.children.retain(|id| !doomed.contains(id));
+            }
+        }
+
+        for (i, new_child_ir) in new_children.iter().enumerate() {
+            if let Some(&old_child_id) = old_children.get(i) {
+                reconcile_ir_node_impl(ctx, old_child_id, new_child_ir);
+            } else {
+                ctx.tree.sole_child_slot = new_children.len() == 1;
+                create_ir_node_tree_impl(ctx, new_child_ir, Some(node_id), false);
+            }
+        }
+
+        // A windowed list that was the only child and just gained a sibling
+        // can no longer own this element's `__virt.window`: run it again so
+        // it drops the window and expands now, not on its next update.
+        if new_children.len() > 1 && old_children.len() <= 1 {
+            let children = ctx.tree.get(node_id).map(|n| n.children.clone());
+            for child in children.into_iter().flatten() {
+                if ctx.tree.list_window(child).is_some() {
+                    if let Some(template) =
+                        ctx.tree.get(child).and_then(|n| n.ir_node_template.clone())
+                    {
+                        reconcile_ir_node_impl(ctx, child, &template);
+                    }
+                }
             }
         }
     }
@@ -1129,14 +1139,8 @@ fn window_for(
     key_path: Option<&str>,
     item_name: &str,
 ) -> (usize, usize) {
-    match tree
-        .get_mut(foreach_id)
-        .and_then(|n| n.control_flow.as_deref_mut())
-    {
-        Some(ControlFlowKind::ForEach {
-            window: Some(window),
-            ..
-        }) => place_window(window, items, key_path, item_name),
+    match tree.list_window_slot(foreach_id) {
+        Some(Some(window)) => place_window(window, items, key_path, item_name),
         _ => (0, items.len()),
     }
 }
@@ -1206,14 +1210,7 @@ fn emit_window_prop(
     start: usize,
     end: usize,
 ) {
-    let Some(ControlFlowKind::ForEach {
-        window: Some(window),
-        ..
-    }) = ctx
-        .tree
-        .get_mut(foreach_id)
-        .and_then(|n| n.control_flow.as_deref_mut())
-    else {
+    let Some(Some(window)) = ctx.tree.list_window_slot(foreach_id) else {
         return;
     };
     if window.sent == Some((total, start, end)) {
@@ -1250,17 +1247,14 @@ pub(crate) fn apply_list_viewport(
         Some(node) if node.children.len() == 1 => node.children[0],
         _ => return false,
     };
-    let Some(foreach) = ctx.tree.get_mut(foreach_id) else {
-        return false;
-    };
-    let Some(template) = foreach.ir_node_template.clone() else {
-        return false;
-    };
-    let Some(ControlFlowKind::ForEach {
-        window: Some(window),
-        ..
-    }) = foreach.control_flow.as_deref_mut()
+    let Some(template) = ctx
+        .tree
+        .get(foreach_id)
+        .and_then(|n| n.ir_node_template.clone())
     else {
+        return false;
+    };
+    let Some(Some(window)) = ctx.tree.list_window_slot(foreach_id) else {
         return false;
     };
     window.start = start;
@@ -1270,34 +1264,32 @@ pub(crate) fn apply_list_viewport(
     window.next_key = None;
     window.viewport_pass = true;
     reconcile_ir_node_impl(ctx, foreach_id, &template);
+    // Normally consumed by the pass; cleared here too in case it bailed out
+    // early (the items stopped being an array), so a later data pass can't
+    // mistake deletions for evictions.
+    if let Some(Some(window)) = ctx.tree.list_window_slot(foreach_id) {
+        window.viewport_pass = false;
+    }
     true
 }
 
-/// Stop windowing a list whose template no longer asks for it (a hot reload
-/// to `lazy: false`): forget the window so the next pass expands every item,
-/// and withdraw `__virt.window` if it was sent.
+/// Stop windowing a list that may no longer window (a hot reload to
+/// `lazy: false`, or a sibling appeared): forget the window so this pass
+/// expands every item, and withdraw `__virt.window` if it was sent.
 fn drop_window(ctx: &mut ReconcileCtx, foreach_id: NodeId, render_parent: NodeId) {
-    let Some(ControlFlowKind::ForEach { window, .. }) = ctx
-        .tree
-        .get_mut(foreach_id)
-        .and_then(|n| n.control_flow.as_deref_mut())
-    else {
-        return;
-    };
-    if let Some(dropped) = window.take() {
-        if dropped.sent.is_some() {
-            ctx.patches.push(Patch::remove_prop(
-                render_parent,
-                VIRT_WINDOW_PROP.to_string(),
-            ));
-        }
+    let dropped = ctx.tree.list_window_slot(foreach_id).and_then(Option::take);
+    if dropped.is_some_and(|w| w.sent.is_some()) {
+        ctx.patches.push(Patch::remove_prop(
+            render_parent,
+            VIRT_WINDOW_PROP.to_string(),
+        ));
     }
 }
 
-/// Bring a ForEach's window in line with its template, so a hot reload takes
-/// effect on the list's next pass: install a window when the list is lazy
-/// and the ForEach is the sole child of a real element; drop it otherwise;
-/// pick up a changed size estimate.
+/// Bring a ForEach's window in line with its template and slot at the start
+/// of each pass: install a window when the list is lazy and the ForEach is
+/// the sole child of a real element; drop it otherwise; pick up a changed
+/// size estimate (hot reload).
 ///
 /// Returns `(windowed, viewport_pass)`: whether the list is windowed now,
 /// and whether this pass was triggered by a viewport report.
@@ -1320,11 +1312,7 @@ fn sync_window(
             return (false, false);
         }
     };
-    let Some(ControlFlowKind::ForEach { window, .. }) = ctx
-        .tree
-        .get_mut(foreach_id)
-        .and_then(|n| n.control_flow.as_deref_mut())
-    else {
+    let Some(window) = ctx.tree.list_window_slot(foreach_id) else {
         return (false, false);
     };
     match window {
@@ -1347,17 +1335,8 @@ fn sync_window(
 /// list with something else), so the renderer doesn't keep spacers for a
 /// list that is gone.
 fn withdraw_window(tree: &InstanceTree, node_id: NodeId, patches: &mut Vec<Patch>) {
-    let Some(node) = tree.get(node_id) else {
-        return;
-    };
-    if let (
-        Some(ControlFlowKind::ForEach {
-            window: Some(ListWindow { sent: Some(_), .. }),
-            ..
-        }),
-        Some(parent),
-    ) = (node.control_flow.as_deref(), node.parent)
-    {
+    let sent = tree.list_window(node_id).is_some_and(|w| w.sent.is_some());
+    if let Some(parent) = tree.get(node_id).and_then(|n| n.parent).filter(|_| sent) {
         patches.push(Patch::remove_prop(parent, VIRT_WINDOW_PROP.to_string()));
     }
 }
@@ -1635,14 +1614,20 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                 IRNode::ForEach { props, .. } => props,
                 _ => unreachable!(),
             };
-            if props.contains_key(FOREACH_ITEMS_PROP) {
-                // A nested loop over the outer item: this copy carries the
-                // freshly resolved array. Keep it as the stored template so a
-                // viewport report or dirty pass on this node sees it too.
-                if let Some(n) = ctx.tree.get_mut(node_id) {
+            // Keep the stored template current: dirty passes and viewport
+            // reports re-run the list from it, so a hot-reloaded template or
+            // a nested loop's freshly substituted copy (its `__items`) must
+            // replace it. A pass already running from it skips the copy.
+            if let Some(n) = ctx.tree.get_mut(node_id) {
+                if !n
+                    .ir_node_template
+                    .as_deref()
+                    .is_some_and(|stored| std::ptr::eq(stored, node))
+                {
                     n.ir_node_template = Some(std::sync::Arc::new(node.clone()));
                 }
-            } else {
+            }
+            if !props.contains_key(FOREACH_ITEMS_PROP) {
                 ctx.dependencies
                     .add_dependency(node_id, source, module_scope_ref);
             }

@@ -399,18 +399,14 @@ fn render_dirty_iterable_partial(
 
     // A lazy list holds children only for its window. Edits outside it have
     // nothing to update; inside it, child positions are window-relative.
-    let (window_start, window_end) = match tree.get(node_id).and_then(|n| n.control_flow.as_deref())
-    {
-        Some(crate::reconcile::ControlFlowKind::ForEach {
-            window: Some(window),
-            ..
-        }) => match window.sent {
+    let (window_start, window_end) = match tree.list_window(node_id) {
+        None => (0, items.len()),
+        Some(window) => match window.sent {
             // A different total means growth/shrink: the window and
             // `__virt.window` need the full pass.
             Some((total, start, end)) if total == items.len() => (start, end),
             _ => return false,
         },
-        _ => (0, items.len()),
     };
     if children.len() != (window_end - window_start) * template_count {
         return false; // growth/shrink slipped past the path check

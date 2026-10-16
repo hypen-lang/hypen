@@ -50,7 +50,7 @@ pub(super) fn apply_replacements(s: &str, mut replacements: Vec<Replacement>) ->
     }
 
     // Sort by start position ascending
-    replacements.sort_by(|a, b| a.start.cmp(&b.start));
+    replacements.sort_by_key(|r| r.start);
 
     // Filter invalid replacements and calculate result size
     let valid_replacements: Vec<_> = replacements
@@ -425,13 +425,13 @@ fn replace_ir_node_impl(
     }
 }
 
-/// Replace item bindings in Props
 /// Reserved ForEach container prop carrying the array a nested loop iterates,
 /// resolved from the outer item at row substitution. Takes precedence over
 /// the loop's `source` binding, which only resolves against state or a data
 /// source.
 pub(crate) const FOREACH_ITEMS_PROP: &str = "__items";
 
+/// Replace item bindings in Props
 fn replace_props_item_bindings(props: &Props, item: &serde_json::Value, item_name: &str) -> Props {
     let mut new_props = Props::new();
     for (key, value) in props {
