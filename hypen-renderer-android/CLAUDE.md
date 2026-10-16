@@ -98,7 +98,13 @@ and has a `FakeViewportEngine` for viewport reports. Use
 `@Config(qualifiers = "w400dp-h800dp-mdpi")` so dp == px. Existing:
 `RootChildrenRenderTest`, `ChildListRenderTest`, `virt/VirtLazyListRenderTest`,
 `virt/VirtPaddedRenderTest`, `virt/VirtShapesRenderTest`, `virt/VirtUnboundedRenderTest`,
-`virt/VirtMoreRenderTest`, `NestedScrollRenderTest`.
+`virt/VirtMoreRenderTest`, `virt/VirtRtlRenderTest`, `virt/VirtDndRenderTest`,
+`NestedScrollRenderTest`. `setHypenContent(renderer, layoutDirection = Rtl)`
+renders right-to-left. A test that drops (DnD) must build its renderer with
+`scopedRenderer(scope)` and cancel `scope` in `@After`: the runtime's
+post-drop hold timer otherwise runs on the default `Dispatchers.Default` scope
+and fires into a later test in the same Robolectric sandbox, which then
+intermittently never goes idle (the suite hangs).
 
 Nested scrollers: a `.scrollable(true)` Column / Row decides whether it
 scrolls from its measured constraints (`LazyOrPadded`), like the DOM: with an
@@ -267,7 +273,14 @@ window move, padded rows' `CollectionItemInfo`), `VirtShapesRenderTest` (lazy
 `Row`, padded anchoring inside a lazy `List`), `VirtUnboundedRenderTest`, and
 `VirtMoreRenderTest` (multi-node item templates on both paths, horizontal
 padded anchoring, a sortable in a windowed lazy `List` dragged by touch
-writing whole-list `__hypen_reorder` indices).
+writing whole-list `__hypen_reorder` indices), `VirtRtlRenderTest` (horizontal
+lazy and padded lists under RTL: reports and anchoring) and `VirtDndRenderTest`
+(a bound pinboard in a windowed Stack writes `seats.<whole-list index>`; a
+cross-list drop between windowed sortables writes whole-list `from` / `to`).
+- RTL: the padded path measures `scrolledPast` from the list's start edge (its
+  right edge in RTL, `virtPadded`); `anchorDelta` is start-relative and
+  `dispatchRawDelta` on a horizontal `ScrollState` already follows the layout
+  direction, so anchoring needs nothing else.
 
 Lazy vs padded is decided from constraints, not the element tree:
 `LazyOrPadded` (`BoxWithConstraints`, the element's modifier on the box with
@@ -280,11 +293,10 @@ renders padded and scrolls with the ancestor (a lazy container there threw
 drops its own scroll modifier there via `LocalSuppressOwnScroll`.
 
 Known gaps:
-- Anchoring assumes LTR for horizontal lists and approximates the rows above
-  the anchor by the measured average size.
+- Anchoring approximates the rows above the anchor by the measured average
+  size.
 - Not yet rendered in tests: `HypenApp` itself (session / connection states —
-  the tests mount `HypenRoot`), pinboards and cross-list drops inside a
-  windowed list, and RTL horizontal anchoring.
+  the tests mount `HypenRoot`).
 
 ## Device Capability Protocol (RFC 001)
 

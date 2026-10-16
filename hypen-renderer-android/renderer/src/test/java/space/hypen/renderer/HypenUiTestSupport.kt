@@ -14,7 +14,12 @@ import androidx.compose.ui.test.junit4.ComposeContentTestRule
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.DpSize
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.LayoutDirection
+import androidx.compose.ui.platform.LocalLayoutDirection
 import space.hypen.renderer.components.LocalParentAllowsHorizontalExpansion
+import kotlinx.coroutines.CoroutineScope
+import space.hypen.renderer.anim.AnimationCoordinator
+import space.hypen.renderer.dnd.DndCoordinator
 import space.hypen.renderer.model.Patch
 import space.hypen.renderer.render.ComposeRenderer
 import space.hypen.renderer.render.LocalComposeRenderer
@@ -43,9 +48,11 @@ class FakeViewportEngine {
 fun ComposeContentTestRule.setHypenContent(
     renderer: ComposeRenderer,
     size: DpSize = DpSize(360.dp, 640.dp),
+    layoutDirection: LayoutDirection = LayoutDirection.Ltr,
 ) {
     setContent {
         CompositionLocalProvider(
+            LocalLayoutDirection provides layoutDirection,
             LocalComposeRenderer provides renderer,
             LocalParentAllowsHorizontalExpansion provides true,
             LocalHypenViewport provides size,
@@ -87,3 +94,17 @@ fun hasCollectionItemRow(rowIndex: Int) =
 fun SemanticsNodeInteraction.positionInRoot(): Offset = fetchSemanticsNode().positionInRoot
 
 fun SemanticsNodeInteraction.heightDp(density: Float): Dp = (fetchSemanticsNode().size.height / density).dp
+
+/**
+ * A [ComposeRenderer] whose animation and drag runtimes run on [scope]
+ * instead of their default process-wide `Dispatchers.Default` scope. Tests
+ * that drop (the runtime then holds for the engine's answer on a timer) must
+ * cancel [scope] when they end: a timer left running fires into a later test
+ * in the same Robolectric sandbox and can keep its compose rule from ever
+ * going idle.
+ */
+fun scopedRenderer(scope: CoroutineScope): ComposeRenderer =
+    ComposeRenderer(
+        animation = AnimationCoordinator(scope = scope),
+        dnd = DndCoordinator(scope = scope),
+    )

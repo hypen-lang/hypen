@@ -25,6 +25,8 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.platform.LocalLayoutDirection
+import androidx.compose.ui.unit.LayoutDirection
 import androidx.compose.ui.semantics.CollectionInfo
 import androidx.compose.ui.semantics.CollectionItemInfo
 import androidx.compose.ui.semantics.collectionInfo
@@ -268,6 +270,7 @@ fun Modifier.virtPadded(
 ): Modifier {
     if (window == null) return this
     val density = LocalDensity.current
+    val rtl = horizontal && LocalLayoutDirection.current == LayoutDirection.Rtl
     val measure = remember(element.id) { VirtMeasure() }
     val tracker = remember(element.id) { ViewportTracker() }
     // Real row extent (measured average), and the possibly smaller size the
@@ -323,14 +326,20 @@ fun Modifier.virtPadded(
             return@onGloballyPositioned
         }
         val origin = coords.positionInRoot()
-        val listTop = (if (horizontal) origin.x else origin.y).toDouble()
-        val viewTop = (if (horizontal) clipped.left else clipped.top).toDouble()
         val viewExtent = (if (horizontal) clipped.width else clipped.height).toDouble()
+        // How far the visible part starts past the list's START edge: the
+        // top, the left in LTR, the right in RTL (a horizontal list lays out
+        // from the right there, and its leading padding is on the right).
+        val scrolledPastPx = when {
+            !horizontal -> clipped.top - origin.y
+            rtl -> (origin.x + coords.size.width) - clipped.right
+            else -> clipped.left - origin.x
+        }.toDouble()
         // One geometry (dp) for both the report and the next anchoring, so
         // they agree on which part of the list is on screen (§3 step 2).
         val geometry = ViewportGeometry(
             size = latestSize,
-            scrolledPast = (viewTop - listTop) / px,
+            scrolledPast = scrolledPastPx / px,
             viewportExtent = viewExtent / px,
             columns = columns,
         )

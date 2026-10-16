@@ -15,6 +15,11 @@ import androidx.compose.ui.test.performScrollToIndex
 import androidx.compose.ui.test.performSemanticsAction
 import androidx.compose.ui.test.performTouchInput
 import org.junit.Assert.assertEquals
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import org.junit.After
 import org.junit.Rule
 import org.junit.Test
 import org.junit.runner.RunWith
@@ -28,7 +33,7 @@ import space.hypen.renderer.hasCollectionItemRow
 import space.hypen.renderer.model.Patch
 import space.hypen.renderer.positionInRoot
 import space.hypen.renderer.render.ActionDispatcher
-import space.hypen.renderer.render.ComposeRenderer
+import space.hypen.renderer.scopedRenderer
 import space.hypen.renderer.setHypenContent
 import space.hypen.renderer.virtWindow
 
@@ -42,7 +47,11 @@ class VirtMoreRenderTest {
     @get:Rule
     val rule = createComposeRule()
 
-    private val renderer = ComposeRenderer()
+    private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
+    private val renderer = scopedRenderer(scope)
+
+    @After
+    fun cancelRuntimeTimers() = scope.cancel()
     private val engine = FakeViewportEngine().also { it.attach(renderer) }
 
     /** Item i as two nodes: "title i" and "sub i", 30dp each (60dp per item). */
