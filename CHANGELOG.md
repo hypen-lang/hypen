@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- **iOS renderer: remote images decode off the main actor at display size** — Remote images were decoded lazily on first draw, on the UI thread (measured up to 28 ms for a story-sized photo). `HypenImageCache` now decodes with ImageIO in a detached task at the requested display size, caches by URL and pixel dimensions, and `Image` / video-poster views pass their display bounds so the first draw uses already-decoded pixels. Synced from hypen-engine-rs PR #195.
+
 ## [0.6.6] - 2026-10-07
 
 Rolls up everything since 0.4.42. The 0.5.x and 0.6.0 to 0.6.5 releases shipped to npm and crates.io without changelog entries, so their changes are listed here. See the [0.6.6 release post](https://hypen.space/blog/device-capabilities) for the agent interface and device plane write-up.
