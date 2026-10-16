@@ -111,6 +111,17 @@ public final class NativeEngine: @unchecked Sendable {
         return nativePatches.map { convertPatch($0) }
     }
 
+    // MARK: - List virtualization
+
+    /// Report the item range `[start, end)` a client can see in the windowed
+    /// list `listId` (the id of the element carrying `__virt.window`) and
+    /// return the resulting patches in the server's wire format. Ids naming
+    /// no windowed list yield no patches (docs/virtualization.md §3).
+    public func setListViewport(listId: String, start: UInt32, end: UInt32) throws -> [[String: Any]] {
+        let nativePatches = try engine.setListViewport(listId: listId, start: start, end: end)
+        return nativePatches.map { convertPatch($0) }
+    }
+
     // MARK: - Route discovery
 
     /// Parse a DSL source and return every `Router { Route ... }` block
