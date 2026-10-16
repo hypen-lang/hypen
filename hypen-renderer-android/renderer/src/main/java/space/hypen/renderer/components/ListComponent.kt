@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.VirtItem
 import space.hypen.renderer.virt.VirtLazyListReporter
 import space.hypen.renderer.virt.VirtMeasure
 import space.hypen.renderer.virt.VirtPlaceholder
@@ -279,9 +280,8 @@ class ListComponent : ComponentHandler {
  * `total` slots, slot `i` the materialized child(ren) of item `i` when
  * `start <= i < end`, else a placeholder of the estimated item size. Keys are
  * node ids for rows and item indices for placeholders ([VirtSlots]), and the
- * container's own `layoutInfo` drives the viewport reports. Compose's lazy
- * containers expose `total` as the collection size to accessibility, so
- * TalkBack announces the full list position.
+ * container's own `layoutInfo` drives the viewport reports. Each row carries
+ * its whole-list position as `collectionItemInfo` ([VirtItem]).
  *
  * Also the path for a scrollable `Column` / `Row` whose sole child is a lazy
  * `ForEach` (see `HypenElement` in HypenApp.kt).
@@ -310,7 +310,7 @@ internal fun WindowedLazyList(
         items(count = slots.count, key = { slots.key(it) }) { index ->
             when (val slot = slots[index]) {
                 is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal)
-                is VirtSlot.Item -> {
+                is VirtSlot.Item -> VirtItem(index, horizontal) {
                     val nodes = slot.nodes
                     if (nodes.size == 1) {
                         ListItemRenderer(element = nodes[0], renderer = renderer, fillsWidth = fillsWidth)

@@ -141,21 +141,41 @@ estimatedSize?}` on the list element; it stays in the element's props (so it
 commits atomically with the batch's rows) but no applicator handles it.
 
 - `virt/Virtualization.kt` — plain-Kotlin port of `@hypen-space/core/virtualization`
-  (parse, itemSize, windowPadding, visibleRange, wantedRange, shouldReport),
-  plus the slot mapping (`VirtSlots`), report state (`ViewportTracker`) and
-  `WindowedShape`. Tests in `src/test/.../virt/` mirror
-  `hypen-web/tests/virtualization-math.test.ts` — keep them aligned.
+  (parseVirtWindow, childrenPerItem, windowRows, itemSize, windowPadding,
+  visibleRange, wantedRange, shouldReport, viewportReport — same names and cases as the TS reference and the Swift port
+  `Virtualization/VirtualizationMath.swift`), plus the slot mapping
+  (`VirtSlots`, O(1), resolved on demand), report state (`ViewportTracker`),
+  the padded-path geometry (`paddedItemSize`, `paddedVisibleRange`) and
+  `WindowedShape`. `VirtualizationMathTest` mirrors
+  `hypen-web/tests/virtualization-math.test.ts` case for case — keep aligned.
 - `virt/VirtCompose.kt` — Compose glue. Lazy shape (`List`/`Grid` that scroll,
   and a scrollable Column/Row via `WindowedLazyList` from `HypenElement`):
   `total` slots, rows keyed by node id, placeholders by item index, reports
-  from `layoutInfo` via `snapshotFlow`. Padded shape (non-scrolling containers):
-  `Modifier.virtPadded` pads leading/trailing and reports from the clipped
-  bounds in root; padding is capped by `MAX_PADDED_EXTENT_DP` (Compose
-  `Constraints` limit).
+  from `layoutInfo` via `snapshotFlow`; each row is wrapped in `VirtItem`
+  (layout-transparent) carrying its whole-list `collectionItemInfo`. Padded
+  shape (any other windowed container): `Modifier.virtPadded` pads
+  leading/trailing and reports from the clipped bounds in root. The padded
+  list (padding + the window's rows) is capped at `MAX_PADDED_EXTENT_DP`
+  (Compose's 2^18 px `Constraints` limit at density 4) by shrinking the
+  per-row padding (`paddedItemSize`); `paddedVisibleRange` maps offsets back
+  through the same sizes.
 - Reports go `ComposeRenderer.reportViewport` → `ViewportReporter` →
-  `RemoteEngine.setListViewport` → `{"type":"viewport","listId","start","end"}`.
-- DnD: a sortable inside a windowed list offsets its reserved-write and event
-  indices by `__virt.window.start` (`DndCoordinator.virtStarts`).
+  `RemoteEngine.setListViewport` → `{"type":"viewport","listId","start","end"}`
+  (dropped while disconnected; the list re-reports from its scroll state).
+- DnD: a sortable / pinboard inside a windowed list names whole-list indices
+  in its reserved writes (`__hypen_reorder`, `bind.<i>` pin paths) and event
+  locations: window-relative child index + `__virt.window.start`
+  (`DndCoordinator.virtStarts` / `absIndexLocked`).
+
+Known gaps:
+- **Scroll anchoring (§2)** is not implemented on the padded path: when the
+  leading padding changes (window moved, item size re-measured), the ancestor
+  `verticalScroll` keeps its offset, so content can shift by the difference.
+  The lazy path relies on `LazyListState`'s own key/index anchoring (slot
+  indices are stable; only the in-item offset can drift when a placeholder's
+  estimate differs from the row's real size).
+- No `collectionInfo` (total count) on the container: Compose's lazy layouts
+  set their own, and overriding it on the same node is order-dependent.
 
 ## Device Capability Protocol (RFC 001)
 

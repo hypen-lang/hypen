@@ -22,6 +22,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.VirtItem
 import space.hypen.renderer.virt.VirtLazyGridReporter
 import space.hypen.renderer.virt.VirtMeasure
 import space.hypen.renderer.virt.VirtPlaceholder
@@ -164,11 +165,13 @@ class GridComponent : ComponentHandler {
                 items(count = slots.count, key = { slots.key(it) }) { index ->
                     when (val slot = slots[index]) {
                         is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal = false)
-                        is VirtSlot.Item -> if (slot.nodes.size == 1) {
-                            GridItemRenderer(element = slot.nodes[0], renderer = renderer)
-                        } else Column {
-                            slot.nodes.forEach { node ->
-                                key(node.id) { GridItemRenderer(element = node, renderer = renderer) }
+                        is VirtSlot.Item -> VirtItem(index, horizontal = false, columns = columns) {
+                            if (slot.nodes.size == 1) {
+                                GridItemRenderer(element = slot.nodes[0], renderer = renderer)
+                            } else Column {
+                                slot.nodes.forEach { node ->
+                                    key(node.id) { GridItemRenderer(element = node, renderer = renderer) }
+                                }
                             }
                         }
                     }

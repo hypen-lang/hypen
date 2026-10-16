@@ -702,13 +702,21 @@ class DndCoordinatorTest {
 
     // ---------------------------------------------------------- pinboard
 
-    private fun Harness.pinboard(bind: String? = null, group: String? = "board", grid: Double? = 8.0, units: String = "px", density: Float = 1f) {
+    private fun Harness.pinboard(
+        bind: String? = null,
+        group: String? = "board",
+        grid: Double? = 8.0,
+        units: String = "px",
+        density: Float = 1f,
+        extra: Map<String, Any?> = emptyMap(),
+    ) {
         val props = LinkedHashMap<String, Any?>()
         props["__dnd.pin"] = mapOf("group" to group, "xKey" to "x", "yKey" to "y", "grid" to grid, "bounds" to "clamp", "units" to units)
         props["padding.0"] = 10.0
         props["onPin.0"] = "@pinned"
         props["onDragEnd.0"] = "@ended"
         if (bind != null) props["bind"] = bind
+        props.putAll(extra)
         create("board", "Stack", props)
         insert("root", "board")
         create("board-fe", "ForEach")
@@ -800,6 +808,20 @@ class DndCoordinatorTest {
             mapOf("path" to "seats.1", "x" to 16.0, "y" to 8.0, "xKey" to "x", "yKey" to "y"),
             h.host.dispatched[0].second,
         )
+    }
+
+    @Test
+    fun `user-field pin in a windowed board writes the whole-list index`() = runTest {
+        val h = Harness(backgroundScope)
+        h.pinboard(
+            bind = "seats",
+            group = null,
+            extra = mapOf("__virt.window" to mapOf("total" to 100.0, "start" to 20.0, "end" to 22.0)),
+        )
+        h.dnd.claim("n2", 5f, 5f)
+        h.dnd.move("n2", 16f, 8f)
+        h.dnd.drop("n2")
+        assertEquals("seats.21", h.host.dispatched[0].second["path"])
     }
 
     /**

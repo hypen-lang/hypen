@@ -889,7 +889,7 @@ class DndCoordinator(
     // ------------------------------------------------------------------
 
     private fun noteVirtWindowLocked(id: String, value: Any?) {
-        val window = Virtualization.parse(value)
+        val window = Virtualization.parseVirtWindow(value)
         if (window != null && window.start > 0) virtStarts[id] = window.start else virtStarts.remove(id)
     }
 
@@ -1593,7 +1593,7 @@ class DndCoordinator(
         val group = spec.group
         val path: String? =
             when {
-                bind != null -> if (originIndex != null) userPinPath(bind, originIndex) else null
+                bind != null -> d.origin?.let { absIndexLocked(it, originIndex) }?.let { userPinPath(bind, it) }
                 group != null -> reservedPinPath(group, d.source.key ?: d.source.id)
                 else -> null
             }

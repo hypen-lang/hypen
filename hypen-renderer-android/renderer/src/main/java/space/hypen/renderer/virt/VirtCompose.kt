@@ -20,6 +20,9 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CollectionItemInfo
+import androidx.compose.ui.semantics.collectionItemInfo
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.filterNotNull
@@ -42,7 +45,7 @@ import kotlin.math.abs
  */
 
 /** The element's decoded `__virt.window`, or null. Reads snapshot state. */
-fun HypenElement.virtWindow(): VirtWindow? = Virtualization.parse(props[VIRT_WINDOW_PROP])
+fun HypenElement.virtWindow(): VirtWindow? = Virtualization.parseVirtWindow(props[VIRT_WINDOW_PROP])
 
 /**
  * Per-list measured item extent (dp), fed by layout and read by
@@ -74,6 +77,25 @@ fun VirtPlaceholder(sizeDp: Double, horizontal: Boolean) {
         Modifier.fillMaxWidth().height(sizeDp.dp)
     }
     Box(modifier = modifier)
+}
+
+/**
+ * A materialized item's slot in a lazy container. Layout-transparent (the
+ * content gets the slot's constraints unchanged); exposes the item's
+ * whole-list position to accessibility (§2), so TalkBack counts from the
+ * list's start rather than the window's. [columns] > 1 is a grid.
+ */
+@Composable
+fun VirtItem(index: Int, horizontal: Boolean, columns: Int = 1, content: @Composable () -> Unit) {
+    val cols = columns.coerceAtLeast(1)
+    val info = if (horizontal) {
+        CollectionItemInfo(rowIndex = 0, rowSpan = 1, columnIndex = index, columnSpan = 1)
+    } else {
+        CollectionItemInfo(rowIndex = index / cols, rowSpan = 1, columnIndex = index % cols, columnSpan = 1)
+    }
+    Box(modifier = Modifier.semantics { collectionItemInfo = info }, propagateMinConstraints = true) {
+        content()
+    }
 }
 
 /** One layout pass of a lazy container, as the reporters read it. */
@@ -185,7 +207,7 @@ fun Modifier.virtPadded(
         // Average materialized row extent: the content between the paddings.
         val extentPx = (if (horizontal) coords.size.width else coords.size.height).toDouble()
         val contentDp = extentPx / px - latestPad.leading - latestPad.trailing
-        measure.update(contentDp, Virtualization.rowsInWindow(w, columns))
+        measure.update(contentDp, Virtualization.windowRows(w, columns))
 
         val clipped = coords.boundsInRoot()
         if (clipped.width <= 0f || clipped.height <= 0f) return@onGloballyPositioned
@@ -193,12 +215,11 @@ fun Modifier.virtPadded(
         val listTop = (if (horizontal) origin.x else origin.y).toDouble()
         val viewTop = (if (horizontal) clipped.left else clipped.top).toDouble()
         val viewExtent = (if (horizontal) clipped.width else clipped.height).toDouble()
-        val visible = tracker.visibleFromGeometry(
+        val visible = Virtualization.paddedVisibleRange(
             w,
             padSize = latestPadSize * px,
             rowSize = latestSize * px,
-            listTop = listTop,
-            viewportTop = viewTop,
+            scrolledPast = viewTop - listTop,
             viewportExtent = viewExtent,
             columns = columns,
         )

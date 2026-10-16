@@ -52,6 +52,19 @@ data class ItemRange(val start: Int, val end: Int)
  */
 data class LaidOutSlot(val index: Int, val offset: Int, val size: Int, val materialized: Boolean)
 
+/**
+ * Where a list sits in its scroll container, for [Virtualization.viewportReport].
+ * [size] is one item's extent (one row's for a grid); [scrolledPast] is how far
+ * the container has scrolled past the list's leading edge, negative while the
+ * list starts below the top of the viewport.
+ */
+data class ViewportGeometry(
+    val size: Double,
+    val scrolledPast: Double,
+    val viewportExtent: Double,
+    val columns: Int = 1,
+)
+
 /** Leading/trailing stand-in extent for the items outside the window. */
 data class WindowPadding(val leading: Double, val trailing: Double)
 
@@ -72,7 +85,7 @@ object Virtualization {
     }
 
     /** Decode a `__virt.window` prop value; `null` for anything malformed. */
-    fun parse(value: Any?): VirtWindow? {
+    fun parseVirtWindow(value: Any?): VirtWindow? {
         val v = value as? Map<*, *> ?: return null
         val total = count(v["total"]) ?: return null
         val start = count(v["start"]) ?: return null
@@ -100,9 +113,30 @@ object Virtualization {
         val cols = max(1, columns)
         val rowsBefore = ceilDiv(window.start, cols)
         val rowsTotal = ceilDiv(window.total, cols)
-        val rowsInWindow = ceilDiv(window.end, cols) - window.start / cols
-        val rowsAfter = max(0, rowsTotal - rowsBefore - rowsInWindow)
+        val rowsAfter = max(0, rowsTotal - rowsBefore - windowRows(window, cols))
         return WindowPadding(rowsBefore * size, rowsAfter * size)
+    }
+
+    /**
+     * Rows the materialized items occupy: `end - start` for a list; for a
+     * grid with `columns > 1`, every row any of them touches. Divide the
+     * measured extent of the children by this to get the row size for
+     * [itemSize].
+     */
+    fun windowRows(window: VirtWindow, columns: Int = 1): Int {
+        val cols = max(1, columns)
+        return ceilDiv(window.end, cols) - window.start / cols
+    }
+
+    /**
+     * Children per item (§1): a multi-node template renders several children
+     * for each item. Never less than 1, so `start + childIndex / n` is always
+     * the item a child belongs to.
+     */
+    fun childrenPerItem(window: VirtWindow, childCount: Int): Int {
+        val items = window.end - window.start
+        if (items <= 0 || childCount <= 0) return 1
+        return max(1, Math.round(childCount.toDouble() / items).toInt())
     }
 
     /**
@@ -162,6 +196,20 @@ object Virtualization {
     }
 
     /**
+     * §3 steps 2–4 in one call: the visible range, widened by overscan, if it
+     * should be reported now — else `null`. The caller sends it and keeps it
+     * as [lastReported] for the next call. While the list starts below the
+     * top of the viewport (`scrolledPast < 0`) only the part of the viewport
+     * over the list counts as visible.
+     */
+    fun viewportReport(window: VirtWindow, geometry: ViewportGeometry, lastReported: ItemRange?): ItemRange? {
+        val extent = geometry.viewportExtent + min(0.0, geometry.scrolledPast)
+        val visible = visibleRange(window.total, geometry.size, geometry.scrolledPast, extent, geometry.columns)
+        val wanted = wantedRange(visible, window.total)
+        return if (shouldReport(window, visible, wanted, lastReported)) wanted else null
+    }
+
+    /**
      * The slots a native lazy container actually shows: items whose extent
      * overlaps `[viewportStart, viewportEnd)` (Compose's `visibleItemsInfo`
      * may also carry beyond-bounds items). `null` when none do.
@@ -196,15 +244,21 @@ object Virtualization {
 
     /**
      * The per-row size the padded path stands in with: [size], shrunk so the
-     * whole padded list stays within [maxExtent]. Compose cannot measure a
-     * node beyond 2^18 px along one axis (a `Constraints` limit), and a
-     * 10,000-row list at 48dp is far past it. The same size must drive both
-     * the padding and the visible-range geometry so the two agree.
+     * whole padded list (the padding plus the window's own rows at [size])
+     * stays within [maxExtent]. Compose cannot measure a node beyond 2^18 px
+     * along one axis (a `Constraints` limit), and a 10,000-row list at 48dp
+     * is far past it. The same size must drive both the padding and the
+     * visible-range geometry ([paddedVisibleRange]) so the two agree.
      */
     fun paddedItemSize(window: VirtWindow, size: Double, columns: Int = 1, maxExtent: Double = MAX_PADDED_EXTENT_DP): Double {
-        val rows = ceilDiv(window.total, max(1, columns))
-        if (rows <= 0) return size
-        return min(size, maxExtent / rows)
+        val cols = max(1, columns)
+        val rowsIn = windowRows(window, cols)
+        val rowsOutside = ceilDiv(window.total, cols) - rowsIn
+        if (rowsOutside <= 0) return size
+        // Never starve the padding entirely: a window too tall to fit leaves
+        // it half the budget, and `paddedVisibleRange` needs a positive size.
+        val budget = max(maxExtent / 2, maxExtent - rowsIn * size)
+        return min(size, budget / rowsOutside)
     }
 
     /**
@@ -226,7 +280,7 @@ object Virtualization {
         val pad = if (padSize > 0) padSize else DEFAULT_ITEM_SIZE
         val row = if (rowSize > 0) rowSize else pad
         val rowsBefore = ceilDiv(window.start, cols)
-        val rowsIn = rowsInWindow(window, cols)
+        val rowsIn = windowRows(window, cols)
         val lead = rowsBefore * pad
         val mid = rowsIn * row
         fun rowAt(y: Double): Double = when {
@@ -238,12 +292,6 @@ object Virtualization {
         val firstRow = floor(rowAt(past))
         val lastRow = ceil(rowAt(past + max(0.0, viewportExtent)))
         return ItemRange(clamp(firstRow * cols, window.total), clamp(lastRow * cols, window.total))
-    }
-
-    /** Rows of a `columns`-wide grid the window `[start, end)` occupies. */
-    fun rowsInWindow(window: VirtWindow, columns: Int = 1): Int {
-        val cols = max(1, columns)
-        return ceilDiv(window.end, cols) - window.start / cols
     }
 
     private fun ceilDiv(a: Int, b: Int): Int = (a + b - 1) / b
@@ -269,9 +317,9 @@ sealed class VirtSlot<out T> {
  * else a placeholder. Built in O(1) — slots are resolved on demand, so a
  * 10,000-item list never allocates 10,000 entries.
  *
- * Children are grouped per item: `childrenPerItem = children / (end - start)`.
- * When the counts disagree (a transient batch the engine is still settling)
- * an item with no children in range falls back to a placeholder rather than
+ * Children are grouped per item ([Virtualization.childrenPerItem]). When the
+ * counts disagree (a transient batch the engine is still settling) an item
+ * with no children in range falls back to a placeholder rather than
  * throwing.
  */
 class VirtSlots<T>(
@@ -281,11 +329,10 @@ class VirtSlots<T>(
 ) {
     val count: Int get() = window.total
 
-    val childrenPerItem: Int =
-        if (window.count <= 0) 0 else max(1, children.size / window.count)
+    val childrenPerItem: Int = Virtualization.childrenPerItem(window, children.size)
 
     operator fun get(index: Int): VirtSlot<T> {
-        if (index < window.start || index >= window.end || childrenPerItem == 0) {
+        if (index < window.start || index >= window.end) {
             return VirtSlot.Placeholder(index)
         }
         val from = (index - window.start) * childrenPerItem
@@ -360,28 +407,4 @@ class ViewportTracker {
         lastReported = wanted
         return wanted
     }
-
-    /**
-     * Visible range from a scroll geometry (the padded, non-lazy path):
-     * [listTop] is where the list's leading edge sits and [viewportTop] /
-     * [viewportExtent] the visible part of the scroll container, all in the
-     * same unit along the scroll axis. Rows outside the window are [padSize]
-     * each, materialized rows [rowSize] ([Virtualization.paddedVisibleRange]).
-     */
-    fun visibleFromGeometry(
-        window: VirtWindow,
-        padSize: Double,
-        rowSize: Double,
-        listTop: Double,
-        viewportTop: Double,
-        viewportExtent: Double,
-        columns: Int = 1,
-    ): ItemRange = Virtualization.paddedVisibleRange(
-        window,
-        padSize,
-        rowSize,
-        scrolledPast = viewportTop - listTop,
-        viewportExtent = viewportExtent,
-        columns = columns,
-    )
 }

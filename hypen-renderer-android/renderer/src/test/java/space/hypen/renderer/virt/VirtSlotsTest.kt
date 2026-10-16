@@ -56,7 +56,7 @@ class VirtSlotsTest {
     @Test
     fun `an empty window is all placeholders`() {
         val s = slots(VirtWindow(total = 3, start = 0, end = 0), emptyList())
-        assertEquals(0, s.childrenPerItem)
+        assertEquals(1, s.childrenPerItem)
         assertTrue((0 until 3).all { s.isPlaceholder(it) })
     }
 
@@ -105,18 +105,11 @@ class VirtSlotsTest {
     }
 
     @Test
-    fun `geometry gives the visible range below a scrolled ancestor`() {
-        // The list starts 100px down the content; the viewport has scrolled
-        // 600px, so 500px of the list are above it.
-        val visible = ViewportTracker().visibleFromGeometry(
-            VirtWindow(total = 1000, start = 0, end = 30),
-            padSize = 50.0,
-            rowSize = 50.0,
-            listTop = -500.0,
-            viewportTop = 0.0,
-            viewportExtent = 200.0,
-        )
-        assertEquals(ItemRange(10, 14), visible)
+    fun `paddedVisibleRange gives the visible range below a scrolled ancestor`() {
+        // 500px of the list are above the viewport (it starts 100px down the
+        // content and the viewport has scrolled 600px).
+        val window = VirtWindow(total = 1000, start = 0, end = 30)
+        assertEquals(ItemRange(10, 14), Virtualization.paddedVisibleRange(window, 50.0, 50.0, 500.0, 200.0))
     }
 
     @Test
@@ -143,16 +136,17 @@ class VirtSlotsTest {
     @Test
     fun `paddedItemSize keeps a huge list measurable`() {
         val huge = VirtWindow(total = 100_000, start = 0, end = 30)
-        assertEquals(MAX_PADDED_EXTENT_DP / 100_000, Virtualization.paddedItemSize(huge, 48.0), 1e-9)
+        val pad = Virtualization.paddedItemSize(huge, 48.0)
+        // Padding plus the window's own rows fit the budget exactly.
+        assertEquals(MAX_PADDED_EXTENT_DP, pad * (100_000 - 30) + 30 * 48.0, 1e-6)
         assertEquals(48.0, Virtualization.paddedItemSize(VirtWindow(total = 100, start = 0, end = 30), 48.0), 0.0)
         // A grid counts rows.
         assertEquals(48.0, Virtualization.paddedItemSize(VirtWindow(total = 3000, start = 0, end = 30), 48.0, 3), 0.0)
-    }
-
-    @Test
-    fun `rowsInWindow counts grid rows`() {
-        assertEquals(3, Virtualization.rowsInWindow(VirtWindow(30, 9, 18), 3))
-        assertEquals(30, Virtualization.rowsInWindow(VirtWindow(100, 40, 70)))
+        // A window covering everything needs no padding.
+        assertEquals(48.0, Virtualization.paddedItemSize(VirtWindow(total = 30, start = 0, end = 30), 48.0), 0.0)
+        // A window too tall for the budget still leaves the padding a positive size.
+        val tall = Virtualization.paddedItemSize(VirtWindow(total = 10_000, start = 0, end = 2_000), 48.0)
+        assertEquals(MAX_PADDED_EXTENT_DP / 2 / 8_000, tall, 1e-9)
     }
 
     @Test
