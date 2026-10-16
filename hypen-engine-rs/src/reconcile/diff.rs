@@ -178,15 +178,12 @@ fn create_element_node(
     let module_scope_ref = ctx.effective_scope(element.module_scope.as_deref());
     let effective_state = ctx.effective_state(element.module_scope.as_deref());
 
-    // Iterable element fast-path (List, Grid, …) — only valid in the
-    // "normal" path where logical and render parents agree, since
-    // create_list_tree_impl emits its own Insert patches against the
-    // tree-side parent.
-    if logical_parent == render_parent {
-        if let Some(Value::Binding(_)) = element.props.get("0") {
-            if !element.ir_children.is_empty() {
-                return create_list_tree_impl(ctx, element, logical_parent, is_root);
-            }
+    // Iterable element fast-path (List, Grid, …). The container itself is
+    // inserted like any element (under `render_parent`); its rows render
+    // under the container.
+    if let Some(Value::Binding(_)) = element.props.get("0") {
+        if !element.ir_children.is_empty() {
+            return create_list_tree_impl(ctx, element, logical_parent, render_parent, is_root);
         }
     }
 
@@ -265,24 +262,10 @@ fn create_element_node(
         semantics,
     ));
 
-    // Tree-side: hang the node off its logical parent.
-    if let Some(parent) = logical_parent {
-        ctx.tree.add_child(parent, node_id, None);
-    }
-
-    // Patch-side: emit Insert into render_parent when set; otherwise
-    // fall back to "root" (for root-level children of a control-flow
-    // container whose own NodeId is not known to the renderer) before
-    // finally falling through to the logical parent (which only fires
-    // when render_parent was omitted by a caller that passed the same
-    // parent for both).
-    if let Some(rp) = render_parent {
-        ctx.patches.push(Patch::insert(rp, node_id, None));
-    } else if is_root {
-        ctx.patches.push(Patch::insert_root(node_id));
-    } else if let Some(lp) = logical_parent {
-        ctx.patches.push(Patch::insert(lp, node_id, None));
-    }
+    // Tree-side: hang the node off its logical parent; patch-side: insert
+    // it into the render parent at the matching place.
+    link_new_node(ctx, logical_parent, node_id);
+    emit_insert(ctx, node_id, logical_parent, render_parent, is_root);
 
     // Recurse into children (skipped for lazy elements). Module-scoped
     // state propagates so `${state.x}` inside the subtree resolves
@@ -299,6 +282,55 @@ fn create_element_node(
     }
 
     node_id
+}
+
+/// Link a just-created node under its logical parent: appended, or at the
+/// slot a replacement path reserved (`InstanceTree::place_before_slot`).
+/// The slot is taken even without a parent so it can never leak to a later
+/// creation.
+pub(crate) fn link_new_node(ctx: &mut ReconcileCtx, parent: Option<NodeId>, node_id: NodeId) {
+    let before = ctx.tree.place_before_slot.take();
+    if let Some(parent) = parent {
+        ctx.tree.add_child(parent, node_id, before);
+    }
+}
+
+/// Emit the `Insert` for a just-linked node. The anchor is the first
+/// rendered node that follows it in render order
+/// (`InstanceTree::render_anchor_after`), so content created under a
+/// control-flow container lands inside that container's range rather than
+/// after the siblings that follow it. Without a render parent the node goes
+/// to "root"; a caller that named neither falls back to the logical parent.
+fn emit_insert(
+    ctx: &mut ReconcileCtx,
+    node_id: NodeId,
+    logical_parent: Option<NodeId>,
+    render_parent: Option<NodeId>,
+    is_root: bool,
+) {
+    let target = match render_parent.or(logical_parent) {
+        // A control-flow container never reaches the renderer: address its
+        // nearest real ancestor (or "root" when there is none).
+        Some(p) if ctx.tree.get(p).is_some_and(|n| n.control_flow.is_some()) => {
+            match nearest_render_parent(ctx.tree, Some(p)) {
+                Some(rp) => Some(rp),
+                None => {
+                    ctx.patches.push(Patch::insert_root(node_id));
+                    return;
+                }
+            }
+        }
+        Some(p) => Some(p),
+        None if is_root => {
+            ctx.patches.push(Patch::insert_root(node_id));
+            return;
+        }
+        None => None,
+    };
+    if let Some(rp) = target {
+        let before = ctx.tree.render_anchor_after(node_id);
+        ctx.patches.push(Patch::insert(rp, node_id, before));
+    }
 }
 
 /// Substitution-path creation of one list row — the fallback when no row
@@ -334,6 +366,7 @@ fn create_list_tree_impl(
     ctx: &mut ReconcileCtx,
     element: &Element,
     parent_id: Option<NodeId>,
+    render_parent: Option<NodeId>,
     is_root: bool,
 ) -> NodeId {
     let module_scope_ref = ctx.effective_scope(element.module_scope.as_deref());
@@ -385,12 +418,8 @@ fn create_list_tree_impl(
         .push(Patch::create(node_id, element_type, props, semantics));
 
     // Insert container
-    if let Some(parent) = parent_id {
-        ctx.tree.add_child(parent, node_id, None);
-        ctx.patches.push(Patch::insert(parent, node_id, None));
-    } else if is_root {
-        ctx.patches.push(Patch::insert_root(node_id));
-    }
+    link_new_node(ctx, parent_id, node_id);
+    emit_insert(ctx, node_id, parent_id, render_parent, is_root);
 
     // Create children for each item in the array. Stamp every per-template
     // child with a key so the next reconcile can match by identity instead
@@ -666,6 +695,15 @@ fn replace_subtree_impl(
     } else {
         None
     };
+    // The replacement takes the old node's slot: linked before the sibling
+    // that followed it, and inserted before what renders after it.
+    let next_sibling = match (parent_id, old_position) {
+        (Some(pid), Some(pos)) => ctx
+            .tree
+            .get(pid)
+            .and_then(|parent| parent.children.get(pos + 1).copied()),
+        _ => None,
+    };
 
     withdraw_window(ctx.tree, old_node_id, ctx.patches);
     emit_subtree_removal(ctx.tree, old_node_id, ctx.patches);
@@ -684,23 +722,20 @@ fn replace_subtree_impl(
         .remove_subtree_with(old_node_id, |id| ctx.dependencies.remove_node(id));
 
     let is_root = parent_id.is_none();
-    let new_node_id = create_element_node(ctx, new_element, parent_id, parent_id, is_root);
+    // The parent may be a transparent control-flow container (a ForEach row
+    // whose template changed type): render under its real ancestor.
+    let render_parent = nearest_render_parent(ctx.tree, parent_id);
+    ctx.tree.place_before_slot = next_sibling;
+    let new_node_id = create_element_node(
+        ctx,
+        new_element,
+        parent_id,
+        render_parent,
+        is_root || render_parent.is_none(),
+    );
 
     if is_root {
         ctx.tree.set_root(new_node_id);
-    } else if let Some(pid) = parent_id {
-        if let Some(pos) = old_position {
-            if let Some(parent) = ctx.tree.get_mut(pid) {
-                let current_len = parent.children.len();
-                if pos < current_len - 1 {
-                    let new_id = parent.children.pop_back().unwrap();
-                    parent.children.insert(pos, new_id);
-                    let next_sibling = parent.children.get(pos + 1).copied();
-                    ctx.patches
-                        .push(Patch::move_node(pid, new_node_id, next_sibling));
-                }
-            }
-        }
     }
 }
 
@@ -1018,9 +1053,7 @@ fn create_foreach_ir_tree(
             .add_dependency(node_id, source, module_scope_ref);
     }
 
-    if let Some(parent) = parent_id {
-        ctx.tree.add_child(parent, node_id, None);
-    }
+    link_new_node(ctx, parent_id, node_id);
 
     // Items must be inserted under a node the renderer knows: the hint may
     // itself be a control-flow container (this ForEach nested directly
@@ -1383,9 +1416,7 @@ fn create_conditional_tree(
         }
     }
 
-    if let Some(parent) = parent_id {
-        ctx.tree.add_child(parent, node_id, None);
-    }
+    link_new_node(ctx, parent_id, node_id);
 
     let matched_children = find_matching_branch(
         &evaluated_value,
@@ -1478,9 +1509,7 @@ fn create_router_tree(
         }
     }
 
-    if let Some(parent) = parent_id {
-        ctx.tree.add_child(parent, node_id, None);
-    }
+    link_new_node(ctx, parent_id, node_id);
 
     // Find the matched route (with its pattern key) so we can remember
     // which route produced the current children. On the next location
@@ -1935,9 +1964,12 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
                         if let Some(router_node) = ctx.tree.get_mut(node_id) {
                             router_node.children.push_back(*cached_id);
                         }
+                        // Back inside the Router's range: before whatever
+                        // renders after the Router, not appended behind it.
+                        let before = ctx.tree.render_anchor_after(*cached_id);
                         let attach_patch = match render_parent {
-                            Some(rp) => Patch::attach(rp, *cached_id, None),
-                            None => Patch::attach_root(*cached_id, None),
+                            Some(rp) => Patch::attach(rp, *cached_id, before),
+                            None => Patch::attach_root(*cached_id, before),
                         };
                         ctx.patches.push(attach_patch);
                     }
@@ -2103,11 +2135,17 @@ fn replace_with_control_flow(
     let sole_child = parent_id
         .and_then(|p| ctx.tree.get(p))
         .is_some_and(|p| p.children.len() == 1);
+    // Keep the old node's slot (see `replace_subtree_impl`).
+    let next_sibling = parent_id.and_then(|p| ctx.tree.get(p)).and_then(|p| {
+        let pos = p.children.iter().position(|&id| id == old_id)?;
+        p.children.get(pos + 1).copied()
+    });
     remove_subtree(ctx.tree, old_id, ctx.patches, ctx.dependencies);
     if let Some(parent) = parent_id.and_then(|p| ctx.tree.get_mut(p)) {
         parent.children.retain(|&id| id != old_id);
     }
     ctx.tree.sole_child_slot = sole_child;
+    ctx.tree.place_before_slot = next_sibling;
     create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
 }
 

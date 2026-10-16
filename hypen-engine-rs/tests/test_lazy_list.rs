@@ -853,15 +853,11 @@ fn gaining_a_sibling_expands_the_list() {
     h.render(
         r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } Text("footer") }"#,
     );
-    // Every row, and no window. (Order is not asserted: rows created after
-    // a sibling exists are appended behind it — a general control-flow
-    // placement limitation, not a windowing one.)
-    let mut rows = h.screen.rows(&column);
-    rows.sort();
+    // Every row, in order — rows created once the sibling exists anchor on
+    // it rather than being appended behind it — and no window.
     let mut expected = names(0..20);
     expected.push("footer".into());
-    expected.sort();
-    assert_eq!(rows, expected);
+    assert_eq!(h.screen.rows(&column), expected);
     assert_eq!(h.screen.window(&column), None);
 }
 

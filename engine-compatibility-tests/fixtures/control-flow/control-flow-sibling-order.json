@@ -1,0 +1,87 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "control-flow-sibling-order",
+  "description": "Content a ForEach or If creates on a later pass is placed inside the control-flow node's range: before the parent's following sibling, never appended behind it. Moves to the end of a ForEach range anchor on that sibling too.",
+  "category": "control-flow",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "Asserts placement through the fixture-only `before` anchor, which only the Rust runner resolves; the prebuilt WASM/native engines the other runners load predate the control-flow anchor fix",
+    "sdks": ["typescript", "golang", "kotlin"]
+  },
+
+  "input": {
+    "source": "Column { ForEach(items: @state.items, key: \"id\") { Text(\"@{item.name}\") } If(@state.show) { Text(\"shown\") } Text(\"footer\") }",
+    "initialState": {
+      "items": [{ "id": "a", "name": "a" }],
+      "show": false
+    },
+    "module": {
+      "name": "OrderModule",
+      "actions": [],
+      "stateKeys": ["items", "show"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatches": [
+        { "type": "create", "elementType": "Text", "props": { "0": "a" } },
+        { "type": "create", "elementType": "Text", "props": { "0": "footer" } }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "Appended rows are inserted before the footer",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["items"],
+        "newValues": { "items": [{ "id": "a", "name": "a" }, { "id": "b", "name": "b" }, { "id": "c", "name": "c" }] }
+      },
+      "expectedPatches": [
+        { "type": "create", "elementType": "Text", "props": { "0": "b" } },
+        { "type": "create", "elementType": "Text", "props": { "0": "c" } },
+        { "type": "insert", "before": { "elementType": "Text", "props": { "0": "footer" } } },
+        { "type": "insert", "before": { "elementType": "Text", "props": { "0": "footer" } } }
+      ]
+    },
+    {
+      "description": "A row moved to the end of the range moves before the footer",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["items"],
+        "newValues": { "items": [{ "id": "b", "name": "b" }, { "id": "c", "name": "c" }, { "id": "a", "name": "a" }] }
+      },
+      "expectedPatchCount": 1,
+      "expectedPatches": [
+        { "type": "move", "before": { "elementType": "Text", "props": { "0": "footer" } } }
+      ]
+    },
+    {
+      "description": "An If turning on inserts its branch before the footer",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["show"],
+        "newValues": { "show": true }
+      },
+      "expectedPatches": [
+        { "type": "create", "elementType": "Text", "props": { "0": "shown" } },
+        { "type": "insert", "before": { "elementType": "Text", "props": { "0": "footer" } } }
+      ]
+    },
+    {
+      "description": "A row appended while the If is on lands before the If's content",
+      "action": "updateState",
+      "stateChange": {
+        "paths": ["items"],
+        "newValues": { "items": [{ "id": "b", "name": "b" }, { "id": "c", "name": "c" }, { "id": "a", "name": "a" }, { "id": "d", "name": "d" }] }
+      },
+      "expectedPatches": [
+        { "type": "create", "elementType": "Text", "props": { "0": "d" } },
+        { "type": "insert", "before": { "elementType": "Text", "props": { "0": "shown" } } }
+      ]
+    }
+  ]
+}

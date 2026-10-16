@@ -447,6 +447,15 @@ pub struct InstanceTree {
     /// render parent describes exactly one list and renderer spacers can't
     /// collide with sibling content.
     pub(crate) sole_child_slot: bool,
+
+    /// Set by a replacement path (a node whose IR changed kind) just before
+    /// it creates the replacement: the sibling the new node must be linked
+    /// BEFORE, so it takes the old node's slot in its parent's child list
+    /// instead of being appended. Taken by the next creation that links a
+    /// node (`diff::link_new_node`) — creators link before building any
+    /// descendant, so it only ever applies to the replacement itself. The
+    /// replacement's content is then anchored from its real position.
+    pub(crate) place_before_slot: Option<NodeId>,
 }
 
 /// How many exit tombstones the tree retains. An exit plays for a few
@@ -501,6 +510,7 @@ impl InstanceTree {
             remove_stack: Vec::new(),
             exit_tombstones: std::collections::VecDeque::new(),
             sole_child_slot: false,
+            place_before_slot: None,
         }
     }
 
@@ -736,6 +746,77 @@ impl InstanceTree {
         if let Some(child) = self.nodes.get_mut(child_id) {
             child.parent = Some(parent_id);
         }
+    }
+
+    /// The first node at or under `id` that the renderer knows, in render
+    /// order: `id` itself for an element; for a control-flow container
+    /// (transparent to renderers) the first rendered node among its
+    /// children, recursively. `None` for an empty container.
+    pub fn first_rendered(&self, id: NodeId) -> Option<NodeId> {
+        let node = self.get(id)?;
+        if node.control_flow.is_none() {
+            return Some(id);
+        }
+        node.children
+            .iter()
+            .find_map(|&child| self.first_rendered(child))
+    }
+
+    /// Call `f` with every renderer-visible root `id` stands for, in render
+    /// order: `id` itself for an element, the rendered roots of a
+    /// control-flow container's children otherwise (nothing when empty).
+    pub fn for_each_rendered_root(&self, id: NodeId, f: &mut impl FnMut(NodeId)) {
+        let Some(node) = self.get(id) else { return };
+        if node.control_flow.is_none() {
+            f(id);
+            return;
+        }
+        for &child in node.children.iter() {
+            self.for_each_rendered_root(child, f);
+        }
+    }
+
+    /// The insert-before anchor for `id`, which must already be linked at
+    /// its place under its logical parent: the first RENDERED node that
+    /// follows it in its render parent's child list. Walks `id`'s following
+    /// siblings (descending into control-flow siblings, skipping empty
+    /// ones); when they render nothing and the parent is itself a
+    /// transparent control-flow container, continues after that container,
+    /// and so on up to the nearest real element. `None` = append.
+    ///
+    /// Cost is O(siblings) per level, with a fast path for the common case
+    /// of a just-appended last child.
+    pub fn render_anchor_after(&self, id: NodeId) -> Option<NodeId> {
+        let mut current = id;
+        loop {
+            let parent_id = self.get(current)?.parent?;
+            let parent = self.get(parent_id)?;
+            if parent.children.last() != Some(&current) {
+                if let Some(pos) = parent.children.iter().position(|&c| c == current) {
+                    let found = parent
+                        .children
+                        .iter()
+                        .skip(pos + 1)
+                        .find_map(|&sibling| self.first_rendered(sibling));
+                    if found.is_some() {
+                        return found;
+                    }
+                }
+            }
+            // A real element is the render parent: nothing follows.
+            parent.control_flow.as_ref()?;
+            current = parent_id;
+        }
+    }
+
+    /// The anchor for content placed at the END of `container`'s child
+    /// range: what follows a control-flow container in render order, or
+    /// `None` (append) when `container` is a real element and so is its own
+    /// render parent.
+    pub fn range_end_anchor(&self, container: NodeId) -> Option<NodeId> {
+        let node = self.get(container)?;
+        node.control_flow.as_ref()?;
+        self.render_anchor_after(container)
     }
 
     /// Remove a child from its parent

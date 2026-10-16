@@ -142,6 +142,21 @@ struct ExpectedPatch {
     /// complete object (exact equality) — the fixture pins the normalized
     /// wire spec, so an extra or missing field is a mismatch.
     spec: Option<Value>,
+    /// Fixture-assertion-only (never on the wire): on `insert`/`move`, the
+    /// element the patch's `beforeId` must name, matched against that
+    /// element's `create` patch (from any earlier step). Pins placement
+    /// contracts — e.g. a row a ForEach gains lands before the list's
+    /// following sibling, not appended behind it — that the id-agnostic
+    /// structural match otherwise cannot see.
+    before: Option<ExpectedAnchor>,
+}
+
+/// See [`ExpectedPatch::before`].
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExpectedAnchor {
+    element_type: Option<String>,
+    props: Option<HashMap<String, Value>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -273,7 +288,11 @@ fn patch_type(patch: &Value) -> &str {
     patch["type"].as_str().unwrap_or("")
 }
 
-fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch) -> bool {
+/// Every `create` patch seen so far in a fixture run, by wire id — what
+/// `before` anchors are resolved against.
+type CreatedById = HashMap<String, Value>;
+
+fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch, created: &CreatedById) -> bool {
     let actual_type = patch_type(actual);
     if actual_type != expected.patch_type {
         return false;
@@ -354,21 +373,52 @@ fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch) -> bool {
         }
     }
 
+    if let Some(ref anchor) = expected.before {
+        let Some(target) = actual
+            .get("beforeId")
+            .and_then(Value::as_str)
+            .and_then(|id| created.get(id))
+        else {
+            return false;
+        };
+        if let Some(ref et) = anchor.element_type {
+            if target.get("elementType").and_then(Value::as_str) != Some(et) {
+                return false;
+            }
+        }
+        if let Some(ref props) = anchor.props {
+            for (key, expected_val) in props {
+                match target.get("props").and_then(|p| p.get(key)) {
+                    Some(av) if json_values_equal(av, expected_val) => {}
+                    _ => return false,
+                }
+            }
+        }
+    }
+
     true
 }
 
 /// Index-by-index match — for fixtures whose contract IS the emission order
 /// (e.g. flagged-root-first deferred removes), where the unordered
 /// structural match below cannot distinguish orderings.
-fn match_patches_sequence(actual_patches: &[Value], expected_patches: &[ExpectedPatch]) -> bool {
+fn match_patches_sequence(
+    actual_patches: &[Value],
+    expected_patches: &[ExpectedPatch],
+    created: &CreatedById,
+) -> bool {
     actual_patches.len() == expected_patches.len()
         && actual_patches
             .iter()
             .zip(expected_patches)
-            .all(|(actual, expected)| matches_expected_patch(actual, expected))
+            .all(|(actual, expected)| matches_expected_patch(actual, expected, created))
 }
 
-fn match_patches_structural(actual_patches: &[Value], expected_patches: &[ExpectedPatch]) -> bool {
+fn match_patches_structural(
+    actual_patches: &[Value],
+    expected_patches: &[ExpectedPatch],
+    created: &CreatedById,
+) -> bool {
     // For each expected patch, find a matching actual patch
     let mut used = vec![false; actual_patches.len()];
 
@@ -376,7 +426,7 @@ fn match_patches_structural(actual_patches: &[Value], expected_patches: &[Expect
         let found = actual_patches
             .iter()
             .enumerate()
-            .find(|(i, actual)| !used[*i] && matches_expected_patch(actual, expected));
+            .find(|(i, actual)| !used[*i] && matches_expected_patch(actual, expected, created));
 
         match found {
             Some((i, _)) => used[i] = true,
@@ -491,10 +541,12 @@ fn run_fixture(tc: &TestCase) {
             engine.render_ir_node(&ir_node);
 
             let patches = collected_patches.lock().unwrap();
+            let created = creates_by_id(&patches, CreatedById::new());
             assert_expected(
                 &tc.name,
                 "single",
                 &patches,
+                &created,
                 expected.patch_count,
                 expected.patch_types.as_deref(),
                 expected.patches.as_deref(),
@@ -511,6 +563,7 @@ fn run_fixture(tc: &TestCase) {
         // Wire id of the first element created per element type, for
         // `setViewport` steps to address a list the way a renderer does.
         let mut created_ids: HashMap<String, String> = HashMap::new();
+        let mut created_by_id = CreatedById::new();
         for (i, step) in steps.iter().enumerate() {
             let default_label = format!("step {i}");
             let step_label = step.description.as_deref().unwrap_or(&default_label);
@@ -604,10 +657,12 @@ fn run_fixture(tc: &TestCase) {
                         .or_insert_with(|| id.to_string());
                 }
             }
+            created_by_id = creates_by_id(&patches, created_by_id);
             assert_expected(
                 &tc.name,
                 step_label,
                 &patches,
+                &created_by_id,
                 step.expected_patch_count,
                 step.expected_patch_types.as_deref(),
                 step.expected_patches.as_deref(),
@@ -619,11 +674,25 @@ fn run_fixture(tc: &TestCase) {
     }
 }
 
+/// Add this batch's `create` patches to `created`.
+fn creates_by_id(patches: &[Value], mut created: CreatedById) -> CreatedById {
+    for patch in patches {
+        if let (Some("create"), Some(id)) = (
+            patch.get("type").and_then(Value::as_str),
+            patch.get("id").and_then(Value::as_str),
+        ) {
+            created.insert(id.to_string(), patch.clone());
+        }
+    }
+    created
+}
+
 #[allow(clippy::too_many_arguments)]
 fn assert_expected(
     test_name: &str,
     step: &str,
     patches: &[Value],
+    created: &CreatedById,
     patch_count: Option<usize>,
     patch_types: Option<&[String]>,
     expected_patches: Option<&[ExpectedPatch]>,
@@ -652,9 +721,9 @@ fn assert_expected(
 
     if let Some(expected) = expected_patches {
         let matched = if strict_patch_order {
-            match_patches_sequence(patches, expected)
+            match_patches_sequence(patches, expected, created)
         } else {
-            match_patches_structural(patches, expected)
+            match_patches_structural(patches, expected, created)
         };
         assert!(
             matched,

@@ -428,6 +428,10 @@ pub(crate) fn instantiate_from_created(
     let mut semantics: Vec<(usize, crate::ir::Semantics)> = Vec::new();
     let mut subs: Vec<(usize, String, serde_json::Value)> = Vec::new();
     let mut inserts = 0usize;
+    // The row ROOT's anchor (its Insert is the run's first, DFS preorder):
+    // a row created inside a control-flow range is placed before what
+    // follows that range, and the Instantiate must keep that placement.
+    let mut root_before: Option<Arc<str>> = None;
 
     for patch in row_patches {
         match patch {
@@ -450,7 +454,12 @@ pub(crate) fn instantiate_from_created(
                 }
                 nodes.push(id.clone());
             }
-            Patch::Insert { .. } => inserts += 1,
+            Patch::Insert { before_id, .. } => {
+                if inserts == 0 {
+                    root_before = before_id.clone();
+                }
+                inserts += 1;
+            }
             _ => return None,
         }
     }
@@ -468,7 +477,7 @@ pub(crate) fn instantiate_from_created(
     out.push(Patch::Instantiate {
         template_id: plan.template_id.clone(),
         parent_id: parent_id_str,
-        before_id: None,
+        before_id: root_before,
         nodes,
         subs,
         semantics,
@@ -836,10 +845,16 @@ pub(crate) fn instantiate_row_from_proto(
             root: plan.skeleton.clone(),
         });
     }
+    // Linked last under its logical parent: anchor on whatever renders
+    // after it (the end of a control-flow range; `None` under an element).
+    let before_id = ctx
+        .tree
+        .render_anchor_after(ids[0])
+        .map(super::patch::node_id_str);
     ctx.patches.push(Patch::Instantiate {
         template_id: plan.template_id.clone(),
         parent_id: super::patch::node_id_str(render_parent),
-        before_id: None,
+        before_id,
         nodes: ids
             .iter()
             .map(|&id| super::patch::node_id_str(id))

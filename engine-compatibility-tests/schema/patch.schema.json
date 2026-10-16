@@ -75,7 +75,16 @@
         "type": { "const": "insert" },
         "parentId": { "type": "string", "description": "Parent element ID" },
         "id": { "type": "string", "description": "Element ID to insert" },
-        "beforeId": { "type": ["string", "null"], "description": "Insert before this element (null = append)" }
+        "beforeId": { "type": ["string", "null"], "description": "Insert before this element (null = append)" },
+        "before": {
+          "type": "object",
+          "description": "Fixture-assertion-only field (never on the wire): the element `beforeId` must name, matched against that element's create patch (elementType, subset of props). Pins placement contracts (e.g. content a ForEach/If creates lands before the parent's following sibling) that the id-agnostic match cannot see. Resolved by the Rust runner.",
+          "properties": {
+            "elementType": { "type": "string" },
+            "props": { "type": "object", "additionalProperties": true }
+          },
+          "additionalProperties": false
+        }
       },
       "required": ["type", "parentId", "id"],
       "additionalProperties": false
@@ -86,7 +95,16 @@
         "type": { "const": "move" },
         "parentId": { "type": "string", "description": "Parent element ID" },
         "id": { "type": "string", "description": "Element ID to move" },
-        "beforeId": { "type": ["string", "null"], "description": "Move before this element (null = move to end)" }
+        "beforeId": { "type": ["string", "null"], "description": "Move before this element (null = move to end)" },
+        "before": {
+          "type": "object",
+          "description": "Fixture-assertion-only field (never on the wire): the element `beforeId` must name, matched against that element's create patch (elementType, subset of props). Pins placement contracts (e.g. content a ForEach/If creates lands before the parent's following sibling) that the id-agnostic match cannot see. Resolved by the Rust runner.",
+          "properties": {
+            "elementType": { "type": "string" },
+            "props": { "type": "object", "additionalProperties": true }
+          },
+          "additionalProperties": false
+        }
       },
       "required": ["type", "parentId", "id"],
       "additionalProperties": false

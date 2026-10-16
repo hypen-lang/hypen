@@ -363,12 +363,13 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
-    // Detach the old children from the LOGICAL parent up front so creation
-    // doesn't append at arbitrary positions during the pass — the final
-    // children list is rebuilt in desired order as we go.
-    if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-        parent_node.children.clear();
-    }
+    // The old children STAY linked in their old order for the whole pass
+    // (the final list is installed from `new_child_ids` after it): they are
+    // still on screen, and content a reused row creates in place (an `If`
+    // row turning on) anchors on the row that follows it there
+    // (`InstanceTree::render_anchor_after`). Rows created in this pass are
+    // appended behind them, i.e. at the end of this container's range —
+    // exactly the post-create render order the placement pass assumes.
 
     // One fingerprint for the whole pass — every child stamped this cycle
     // shares it, and a keyed match only skips when BOTH its stored item and
@@ -437,9 +438,6 @@ pub(crate) fn reconcile_iterable_children_full(
                 // full reconcile sees those.
                 let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
 
-                if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-                    parent_node.children.push_back(old_id);
-                }
                 if !memo_hit {
                     // Fast path: apply just the item-dependent prop deltas
                     // via the compiled binding map. Falls back to full
@@ -463,6 +461,9 @@ pub(crate) fn reconcile_iterable_children_full(
                         );
                         reconcile_ir_node_impl(ctx, old_id, &substituted);
                     }
+                }
+                let old_id = replaced_or_same(ctx, parent_id, &old_children, old_id);
+                if !memo_hit {
                     stamp_iter_memo(ctx, old_id, item_hash, templates_hash);
                 }
                 // `swap_remove`, not `shift_remove`: matching N children in
@@ -484,9 +485,6 @@ pub(crate) fn reconcile_iterable_children_full(
                 });
                 let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
 
-                if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-                    parent_node.children.push_back(old_id);
-                }
                 if !memo_hit {
                     // Same fast path as the keyed branch: positional reuse
                     // re-resolves every item-dependent prop against the new
@@ -508,6 +506,9 @@ pub(crate) fn reconcile_iterable_children_full(
                         );
                         reconcile_ir_node_impl(ctx, old_id, &substituted);
                     }
+                }
+                let old_id = replaced_or_same(ctx, parent_id, &old_children, old_id);
+                if !memo_hit {
                     stamp_iter_memo(ctx, old_id, item_hash, templates_hash);
                 }
                 unkeyed_idx += 1;
@@ -572,6 +573,11 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
+    // Install the final child order on the LOGICAL parent.
+    if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
+        parent_node.children = new_child_ids.iter().copied().collect();
+    }
+
     // Stamp keys onto the (re-used or freshly created) tree nodes so the
     // *next* reconcile finds them again. `new_child_keys` is dead after this,
     // so the keys MOVE into the nodes — and a node already carrying its key
@@ -618,19 +624,30 @@ pub(crate) fn reconcile_iterable_children_full(
         in_lis[idx] = true;
     }
 
-    // Walk backwards so each Move's anchor (`new_child_ids[i + 1]`) is already
-    // in its final position — the forward direction is wrong for any reorder
-    // needing two or more moves (e.g. [a,b,c] → [c,b,a]).
-    for new_idx in (0..new_child_ids.len()).rev() {
-        if in_lis[new_idx] {
-            continue;
+    // Walk backwards so each Move's anchor (the first rendered node of the
+    // children after it) is already in its final position — the forward
+    // direction is wrong for any reorder needing two or more moves (e.g.
+    // [a,b,c] → [c,b,a]). The last child anchors on whatever renders after
+    // this container's range (`None` under a real element), never a blind
+    // append past the container's following siblings. A child rooted at
+    // control flow (an `If` per item) moves as its rendered roots; an empty
+    // one moves nothing and anchors nothing.
+    if in_lis.iter().any(|&kept| !kept) {
+        let tree = &*ctx.tree;
+        let patches = &mut *ctx.patches;
+        let mut anchor = tree.range_end_anchor(parent_id);
+        for new_idx in (0..new_child_ids.len()).rev() {
+            let child = new_child_ids[new_idx];
+            if !in_lis[new_idx] {
+                let before_id = anchor;
+                tree.for_each_rendered_root(child, &mut |root| {
+                    patches.push(Patch::move_node(render_parent, root, before_id));
+                });
+            }
+            if let Some(first) = tree.first_rendered(child) {
+                anchor = Some(first);
+            }
         }
-        let before_id = new_child_ids.get(new_idx + 1).copied();
-        ctx.patches.push(Patch::move_node(
-            render_parent,
-            new_child_ids[new_idx],
-            before_id,
-        ));
     }
 
     // Remove old children that weren't reused.
@@ -677,6 +694,27 @@ pub(crate) fn reconcile_iterable_children_full(
             remove_child_subtree(ctx, old_id);
         }
     }
+}
+
+/// The live id for a reused child after its in-place reconcile: itself, or —
+/// when the reconcile replaced it (its template changed element type) — the
+/// replacement, which the replace paths link into the old child's slot
+/// (`InstanceTree::place_before_slot`). The old children stay linked in old
+/// order for the whole keyed pass, so that slot is the old child's index.
+fn replaced_or_same(
+    ctx: &ReconcileCtx,
+    parent_id: NodeId,
+    old_children: &[NodeId],
+    old_id: NodeId,
+) -> NodeId {
+    if ctx.tree.get(old_id).is_some() {
+        return old_id;
+    }
+    old_children
+        .iter()
+        .position(|&id| id == old_id)
+        .and_then(|pos| ctx.tree.get(parent_id)?.children.get(pos).copied())
+        .unwrap_or(old_id)
 }
 
 /// Remove a row that only left a lazy list's window: a plain `Remove` with
