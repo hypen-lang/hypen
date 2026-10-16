@@ -142,12 +142,14 @@ commits atomically with the batch's rows) but no applicator handles it.
 
 - `virt/Virtualization.kt` — plain-Kotlin port of `@hypen-space/core/virtualization`
   (parseVirtWindow, childrenPerItem, windowRows, itemSize, windowPadding,
-  visibleRange, wantedRange, shouldReport, viewportReport — same names and cases as the TS reference and the Swift port
+  visibleRange, wantedRange, shouldReport, viewportReport, windowChanged — same names and cases as the TS reference and the Swift port
   `Virtualization/VirtualizationMath.swift`), plus the slot mapping
   (`VirtSlots`, O(1), resolved on demand), report state (`ViewportTracker`),
-  the padded-path geometry (`paddedItemSize`, `paddedVisibleRange`) and
+  the padded-path geometry (`paddedItemSize`, `paddedVisibleRange`,
+  `anchorDelta`), `collectionShape`, and
   `WindowedShape`. `VirtualizationMathTest` mirrors
-  `hypen-web/tests/virtualization-math.test.ts` case for case — keep aligned.
+  `hypen-web/tests/virtualization-math.test.ts` case for case — keep aligned;
+  `VirtAnchorTest` covers `anchorDelta` / `collectionShape`.
 - `virt/VirtCompose.kt` — Compose glue. Lazy shape (`List`/`Grid` that scroll,
   and a scrollable Column/Row via `WindowedLazyList` from `HypenElement`):
   `total` slots, rows keyed by node id, placeholders by item index, reports
@@ -166,16 +168,32 @@ commits atomically with the batch's rows) but no applicator handles it.
   in its reserved writes (`__hypen_reorder`, `bind.<i>` pin paths) and event
   locations: window-relative child index + `__virt.window.start`
   (`DndCoordinator.virtStarts` / `absIndexLocked`).
+- Report state: `ViewportTracker` forgets its last report whenever
+  `__virt.window` changes value (`windowChanged`, §3 step 4); an identical
+  re-send does not reset it.
+- Scroll anchoring (§2) on the padded path: every scroller a windowed list can
+  sit in (scrollable Column/Row `ScrollState`, List/Grid lazy states) provides
+  itself through `ProvideVirtScroller` / `LocalVirtScrollers`. When the window
+  or the per-row padding changes, `virtPadded` scrolls the nearest scroller on
+  its axis (`dispatchRawDelta`, in a `SideEffect` before layout; any part the
+  scroller clamps is applied after the next layout) by
+  `Virtualization.anchorDelta` — the padding delta minus the anchor row's shift
+  inside the window, computed from the last layout's geometry with rows at the
+  measured average size. The lazy path relies on `LazyListState`'s own
+  key/index anchoring.
+- Accessibility: `Modifier.virtCollectionInfo` sets the container's
+  `collectionInfo` from `Virtualization.collectionShape` (`total` rows for a
+  list, 1×`total` horizontally, `ceil(total/columns)`×`columns` for a grid) on
+  both paths. On the lazy path it must be in the `modifier` passed to the lazy
+  container: ui 1.7 applies a node's semantics modifiers tail-to-head, so the
+  outer one overrides the lazy layout's own `-1` (unknown) count.
 
 Known gaps:
-- **Scroll anchoring (§2)** is not implemented on the padded path: when the
-  leading padding changes (window moved, item size re-measured), the ancestor
-  `verticalScroll` keeps its offset, so content can shift by the difference.
-  The lazy path relies on `LazyListState`'s own key/index anchoring (slot
-  indices are stable; only the in-item offset can drift when a placeholder's
-  estimate differs from the row's real size).
-- No `collectionInfo` (total count) on the container: Compose's lazy layouts
-  set their own, and overriding it on the same node is order-dependent.
+- Padded-path rows carry no per-row `collectionItemInfo` (only the lazy path
+  wraps rows in `VirtItem`); anchoring assumes LTR for horizontal lists and
+  approximates the rows above the anchor by the measured average size.
+- None of the Compose glue is exercised by unit tests (no Robolectric/Compose UI
+  test setup); only the pure functions in `Virtualization.kt` are.
 
 ## Device Capability Protocol (RFC 001)
 

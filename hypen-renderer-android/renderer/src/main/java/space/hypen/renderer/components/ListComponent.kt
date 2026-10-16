@@ -21,6 +21,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.ProvideVirtScroller
 import space.hypen.renderer.virt.VirtItem
 import space.hypen.renderer.virt.VirtLazyListReporter
 import space.hypen.renderer.virt.VirtMeasure
@@ -28,6 +29,7 @@ import space.hypen.renderer.virt.VirtPlaceholder
 import space.hypen.renderer.virt.VirtSlot
 import space.hypen.renderer.virt.VirtSlots
 import space.hypen.renderer.virt.VirtWindow
+import space.hypen.renderer.virt.virtCollectionInfo
 import space.hypen.renderer.virt.virtPadded
 import space.hypen.renderer.virt.virtWindow
 
@@ -171,21 +173,25 @@ class ListComponent : ComponentHandler {
                 fillsWidth = true,
             )
         } else if (layout.scrollsVertically) {
-            LazyColumn(
-                modifier = modifier,
-                verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
-                    Arrangement.spacedBy(gap.dp)
-                } else {
-                    verticalArrangement
-                },
-                horizontalAlignment = horizontalAlignment,
-            ) {
-                items(
-                    items = children,
-                    key = { child -> child.id }
-                ) { child ->
-                    key(child.id) {
-                        ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+            val state = rememberLazyListState()
+            ProvideVirtScroller(state, horizontal = false) {
+                LazyColumn(
+                    modifier = modifier,
+                    state = state,
+                    verticalArrangement = if (gap > 0 && verticalArrangement == Arrangement.Top) {
+                        Arrangement.spacedBy(gap.dp)
+                    } else {
+                        verticalArrangement
+                    },
+                    horizontalAlignment = horizontalAlignment,
+                ) {
+                    items(
+                        items = children,
+                        key = { child -> child.id }
+                    ) { child ->
+                        key(child.id) {
+                            ListItemRenderer(element = child, renderer = renderer, fillsWidth = true)
+                        }
                     }
                 }
             }
@@ -254,17 +260,21 @@ class ListComponent : ComponentHandler {
             return
         }
 
-        LazyRow(
-            modifier = modifier,
-            horizontalArrangement = horizontalArrangement,
-            verticalAlignment = verticalAlignment,
-        ) {
-            items(
-                items = children,
-                key = { child -> child.id }
-            ) { child ->
-                key(child.id) {
-                    ListItemRenderer(element = child, renderer = renderer)
+        val state = rememberLazyListState()
+        ProvideVirtScroller(state, horizontal = true) {
+            LazyRow(
+                modifier = modifier,
+                state = state,
+                horizontalArrangement = horizontalArrangement,
+                verticalAlignment = verticalAlignment,
+            ) {
+                items(
+                    items = children,
+                    key = { child -> child.id }
+                ) { child ->
+                    key(child.id) {
+                        ListItemRenderer(element = child, renderer = renderer)
+                    }
                 }
             }
         }
@@ -332,22 +342,27 @@ internal fun WindowedLazyList(
         }
     }
 
-    if (horizontal) {
-        LazyRow(
-            modifier = modifier,
-            state = state,
-            horizontalArrangement = horizontalArrangement,
-            verticalAlignment = verticalAlignment,
-            content = content,
-        )
-    } else {
-        LazyColumn(
-            modifier = modifier,
-            state = state,
-            verticalArrangement = verticalArrangement,
-            horizontalAlignment = horizontalAlignment,
-            content = content,
-        )
+    // Whole-list size for TalkBack; outermost on the lazy node, so it
+    // overrides the lazy layout's own (unknown-count) collectionInfo.
+    val listModifier = modifier.virtCollectionInfo(window, horizontal)
+    ProvideVirtScroller(state, horizontal) {
+        if (horizontal) {
+            LazyRow(
+                modifier = listModifier,
+                state = state,
+                horizontalArrangement = horizontalArrangement,
+                verticalAlignment = verticalAlignment,
+                content = content,
+            )
+        } else {
+            LazyColumn(
+                modifier = listModifier,
+                state = state,
+                verticalArrangement = verticalArrangement,
+                horizontalAlignment = horizontalAlignment,
+                content = content,
+            )
+        }
     }
 }
 

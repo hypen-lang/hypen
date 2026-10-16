@@ -65,6 +65,12 @@ data class ViewportGeometry(
     val columns: Int = 1,
 )
 
+/** One padded layout: the window and the per-row padding size ([Virtualization.paddedItemSize]). */
+data class PaddedLayout(val window: VirtWindow, val padSize: Double)
+
+/** Rows and columns of a whole windowed list, for accessibility's `CollectionInfo`. */
+data class CollectionShape(val rowCount: Int, val columnCount: Int)
+
 /** Leading/trailing stand-in extent for the items outside the window. */
 data class WindowPadding(val leading: Double, val trailing: Double)
 
@@ -196,6 +202,15 @@ object Virtualization {
     }
 
     /**
+     * Whether a newly received `__virt.window` differs in value from the
+     * previous one (`null` = none yet). §3 step 4: when it does, forget the
+     * last report — the engine may have moved the window on its own (e.g.
+     * `total` changed) to exactly the range last reported, and the renderer
+     * must be able to ask for it again. An identical re-send is not a change.
+     */
+    fun windowChanged(previous: VirtWindow?, next: VirtWindow): Boolean = previous != next
+
+    /**
      * §3 steps 2–4 in one call: the visible range, widened by overscan, if it
      * should be reported now — else `null`. The caller sends it and keeps it
      * as [lastReported] for the next call. While the list starts below the
@@ -292,6 +307,76 @@ object Virtualization {
         val firstRow = floor(rowAt(past))
         val lastRow = ceil(rowAt(past + max(0.0, viewportExtent)))
         return ItemRange(clamp(firstRow * cols, window.total), clamp(lastRow * cols, window.total))
+    }
+
+    /**
+     * Scroll anchoring on the padded path (§2/§3): how far (same unit as the
+     * sizes) to scroll the ancestor scroller so the first visible
+     * materialized row stays at the same on-screen position when the window
+     * or the padding changes. The DOM renderer's anchor capture/restore, done
+     * on the geometry instead of measured element rects.
+     *
+     * The anchor is the first row of the [before] window whose bottom edge is
+     * below the viewport's top (`scrolledPast`, in list coordinates) and that
+     * is actually on screen. Its offset in the list is the leading padding
+     * plus the window rows above it; the result is that offset under [after]
+     * minus the one under [before] — the padding delta minus the shift of the
+     * row inside the window (rows above it removed or added). Rows inside the
+     * window lay out at their real size, approximated by [rowSize] (the
+     * measured average) on both sides: a size re-measure moves only the
+     * padding. 0 when there is no visible materialized row or the anchor item
+     * left the window (the content under the viewport was replaced; nothing
+     * to hold still).
+     *
+     * @param before the window, padding size per row ([paddedItemSize]) before
+     * @param after the same after the change
+     * @param rowSize the real extent of a materialized row
+     * @param scrolledPast how far the scroller has scrolled past the list's
+     *   leading edge before the change (negative while it starts below it)
+     * @param viewportExtent the scroller's visible extent
+     */
+    fun anchorDelta(
+        before: PaddedLayout,
+        after: PaddedLayout,
+        rowSize: Double,
+        scrolledPast: Double,
+        viewportExtent: Double,
+        columns: Int = 1,
+    ): Double {
+        val cols = max(1, columns)
+        val row = if (rowSize > 0) rowSize else return 0.0
+        val rowsIn = windowRows(before.window, cols)
+        if (rowsIn <= 0 || before.window.count <= 0) return 0.0
+        val lead = windowPadding(before.window, before.padSize, cols).leading
+        // First window row whose bottom is below the viewport's top (row k
+        // spans [lead + k*row, lead + (k+1)*row)).
+        val k = max(0.0, floor((scrolledPast - lead) / row)).toInt()
+        if (k >= rowsIn) return 0.0
+        val rowTop = lead + k * row
+        if (rowTop >= scrolledPast + max(0.0, viewportExtent)) return 0.0
+        val anchor = before.window.start + k * cols
+        if (anchor >= before.window.end) return 0.0
+        if (anchor < after.window.start || anchor >= after.window.end) return 0.0
+        val newLead = windowPadding(after.window, after.padSize, cols).leading
+        val newRow = (anchor - after.window.start) / cols
+        val oldRow = (anchor - before.window.start) / cols
+        return (newLead - lead) + (newRow - oldRow) * row
+    }
+
+    /**
+     * The whole-list collection shape a windowed container exposes to
+     * accessibility (TalkBack's "item n of total"), matching the per-row
+     * item info: a vertical list is `total` rows of 1 column, a horizontal
+     * one 1 row of `total` columns, a grid `ceil(total / columns)` rows of
+     * `columns`.
+     */
+    fun collectionShape(window: VirtWindow, horizontal: Boolean, columns: Int = 1): CollectionShape {
+        val cols = max(1, columns)
+        return when {
+            horizontal -> CollectionShape(rowCount = 1, columnCount = window.total)
+            cols > 1 -> CollectionShape(rowCount = ceilDiv(window.total, cols), columnCount = cols)
+            else -> CollectionShape(rowCount = window.total, columnCount = 1)
+        }
     }
 
     private fun ceilDiv(a: Int, b: Int): Int = (a + b - 1) / b
@@ -397,11 +482,19 @@ class ViewportTracker {
     var lastReported: ItemRange? = null
         private set
 
+    private var lastWindow: VirtWindow? = null
+
     /**
      * The range to report for [visible] under [window], or `null` when the
-     * rules say not to report. Records the report.
+     * rules say not to report. Records the report. A [window] that differs in
+     * value from the previous call's forgets the last report (§3 step 4); an
+     * identical re-send does not.
      */
     fun next(window: VirtWindow, visible: ItemRange): ItemRange? {
+        if (Virtualization.windowChanged(lastWindow, window)) {
+            lastReported = null
+            lastWindow = window
+        }
         val wanted = Virtualization.wantedRange(visible, window.total)
         if (!Virtualization.shouldReport(window, visible, wanted, lastReported)) return null
         lastReported = wanted

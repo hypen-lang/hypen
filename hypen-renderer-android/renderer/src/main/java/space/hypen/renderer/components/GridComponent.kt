@@ -22,12 +22,14 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.HypenElement as RenderHypenElement
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.render.LocalComposeRenderer
+import space.hypen.renderer.virt.ProvideVirtScroller
 import space.hypen.renderer.virt.VirtItem
 import space.hypen.renderer.virt.VirtLazyGridReporter
 import space.hypen.renderer.virt.VirtMeasure
 import space.hypen.renderer.virt.VirtPlaceholder
 import space.hypen.renderer.virt.VirtSlot
 import space.hypen.renderer.virt.VirtSlots
+import space.hypen.renderer.virt.virtCollectionInfo
 import space.hypen.renderer.virt.virtPadded
 import space.hypen.renderer.virt.virtWindow
 
@@ -155,22 +157,26 @@ class GridComponent : ComponentHandler {
             VirtLazyGridReporter(element, state, measure, renderer)
             val slots = VirtSlots(window, children) { it.id }
             val placeholderSize = measure.itemSize(window)
-            LazyVerticalGrid(
-                columns = GridCells.Fixed(columns),
-                modifier = gridModifier,
-                state = state,
-                horizontalArrangement = Arrangement.spacedBy(columnGap),
-                verticalArrangement = Arrangement.spacedBy(rowGap),
-            ) {
-                items(count = slots.count, key = { slots.key(it) }) { index ->
-                    when (val slot = slots[index]) {
-                        is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal = false)
-                        is VirtSlot.Item -> VirtItem(index, horizontal = false, columns = columns) {
-                            if (slot.nodes.size == 1) {
-                                GridItemRenderer(element = slot.nodes[0], renderer = renderer)
-                            } else Column {
-                                slot.nodes.forEach { node ->
-                                    key(node.id) { GridItemRenderer(element = node, renderer = renderer) }
+            ProvideVirtScroller(state, horizontal = false) {
+                LazyVerticalGrid(
+                    columns = GridCells.Fixed(columns),
+                    // Whole-grid size for TalkBack; outermost on the lazy node, so it
+                    // overrides the lazy grid's own (unknown-count) collectionInfo.
+                    modifier = gridModifier.virtCollectionInfo(window, horizontal = false, columns = columns),
+                    state = state,
+                    horizontalArrangement = Arrangement.spacedBy(columnGap),
+                    verticalArrangement = Arrangement.spacedBy(rowGap),
+                ) {
+                    items(count = slots.count, key = { slots.key(it) }) { index ->
+                        when (val slot = slots[index]) {
+                            is VirtSlot.Placeholder -> VirtPlaceholder(placeholderSize, horizontal = false)
+                            is VirtSlot.Item -> VirtItem(index, horizontal = false, columns = columns) {
+                                if (slot.nodes.size == 1) {
+                                    GridItemRenderer(element = slot.nodes[0], renderer = renderer)
+                                } else Column {
+                                    slot.nodes.forEach { node ->
+                                        key(node.id) { GridItemRenderer(element = node, renderer = renderer) }
+                                    }
                                 }
                             }
                         }
@@ -180,21 +186,25 @@ class GridComponent : ComponentHandler {
             return
         }
 
-        LazyVerticalGrid(
-            columns = GridCells.Fixed(columns),
-            modifier = gridModifier,
-            horizontalArrangement = Arrangement.spacedBy(columnGap),
-            verticalArrangement = Arrangement.spacedBy(rowGap),
-        ) {
-            items(
-                items = children,
-                key = { child -> child.id }
-            ) { child ->
-                key(child.id) {
-                    GridItemRenderer(
-                        element = child,
-                        renderer = renderer,
-                    )
+        val state = rememberLazyGridState()
+        ProvideVirtScroller(state, horizontal = false) {
+            LazyVerticalGrid(
+                columns = GridCells.Fixed(columns),
+                modifier = gridModifier,
+                state = state,
+                horizontalArrangement = Arrangement.spacedBy(columnGap),
+                verticalArrangement = Arrangement.spacedBy(rowGap),
+            ) {
+                items(
+                    items = children,
+                    key = { child -> child.id }
+                ) { child ->
+                    key(child.id) {
+                        GridItemRenderer(
+                            element = child,
+                            renderer = renderer,
+                        )
+                    }
                 }
             }
         }

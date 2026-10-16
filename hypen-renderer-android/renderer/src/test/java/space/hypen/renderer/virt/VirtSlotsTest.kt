@@ -105,6 +105,40 @@ class VirtSlotsTest {
     }
 
     @Test
+    fun `the tracker forgets its last report when the window changes value`() {
+        // §3 step 4: the engine moves the window on its own (here `total`
+        // grew) without covering the range last asked for. The same range
+        // must be askable again.
+        val tracker = ViewportTracker()
+        val before = VirtWindow(total = 1000, start = 0, end = 30)
+        assertEquals(ItemRange(10, 70), tracker.next(before, ItemRange(30, 50)))
+        val after = VirtWindow(total = 1001, start = 0, end = 30)
+        assertEquals(ItemRange(10, 70), tracker.next(after, ItemRange(30, 50)))
+        // And once more is still not twice in a row under the same window.
+        assertNull(tracker.next(after, ItemRange(30, 50)))
+    }
+
+    @Test
+    fun `an identical re-send of the window does not reset the last report`() {
+        val tracker = ViewportTracker()
+        val window = VirtWindow(total = 1000, start = 0, end = 30, estimatedSize = 40.0)
+        assertEquals(ItemRange(10, 70), tracker.next(window, ItemRange(30, 50)))
+        // Same value, new instance (a re-sent setProp decodes afresh).
+        assertNull(tracker.next(window.copy(), ItemRange(30, 50)))
+        assertEquals(ItemRange(10, 70), tracker.lastReported)
+    }
+
+    @Test
+    fun `a report the engine answers without moving the window is not repeated`() {
+        // The engine ignores the report (e.g. a stale list id) and sends no
+        // new window: every later frame at the same scroll position stays quiet.
+        val tracker = ViewportTracker()
+        val window = VirtWindow(total = 1000, start = 0, end = 30)
+        assertEquals(ItemRange(10, 70), tracker.next(window, ItemRange(30, 50)))
+        repeat(5) { assertNull(tracker.next(window, ItemRange(30, 50))) }
+    }
+
+    @Test
     fun `paddedVisibleRange gives the visible range below a scrolled ancestor`() {
         // 500px of the list are above the viewport (it starts 100px down the
         // content and the viewport has scrolled 600px).

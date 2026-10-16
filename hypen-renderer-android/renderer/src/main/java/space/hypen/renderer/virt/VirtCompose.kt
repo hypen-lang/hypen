@@ -1,5 +1,6 @@
 package space.hypen.renderer.virt
 
+import androidx.compose.foundation.gestures.ScrollableState
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -8,7 +9,10 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.grid.LazyGridState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -20,7 +24,9 @@ import androidx.compose.ui.layout.boundsInRoot
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.layout.positionInRoot
 import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.semantics.CollectionInfo
 import androidx.compose.ui.semantics.CollectionItemInfo
+import androidx.compose.ui.semantics.collectionInfo
 import androidx.compose.ui.semantics.collectionItemInfo
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
@@ -66,6 +72,51 @@ class VirtMeasure {
         this.totalDp = totalDp
         this.count = count
     }
+}
+
+/**
+ * The nearest ancestor scroller on each axis. The padded path scrolls it to
+ * keep its first visible row still when the window or the padding changes
+ * (scroll anchoring, §2). Every scrolling container a windowed list can sit
+ * in provides itself here ([ProvideVirtScroller]): a scrollable Column / Row
+ * its `ScrollState`, the List / Grid lazy containers their lazy state.
+ */
+data class VirtScrollers(val vertical: ScrollableState? = null, val horizontal: ScrollableState? = null) {
+    fun along(horizontal: Boolean): ScrollableState? = if (horizontal) this.horizontal else vertical
+}
+
+val LocalVirtScrollers = compositionLocalOf { VirtScrollers() }
+
+/**
+ * Make [state] the nearest scroller along its axis for [content]; `null`
+ * (the container does not scroll) leaves the ancestors' in place. Always
+ * call it, scrolling or not, so toggling scrolling keeps the content's
+ * composition.
+ */
+@Composable
+fun ProvideVirtScroller(state: ScrollableState?, horizontal: Boolean, content: @Composable () -> Unit) {
+    val current = LocalVirtScrollers.current
+    val next = when {
+        state == null -> current
+        horizontal -> current.copy(horizontal = state)
+        else -> current.copy(vertical = state)
+    }
+    CompositionLocalProvider(LocalVirtScrollers provides next, content = content)
+}
+
+/**
+ * The whole list's size for accessibility (§2): TalkBack announces "n
+ * items" from the container's `collectionInfo` and each row's position from
+ * its `collectionItemInfo` ([VirtItem]).
+ *
+ * On a lazy container this must sit in the `modifier` passed to it: Compose
+ * (ui 1.7) applies a node's semantics modifiers innermost first, so this
+ * outer one overrides the lazy layout's own `collectionInfo` (which says
+ * `-1`, unknown, along the scroll axis).
+ */
+fun Modifier.virtCollectionInfo(window: VirtWindow, horizontal: Boolean, columns: Int = 1): Modifier {
+    val shape = Virtualization.collectionShape(window, horizontal, columns)
+    return this.semantics { collectionInfo = CollectionInfo(rowCount = shape.rowCount, columnCount = shape.columnCount) }
 }
 
 /** A stand-in for an unmaterialized item, [sizeDp] along the scroll axis. */
@@ -201,6 +252,27 @@ fun Modifier.virtPadded(
     val latestPadSize by rememberUpdatedState(padSize)
     val latestPad by rememberUpdatedState(pad)
 
+    // Scroll anchoring (§2): when the window or the padding changes, scroll
+    // the nearest scroller along our axis by however far the first visible
+    // row moved ([Virtualization.anchorDelta], from the geometry of the last
+    // layout). Runs after the composition that changed the padding and
+    // before its layout, so the row never shows at the shifted position.
+    val scroller = LocalVirtScrollers.current.along(horizontal)
+    val anchor = remember(element.id) { PaddedAnchor() }
+    val layout = PaddedLayout(window, padSize)
+    SideEffect {
+        val before = anchor.layout
+        anchor.layout = layout
+        val past = anchor.scrolledPastDp
+        if (before == null || before == layout || past == null || scroller == null) return@SideEffect
+        val deltaDp = Virtualization.anchorDelta(before, layout, size, past, anchor.viewportDp, columns)
+        val deltaPx = (deltaDp * density.density).toFloat()
+        if (abs(deltaPx) < 0.5f) return@SideEffect
+        // A scroller clamps to its last measured range; a larger padding
+        // may need more than that. The rest goes in after the next layout.
+        anchor.pendingPx = deltaPx - scroller.dispatchRawDelta(deltaPx)
+    }
+
     val positioned = onGloballyPositioned { coords ->
         val w = latestWindow
         val px = density.density
@@ -209,12 +281,25 @@ fun Modifier.virtPadded(
         val contentDp = extentPx / px - latestPad.leading - latestPad.trailing
         measure.update(contentDp, Virtualization.windowRows(w, columns))
 
+        if (abs(anchor.pendingPx) >= 0.5f && scroller != null) {
+            val rest = anchor.pendingPx
+            anchor.pendingPx = 0f
+            scroller.dispatchRawDelta(rest)
+        } else {
+            anchor.pendingPx = 0f
+        }
+
         val clipped = coords.boundsInRoot()
-        if (clipped.width <= 0f || clipped.height <= 0f) return@onGloballyPositioned
+        if (clipped.width <= 0f || clipped.height <= 0f) {
+            anchor.scrolledPastDp = null
+            return@onGloballyPositioned
+        }
         val origin = coords.positionInRoot()
         val listTop = (if (horizontal) origin.x else origin.y).toDouble()
         val viewTop = (if (horizontal) clipped.left else clipped.top).toDouble()
         val viewExtent = (if (horizontal) clipped.width else clipped.height).toDouble()
+        anchor.scrolledPastDp = (viewTop - listTop) / px
+        anchor.viewportDp = viewExtent / px
         val visible = Virtualization.paddedVisibleRange(
             w,
             padSize = latestPadSize * px,
@@ -230,5 +315,17 @@ fun Modifier.virtPadded(
     } else {
         Modifier.padding(top = pad.leading.dp, bottom = pad.trailing.dp)
     }
-    return this.then(positioned).then(padding)
+    return this.then(positioned).virtCollectionInfo(window, horizontal, columns).then(padding)
+}
+
+/**
+ * Padded-path anchoring state, written only on the main thread (in
+ * `SideEffect` and `onGloballyPositioned`): the layout last composed and
+ * where the list sat in its scroller at the last layout (dp).
+ */
+private class PaddedAnchor {
+    var layout: PaddedLayout? = null
+    var scrolledPastDp: Double? = null
+    var viewportDp: Double = 0.0
+    var pendingPx: Float = 0f
 }

@@ -16,6 +16,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import space.hypen.renderer.model.HypenElement
+import space.hypen.renderer.virt.ProvideVirtScroller
 
 /**
  * Composition local for ColumnScope modifier extension.
@@ -123,9 +124,10 @@ class ColumnComponent : ComponentHandler {
         // the Column needs to fill available height unless scrollable
         val needsFillHeight = parsedArrangement != null && parsedArrangement != Arrangement.Top && !scrollable
 
+        val scrollState = rememberScrollState()
         val finalModifier = modifier
             .let { if (needsFillHeight) it.fillMaxHeight() else it }
-            .let { if (scrollable) it.verticalScroll(rememberScrollState()) else it }
+            .let { if (scrollable) it.verticalScroll(scrollState) else it }
             // For stretch, use IntrinsicSize.Min so children know the width to stretch to
             .let { if (isStretch) it.width(IntrinsicSize.Min) else it }
 
@@ -140,28 +142,31 @@ class ColumnComponent : ComponentHandler {
         val allowsHorizontalExpansion =
             columnAllowsHorizontalExpansion(element, inheritedHorizontalExpansion)
 
-        Column(
-            modifier = finalModifier,
-            verticalArrangement = verticalArrangement,
-            horizontalAlignment = horizontalAlignment,
-        ) {
-            // Add content color if specified
-            if (contentColor != null) {
-                CompositionLocalProvider(
-                    LocalColumnScope provides this,
-                    LocalStretchCrossAxis provides isStretch,
-                    LocalParentAllowsHorizontalExpansion provides allowsHorizontalExpansion,
-                    LocalContentColor provides contentColor
-                ) {
-                    renderChildren()
-                }
-            } else {
-                CompositionLocalProvider(
-                    LocalColumnScope provides this,
-                    LocalStretchCrossAxis provides isStretch,
-                    LocalParentAllowsHorizontalExpansion provides allowsHorizontalExpansion
-                ) {
-                    renderChildren()
+        // A padded windowed list inside anchors against this scroller.
+        ProvideVirtScroller(scrollState.takeIf { scrollable }, horizontal = false) {
+            Column(
+                modifier = finalModifier,
+                verticalArrangement = verticalArrangement,
+                horizontalAlignment = horizontalAlignment,
+            ) {
+                // Add content color if specified
+                if (contentColor != null) {
+                    CompositionLocalProvider(
+                        LocalColumnScope provides this,
+                        LocalStretchCrossAxis provides isStretch,
+                        LocalParentAllowsHorizontalExpansion provides allowsHorizontalExpansion,
+                        LocalContentColor provides contentColor
+                    ) {
+                        renderChildren()
+                    }
+                } else {
+                    CompositionLocalProvider(
+                        LocalColumnScope provides this,
+                        LocalStretchCrossAxis provides isStretch,
+                        LocalParentAllowsHorizontalExpansion provides allowsHorizontalExpansion
+                    ) {
+                        renderChildren()
+                    }
                 }
             }
         }

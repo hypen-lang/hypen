@@ -192,4 +192,39 @@ class VirtualizationMathTest {
         val grid = w(90, 0, 9)
         assertEquals(r(3, 21), Virtualization.viewportReport(grid, ViewportGeometry(100.0, 300.0, 200.0, 3), null))
     }
+
+    // ---- windowChanged (§3 step 4)
+
+    private val current = w(1000, 30, 60)
+
+    @Test
+    fun `windowChanged the first window is a change`() {
+        assertTrue(Virtualization.windowChanged(null, current))
+    }
+
+    @Test
+    fun `windowChanged an identical re-send is not a change`() {
+        assertFalse(Virtualization.windowChanged(current, current.copy()))
+        assertFalse(Virtualization.windowChanged(current.copy(estimatedSize = 40.0), current.copy(estimatedSize = 40.0)))
+    }
+
+    @Test
+    fun `windowChanged any field moving is a change, total alone included`() {
+        assertTrue(Virtualization.windowChanged(current, current.copy(total = 1001)))
+        assertTrue(Virtualization.windowChanged(current, current.copy(start = 31)))
+        assertTrue(Virtualization.windowChanged(current, current.copy(end = 61)))
+        assertTrue(Virtualization.windowChanged(current, current.copy(estimatedSize = 40.0)))
+    }
+
+    @Test
+    fun `windowChanged forgetting the last report lets the same range be asked again`() {
+        val geometry = ViewportGeometry(50.0, 2000.0, 500.0)
+        val before = w(1000, 0, 20)
+        var last = Virtualization.viewportReport(before, geometry, null)
+        assertEquals(r(30, 60), last)
+        // The engine moves the window on its own (total changed), still not covering.
+        val after = w(1001, 0, 20)
+        if (Virtualization.windowChanged(before, after)) last = null
+        assertEquals(r(30, 60), Virtualization.viewportReport(after, geometry, last))
+    }
 }

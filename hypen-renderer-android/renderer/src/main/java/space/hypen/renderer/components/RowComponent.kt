@@ -20,6 +20,7 @@ import androidx.compose.ui.unit.dp
 import space.hypen.renderer.render.ComposeRenderer
 import space.hypen.renderer.render.LocalComposeRenderer
 import space.hypen.renderer.model.HypenElement
+import space.hypen.renderer.virt.ProvideVirtScroller
 import kotlin.math.roundToInt
 
 /**
@@ -134,9 +135,10 @@ class RowComponent : ComponentHandler {
         // the Row needs to fill available width unless scrollable
         val needsFillWidth = parsedArrangement != null && parsedArrangement != Arrangement.Start && !scrollable
 
+        val scrollState = rememberScrollState()
         val finalModifier = modifier
             .let { if (needsFillWidth) it.fillMaxWidth() else it }
-            .let { if (scrollable) it.horizontalScroll(rememberScrollState()) else it }
+            .let { if (scrollable) it.horizontalScroll(scrollState) else it }
             // For stretch, use IntrinsicSize.Min so children know the height to stretch to
             .let { if (isStretch) it.height(IntrinsicSize.Min) else it }
 
@@ -159,17 +161,20 @@ class RowComponent : ComponentHandler {
                 )
             }
         } else {
-            Row(
-                modifier = finalModifier,
-                horizontalArrangement = horizontalArrangement,
-                verticalAlignment = verticalAlignment,
-            ) {
-                CompositionLocalProvider(
-                    LocalManagedRowId provides null,
-                    LocalRowScope provides this,
-                    LocalStretchCrossAxis provides isStretch,
+            // A padded windowed horizontal list inside anchors against this scroller.
+            ProvideVirtScroller(scrollState.takeIf { scrollable }, horizontal = true) {
+                Row(
+                    modifier = finalModifier,
+                    horizontalArrangement = horizontalArrangement,
+                    verticalAlignment = verticalAlignment,
                 ) {
-                    ProvideHypenContentColor(element, renderChildren)
+                    CompositionLocalProvider(
+                        LocalManagedRowId provides null,
+                        LocalRowScope provides this,
+                        LocalStretchCrossAxis provides isStretch,
+                    ) {
+                        ProvideHypenContentColor(element, renderChildren)
+                    }
                 }
             }
         }
