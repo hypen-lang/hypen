@@ -1427,8 +1427,48 @@ impl RemoteSession {
                 self.inner.lock().unwrap().state_subscribed = true;
             }
 
+            RemoteMessage::Viewport {
+                list_id,
+                start,
+                end,
+            } => self.handle_viewport(&list_id, start as usize, end as usize, emit),
+
             _ => {}
         }
+    }
+
+    /// A client's `viewport` report (list virtualization,
+    /// `hypen-web/docs/virtualization.md` §4): move that list's window on
+    /// **this session's engine only**.
+    ///
+    /// Ignored before `hello`; the engine itself ignores a malformed id or
+    /// one naming no windowed list. The resulting
+    /// patches go out as an ordinary `patch` message with the next
+    /// revision; a report that changes nothing sends nothing and keeps the
+    /// revision. It is not an action: nothing is replayed to other
+    /// sessions, no handler runs and no `stateUpdate` follows.
+    fn handle_viewport(&self, list_id: &str, start: usize, end: usize, emit: &mut dyn FnMut(&str)) {
+        let mut inner = self.inner.lock().unwrap();
+        if inner.acked_session_id.is_none() {
+            return;
+        }
+        let patches = with_capture(&mut inner.engine, |engine| {
+            engine.set_list_viewport_wire(list_id, start, end);
+        });
+        let patches = inner.template_expander.expand(patches);
+        if patches.is_empty() {
+            return;
+        }
+        inner.revision += 1;
+        let msg = RemoteMessage::Patch {
+            module: self.module_name.clone(),
+            patches,
+            revision: inner.revision,
+        };
+        if let Ok(json) = msg.to_json() {
+            emit(&json);
+        }
+        // `inner` is released here, after the emit (revision order).
     }
 
     /// A `hello` that fails typed decoding only because of its `device`
@@ -2797,5 +2837,196 @@ mod tests {
             "resolved heart path d did not round-trip into the patch stream: {}",
             initial_tree
         );
+    }
+
+    // ── List virtualization: the `viewport` message (contract §4) ──
+
+    fn list_session() -> RemoteSession {
+        let items: Vec<Value> = (0..100)
+            .map(|i| serde_json::json!({ "id": i, "name": format!("row {i}") }))
+            .collect();
+        RemoteSession::new(SessionConfig {
+            module_name: "App".to_string(),
+            ui_source:
+                r#"List(@state.items, key: "id", initialCount: 10) { Text("@{item.name}") }"#
+                    .to_string(),
+            initial_state: serde_json::json!({ "items": items }),
+            action_names: vec!["noop".to_string()],
+            ..SessionConfig::default()
+        })
+    }
+
+    /// `(list id, window)` from every `__virt.window` SetProp/Create in a
+    /// `patch` / `initialTree` message.
+    fn virt_windows(msg: &str) -> Vec<(String, Value)> {
+        let v: Value = serde_json::from_str(msg).unwrap();
+        let mut out = Vec::new();
+        for p in v["patches"].as_array().into_iter().flatten() {
+            match p["type"].as_str() {
+                Some("setProp") if p["name"] == "__virt.window" => {
+                    out.push((p["id"].as_str().unwrap().to_string(), p["value"].clone()));
+                }
+                Some("create") if !p["props"]["__virt.window"].is_null() => {
+                    out.push((
+                        p["id"].as_str().unwrap().to_string(),
+                        p["props"]["__virt.window"].clone(),
+                    ));
+                }
+                _ => {}
+            }
+        }
+        out
+    }
+
+    fn hello_list(session: &RemoteSession) -> String {
+        let msgs = session.handle_hello(None);
+        let (id, window) = virt_windows(&msgs[1]).pop().expect("list is windowed");
+        assert_eq!(window["start"], 0);
+        assert_eq!(window["end"], 10);
+        assert_eq!(window["total"], 100);
+        id
+    }
+
+    fn viewport_json(id: &str, start: u32, end: u32) -> String {
+        serde_json::json!({ "type": "viewport", "listId": id, "start": start, "end": end })
+            .to_string()
+    }
+
+    #[test]
+    fn viewport_message_round_trips_on_the_wire() {
+        let msg = RemoteMessage::Viewport {
+            list_id: "4294967301".into(),
+            start: 40,
+            end: 70,
+        };
+        let json: Value = serde_json::from_str(&msg.to_json().unwrap()).unwrap();
+        assert_eq!(
+            json,
+            serde_json::json!({ "type": "viewport", "listId": "4294967301", "start": 40, "end": 70 })
+        );
+        match RemoteMessage::from_json(&json.to_string()).unwrap() {
+            RemoteMessage::Viewport {
+                list_id,
+                start,
+                end,
+            } => assert_eq!((list_id.as_str(), start, end), ("4294967301", 40, 70)),
+            other => panic!("expected Viewport, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn viewport_decoding_clamps_to_u32_and_rejects_malformed_ranges() {
+        let big = r#"{"type":"viewport","listId":"1","start":1e20,"end":99999999999}"#;
+        match RemoteMessage::from_json(big).unwrap() {
+            RemoteMessage::Viewport { start, end, .. } => {
+                assert_eq!((start, end), (u32::MAX, u32::MAX))
+            }
+            other => panic!("expected Viewport, got {other:?}"),
+        }
+        for bad in [
+            r#"{"type":"viewport","listId":"1","start":-1,"end":5}"#,
+            r#"{"type":"viewport","listId":"1","start":1.5,"end":5}"#,
+            r#"{"type":"viewport","listId":"1","start":"0","end":5}"#,
+            r#"{"type":"viewport","listId":"1","start":0}"#,
+            r#"{"type":"viewport","listId":1,"start":0,"end":5}"#,
+        ] {
+            assert!(
+                RemoteMessage::from_json(bad).is_err(),
+                "{bad} must not decode"
+            );
+        }
+    }
+
+    #[test]
+    fn viewport_moves_the_window_and_streams_an_ordinary_patch() {
+        let session = list_session();
+        let id = hello_list(&session);
+        // Subscribed to state: a viewport still never sends a stateUpdate.
+        session.handle_message(r#"{"type":"subscribeState","module":"App"}"#);
+        let before = session.revision();
+
+        let replies = session.handle_message(&viewport_json(&id, 50, 70));
+        assert_eq!(replies.len(), 1, "exactly one patch message: {replies:?}");
+        let reply: Value = serde_json::from_str(&replies[0]).unwrap();
+        assert_eq!(reply["type"], "patch");
+        assert_eq!(reply["revision"], before + 1);
+        assert_eq!(session.revision(), before + 1);
+        let (wid, window) = virt_windows(&replies[0]).pop().expect("window moved");
+        assert_eq!(wid, id);
+        assert_eq!(
+            (window["start"].as_u64(), window["end"].as_u64()),
+            (Some(50), Some(70))
+        );
+        assert!(
+            replies[0].contains("row 50"),
+            "rows of the new window are created"
+        );
+
+        // The same report again changes nothing: no message, no revision.
+        assert!(session
+            .handle_message(&viewport_json(&id, 50, 70))
+            .is_empty());
+        assert_eq!(session.revision(), before + 1);
+        // State is untouched — a viewport is not an action.
+        assert_eq!(session.get_state()["items"].as_array().unwrap().len(), 100);
+    }
+
+    #[test]
+    fn viewport_before_hello_is_ignored() {
+        let session = list_session();
+        // The list id is unknown before render, but even a plausible one is
+        // dropped: nothing has been acked.
+        assert!(session
+            .handle_message(&viewport_json("4294967297", 0, 5))
+            .is_empty());
+        assert_eq!(session.revision(), 0);
+        // The hello still renders the initial window.
+        hello_list(&session);
+    }
+
+    #[test]
+    fn malformed_or_unknown_viewports_are_ignored_without_side_effects() {
+        let session = list_session();
+        let id = hello_list(&session);
+        let before = session.revision();
+        for bad in [
+            format!(r#"{{"type":"viewport","listId":"{id}","start":-3,"end":5}}"#),
+            format!(r#"{{"type":"viewport","listId":"{id}","start":"x","end":5}}"#),
+            format!(r#"{{"type":"viewport","listId":"{id}"}}"#),
+            r#"{"type":"viewport","listId":"not-a-node","start":0,"end":5}"#.to_string(),
+            viewport_json("4294977295", 20, 40), // slot 9999: no such node
+        ] {
+            assert!(
+                session.handle_message(&bad).is_empty(),
+                "{bad} must be ignored"
+            );
+        }
+        assert_eq!(session.revision(), before);
+        // The session is still alive and answers a good report.
+        assert_eq!(session.handle_message(&viewport_json(&id, 30, 60)).len(), 1);
+    }
+
+    #[test]
+    fn huge_viewport_values_are_clamped_not_rejected() {
+        let session = list_session();
+        let id = hello_list(&session);
+        let msg = format!(r#"{{"type":"viewport","listId":"{id}","start":90,"end":1e20}}"#);
+        let replies = session.handle_message(&msg);
+        let (_, window) = virt_windows(&replies[0]).pop().expect("window moved");
+        assert_eq!(window["end"], 100, "the engine clamps to the list");
+    }
+
+    #[test]
+    fn a_viewport_affects_only_its_own_session() {
+        let a = list_session();
+        let b = list_session();
+        let id_a = hello_list(&a);
+        let id_b = hello_list(&b);
+        let rev_b = b.revision();
+        assert_eq!(a.handle_message(&viewport_json(&id_a, 60, 90)).len(), 1);
+        assert_eq!(b.revision(), rev_b, "the other session saw nothing");
+        // b's own window is where b left it: reporting its initial range
+        // is a no-op there.
+        assert!(b.handle_message(&viewport_json(&id_b, 0, 10)).is_empty());
     }
 }

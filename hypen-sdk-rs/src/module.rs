@@ -1050,6 +1050,24 @@ impl<S: State> ModuleInstance<S> {
         engine.set_render_callback(callback);
     }
 
+    /// Report a windowed list's visible range (list virtualization,
+    /// `hypen-web/docs/virtualization.md` §3). Renderer-facing: a renderer
+    /// embedding this module in-process calls it as the user scrolls.
+    ///
+    /// `list_id` is the patch-wire id of the element carrying
+    /// `__virt.window`; `[start, end)` is the item range to materialize.
+    /// The patches that move the window go to the [`on_patches`]
+    /// callback. A malformed id, or one naming no windowed list, is
+    /// ignored.
+    ///
+    /// [`on_patches`]: Self::on_patches
+    pub fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
+        self.engine
+            .lock()
+            .unwrap()
+            .set_list_viewport_wire(list_id, start, end);
+    }
+
     /// Check if the module is currently mounted.
     pub fn is_mounted(&self) -> bool {
         *self.mounted.lock().unwrap()

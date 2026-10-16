@@ -89,12 +89,47 @@ pub enum RemoteMessage {
     /// Client → Server: request state subscription.
     SubscribeState { module: String },
 
+    /// Client → Server: a windowed list's visible range plus overscan
+    /// (list virtualization, `hypen-web/docs/virtualization.md` §4).
+    ///
+    /// `list_id` is the patch-wire id of the element carrying
+    /// `__virt.window`; `[start, end)` is the item range the client wants
+    /// materialized. Decoding accepts any non-negative integer for
+    /// `start`/`end` and clamps it to `u32`; anything else (negative,
+    /// fractional, missing, not a number) makes the message malformed, and
+    /// a server ignores it.
+    Viewport {
+        #[serde(rename = "listId")]
+        list_id: String,
+        #[serde(deserialize_with = "clamped_u32")]
+        start: u32,
+        #[serde(deserialize_with = "clamped_u32")]
+        end: u32,
+    },
+
     /// Server → Client: session expired.
     SessionExpired {
         #[serde(rename = "sessionId")]
         session_id: String,
         reason: String,
     },
+}
+
+/// Decode a non-negative JSON integer, clamped to `u32::MAX`. Integral
+/// floats (`40.0`, `1e20`) count as integers; negatives, fractions and
+/// non-numbers are errors.
+fn clamped_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> {
+    use serde::de::Error;
+    let n = serde_json::Number::deserialize(d)?;
+    if let Some(u) = n.as_u64() {
+        return Ok(u.min(u32::MAX as u64) as u32);
+    }
+    match n.as_f64() {
+        Some(f) if f.is_finite() && f >= 0.0 && f.fract() == 0.0 => {
+            Ok(f.min(u32::MAX as f64) as u32)
+        }
+        _ => Err(D::Error::custom("expected a non-negative integer")),
+    }
 }
 
 impl RemoteMessage {
