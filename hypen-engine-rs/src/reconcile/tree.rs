@@ -528,6 +528,8 @@ impl InstanceTree {
         self.nodes.clear();
         self.root = None;
         self.exit_tombstones.clear();
+        self.deferred_detached.clear();
+        self.place_before_slot = None;
         // A cleared tree usually precedes a fresh render to the SAME
         // consumer, whose registered templates survive — keep the set so
         // templates aren't re-sent.
@@ -634,7 +636,8 @@ impl InstanceTree {
     ///
     /// A Router's detached route cache goes with it: those subtrees are
     /// only reachable through the cache, and left behind they would keep
-    /// reconciling (and patching) through their bindings.
+    /// reconciling (and patching) through their bindings. Removed ids also
+    /// leave `deferred_detached`.
     pub fn remove_subtree_with(&mut self, id: NodeId, mut on_removed: impl FnMut(NodeId)) {
         let mut stack = std::mem::take(&mut self.remove_stack);
         stack.clear();
@@ -642,6 +645,12 @@ impl InstanceTree {
         while let Some(current) = stack.pop() {
             if let Some(node) = self.nodes.remove(current) {
                 on_removed(current);
+                // A torn-down node is never re-run: drop any deferral it
+                // left (route evicted, Router removed, a parent branch
+                // switched away) so the set holds only live ids.
+                if !self.deferred_detached.is_empty() {
+                    self.deferred_detached.shift_remove(&current);
+                }
                 stack.extend(node.children.iter().copied());
                 if let Some(ControlFlowKind::Router { cache, .. }) = node.control_flow.as_deref() {
                     stack.extend(cache.values().flatten().copied());
@@ -793,8 +802,12 @@ impl InstanceTree {
     /// transparent control-flow container, continues after that container,
     /// and so on up to the nearest real element. `None` = append.
     ///
-    /// Cost is O(siblings) per level, with a fast path for the common case
-    /// of a just-appended last child.
+    /// Cost per call: a linear scan of the child list at each level climbed
+    /// (to find `id`, then past empty siblings, descending into control-flow
+    /// ones), with a fast path for a just-appended last child. Nothing is
+    /// cached between calls, so a pass in which many control-flow nodes in
+    /// the middle of one large parent turn on (N `If` rows of a K-row list)
+    /// costs O(N·K).
     pub fn render_anchor_after(&self, id: NodeId) -> Option<NodeId> {
         let mut current = id;
         loop {

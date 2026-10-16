@@ -312,25 +312,19 @@ fn emit_insert(
         // A control-flow container never reaches the renderer: address its
         // nearest real ancestor (or "root" when there is none).
         Some(p) if ctx.tree.get(p).is_some_and(|n| n.control_flow.is_some()) => {
-            match nearest_render_parent(ctx.tree, Some(p)) {
-                Some(rp) => Some(rp),
-                None => {
-                    ctx.patches.push(Patch::insert_root(node_id));
-                    return;
-                }
-            }
+            nearest_render_parent(ctx.tree, Some(p))
         }
         Some(p) => Some(p),
-        None if is_root => {
-            ctx.patches.push(Patch::insert_root(node_id));
-            return;
-        }
-        None => None,
+        None if is_root => None,
+        None => return,
     };
-    if let Some(rp) = target {
-        let before = ctx.tree.render_anchor_after(node_id);
-        ctx.patches.push(Patch::insert(rp, node_id, before));
-    }
+    // "root" is a container like any other: root-level control flow
+    // anchors before the root siblings that follow it too.
+    let before = ctx.tree.render_anchor_after(node_id);
+    ctx.patches.push(match target {
+        Some(rp) => Patch::insert(rp, node_id, before),
+        None => Patch::insert_root(node_id, before),
+    });
 }
 
 /// Substitution-path creation of one list row — the fallback when no row

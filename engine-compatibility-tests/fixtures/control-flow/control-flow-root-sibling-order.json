@@ -1,0 +1,188 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "control-flow-root-sibling-order",
+  "description": "Root-level control flow has no element parent: its content goes to \"root\", which is an ordinary ordered container. Content created or moved there on a later pass anchors before the following root sibling (beforeId), never appended behind it.",
+  "category": "control-flow",
+  "priority": "P0",
+  "input": {
+    "source": "If(@state.on) { If(@state.banner) { Text(\"banner\") } ForEach(items: @state.items, key: \"id\") { Text(\"@{item.name}\") } Text(\"footer\") }",
+    "initialState": {
+      "on": true,
+      "banner": false,
+      "items": [
+        {
+          "id": "a",
+          "name": "a"
+        },
+        {
+          "id": "b",
+          "name": "b"
+        },
+        {
+          "id": "c",
+          "name": "c"
+        }
+      ]
+    },
+    "module": {
+      "name": "RootOrderModule",
+      "actions": [],
+      "stateKeys": [
+        "on",
+        "banner",
+        "items"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "a"
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "b"
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "c"
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "footer"
+          }
+        }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "An If turning on at root inserts before the first list row",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "banner"
+        ],
+        "newValues": {
+          "banner": true
+        }
+      },
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "banner"
+          }
+        },
+        {
+          "type": "insert",
+          "before": {
+            "elementType": "Text",
+            "props": {
+              "0": "a"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "description": "A root-level row moved to the end of its range moves before the footer",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": [
+            {
+              "id": "b",
+              "name": "b"
+            },
+            {
+              "id": "c",
+              "name": "c"
+            },
+            {
+              "id": "a",
+              "name": "a"
+            }
+          ]
+        }
+      },
+      "expectedPatchCount": 1,
+      "expectedPatches": [
+        {
+          "type": "move",
+          "before": {
+            "elementType": "Text",
+            "props": {
+              "0": "footer"
+            }
+          }
+        }
+      ]
+    },
+    {
+      "description": "A root-level row appended lands before the footer",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": [
+            {
+              "id": "b",
+              "name": "b"
+            },
+            {
+              "id": "c",
+              "name": "c"
+            },
+            {
+              "id": "a",
+              "name": "a"
+            },
+            {
+              "id": "d",
+              "name": "d"
+            }
+          ]
+        }
+      },
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "d"
+          }
+        },
+        {
+          "type": "insert",
+          "before": {
+            "elementType": "Text",
+            "props": {
+              "0": "footer"
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

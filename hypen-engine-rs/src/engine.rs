@@ -357,6 +357,14 @@ impl Engine {
         self.core.revision
     }
 
+    /// How many control-flow nodes are waiting for their detached route to
+    /// be attached again. Test-only introspection: a teardown must never
+    /// leave ids behind here.
+    #[doc(hidden)]
+    pub fn deferred_detached_len(&self) -> usize {
+        self.core.tree.deferred_detached.len()
+    }
+
     /// Get access to the component registry
     pub fn component_registry(&self) -> &ComponentRegistry {
         &self.core.component_registry

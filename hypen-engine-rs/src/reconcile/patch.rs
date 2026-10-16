@@ -452,18 +452,29 @@ impl Patch {
         }
     }
 
-    /// Insert a root node into the "root" container
-    pub fn insert_root(id: NodeId) -> Self {
+    /// Insert a node into the "root" container, before `before_id` (another
+    /// root-level node) or appended when `None`.
+    pub fn insert_root(id: NodeId, before_id: Option<NodeId>) -> Self {
         Self::Insert {
             parent_id: "root".into(),
             id: node_id_str(id),
-            before_id: None,
+            before_id: before_id.map(node_id_str),
         }
     }
 
     pub fn move_node(parent_id: NodeId, id: NodeId, before_id: Option<NodeId>) -> Self {
         Self::Move {
             parent_id: node_id_str(parent_id),
+            id: node_id_str(id),
+            before_id: before_id.map(node_id_str),
+        }
+    }
+
+    /// Move a node within the "root" container (a root-level control-flow
+    /// range reordering its rendered roots).
+    pub fn move_root(id: NodeId, before_id: Option<NodeId>) -> Self {
+        Self::Move {
+            parent_id: "root".into(),
             id: node_id_str(id),
             before_id: before_id.map(node_id_str),
         }

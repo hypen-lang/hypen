@@ -138,7 +138,7 @@ fn test_insert_root_patch() {
     let node_id = test_node_id();
 
     // WHEN: Create root insert patch
-    let patch = Patch::insert_root(node_id);
+    let patch = Patch::insert_root(node_id, None);
 
     // THEN: Insert patch with parent_id = "root"
     match patch {

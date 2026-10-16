@@ -387,6 +387,14 @@ pub(crate) fn reconcile_iterable_children_full(
     // over an unchanged template list must not redo that.
     let instantiation_plans =
         super::binding_map::plans_for(ctx, parent_id, ir_templates, templates_hash);
+    // A root-level ForEach has no real render parent: its caller passes the
+    // (transparent) container itself, and its rows go to "root". There is
+    // no element id to Instantiate under, so new rows take the plain
+    // Create + Insert path (`emit_insert` resolves "root"), as on creation.
+    let at_root = ctx
+        .tree
+        .get(render_parent)
+        .is_some_and(|n| n.control_flow.is_some());
     // Row prototypes for brand-new children, built lazily on first use —
     // see binding_map::build_row_prototype.
     let mut row_protos: Vec<Option<Option<super::binding_map::RowPrototype>>> =
@@ -521,7 +529,8 @@ pub(crate) fn reconcile_iterable_children_full(
                 // didn't land at the end.
                 let plan = instantiation_plans
                     .get(template_idx)
-                    .and_then(Option::as_ref);
+                    .and_then(Option::as_ref)
+                    .filter(|_| !at_root);
                 let created = if let Some(plan) = plan {
                     if row_protos[template_idx].is_none() {
                         row_protos[template_idx] = Some(super::binding_map::build_row_prototype(
@@ -641,7 +650,11 @@ pub(crate) fn reconcile_iterable_children_full(
             if !in_lis[new_idx] {
                 let before_id = anchor;
                 tree.for_each_rendered_root(child, &mut |root| {
-                    patches.push(Patch::move_node(render_parent, root, before_id));
+                    patches.push(if at_root {
+                        Patch::move_root(root, before_id)
+                    } else {
+                        Patch::move_node(render_parent, root, before_id)
+                    });
                 });
             }
             if let Some(first) = tree.first_rendered(child) {

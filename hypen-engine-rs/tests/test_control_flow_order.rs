@@ -739,3 +739,309 @@ fn evicted_control_flow_route_is_removed_from_the_renderer() {
     let col = h.screen.find("Column");
     assert_eq!(h.screen.rows(&col), strs(&["a", "b", "footer"]));
 }
+
+// ---------------------------------------------------------------------------
+// Root-level control flow (content placed straight into "root")
+// ---------------------------------------------------------------------------
+
+impl Screen {
+    /// Labels of the root container's children, in order.
+    fn root_rows(&self) -> Vec<String> {
+        self.roots.iter().map(|id| self.label(id)).collect()
+    }
+}
+
+#[test]
+fn root_router_route_if_toggle_lands_before_sibling() {
+    let mut h = Harness::new(
+        r#"Router { Route(path: "/") { If(@state.banner) { Text("banner") } Text("body") } }"#,
+        json!({ "location": "/", "banner": false }),
+    );
+    assert_eq!(h.screen.root_rows(), strs(&["body"]));
+    h.update(json!({ "banner": true }));
+    assert_eq!(h.screen.root_rows(), strs(&["banner", "body"]));
+    h.update(json!({ "banner": false }));
+    h.update(json!({ "banner": true }));
+    assert_eq!(h.screen.root_rows(), strs(&["banner", "body"]));
+}
+
+#[test]
+fn root_if_children_keep_order_before_root_sibling() {
+    let mut h = Harness::new(
+        r#"If(@state.on) {
+            If(@state.banner) { Text("banner") }
+            ForEach(items: @state.items, key: "id") { Text("@{item.name}") }
+            Text("footer")
+        }"#,
+        json!({ "on": true, "banner": false, "items": items(&["a", "b"]) }),
+    );
+    assert_eq!(h.screen.root_rows(), strs(&["a", "b", "footer"]));
+    h.update(json!({ "banner": true }));
+    assert_eq!(h.screen.root_rows(), strs(&["banner", "a", "b", "footer"]));
+    h.update(json!({ "items": items(&["a", "b", "c"]) }));
+    assert_eq!(
+        h.screen.root_rows(),
+        strs(&["banner", "a", "b", "c", "footer"])
+    );
+    // Reorder at root: Moves must address "root" and anchor on the footer.
+    h.update(json!({ "items": items(&["c", "b", "a"]) }));
+    assert_eq!(
+        h.screen.root_rows(),
+        strs(&["banner", "c", "b", "a", "footer"])
+    );
+    h.update(json!({ "on": false }));
+    assert_eq!(h.screen.root_rows(), Vec::<String>::new());
+    h.update(json!({ "on": true }));
+    assert_eq!(
+        h.screen.root_rows(),
+        strs(&["banner", "c", "b", "a", "footer"])
+    );
+}
+
+#[test]
+fn root_foreach_rows_reorder_and_toggle() {
+    let mut h = Harness::new(
+        r#"ForEach(items: @state.items, key: "id") {
+            If(condition: "@{item.on}") { Text("@{item.name}") }
+            Text("-")
+        }"#,
+        json!({ "items": [
+            { "id": "a", "name": "a", "on": true },
+            { "id": "b", "name": "b", "on": false },
+            { "id": "c", "name": "c", "on": true },
+        ] }),
+    );
+    assert_eq!(h.screen.root_rows(), strs(&["a", "-", "-", "c", "-"]));
+    h.update(json!({ "items": [
+        { "id": "c", "name": "c", "on": true },
+        { "id": "b", "name": "b", "on": true },
+        { "id": "a", "name": "a", "on": false },
+    ] }));
+    assert_eq!(h.screen.root_rows(), strs(&["c", "-", "b", "-", "-"]));
+    h.update(json!({ "items": [
+        { "id": "a", "name": "a", "on": true },
+        { "id": "d", "name": "d", "on": true },
+        { "id": "c", "name": "c", "on": true },
+    ] }));
+    assert_eq!(h.screen.root_rows(), strs(&["a", "-", "d", "-", "c", "-"]));
+}
+
+#[test]
+fn root_router_route_with_foreach_and_sibling() {
+    let mut h = Harness::new(
+        r#"Router {
+            Route(path: "/list") {
+                ForEach(items: @state.items, key: "id") { Text("@{item.name}") }
+                Text("footer")
+            }
+            Route(path: "/other") { Text("other") }
+        }"#,
+        json!({ "location": "/list", "items": items(&["a"]) }),
+    );
+    assert_eq!(h.screen.root_rows(), strs(&["a", "footer"]));
+    h.update(json!({ "items": items(&["a", "b"]) }));
+    assert_eq!(h.screen.root_rows(), strs(&["a", "b", "footer"]));
+    h.update(json!({ "items": items(&["b", "a"]) }));
+    assert_eq!(h.screen.root_rows(), strs(&["b", "a", "footer"]));
+    h.update(json!({ "location": "/other" }));
+    assert_eq!(h.screen.root_rows(), strs(&["other"]));
+    h.update(json!({ "items": items(&["c", "b", "a"]) }));
+    h.update(json!({ "location": "/list" }));
+    assert_eq!(h.screen.root_rows(), strs(&["c", "b", "a", "footer"]));
+}
+
+// ---------------------------------------------------------------------------
+// Mixed passes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn if_rooted_rows_reordered_and_toggled_in_one_pass() {
+    let mut h = Harness::new(
+        r#"Column {
+            ForEach(items: @state.items, key: "id") {
+                If(condition: "@{item.on}") { Text("@{item.name}") }
+            }
+            Text("footer")
+        }"#,
+        json!({ "items": [
+            { "id": "a", "name": "a", "on": true },
+            { "id": "b", "name": "b", "on": false },
+            { "id": "c", "name": "c", "on": true },
+            { "id": "d", "name": "d", "on": true },
+        ] }),
+    );
+    let col = h.screen.find("Column");
+    // Reverse while d turns off and b turns on.
+    h.update(json!({ "items": [
+        { "id": "d", "name": "d", "on": false },
+        { "id": "c", "name": "c", "on": true },
+        { "id": "b", "name": "b", "on": true },
+        { "id": "a", "name": "a", "on": true },
+    ] }));
+    assert_eq!(h.screen.rows(&col), strs(&["c", "b", "a", "footer"]));
+    // Move an off row to the front while it turns on; the last row moves
+    // to the middle while turning off.
+    h.update(json!({ "items": [
+        { "id": "d", "name": "d", "on": true },
+        { "id": "a", "name": "a", "on": false },
+        { "id": "c", "name": "c", "on": true },
+        { "id": "b", "name": "b", "on": true },
+    ] }));
+    assert_eq!(h.screen.rows(&col), strs(&["d", "c", "b", "footer"]));
+    h.update(json!({ "items": [
+        { "id": "b", "name": "b", "on": true },
+        { "id": "a", "name": "a", "on": true },
+        { "id": "d", "name": "d", "on": true },
+        { "id": "c", "name": "c", "on": false },
+    ] }));
+    assert_eq!(h.screen.rows(&col), strs(&["b", "a", "d", "footer"]));
+}
+
+#[test]
+fn foreach_rows_that_are_foreachs_reorder_as_multi_root_moves() {
+    let group = |id: &str, kids: &[&str]| json!({ "id": id, "kids": items(kids) });
+    let mut h = Harness::new(
+        r#"Column {
+            ForEach(items: @state.groups, key: "id") {
+                ForEach(items: @item.kids, as: "k", key: "id") { Text("@{k.name}") }
+            }
+            Text("footer")
+        }"#,
+        json!({ "groups": [
+            group("g1", &["x1", "x2"]),
+            group("g2", &["y1"]),
+            group("g3", &["z1", "z2"]),
+        ] }),
+    );
+    let col = h.screen.find("Column");
+    assert_eq!(
+        h.screen.rows(&col),
+        strs(&["x1", "x2", "y1", "z1", "z2", "footer"])
+    );
+    h.update(json!({ "groups": [
+        group("g3", &["z1", "z2"]),
+        group("g1", &["x1", "x2"]),
+        group("g2", &["y1"]),
+    ] }));
+    assert_eq!(
+        h.screen.rows(&col),
+        strs(&["z1", "z2", "x1", "x2", "y1", "footer"])
+    );
+    // Reverse while the groups' own rows change, and an empty group sits
+    // between them.
+    h.update(json!({ "groups": [
+        group("g2", &["y2", "y1"]),
+        group("g4", &[]),
+        group("g1", &["x2"]),
+        group("g3", &["z1", "z2", "z3"]),
+    ] }));
+    assert_eq!(
+        h.screen.rows(&col),
+        strs(&["y2", "y1", "x2", "z1", "z2", "z3", "footer"])
+    );
+}
+
+#[test]
+fn row_type_change_in_a_pass_that_also_creates_rows() {
+    let mut h = Harness::new(LIST_THEN_FOOTER, json!({ "items": items(&["a", "b"]) }));
+    let col = h.screen.find("Column");
+    let source = r#"Column { ForEach(items: @state.items, key: "id") { Button("@{item.name}") } Text("footer") }"#;
+    // New state AND new templates in one render: `a`/`b` are replaced in
+    // their slots while `c` and `z` are created around them.
+    let state = json!({ "items": items(&["z", "a", "b", "c"]) });
+    h.engine
+        .set_module(ModuleInstance::new(Module::new("Test"), state.clone()));
+    h.engine
+        .render_ir_node(&ast_to_ir_node(&parse_component(source).unwrap()));
+    h.flush();
+    h.source = source.to_string();
+    h.state = state;
+    assert_eq!(h.screen.rows(&col), strs(&["z", "a", "b", "c", "footer"]));
+    h.assert_matches_fresh_render();
+    h.update(json!({ "items": items(&["c", "a", "y"]) }));
+    assert_eq!(h.screen.rows(&col), strs(&["c", "a", "y", "footer"]));
+}
+
+// ---------------------------------------------------------------------------
+// Deferred control flow under torn-down routes
+// ---------------------------------------------------------------------------
+
+#[test]
+fn deferred_route_evicted_before_return_leaves_nothing_pending() {
+    let mut routes = String::from(
+        r#"Route(path: "/list") {
+            ForEach(items: @state.items, key: "id") { Text("@{item.name}") }
+            If(@state.show) { Text("shown") }
+        }"#,
+    );
+    for i in 0..12 {
+        routes.push_str(&format!(r#" Route(path: "/p{i}") {{ Text("p{i}") }}"#));
+    }
+    let src = format!(r#"Column {{ Router {{ {routes} }} Text("footer") }}"#);
+    let mut h = Harness::new(
+        &src,
+        json!({ "location": "/list", "items": items(&["a", "b"]), "show": false }),
+    );
+    h.update(json!({ "location": "/p0" }));
+    h.update(json!({ "items": items(&["c", "a"]), "show": true }));
+    assert!(h.engine.deferred_detached_len() > 0, "edits were deferred");
+    for i in 1..12 {
+        h.update(json!({ "location": format!("/p{i}") }));
+    }
+    assert_eq!(
+        h.engine.deferred_detached_len(),
+        0,
+        "evicted route left deferred ids behind"
+    );
+    h.update(json!({ "location": "/list" }));
+    let col = h.screen.find("Column");
+    assert_eq!(h.screen.rows(&col), strs(&["c", "a", "shown", "footer"]));
+}
+
+const ROUTER_LIST: &str = r#"Router {
+    Route(path: "/list") { ForEach(items: @state.items, key: "id") { Text("@{item.name}") } }
+    Route(path: "/other") { Text("other") }
+}"#;
+
+#[test]
+fn deferred_ids_dropped_when_the_router_is_removed() {
+    let src = format!(r#"Column {{ If(@state.on) {{ {ROUTER_LIST} }} Text("footer") }}"#);
+    let mut h = Harness::new(
+        &src,
+        json!({ "on": true, "location": "/list", "items": items(&["a"]) }),
+    );
+    h.update(json!({ "location": "/other" }));
+    h.update(json!({ "items": items(&["b", "a"]) }));
+    assert!(h.engine.deferred_detached_len() > 0, "edits were deferred");
+    h.update(json!({ "on": false }));
+    assert_eq!(h.engine.deferred_detached_len(), 0);
+    h.update(json!({ "on": true, "location": "/list" }));
+    let col = h.screen.find("Column");
+    assert_eq!(h.screen.rows(&col), strs(&["b", "a", "footer"]));
+}
+
+#[test]
+fn deferred_ids_dropped_when_a_parent_when_switches_away() {
+    let src = format!(
+        r#"Column {{
+            When(value: @state.mode) {{
+                Case(match: "r") {{ {ROUTER_LIST} }}
+                Case(match: "x") {{ Text("x") }}
+            }}
+            Text("footer")
+        }}"#
+    );
+    let mut h = Harness::new(
+        &src,
+        json!({ "mode": "r", "location": "/list", "items": items(&["a"]) }),
+    );
+    h.update(json!({ "location": "/other" }));
+    h.update(json!({ "items": items(&["b", "a"]) }));
+    assert!(h.engine.deferred_detached_len() > 0, "edits were deferred");
+    h.update(json!({ "mode": "x" }));
+    assert_eq!(h.engine.deferred_detached_len(), 0);
+    let col = h.screen.find("Column");
+    assert_eq!(h.screen.rows(&col), strs(&["x", "footer"]));
+    h.update(json!({ "mode": "r", "location": "/list" }));
+    assert_eq!(h.screen.rows(&col), strs(&["b", "a", "footer"]));
+}
