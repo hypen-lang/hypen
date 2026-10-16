@@ -81,11 +81,11 @@ class ComposeRenderer(
         )
     }
 
-    // Lock for synchronizing access to elements and rootId across threads
+    // Lock for synchronizing access to elements and root children across threads
     private val lock = Any()
 
     // Element storage — guarded by [lock]. Contains both attached
-    // elements (reachable from [rootId] via children) and detached
+    // elements (reachable from a root child via children) and detached
     // elements (unlinked by a DETACH patch, kept alive here until
     // ATTACH or REMOVE arrives).
     private val elements = mutableMapOf<String, HypenElement>()
@@ -125,10 +125,41 @@ class ComposeRenderer(
     // consumer is composition, which runs after this returns.
     private var batchAnimationSpec: Map<String, Any?>? = null
 
-    // Snapshot-backed so composables reading [getRootId] recompose when
-    // the root changes; per-element updates flow through each element's
-    // own snapshot state instead of a global version bump.
-    private var rootIdState: String? by mutableStateOf(null)
+    // Ordered children of the "root" mount container. Usually one node, but
+    // control flow at the IR root (Router / If / ForEach with siblings)
+    // places several nodes straight into "root", addressed by Insert / Move /
+    // Attach with a beforeId exactly like any other parent. Snapshot-backed
+    // (an immutable list replaced on each change) so composables reading
+    // [getRootChildIds] recompose when the root set changes; per-element
+    // updates flow through each element's own snapshot state instead.
+    // Guarded by [lock].
+    private var rootChildIdsState: List<String> by mutableStateOf(emptyList())
+
+    /** Place [id] among the root children before [beforeId] (append when absent/unknown). */
+    private fun linkRootLocked(id: String, beforeId: String?) {
+        val list = rootChildIdsState.toMutableList()
+        list.remove(id)
+        val at = if (beforeId != null) list.indexOf(beforeId) else -1
+        if (at >= 0) list.add(at, id) else list.add(id)
+        rootChildIdsState = list
+    }
+
+    /** Drop [id] from the root children if it is one. */
+    private fun unlinkRootLocked(id: String) {
+        if (id in rootChildIdsState) rootChildIdsState = rootChildIdsState - id
+    }
+
+    /**
+     * Unlink [child] from wherever it currently sits — an element parent or
+     * the root container — so a re-link never leaves a stale copy behind.
+     */
+    private fun unlinkLocked(child: HypenElement) {
+        child.parentId?.let { oldParentId ->
+            elements[oldParentId]?.let { stage(it); it.removeChild(child.id) }
+        }
+        child.parentId = null
+        unlinkRootLocked(child.id)
+    }
 
     // Bumped once per batch. Kept for external observers and tests;
     // composition no longer keys on it.
@@ -380,10 +411,8 @@ class ComposeRenderer(
             ).also { elements[id] = it }
         }
 
-        // Set root if this is the first element
-        if (rootIdState == null) {
-            rootIdState = id
-        }
+        // A node becomes a root child only through Insert / Attach into
+        // "root" — never by being the first one created.
 
         // Parse every `__anim.*` channel and register enter eligibility. A
         // node created in this batch is the ONLY node that may enter-animate
@@ -482,11 +511,13 @@ class ComposeRenderer(
             return
         }
 
-        // Handle root insertion
-        if (parentId == "root") {
-            rootIdState = id
+        // "root" is the mount-container sentinel: one of possibly several
+        // ordered root children, positioned by beforeId like any parent.
+        if (parentId == "root" && elements[parentId] == null) {
+            unlinkLocked(child)
+            linkRootLocked(id, patch.beforeId)
             dnd.noteInsert(parentId, id, patch.beforeId)
-            log.debug { "Inserted as root: $id" }
+            log.debug { "Inserted at root: $id (before: ${patch.beforeId ?: "end"})" }
             return
         }
 
@@ -494,6 +525,8 @@ class ComposeRenderer(
             log.warn { "INSERT: parent $parentId NOT FOUND for child $id" }
             return
         }
+        // Leaving the root container (Move from root to an element).
+        unlinkRootLocked(id)
         child.parentId = parentId
 
         stage(parent)
@@ -513,10 +546,8 @@ class ComposeRenderer(
 
         val child = elements[id] ?: return
 
-        // Remove from old parent
-        child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.let { stage(it); it.removeChild(id) }
-        }
+        // Remove from old parent (an element or the root container)
+        unlinkLocked(child)
 
         // Insert into new parent (same as insert)
         onInsert(patch)
@@ -576,12 +607,12 @@ class ComposeRenderer(
             elements[parentId]?.let { stage(it); it.removeChild(id) }
         }
 
+        // A root child leaves the root container only now — an exiting one
+        // keeps its slot while its exit plays, like its DOM element does.
+        unlinkRootLocked(id)
+
         // Recursively remove all descendants
         removeDescendants(element, deferred)
-
-        if (rootIdState == id) {
-            rootIdState = null
-        }
 
         log.debug { "Removed: $id" }
         deferred.add { listeners -> listeners.forEach { it.onElementRemoved(id) } }
@@ -654,9 +685,7 @@ class ComposeRenderer(
         // A drag inside a detaching route cancels with NO dispatch (plan §6.6).
         dnd.noteDetach(id)
 
-        if (rootIdState == id) {
-            rootIdState = null
-        }
+        unlinkRootLocked(id)
 
         log.debug { "Detached: $id" }
     }
@@ -684,11 +713,8 @@ class ComposeRenderer(
         // terminates at the mount point (Router at IR root). Must not
         // be looked up in `elements`.
         if (parentId == "root" && elements[parentId] == null) {
-            child.parentId?.let { oldParentId ->
-                elements[oldParentId]?.let { stage(it); it.removeChild(id) }
-            }
-            child.parentId = null
-            rootIdState = id
+            unlinkLocked(child)
+            linkRootLocked(id, patch.beforeId)
             detachedIds.remove(id)
             animation.noteAttach(id)
             dnd.noteInsert(parentId, id, patch.beforeId)
@@ -703,9 +729,7 @@ class ComposeRenderer(
 
         // Defensive: if the element somehow still has a stale parent
         // link (engine bug), unlink it first.
-        child.parentId?.let { oldParentId ->
-            elements[oldParentId]?.let { stage(it); it.removeChild(id) }
-        }
+        unlinkLocked(child)
 
         child.parentId = parentId
 
@@ -735,7 +759,7 @@ class ComposeRenderer(
             elements.clear()
             detachedIds.clear()
             batchAnimationSpec = null
-            rootIdState = null
+            rootChildIdsState = emptyList()
         }
         // Drops in-flight playbacks and their finalize timers without
         // running them — the tree they would tear down is already gone.
@@ -826,10 +850,18 @@ class ComposeRenderer(
     }
 
     /**
-     * Get the root element ID. Snapshot-backed: calling this from
-     * composition subscribes the caller to root changes.
+     * The ordered children of the "root" mount container (usually one;
+     * several when control flow sits at the IR root with siblings). Includes
+     * a root child whose animated exit is still playing. Snapshot-backed:
+     * calling this from composition subscribes the caller to root changes.
      */
-    fun getRootId(): String? = synchronized(lock) { rootIdState }
+    fun getRootChildIds(): List<String> = synchronized(lock) { rootChildIdsState }
+
+    /**
+     * The first root child, or null when the root container is empty.
+     * Kept for single-root callers; use [getRootChildIds] for the full set.
+     */
+    fun getRootId(): String? = synchronized(lock) { rootChildIdsState.firstOrNull() }
 
     /**
      * Get the component registry.

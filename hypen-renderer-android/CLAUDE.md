@@ -123,6 +123,16 @@ Compose nodes. Handled in `ComposeRenderer.onDetach` / `onAttach`
 A `PatchType.REMOVE` arriving for a detached id (engine LRU eviction)
 tears down normally via `onRemove`, which also evicts from `detachedIds`.
 
+### Root children
+
+The "root" mount container can hold several ordered nodes (control flow at
+the IR root with siblings). `ComposeRenderer` keeps them as a snapshot-backed
+list (`getRootChildIds()`; `getRootId()` is the first): Insert / Move / Attach
+into "root" place by `beforeId` (unknown or absent anchor appends), Detach and
+Remove drop the id, and an animated-exit root keeps its slot until finalize.
+`HypenApp` renders one root directly (unchanged) and several in a
+`fillMaxSize` Column with `LocalColumnScope`. Tests: `RootChildrenTest`.
+
 ### Strategy 3 hook (limbo container)
 
 `ComposeRenderer.getDetachedIds(): List<String>` is exposed so a

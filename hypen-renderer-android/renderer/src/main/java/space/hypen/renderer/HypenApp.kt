@@ -2,6 +2,7 @@ package space.hypen.renderer
 
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -168,18 +169,14 @@ fun HypenApp(
                 }
 
                 ConnectionState.CONNECTED -> {
-                    // The root id is snapshot-backed, so this block recomposes
-                    // when the root element arrives or is replaced. Per-element
-                    // updates invalidate only the composables that read the
-                    // touched element's snapshot state.
-                    val rootId = renderer.getRootId()
-                    val rootElement = if (rootId != null) renderer.getElement(rootId) else null
+                    // The root children are snapshot-backed, so this block
+                    // recomposes when a root node arrives, moves or leaves.
+                    // Per-element updates invalidate only the composables that
+                    // read the touched element's snapshot state.
+                    val rootElements = renderer.getRootChildIds().mapNotNull { renderer.getElement(it) }
 
-                    if (rootElement != null) {
-                        HypenElement(
-                            element = rootElement,
-                            renderer = renderer,
-                        )
+                    if (rootElements.isNotEmpty()) {
+                        HypenRootChildren(rootElements, renderer)
                     } else {
                         // Tree not yet loaded, show loading
                         loadingContent()
@@ -417,6 +414,39 @@ internal fun HypenElement(
                     RenderChildren(element, renderer)
                 },
             )
+        }
+    }
+}
+
+/**
+ * Renders the ordered children of the "root" mount container.
+ *
+ * One root (the common case) renders directly in the host, with no wrapper
+ * layout — exactly as before root siblings existed. Several roots (control
+ * flow at the IR root with siblings) stack top-to-bottom in a Column that
+ * fills the host, matching the DOM container's block flow and the desktop
+ * renderer's viewport-sized flex column; the Column scope is provided so a
+ * `.weight` root child (a `flex-1` page above a bottom bar) works as it would
+ * in an explicit root Column. Switching between one and several roots moves
+ * the content under a different parent, so Compose-local state (`remember`,
+ * scroll) of the surviving root restarts at that moment.
+ */
+@Composable
+private fun HypenRootChildren(
+    roots: List<HypenElement>,
+    renderer: ComposeRenderer,
+) {
+    if (roots.size == 1) {
+        HypenElement(element = roots[0], renderer = renderer)
+        return
+    }
+    Column(modifier = Modifier.fillMaxSize()) {
+        CompositionLocalProvider(LocalColumnScope provides this) {
+            for (root in roots) {
+                key(root.id) {
+                    HypenElement(element = root, renderer = renderer)
+                }
+            }
         }
     }
 }
