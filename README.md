@@ -11,20 +11,101 @@
   <a href="https://github.com/hypen-lang/hypen/blob/main/LICENSE">
     <img alt="License: MIT" src="https://img.shields.io/badge/License-MIT-FFECA7?style=flat-square&labelColor=161616" />
   </a>
+  <a href="https://www.npmjs.com/package/@hypen-space/core">
+    <img alt="npm" src="https://img.shields.io/npm/v/@hypen-space/core?style=flat-square&labelColor=161616&color=A7D8FF&label=npm" />
+  </a>
+  <a href="https://crates.io/crates/hypen-engine">
+    <img alt="crates.io" src="https://img.shields.io/crates/v/hypen-engine?style=flat-square&labelColor=161616&color=B5FFA7&label=crates.io" />
+  </a>
+  <a href="https://github.com/hypen-lang/hypen/releases">
+    <img alt="Release" src="https://img.shields.io/github/v/release/hypen-lang/hypen?style=flat-square&labelColor=161616&color=FFA7E1&label=release" />
+  </a>
+  <a href="https://github.com/hypen-lang/hypen/discussions">
+    <img alt="Discussions" src="https://img.shields.io/badge/discussions-join-FFECA7?style=flat-square&labelColor=161616" />
+  </a>
+  <a href="https://github.com/hypen-lang/hypen/actions/workflows/rust.yml">
+    <img alt="Rust CI" src="https://img.shields.io/github/actions/workflow/status/hypen-lang/hypen/rust.yml?branch=main&style=flat-square&labelColor=161616&label=rust" />
+  </a>
+  <a href="https://github.com/hypen-lang/hypen/actions/workflows/typescript.yml">
+    <img alt="TypeScript CI" src="https://img.shields.io/github/actions/workflow/status/hypen-lang/hypen/typescript.yml?branch=main&style=flat-square&labelColor=161616&label=typescript" />
+  </a>
+  <a href="https://github.com/hypen-lang/hypen/actions/workflows/cross-platform.yml">
+    <img alt="Cross-platform SDK CI" src="https://img.shields.io/github/actions/workflow/status/hypen-lang/hypen/cross-platform.yml?branch=main&style=flat-square&labelColor=161616&label=sdks" />
+  </a>
 </p>
 
 <p align="center">
-  An open-source cross-platform language and engine for building universal software that runs natively on all platforms via UI streaming. Fastest dev experience ever with out of the box reactivity, routing, hot reload, preview studio, Tailwind shorthands and all kinds of niceties.
+  An open-source declarative UI language and engine. Write the UI once, keep state and logic in Rust, TypeScript, Go, Kotlin or Swift, and stream it to web, iOS, Android and desktop renderers as native UI. Reactivity, routing, hot reload, a preview studio and Tailwind shorthands are built in.
+</p>
+
+<p align="center">
+  <a href="https://hypen-home-screen.ian-dae.workers.dev/"><b>Try it in the browser</b></a>
+  &nbsp;·&nbsp; <a href="https://hypen.space">Website</a>
+  &nbsp;·&nbsp; <a href="https://docs.hypen.space/docs">Docs</a>
+  &nbsp;·&nbsp; <a href="https://github.com/hypen-lang/hypen/releases">Releases</a>
+  &nbsp;·&nbsp; <a href="https://github.com/hypen-lang/hypen/discussions">Discussions</a>
+  &nbsp;·&nbsp; <a href="https://hypen.space/blog">Blog</a>
+</p>
+
+<p align="center">
+  <img alt="One Hypen template rendered by five renderers: web DOM, web Canvas, desktop (Vello), iOS (SwiftUI) and Android (Compose). Actual renderer captures." src="./.github/five-renderers.png" width="100%">
 </p>
 
 ## Why Hypen?
-- **Native UI Streaming and portable (coming soon)** - Hypen supports native UI streaming from different languages - Rust, TS, Go, Kotlin, Swift and more coming soon
-- **Crossplatform native rendering** - Render hypen in web, canvas, iOS or Android, all native.
+- **Native UI streaming from your language** — Server SDKs for Rust, TypeScript, Go, Kotlin and Swift speak one WebSocket patch protocol. Your backend owns state and logic; the client only renders.
+- **Cross-platform native rendering** — DOM, Canvas, SwiftUI, Jetpack Compose and a Vello desktop renderer, all driven by the same patches.
 - **Declarative and familiar** — Hypen is a declarative language that will be familiar to both developers and machines.
 - **Highly portable** — Hypen clients are thin layers over native UI, enabling you to automatically support any platform that Hypen supports.
 - **Reactivity, Tailwind, routing, hot reload** — All of your favorite features, out of the box. Develop faster than ever with Hypen.
 - **Modular and expressive** — Use Hypen to build live components, screens, apps or mini-apps, and stream them anywhere with 1 line of code.
 - **Developer and LLM friendly** — Hypen was designed to be easy to learn and use for both humans and machines, allowing your LLM to easily learn to build and use Hypen apps.
+- **Agent native** — An agent drives a Hypen app through its state and actions instead of a browser. On the same app, that [measured](https://hypen.space/blog/device-capabilities) at about 6× fewer tokens than driving the React version through Playwright.
+
+## Try it in the browser
+
+No install needed. These are real Hypen apps from [`examples/`](examples/), each deployed as a Cloudflare Worker and streamed to your browser over WebSocket:
+
+<table>
+<tr>
+<td width="300" valign="top"><img alt="The Todo example running live: adding a task and clearing done tasks" src="./.github/todo-demo.gif" width="300"></td>
+<td valign="top">
+
+- **[Home Screen](https://hypen-home-screen.ian-dae.workers.dev/)** — a phone-style launcher that embeds every other app below with one `HypenApp("wss://…")` line each. Start here.
+- **[Movie Discovery](https://hypen-movie-discovery.ian-dae.workers.dev)** · **[Social](https://hypen-social.ian-dae.workers.dev/)** · **[Food Ordering](https://hypen-food-ordering.ian-dae.workers.dev/)**
+- **[Calorie Counter](https://hypen-calorie-counter.ian-dae.workers.dev/)** · **[Calculator](https://hypen-calculator.ian-dae.workers.dev/)** · **[Todo](https://hypen-todo.ian-dae.workers.dev/)**
+
+The Todo app on the left, trimmed from [`examples/todo`](examples/todo/cloudflare/src/todo.ts) (styling applicators cut, logic intact):
+
+```typescript
+export default app
+  .defineState<TodoState>({ tasks: [...], newTask: "" })
+  .onAction("addTask", async ({ state }) => {
+    state.tasks.unshift({ id: Date.now().toString(), text: state.newTask, done: false });
+    state.newTask = "";
+  })
+  .onAction<{ id: string }>("toggleTask", async ({ action, state }) => {
+    const task = state.tasks.find((t) => t.id === action.payload?.id);
+    if (task) task.done = !task.done;
+  })
+  .ui(`
+    Column {
+      Input(placeholder: "Add a task… (Enter)").bind(@state.newTask).onKey(@actions.addTask)
+      Text("@{state.tasks.length} tasks")
+      List(@state.tasks) {
+        Row {
+          Text("@{item.text}").textDecoration("@{item.done ? 'line-through' : 'none'}")
+          Button { Text("Remove") }.onClick(@actions.removeTask, id: "@{item.id}")
+        }
+          .enter(slide, fade, from: top).exit(fade, slide, to: trailing).layout(spring)
+          .onClick(@actions.toggleTask, id: "@{item.id}", animate: spring)
+      }
+    }
+  `);
+```
+
+</td>
+</tr>
+</table>
 
 
 ## Documentation
@@ -32,8 +113,6 @@
 Learn more about using Hypen here:
 
 [ [Docs](https://docs.hypen.space/docs) ] [ [TS Server SDK](https://docs.hypen.space/docs/servers/typescript) ] [ [Go Server SDK](https://docs.hypen.space/docs/servers/golang) ] [ [Swift Server SDK](https://docs.hypen.space/docs/servers/swift) ] [ [Kotlin Server SDK](https://docs.hypen.space/docs/servers/kotlin) ] [ [Rust Server SDK](https://docs.hypen.space/docs/servers/rust) ] [ [Language references](https://docs.hypen.space/docs/hypen/basics) ]
-
-> **Warning:** After the 1.0 version stabilizes, all server and renderer SDKs will move into their own repositories.
 
 ## Quick Start
 
@@ -183,8 +262,20 @@ let app = HypenApp::builder()
         .build())
     .build();
 
-// Plug `app` into your Axum/Actix/etc. server via the framework integration.
+// The Rust SDK is framework-agnostic: hand each WebSocket connection a
+// RemoteSession and pump messages through it (Axum, Actix, Warp, ...).
+async fn ws_handler(ws: WebSocket, session: RemoteSession) {
+    let (mut tx, mut rx) = ws.split();
+    for msg in session.handle_hello(None) { tx.send(Message::Text(msg)).await.unwrap(); }
+    while let Some(Ok(msg)) = rx.next().await {
+        for out in session.handle_message(msg.to_text().unwrap()) {
+            tx.send(Message::Text(out)).await.unwrap();
+        }
+    }
+}
 ```
+
+Full Axum wiring is in the [Rust SDK docs](https://docs.hypen.space/docs/servers/rust).
 
 </details>
 
@@ -283,13 +374,17 @@ The engine is renderer-agnostic. All platforms receive the same patch format.
 | `hypen-cli/` | CLI tools (`init`, `dev`, `build`, `studio`) | TypeScript |
 | `hypen-renderer-swift/` | iOS/macOS native renderer | Swift |
 | `hypen-renderer-android/` | Android native renderer | Kotlin |
+| `hypen-renderer-desktop/` | Desktop native renderer (Vello) | Rust |
+| `hypen-browser/` | Desktop Hypen browser built on the desktop renderer | Rust |
 | `hypen-server-swift/` | Swift server SDK (`HypenServer`) | Swift |
 | `hypen-kotlin/` | Kotlin/JVM SDK with Kotlin DSL | Kotlin |
 | `hypen-golang/` | Go SDK (module system) | Go |
 | `hypen-lsp/` | Language Server Protocol implementation | TypeScript |
 | `tailwind-parse/` | Tailwind CSS class parser | Rust |
-| `hypen-landing/` | Landing page | TypeScript |
+| `hypen-ios-streamer/` | Streams iOS Simulators over HTTP for Studio and tests | TypeScript |
 | `hypen-docs/` | Documentation site (Fumadocs) | Markdown |
+| `benchmarks/` | React vs Hypen runtime benchmark | TypeScript |
+| `releases/` | Cloudflare Worker that serves gallery app downloads | JavaScript |
 | `engine-compatibility-tests/` | Cross-SDK compatibility test suite | Multi |
 | `examples/` | Example apps | Multi |
 | `component-gallery-server/` | Server for x-platform screenshot tests | TypeScript |
@@ -322,7 +417,7 @@ All server SDKs share the same module system (typed state, typed actions, lifecy
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development workflows and guidelines.
 
-## Documentation
+## Reference docs in this repo
 
 - [SPEC.md](SPEC.md) — RFC-0001: Stateful module system specification
 - [Parser README](parser/README.md) — Parser architecture and usage
@@ -334,6 +429,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development workflows and gu
 - [Rust Server SDK README](hypen-sdk-rs/README.md)
 - [Swift Server SDK README](hypen-server-swift/README.md)
 - [Kotlin Server SDK README](hypen-kotlin/README.md)
+
+## Community
+
+- [Discussions](https://github.com/hypen-lang/hypen/discussions) — questions, show-and-tell, design threads.
+- [Issues](https://github.com/hypen-lang/hypen/issues) — bugs and feature requests.
+- [Releases](https://github.com/hypen-lang/hypen/releases) — versioned changelog; every SDK ships in lockstep.
+- [Blog](https://hypen.space/blog) — release write-ups and measurements.
 
 ## License
 
