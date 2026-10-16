@@ -5,12 +5,12 @@ description: Complete guide to building Hypen servers with Go
 
 # Go SDK
 
-The Go SDK (`github.com/hypen-space/core`) provides a server-side Hypen implementation for Go applications with reactive state management, routing, cross-module communication, and Remote UI streaming over WebSocket.
+The Go SDK (`github.com/hypen-lang/hypen/hypen-golang`) provides a server-side Hypen implementation for Go applications with reactive state management, routing, cross-module communication, and Remote UI streaming over WebSocket.
 
 ## Installation
 
 ```bash
-go get github.com/hypen-space/core
+go get github.com/hypen-lang/hypen/hypen-golang
 ```
 
 ## Quick Start
@@ -25,8 +25,8 @@ package main
 import (
     "fmt"
 
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // Module state as a Go struct. json tags match the @{state.xxx}

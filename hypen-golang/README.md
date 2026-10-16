@@ -5,7 +5,7 @@ A complete Go implementation of the Hypen reactive UI framework SDK.
 ## Installation
 
 ```bash
-go get github.com/hypen-space/core
+go get github.com/hypen-lang/hypen/hypen-golang
 ```
 
 Requires Go 1.25+ (wazero v1.12.0, whose own floor is Go 1.25).
@@ -22,7 +22,7 @@ import (
     "fmt"
     "log"
 
-    core "github.com/hypen-space/core"
+    core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // State is a plain Go struct. json tags match the names referenced from
@@ -147,8 +147,8 @@ Stream Hypen apps over WebSocket:
 **Server (typed module):**
 ```go
 import (
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 type CounterState struct {
@@ -188,7 +188,7 @@ defer server.Stop()
 
 **Client:**
 ```go
-import "github.com/hypen-space/core/remote"
+import "github.com/hypen-lang/hypen/hypen-golang/remote"
 
 client := remote.NewRemoteEngine("ws://localhost:3000/ws", nil).
     OnConnect(func() {
@@ -223,7 +223,7 @@ changes its options (retained budgets, item caps, broker overrides) and
 `DisableDevice()` is the one opt-out (a plain UI-only server).
 
 ```go
-import "github.com/hypen-space/core/device"
+import "github.com/hypen-lang/hypen/hypen-golang/device"
 
 server := remote.NewRemoteServer().
     WithDefinition(profile).Source("./components").UI(ui).
@@ -339,8 +339,8 @@ result:
 import (
     "errors"
 
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // Ready() closes once the user's hello → initialTree flow has completed and

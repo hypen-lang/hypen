@@ -1111,7 +1111,8 @@ function paintImage(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
     imagePending.add(src);
     const canvas = ctx.canvas;
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    // The preview only draws images; it does not read canvas pixels. Loading
+    // without CORS lets hosts such as randomuser.me supply example avatars.
     imageInFlight.set(src, img);
     img.onload = () => {
       imageInFlight.delete(src);
@@ -2535,7 +2536,7 @@ function ensureImageLoaded(
   if (!imagePending.has(src) && typeof Image !== "undefined") {
     imagePending.add(src);
     const img = new Image();
-    img.crossOrigin = "anonymous";
+    // Poster images follow the same display-only policy as paintImage.
     imageInFlight.set(src, img);
     img.onload = () => {
       imageInFlight.delete(src);
@@ -3847,4 +3848,3 @@ export function paintDndGhost(ctx: CanvasRenderingContext2D, node: VirtualNode):
     ctx.restore();
   }
 }
-

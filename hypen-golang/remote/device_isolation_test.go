@@ -16,8 +16,8 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	core "github.com/hypen-space/core"
-	"github.com/hypen-space/core/device"
+	core "github.com/hypen-lang/hypen/hypen-golang"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
 )
 
 // sessionFor returns the server session whose sessionAck carried sid.

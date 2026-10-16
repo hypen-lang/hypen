@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with the Hypen Go SDK.
 
 ## Project Overview
 
-The Go SDK (`github.com/hypen-space/core`) provides the module system for building Hypen applications in Go. It includes state management, action handling, lifecycle hooks, routing, and a remote UI server — parallel to the TypeScript, Kotlin, and Rust SDKs.
+The Go SDK (`github.com/hypen-lang/hypen/hypen-golang`) provides the module system for building Hypen applications in Go. It includes state management, action handling, lifecycle hooks, routing, and a remote UI server — parallel to the TypeScript, Kotlin, and Rust SDKs.
 
 ## Module Structure
 

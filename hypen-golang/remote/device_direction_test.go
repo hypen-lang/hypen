@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hypen-space/core/device"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
 )
 
 // transcriptStep is one step of a shared device transcript fixture.

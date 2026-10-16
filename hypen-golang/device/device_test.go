@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	wire "github.com/hypen-space/core/remote/device"
+	wire "github.com/hypen-lang/hypen/hypen-golang/remote/device"
 )
 
 // fakePlane is a scripted Plane: Open records the spec and hands the sink

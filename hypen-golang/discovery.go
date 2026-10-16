@@ -428,7 +428,7 @@ func GenerateComponentsCode(baseDir string, packageName string, options *Discove
 package %s
 
 import (
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 `, packageName))

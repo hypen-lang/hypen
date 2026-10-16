@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 func TestDispatchQueueRunsInOrderOneAtATime(t *testing.T) {

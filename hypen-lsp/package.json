@@ -5,6 +5,11 @@
   "version": "0.6.5",
   "publisher": "hypen",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen.git",
+    "directory": "hypen-lsp"
+  },
   "type": "module",
   "engines": {
     "vscode": "^1.75.0"
