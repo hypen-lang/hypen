@@ -297,8 +297,11 @@ fn replace_ir_node_impl(
             // under `as: "g"`, which parses as a provider named `g`) can't be
             // resolved against state: resolve it here, where the outer item is
             // known, and hand the array to the inner loop as `__items`.
+            // `@item.*` binds to the OUTERMOST row that reaches it (rows
+            // substitute outside-in, as for every other `@item.*` binding), so
+            // an enclosing `as:`-named loop must not overwrite it.
             let over_outer_item = match &source.source {
-                crate::reactive::BindingSource::Item => true,
+                crate::reactive::BindingSource::Item => !props.contains_key(FOREACH_ITEMS_PROP),
                 crate::reactive::BindingSource::DataSource(name) => name == item_name,
                 crate::reactive::BindingSource::State => false,
             };

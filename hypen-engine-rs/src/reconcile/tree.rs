@@ -595,6 +595,10 @@ impl InstanceTree {
     /// once for the patches and again for the tree. Iterative on purpose: a
     /// 1,000-row clear tears down ~17k nodes, and the recursive version
     /// cloned each node's child vector before descending.
+    ///
+    /// A Router's detached route cache goes with it: those subtrees are
+    /// only reachable through the cache, and left behind they would keep
+    /// reconciling (and patching) through their bindings.
     pub fn remove_subtree_with(&mut self, id: NodeId, mut on_removed: impl FnMut(NodeId)) {
         let mut stack = std::mem::take(&mut self.remove_stack);
         stack.clear();
@@ -603,6 +607,9 @@ impl InstanceTree {
             if let Some(node) = self.nodes.remove(current) {
                 on_removed(current);
                 stack.extend(node.children.iter().copied());
+                if let Some(ControlFlowKind::Router { cache, .. }) = node.control_flow.as_deref() {
+                    stack.extend(cache.values().flatten().copied());
+                }
             }
         }
         self.remove_stack = stack;

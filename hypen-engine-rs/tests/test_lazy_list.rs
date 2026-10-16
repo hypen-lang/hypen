@@ -785,3 +785,52 @@ fn deleting_a_row_rooted_at_an_if_removes_its_content() {
     h.set_items(json!([{ "id": 2, "name": "two", "show": true }]));
     assert_eq!(h.screen.rows(&column), ["two"]);
 }
+
+// ── Review regressions ───────────────────────────────────────────────────
+
+#[test]
+fn hot_reload_turning_the_sole_child_into_a_lazy_list_windows_it() {
+    let mut h = Harness::new(
+        r#"Column { Text("loading") }"#,
+        json!({ "items": items(0..50) }),
+    );
+    let column = h.screen.find("Column");
+    h.render(
+        r#"Column { ForEach(items: @state.items, key: "id", lazy: true, initialCount: 5) { Text("@{item.name}") } }"#,
+    );
+    assert_eq!(h.screen.rows(&column), names(0..5));
+    assert_eq!(
+        h.screen.window(&column),
+        Some(json!({ "total": 50, "start": 0, "end": 5 }))
+    );
+}
+
+#[test]
+fn doubly_nested_loop_reads_the_outermost_item() {
+    // `@item.children` in the innermost loop names the outermost row (the
+    // middle loop is `as: "t"`), like every other `@item.*` binding there.
+    let h = Harness::new(
+        r#"Column { ForEach(items: @state.groups, key: "id") { Column { ForEach(items: @state.tags, as: "t", key: "id") { Column { Text("@{t.name}") ForEach(items: @item.children, as: "c", key: "id") { Text("@{c.name}") } } } } } }"#,
+        json!({
+            "groups": [{ "id": 1, "children": [{ "id": 11, "name": "a1" }] }],
+            "tags": [{ "id": 7, "name": "T", "children": [{ "id": 99, "name": "wrong" }] }],
+        }),
+    );
+    assert_eq!(all_texts(&h.screen), ["T", "a1"]);
+}
+
+#[test]
+fn removing_a_router_releases_its_cached_routes() {
+    let mut h = Harness::new(
+        r#"Column { If(@state.show) { Router { Route(path: "/a") { Text("@{state.label}") } Route(path: "/b") { Text("b") } } } }"#,
+        json!({ "show": true, "location": "/a", "label": "one" }),
+    );
+    h.engine.update_state(None, json!({ "location": "/b" }));
+    h.flush();
+    h.engine.update_state(None, json!({ "show": false }));
+    h.flush();
+    // The cached `/a` subtree is gone from the renderer; it must not keep
+    // receiving patches through its old bindings.
+    h.engine.update_state(None, json!({ "label": "two" }));
+    assert!(h.flush().is_empty());
+}

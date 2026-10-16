@@ -1624,9 +1624,7 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             };
 
             if !is_foreach {
-                let parent_id = existing_parent;
-                remove_subtree(ctx.tree, node_id, ctx.patches, ctx.dependencies);
-                create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
+                replace_with_control_flow(ctx, node_id, existing_parent, node);
                 return;
             }
 
@@ -1737,9 +1735,7 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
             };
 
             if !is_conditional {
-                let parent_id = existing_parent;
-                remove_subtree(ctx.tree, node_id, ctx.patches, ctx.dependencies);
-                create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
+                replace_with_control_flow(ctx, node_id, existing_parent, node);
                 return;
             }
 
@@ -1831,9 +1827,7 @@ pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, no
 
             // If the existing node isn't a Router, replace it wholesale.
             if !is_router {
-                let parent_id = existing_parent;
-                remove_subtree(ctx.tree, node_id, ctx.patches, ctx.dependencies);
-                create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
+                replace_with_control_flow(ctx, node_id, existing_parent, node);
                 return;
             }
 
@@ -2109,6 +2103,27 @@ fn emit_subtree_removal(tree: &mut InstanceTree, root_id: NodeId, patches: &mut 
             }
         }
     }
+}
+
+/// Replace `old_id` with a freshly created control-flow node (the IR at
+/// this slot changed kind, e.g. a hot reload turning a `Text` into a
+/// `ForEach`). The old id is unlinked from its parent, and a lone child
+/// keeps its sole-child slot so a lazy list windows from its first pass.
+fn replace_with_control_flow(
+    ctx: &mut ReconcileCtx,
+    old_id: NodeId,
+    parent_id: Option<NodeId>,
+    node: &IRNode,
+) {
+    let sole_child = parent_id
+        .and_then(|p| ctx.tree.get(p))
+        .is_some_and(|p| p.children.len() == 1);
+    remove_subtree(ctx.tree, old_id, ctx.patches, ctx.dependencies);
+    if let Some(parent) = parent_id.and_then(|p| ctx.tree.get_mut(p)) {
+        parent.children.retain(|&id| id != old_id);
+    }
+    ctx.tree.sole_child_slot = sole_child;
+    create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
 }
 
 /// Remove a subtree and generate Remove patches
