@@ -350,10 +350,12 @@ impl VirtLists {
                 true
             }
             Patch::Create { id, props, .. } => {
-                // A (re-)created element starts with no padding.
+                // A (re-)created element starts with no padding and has
+                // reported nothing yet (e.g. a reconnect re-rendered it).
                 if let Some(list) = self.lists.get_mut(id.as_ref()) {
                     list.in_tree = None;
                     list.requested = None;
+                    list.last_reported = None;
                 }
                 if props.contains_key(VIRT_WINDOW_PROP) {
                     let value = Arc::make_mut(props).shift_remove(VIRT_WINDOW_PROP);
@@ -376,11 +378,14 @@ impl VirtLists {
                         .lists
                         .entry(id.clone())
                         .or_insert_with(|| VirtList::new(window));
+                    // §3 step 4: forget the last report when the window
+                    // changes value — the engine may have moved it on its own
+                    // (e.g. `total` changed) and the range to ask may equal
+                    // the last report. An identical re-send changes nothing.
+                    if list.window != window {
+                        list.last_reported = None;
+                    }
                     list.window = window;
-                    // A new window answers (or supersedes) the last report:
-                    // the next one may legitimately ask for the same range
-                    // again (e.g. after a reconnect re-rendered the list).
-                    list.last_reported = None;
                     if let Some(p) = list.pad_patch(&id, scale, true) {
                         list.landed(list.requested);
                         patches.push(p);

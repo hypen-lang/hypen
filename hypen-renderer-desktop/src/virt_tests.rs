@@ -388,6 +388,42 @@ fn plan_report_applies_overscan_and_never_repeats() {
     assert_eq!(lists.plan_report("list", r(100, 113)), None);
 }
 
+/// §3 step 4: the engine may move the window on its own (e.g. `total`
+/// changed) to a window that still misses the visible range; the range to
+/// ask equals the last report and must be asked again, not wait for a scroll.
+#[test]
+fn plan_report_asks_again_after_the_engine_moves_the_window_itself() {
+    let mut lists = VirtLists::default();
+    lists.ingest(&mut vec![set_window("list", 1000, 0, 30)], 1.0);
+    assert_eq!(lists.plan_report("list", r(100, 113)), Some(r(87, 126)));
+    lists.ingest(&mut vec![set_window("list", 1001, 0, 30)], 1.0);
+    assert_eq!(lists.plan_report("list", r(100, 113)), Some(r(87, 126)));
+}
+
+/// An identical re-send of `__virt.window` is not a change: the last report
+/// stays remembered, so nothing is asked twice.
+#[test]
+fn plan_report_ignores_an_identical_window_resend() {
+    let mut lists = VirtLists::default();
+    lists.ingest(&mut vec![set_window("list", 1000, 0, 30)], 1.0);
+    assert_eq!(lists.plan_report("list", r(100, 113)), Some(r(87, 126)));
+    lists.ingest(&mut vec![set_window("list", 1000, 0, 30)], 1.0);
+    assert_eq!(lists.plan_report("list", r(100, 113)), None);
+}
+
+/// A report the engine answers with no window change (no patch at all) is
+/// never repeated, however many frames sync.
+#[test]
+fn plan_report_answered_with_no_window_change_is_not_repeated() {
+    let mut lists = VirtLists::default();
+    lists.ingest(&mut vec![set_window("list", 1000, 0, 30)], 1.0);
+    assert_eq!(lists.plan_report("list", r(100, 113)), Some(r(87, 126)));
+    for _ in 0..5 {
+        lists.ingest(&mut Vec::new(), 1.0);
+        assert_eq!(lists.plan_report("list", r(100, 113)), None);
+    }
+}
+
 /// The padding appended for a new window reaches the tree in the same
 /// flush: it is the list's current padding (`visible` measures from it) and
 /// arms anchoring — no second trip through `ingest` needed.

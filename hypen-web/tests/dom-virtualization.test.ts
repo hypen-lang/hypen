@@ -295,6 +295,54 @@ describe("viewport reports", () => {
     expect(s.engine.reports.length).toBe(1);
   });
 
+  test("a window the engine moves on its own may be asked for the last-reported range again", async () => {
+    const s = setup();
+    selfScroll(s);
+    s.renderer.applyPatches([...rowPatches(0, 20), win(1000, 0, 20)]);
+    await tick();
+    (s.list() as any).scrollTop = 2000;
+    s.list().dispatchEvent("scroll");
+    runFrames();
+    expect(s.engine.reports).toEqual([["list", 30, 60]]);
+
+    // Before answering, the engine moves the window itself (total changed):
+    // [0,20) still does not cover [40,50), and the range to ask is [30,60]
+    // again. The renderer must not stall until the next scroll.
+    s.renderer.applyPatches([win(1001, 0, 20)]);
+    await tick();
+    runFrames();
+    expect(s.engine.reports).toEqual([
+      ["list", 30, 60],
+      ["list", 30, 60],
+    ]);
+
+    // An identical re-send is not a change: no report.
+    s.renderer.applyPatches([win(1001, 0, 20)]);
+    await tick();
+    runFrames();
+    expect(s.engine.reports.length).toBe(2);
+  });
+
+  test("a report the engine answers with no window change is not repeated", async () => {
+    const s = setup();
+    selfScroll(s);
+    s.renderer.applyPatches([...rowPatches(0, 20), win(1000, 0, 20)]);
+    await tick();
+    (s.list() as any).scrollTop = 2000;
+    s.list().dispatchEvent("scroll");
+    runFrames();
+    expect(s.engine.reports).toEqual([["list", 30, 60]]);
+    // The engine sends nothing back; scrolling within the range, layout
+    // passes and frames never re-send it.
+    for (let i = 0; i < 3; i++) {
+      s.list().dispatchEvent("scroll");
+      runFrames();
+      await tick();
+      runFrames();
+    }
+    expect(s.engine.reports).toEqual([["list", 30, 60]]);
+  });
+
   test("first layout reports when the window does not cover the viewport", async () => {
     const s = setup();
     s.layout.viewport = 1000; // 20 visible rows of 50px, 5 materialized

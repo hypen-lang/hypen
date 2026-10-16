@@ -164,6 +164,23 @@ export function shouldReport(
   return !covered || oversized;
 }
 
+/**
+ * Whether a newly received `__virt.window` differs in value from the previous
+ * one (`null` = none yet). §3 step 4: when it does, forget `lastReported` —
+ * the engine may have moved the window on its own (e.g. `total` changed) to
+ * exactly the range last reported, and the renderer must be able to ask for
+ * it again. An identical re-send is not a change.
+ */
+export function windowChanged(previous: VirtWindow | null | undefined, next: VirtWindow): boolean {
+  return (
+    !previous ||
+    previous.total !== next.total ||
+    previous.start !== next.start ||
+    previous.end !== next.end ||
+    previous.estimatedSize !== next.estimatedSize
+  );
+}
+
 /** Where the list sits in its scroll container, for {@link viewportReport}. */
 export interface ViewportGeometry {
   /** Extent of one item (one row of items for a grid). */
@@ -181,7 +198,8 @@ export interface ViewportGeometry {
 /**
  * §3 steps 2–4 in one call: the visible range, widened by overscan, if it
  * should be reported now — else `null`. The caller sends it with
- * `setListViewport` and keeps it as `lastReported` for the next call.
+ * `setListViewport` and keeps it as `lastReported` for the next call, and
+ * resets `lastReported` to `null` when {@link windowChanged}.
  *
  * While the list starts below the top of the viewport (`scrolledPast < 0`)
  * only the part of the viewport over the list counts as visible.

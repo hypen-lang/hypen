@@ -12,6 +12,7 @@ import {
   visibleRange,
   viewportReport,
   wantedRange,
+  windowChanged,
   windowPadding,
   windowRows,
 } from "../packages/core/src/virtualization";
@@ -164,5 +165,32 @@ describe("viewportReport", () => {
       start: 3,
       end: 21,
     });
+  });
+});
+
+describe("windowChanged", () => {
+  const window = { total: 1000, start: 30, end: 60 };
+  test("the first window is a change", () => {
+    expect(windowChanged(null, window)).toBe(true);
+  });
+  test("an identical re-send is not a change", () => {
+    expect(windowChanged(window, { ...window })).toBe(false);
+    expect(windowChanged({ ...window, estimatedSize: 40 }, { ...window, estimatedSize: 40 })).toBe(false);
+  });
+  test("any field moving is a change, `total` alone included", () => {
+    expect(windowChanged(window, { ...window, total: 1001 })).toBe(true);
+    expect(windowChanged(window, { ...window, start: 31 })).toBe(true);
+    expect(windowChanged(window, { ...window, end: 61 })).toBe(true);
+    expect(windowChanged(window, { ...window, estimatedSize: 40 })).toBe(true);
+  });
+  test("forgetting the last report on a change lets the same range be asked again (§3 step 4)", () => {
+    const geometry = { size: 50, scrolledPast: 2000, viewportExtent: 500 };
+    const before = { total: 1000, start: 0, end: 20 };
+    let last = viewportReport(before, geometry, null);
+    expect(last).toEqual({ start: 30, end: 60 });
+    // The engine moves the window on its own (total changed), still not covering.
+    const after = { total: 1001, start: 0, end: 20 };
+    if (windowChanged(before, after)) last = null;
+    expect(viewportReport(after, geometry, last)).toEqual({ start: 30, end: 60 });
   });
 });

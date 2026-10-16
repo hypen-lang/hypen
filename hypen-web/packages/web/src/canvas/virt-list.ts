@@ -29,6 +29,7 @@ import {
   parseVirtWindow,
   itemSize,
   viewportReport,
+  windowChanged,
   windowPadding,
   windowRows,
   type VirtWindow,
@@ -116,6 +117,9 @@ export class VirtListController {
       }
       const v = node.virt;
       if (v) {
+        // §3 step 4: a window that changed value may legitimately be asked
+        // for the last-reported range again.
+        if (windowChanged(v.window, window)) v.lastReported = null;
         v.window = window;
         if (!v.measured) v.itemSize = window.estimatedSize ?? DEFAULT_ITEM_SIZE;
       } else {

@@ -442,6 +442,7 @@ export {
   windowRows,
   childrenPerItem,
   viewportReport,
+  windowChanged,
 } from "./virtualization.js";
 export type { VirtWindow, ItemRange, ViewportGeometry } from "./virtualization.js";
 

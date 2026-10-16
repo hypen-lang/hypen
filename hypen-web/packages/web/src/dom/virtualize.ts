@@ -26,6 +26,7 @@ import {
   itemSize,
   parseVirtWindow,
   viewportReport,
+  windowChanged,
   windowPadding,
   windowRows,
   type ItemRange,
@@ -258,6 +259,9 @@ export class DomVirtualizer {
       state.prevOverflowAnchor = style.overflowAnchor;
       style.overflowAnchor = "none";
     } else {
+      // §3 step 4: a window that changed value may legitimately be asked
+      // for the last-reported range again.
+      if (windowChanged(state.window, window)) state.lastReported = null;
       state.window = window;
     }
     this.dirty.add(state);

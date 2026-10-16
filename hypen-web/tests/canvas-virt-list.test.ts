@@ -246,6 +246,38 @@ describe("canvas windowed list (JS layout)", () => {
     expect(h.engine.reports.length).toBe(1);
   });
 
+  test("a window the engine moves on its own may be asked for the last-reported range again", () => {
+    const h = harness();
+    mountList(h, true);
+    h.wheel(4000);
+    expect(h.engine.reports).toEqual([["L", 85, 130]]);
+
+    // The engine moves the window itself (total changed) before answering:
+    // [0,30) still misses the visible range and the range to ask is the
+    // same [85,130). It must be asked again, not wait for the next scroll.
+    h.renderer.applyPatches([setProp("L", "__virt.window", { total: 1001, start: 0, end: 30 })]);
+    h.render();
+    expect(h.engine.reports).toEqual([
+      ["L", 85, 130],
+      ["L", 85, 130],
+    ]);
+
+    // An identical re-send is not a change: no report.
+    h.renderer.applyPatches([setProp("L", "__virt.window", { total: 1001, start: 0, end: 30 })]);
+    h.render();
+    expect(h.engine.reports.length).toBe(2);
+  });
+
+  test("a report the engine answers with no window change is not repeated", () => {
+    const h = harness();
+    mountList(h, true);
+    h.wheel(4000);
+    expect(h.engine.reports).toEqual([["L", 85, 130]]);
+    // No window comes back: frames never re-send the report.
+    for (let i = 0; i < 5; i++) h.render();
+    expect(h.engine.reports).toEqual([["L", 85, 130]]);
+  });
+
   test("hit-testing lands on the row under the pointer after the leading padding", () => {
     const h = harness();
     mountList(h, true);
