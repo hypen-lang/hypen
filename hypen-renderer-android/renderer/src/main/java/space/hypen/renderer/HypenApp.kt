@@ -178,20 +178,7 @@ fun HypenApp(
                 }
 
                 ConnectionState.CONNECTED -> {
-                    // The root children are snapshot-backed, so this block
-                    // recomposes when a root node arrives, moves or leaves.
-                    // Per-element updates invalidate only the composables that
-                    // read the touched element's snapshot state.
-                    val rootElements = renderer.getRootChildIds().mapNotNull { renderer.getElement(it) }
-
-                    if (renderer.hasRendered()) {
-                        // An empty root after the first render (a root `If`
-                        // turned off) renders nothing, like the DOM container.
-                        HypenRootChildren(rootElements, renderer)
-                    } else {
-                        // Tree not yet loaded, show loading
-                        loadingContent()
-                    }
+                    HypenRoot(renderer, loadingContent)
                 }
 
                 ConnectionState.ERROR -> {
@@ -426,6 +413,31 @@ internal fun HypenElement(
                 },
             )
         }
+    }
+}
+
+/**
+ * The connected app: [renderer]'s root children, or [loadingContent] until
+ * the first root lands. Expects [LocalComposeRenderer] (and the other
+ * [HypenApp] locals) to be provided by the caller.
+ *
+ * The root children are snapshot-backed, so this recomposes when a root
+ * node arrives, moves or leaves. Per-element updates invalidate only the
+ * composables that read the touched element's snapshot state.
+ */
+@Composable
+internal fun HypenRoot(
+    renderer: ComposeRenderer,
+    loadingContent: @Composable () -> Unit,
+) {
+    val rootElements = renderer.getRootChildIds().mapNotNull { renderer.getElement(it) }
+    if (renderer.hasRendered()) {
+        // An empty root after the first render (a root `If` turned off)
+        // renders nothing, like the DOM container.
+        HypenRootChildren(rootElements, renderer)
+    } else {
+        // Tree not yet loaded, show loading
+        loadingContent()
     }
 }
 

@@ -14,6 +14,7 @@ okhttp = "4.12.0"
 moshi = "1.15.1"
 coroutines = "1.9.0"
 mockk = "1.13.13"
+robolectric = "4.14.1"
 coil = "2.7.0"
 mavenPublish = "0.29.0"
 cameraX = "1.4.1"
@@ -63,6 +64,9 @@ kotlinx-coroutines-test = { group = "org.jetbrains.kotlinx", name = "kotlinx-cor
 # Testing
 mockk = { group = "io.mockk", name = "mockk", version.ref = "mockk" }
 mockk-android = { group = "io.mockk", name = "mockk-android", version.ref = "mockk" }
+robolectric = { group = "org.robolectric", name = "robolectric", version.ref = "robolectric" }
+androidx-compose-ui-test-junit4 = { group = "androidx.compose.ui", name = "ui-test-junit4" }
+androidx-compose-ui-test-manifest = { group = "androidx.compose.ui", name = "ui-test-manifest" }
 
 # Image Loading
 coil-compose = { group = "io.coil-kt", name = "coil-compose", version.ref = "coil" }

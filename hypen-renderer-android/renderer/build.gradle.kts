@@ -7,6 +7,23 @@ plugins {
     alias(libs.plugins.maven.publish)
 }
 
+// Robolectric runtime for the Compose UI unit tests (see testOptions). The
+// version must match the SDK the tests run on (src/test/resources/
+// robolectric.properties: sdk=34) for the Robolectric version in
+// libs.versions.toml: 4.14.1 maps API 34 to 14-robolectric-10818077, and its
+// pre-instrumented jars carry the -i7 suffix. It also reads resources from
+// its newest supported SDK's jar (API 35, 15-robolectric-12650502), so that
+// one is needed too.
+val robolectricAndroidAll: Configuration by configurations.creating {
+    isCanBeConsumed = false
+    isTransitive = false
+}
+val robolectricAndroidAllDir = layout.buildDirectory.dir("robolectric-android-all")
+val copyRobolectricAndroidAll = tasks.register<Copy>("copyRobolectricAndroidAll") {
+    from(robolectricAndroidAll)
+    into(robolectricAndroidAllDir)
+}
+
 android {
     namespace = "space.hypen.renderer"
     compileSdk = 36
@@ -43,6 +60,18 @@ android {
 
     testOptions {
         unitTests.isReturnDefaultValues = true
+        // Compose UI tests (createComposeRule) run on Robolectric and need the
+        // merged manifest (ui-test-manifest's ComponentActivity) and resources.
+        unitTests.isIncludeAndroidResources = true
+        unitTests.all { test ->
+            // Robolectric's android-all jar comes through Gradle (the build's
+            // own repositories and cache) instead of Robolectric's built-in
+            // Maven Central fetcher, so it runs offline and behind mirrors.
+            test.dependsOn(copyRobolectricAndroidAll)
+            test.systemProperty("robolectric.offline", "true")
+            test.systemProperty("robolectric.dependency.dir", robolectricAndroidAllDir.get().asFile.absolutePath)
+            test.systemProperty("robolectric.logging.enabled", "false")
+        }
     }
 
     packaging {
@@ -98,6 +127,14 @@ dependencies {
     testImplementation(libs.kotlinx.coroutines.test)
     testImplementation(libs.mockk)
     testImplementation(libs.okhttp.mockwebserver)
+
+    // Compose UI tests on the JVM (Robolectric)
+    testImplementation(libs.robolectric)
+    testImplementation(platform(libs.androidx.compose.bom))
+    testImplementation(libs.androidx.compose.ui.test.junit4)
+    debugImplementation(libs.androidx.compose.ui.test.manifest)
+    robolectricAndroidAll("org.robolectric:android-all-instrumented:14-robolectric-10818077-i7")
+    robolectricAndroidAll("org.robolectric:android-all-instrumented:15-robolectric-12650502-i7")
 
     // Android Testing
     androidTestImplementation(libs.androidx.junit)

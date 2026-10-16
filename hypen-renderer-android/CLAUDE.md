@@ -69,7 +69,35 @@ cd server && bun install && bun run start
 
 # Publish locally
 ./gradlew :renderer:publishToMavenLocal
+
+# All renderer unit tests, including the Compose UI tests (JVM, Robolectric)
+./gradlew :renderer:testDebugUnitTest
+# Only the rendering tests
+./gradlew :renderer:testDebugUnitTest --tests '*RenderTest'
 ```
+
+### Compose UI tests (Robolectric)
+
+Composables are rendered for real in plain unit tests: Robolectric 4.14.1
+(`libs.versions.toml`) + `androidx.compose.ui:ui-test-junit4` (Compose BOM)
+with `ui-test-manifest` on `debugImplementation`, and
+`unitTests.isIncludeAndroidResources = true`. Tests run on API 34
+(`src/test/resources/robolectric.properties`). Robolectric's
+`android-all-instrumented` jars (API 34, plus API 35 which it reads resources
+from) are resolved by Gradle through the `robolectricAndroidAll`
+configuration and copied to `renderer/build/robolectric-android-all`; tests run
+with `robolectric.offline=true` pointed there, so they work behind the same
+repository mirrors as the rest of the build. Changing the Robolectric version
+means updating those two coordinates in `renderer/build.gradle.kts`.
+
+Write them with `@RunWith(RobolectricTestRunner::class)` and
+`createComposeRule()`; `HypenUiTestSupport.kt` mounts a `ComposeRenderer`
+through `HypenRoot` (what `HypenApp` renders once connected) with
+`setHypenContent`, applies patch batches with `rule.apply(renderer, patches)`,
+and has a `FakeViewportEngine` for viewport reports. Use
+`@Config(qualifiers = "w400dp-h800dp-mdpi")` so dp == px. Existing:
+`RootChildrenRenderTest`, `ChildListRenderTest`, `virt/VirtLazyListRenderTest`,
+`virt/VirtPaddedRenderTest`.
 
 ## Architecture
 
@@ -136,7 +164,19 @@ host Box's policy (loose constraints, TopStart, parent data ignored — identica
 to before); several stack vertically with `.weight` via `RootColumnScope`.
 `hasRendered()` latches on the first root placement (reset by `clear()`): the
 loading content shows only before it, and an empty root afterwards renders
-nothing, like the DOM container. Tests: `RootChildrenTest`.
+nothing, like the DOM container. `HypenRoot` is the connected-state body
+(root children or loading). Tests: `RootChildrenTest` (patch level) and
+`RootChildrenRenderTest` (rendered: order, `beforeId`, a root keeps its
+`remember`ed state while siblings toggle, the loading latch).
+
+### Child lists in composition
+
+`ComposeRenderer.getChildren` reads the snapshot-backed
+`HypenElement.children`, so the composable that renders a child list
+recomposes when it changes. `HypenElement.childIds` (the canonical linked
+order) is for code applying a batch only: it is not snapshot state, and
+reading it from composition left a batch that only inserted / removed / moved
+rows unrendered (`ChildListRenderTest`).
 
 ### Strategy 3 hook (limbo container)
 
@@ -209,11 +249,21 @@ commits atomically with the batch's rows) but no applicator handles it.
   through `ProvideVirtItemPositions` / `LocalVirtItemPositions`, and
   `HypenElement` adds `virtItemInfo` to a listed row's own modifier.
 
+Rendered tests: `VirtLazyListRenderTest` (a windowed `List`: only visible rows
+composed, `performScrollToIndex` reports the expected range, a new window
+materializes the rows in place, `removeProp` unwindows, `CollectionInfo` /
+whole-list `CollectionItemInfo`) and `VirtPaddedRenderTest` (a windowed
+`Column { ForEach }` in a scrollable `Column`: padding sizes, report on outer
+scroll, anchoring keeps the first visible row's on-screen position across a
+window move, padded rows' `CollectionItemInfo`).
+
 Known gaps:
 - Anchoring assumes LTR for horizontal lists and approximates the rows above
   the anchor by the measured average size.
-- None of the Compose glue is exercised by unit tests (no Robolectric/Compose UI
-  test setup); only the pure functions in `Virtualization.kt` are.
+- Not yet rendered in tests: `Grid` (lazy and padded), horizontal lists, the
+  lazy path for a scrollable `Column` / `Row` (`WindowedLazyList` from
+  `HypenElement`), padded anchoring inside a lazy scroller, and `HypenApp`
+  itself (session / connection states — the tests mount `HypenRoot`).
 
 ## Device Capability Protocol (RFC 001)
 

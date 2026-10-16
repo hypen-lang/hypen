@@ -888,11 +888,18 @@ class ComposeRenderer(
     fun getApplicatorRegistry(): ApplicatorRegistry = applicatorRegistry
 
     /**
-     * Get children of an element.
+     * Get children of an element, as committed for composition.
+     *
+     * Reads the snapshot-backed [HypenElement.children], so a composable
+     * calling this recomposes when the child list changes. (The canonical
+     * [HypenElement.childIds] is a plain linked order: reading it from
+     * composition subscribes to nothing, and a batch that only inserts,
+     * removes or moves rows never re-rendered them.) Renderer code applying
+     * a batch must read `childIds` instead; this lags until the batch commits.
      */
     fun getChildren(id: String): List<HypenElement> = synchronized(lock) {
         val element = elements[id] ?: return emptyList()
-        element.childIds.mapNotNull { elements[it] }
+        element.children.mapNotNull { elements[it] }
     }
 
     /**
