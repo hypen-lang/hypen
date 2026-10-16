@@ -226,40 +226,36 @@ public enum Virtualization {
     // MARK: - Accessibility (§2)
 
     /// Localization keys of the list accessibility strings (the package's
-    /// `Resources/<lang>.lproj/Localizable.strings`). Every format uses only
-    /// object specifiers — `%@`, or positional `%1$@` / `%2$@` so a language
-    /// may name the total first — and receives numbers already formatted for
-    /// the locale (``formatCount(_:locale:)``).
+    /// `Resources/<lang>.lproj/Localizable.strings` and
+    /// `Localizable.stringsdict`). Every format uses only object specifiers
+    /// — `%@`, or positional `%1$@` / `%2$@` so a language may name the total
+    /// first — and receives numbers already formatted for the locale
+    /// (``formatCount(_:locale:)``).
     public enum A11yKey {
-        /// "Row %1$@ of %2$@": position, total.
+        /// "Row %1$@ of %2$@": position, total (Localizable.strings).
         public static let rowPosition = "hypen.a11y.list.rowPosition"
         /// "Item %1$@ of %2$@" (a grid): position, total.
         public static let itemPosition = "hypen.a11y.list.itemPosition"
-        /// "%@ row" / "%@ rows": the list's total.
-        public static let rowsOne = "hypen.a11y.list.rows.one"
-        public static let rowsOther = "hypen.a11y.list.rows.other"
-        /// "%@ item" / "%@ items": a grid's total.
-        public static let itemsOne = "hypen.a11y.list.items.one"
-        public static let itemsOther = "hypen.a11y.list.items.other"
+        /// A list's size, plural (Localizable.stringsdict): the format key is
+        /// `%1$#@rows@` over arguments (count, formatted count), so each
+        /// variant names the formatted count as `%2$@` ("%2$@ rows").
+        public static let rows = "hypen.a11y.list.rows"
+        /// A grid's size, plural, like ``rows`` ("%2$@ items").
+        public static let items = "hypen.a11y.list.items"
 
-        public static let all = [rowPosition, itemPosition, rowsOne, rowsOther, itemsOne, itemsOther]
+        public static let positionKeys = [rowPosition, itemPosition]
+        public static let pluralKeys = [rows, items]
 
         /// The English text, used when a lookup has no (valid) translation.
-        public static func english(_ key: String) -> String {
+        /// For a plural key, the variant for `count`.
+        public static func english(_ key: String, count: Int = 0) -> String {
             switch key {
             case rowPosition: return "Row %1$@ of %2$@"
             case itemPosition: return "Item %1$@ of %2$@"
-            case rowsOne: return "%@ row"
-            case rowsOther: return "%@ rows"
-            case itemsOne: return "%@ item"
-            case itemsOther: return "%@ items"
+            case rows: return count == 1 ? "%2$@ row" : "%2$@ rows"
+            case items: return count == 1 ? "%2$@ item" : "%2$@ items"
             default: return key
             }
-        }
-
-        /// Arguments the key's format receives.
-        public static func argumentCount(_ key: String) -> Int {
-            key == rowPosition || key == itemPosition ? 2 : 1
         }
     }
 
@@ -280,27 +276,93 @@ public enum Virtualization {
         localize: (String) -> String? = { _ in nil }
     ) -> String {
         let key = columns > 1 ? A11yKey.itemPosition : A11yKey.rowPosition
-        return localizedFormat(key, localize: localize, arguments: [
-            formatCount(max(0, index) + 1, locale: locale),
-            formatCount(total, locale: locale),
-        ])
+        let arguments = [formatCount(max(0, index) + 1, locale: locale), formatCount(total, locale: locale)]
+        return fill(localize(key), fallback: A11yKey.english(key), arguments: arguments)
     }
 
     /// The list container's size, for its accessibility value:
-    /// "10,000 rows", "1 row", "30 items". Plural choice is one (exactly 1)
-    /// vs other; a host needing a language's full plural rules overrides
-    /// ``HypenAccessibility/listSummary``.
+    /// "10,000 rows", "1 row", "30 items".
+    ///
+    /// - Parameter localizePlural: the translated plural variant for
+    ///   (``A11yKey/rows`` or ``A11yKey/items``, count) — already chosen by
+    ///   the language's CLDR category (``pluralCategory(_:language:)``,
+    ///   ``pluralVariant(_:count:language:)``); nil = English.
     public static func accessibilitySummary(
         total: Int,
         columns: Int = 1,
         locale: Locale = .current,
-        localize: (String) -> String? = { _ in nil }
+        localizePlural: (String, Int) -> String? = { _, _ in nil }
     ) -> String {
         let n = max(0, total)
-        let key = columns > 1
-            ? (n == 1 ? A11yKey.itemsOne : A11yKey.itemsOther)
-            : (n == 1 ? A11yKey.rowsOne : A11yKey.rowsOther)
-        return localizedFormat(key, localize: localize, arguments: [formatCount(n, locale: locale)])
+        let key = columns > 1 ? A11yKey.items : A11yKey.rows
+        return fill(localizePlural(key, n), fallback: A11yKey.english(key, count: n),
+                    arguments: [String(n), formatCount(n, locale: locale)])
+    }
+
+    /// A row's accessibility hint inside a windowed list: its own hint
+    /// first, then its position, joined the way VoiceOver reads separate
+    /// phrases ("Opens the message, Row 3 of 10"). Blank parts are dropped;
+    /// nil when nothing is left.
+    public static func composeAccessibilityHint(own: String?, position: String?) -> String? {
+        let parts = [own, position].compactMap { $0?.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: ", ")
+    }
+
+    // MARK: Plurals (CLDR, integers)
+
+    /// CLDR plural categories.
+    public enum PluralCategory: String, CaseIterable, Sendable {
+        case zero, one, two, few, many, other
+    }
+
+    /// The CLDR plural category of the non-negative integer `n` (v = 0, no
+    /// compact exponent) in `language` (a BCP 47 / lproj code; region and
+    /// script are ignored except Portugal's `pt-PT`). Rules for the bundled
+    /// languages (CLDR 46); any other language uses English's one / other.
+    public static func pluralCategory(_ n: Int, language: String) -> PluralCategory {
+        let parts = language.lowercased().split(whereSeparator: { $0 == "-" || $0 == "_" })
+        let base = parts.first.map(String.init) ?? ""
+        let i = max(0, n)
+        let millions = i != 0 && i % 1_000_000 == 0
+        switch base {
+        case "ja", "zh", "ko":
+            return .other
+        case "fr":
+            return i <= 1 ? .one : (millions ? .many : .other)
+        case "pt":
+            if parts.dropFirst().contains("pt") { // pt-PT: one = i is 1
+                return i == 1 ? .one : (millions ? .many : .other)
+            }
+            return i <= 1 ? .one : (millions ? .many : .other)
+        case "es", "it", "ca":
+            return i == 1 ? .one : (millions ? .many : .other)
+        default: // en, de, nl, sv, …
+            return i == 1 ? .one : .other
+        }
+    }
+
+    /// The variant of a `.stringsdict` entry for `count`: the entry's
+    /// `NSStringLocalizedFormatKey` with its `%#@var@` plural variable
+    /// replaced by the variable's variant for the CLDR category of `count`
+    /// (Apple's rule: a `zero` variant, when present, wins for 0), else its
+    /// `other` variant. Nil when the entry is malformed.
+    public static func pluralVariant(_ entry: Any?, count: Int, language: String) -> String? {
+        guard let entry = entry as? [String: Any],
+              let format = entry["NSStringLocalizedFormatKey"] as? String else { return nil }
+        // Find `%[n$]#@name@`.
+        guard let hash = format.range(of: "#@"),
+              let percent = format[..<hash.lowerBound].lastIndex(of: "%"),
+              let close = format[hash.upperBound...].firstIndex(of: "@") else { return nil }
+        let name = String(format[hash.upperBound..<close])
+        guard let variable = entry[name] as? [String: Any],
+              variable["NSStringFormatSpecTypeKey"] as? String == "NSStringPluralRuleType" else { return nil }
+        let category = pluralCategory(count, language: language)
+        let chosen = (count == 0 ? variable[PluralCategory.zero.rawValue] as? String : nil)
+            ?? variable[category.rawValue] as? String
+            ?? variable[PluralCategory.other.rawValue] as? String
+        guard let chosen else { return nil }
+        return String(format[..<percent]) + chosen + String(format[format.index(after: close)...])
     }
 
     /// A non-negative count with the locale's digits and grouping
@@ -314,11 +376,12 @@ public enum Virtualization {
         return formatter.string(from: NSNumber(value: value)) ?? String(value)
     }
 
-    /// The number of distinct object arguments `format` consumes, or nil
-    /// when it contains anything but `%@`, `%n$@` and `%%` (or mixes
-    /// positional and sequential specifiers). Translations are checked with
-    /// this before use, so a bad one can never crash formatting.
-    public static func objectArgumentCount(_ format: String) -> Int? {
+    /// The argument positions `format` names (`%@` sequentially counts
+    /// 1, 2, …), or nil when it contains anything but `%@`, `%n$@` and `%%`,
+    /// or mixes positional and sequential specifiers. Translations are
+    /// checked with this before use, so a bad one can never crash or read a
+    /// missing argument.
+    public static func formatPositions(_ format: String) -> Set<Int>? {
         guard let tokens = formatTokens(format) else { return nil }
         var positional = Set<Int>()
         var sequential = 0
@@ -326,18 +389,18 @@ public enum Virtualization {
             if let position { positional.insert(position) } else { sequential += 1 }
         }
         if !positional.isEmpty && sequential > 0 { return nil }
-        if positional.isEmpty { return sequential }
-        // Positions must be exactly 1...n.
-        return positional == Set(1...positional.count) ? positional.count : nil
+        if !positional.isEmpty { return positional }
+        return sequential == 0 ? [] : Set(1...sequential)
     }
 
-    /// `localize(key)` filled with `arguments`, or the English format when
-    /// the translation is missing or takes different arguments.
-    static func localizedFormat(_ key: String, localize: (String) -> String?, arguments: [String]) -> String {
-        if let format = localize(key), objectArgumentCount(format) == arguments.count {
+    /// `format` filled with `arguments` when it is valid and names only
+    /// existing arguments, else `fallback` filled.
+    static func fill(_ format: String?, fallback: String, arguments: [String]) -> String {
+        if let format, let positions = formatPositions(format),
+           positions.allSatisfy({ $0 >= 1 && $0 <= arguments.count }) {
             return substitute(format, arguments)
         }
-        return substitute(A11yKey.english(key), arguments)
+        return substitute(fallback, arguments)
     }
 
     private enum FormatToken {
@@ -369,7 +432,7 @@ public enum Virtualization {
         return tokens
     }
 
-    /// Fill a format validated by ``objectArgumentCount(_:)``. Done by hand
+    /// Fill a format validated by ``formatPositions(_:)``. Done by hand
     /// rather than `String(format:)` so it behaves identically on every
     /// platform and never reads a missing vararg.
     private static func substitute(_ format: String, _ arguments: [String]) -> String {

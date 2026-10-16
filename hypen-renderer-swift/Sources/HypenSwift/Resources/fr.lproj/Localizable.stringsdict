@@ -1,0 +1,45 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Windowed-list VoiceOver summaries (Virtualization/HypenAccessibility.swift).
+     Arguments: %1$ = the count (selects the CLDR plural category),
+     %2$@ = the count formatted for the locale. Variants use only %2$@. -->
+<plist version="1.0">
+<dict>
+	<key>hypen.a11y.list.rows</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@rows@</string>
+		<key>rows</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%2$@ ligne</string>
+			<key>many</key>
+			<string>%2$@ de lignes</string>
+			<key>other</key>
+			<string>%2$@ lignes</string>
+		</dict>
+	</dict>
+	<key>hypen.a11y.list.items</key>
+	<dict>
+		<key>NSStringLocalizedFormatKey</key>
+		<string>%1$#@items@</string>
+		<key>items</key>
+		<dict>
+			<key>NSStringFormatSpecTypeKey</key>
+			<string>NSStringPluralRuleType</string>
+			<key>NSStringFormatValueTypeKey</key>
+			<string>ld</string>
+			<key>one</key>
+			<string>%2$@ élément</string>
+			<key>many</key>
+			<string>%2$@ d’éléments</string>
+			<key>other</key>
+			<string>%2$@ éléments</string>
+		</dict>
+	</dict>
+</dict>
+</plist>

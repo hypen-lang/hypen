@@ -253,11 +253,19 @@ struct VirtualizedLazyStack: View {
             placeholder(size: size)
                 .accessibilityHidden(true)
         case let .item(index, ids):
+            let position = HypenAccessibility.listPosition(index, window.total, columns > 1)
+            // The row's own hint (its root element's semantics description)
+            // first, then the position. Elements inside the row that set
+            // their own hint compose the same way through the environment
+            // (`SemanticsModifier`), so whichever modifier SwiftUI keeps, it
+            // says both.
+            let ownHint = ids.count == 1 ? ids.first.flatMap { renderer.getElement($0)?.semantics?.description } : nil
             keyed {
                 itemView(ids)
-                    .accessibilityHint(Text(verbatim: HypenAccessibility.listPosition(
-                        index, window.total, columns > 1
-                    )))
+                    .environment(\.hypenListPositionHint, position)
+                    .accessibilityHint(Text(verbatim: Virtualization.composeAccessibilityHint(
+                        own: ownHint, position: position
+                    ) ?? position))
                     .background(
                         GeometryReader { geometry in
                             Color.clear.onAppear {
@@ -416,7 +424,19 @@ private struct VirtScrollViewportKey: EnvironmentKey {
     static let defaultValue: VirtScrollViewport? = nil
 }
 
+private struct HypenListPositionHintKey: EnvironmentKey {
+    static let defaultValue: String? = nil
+}
+
 extension EnvironmentValues {
+    /// A windowed list row's position hint ("Row 41 of 10,000"), set on the
+    /// row so an element in it with its own hint appends the position
+    /// instead of replacing it (``Virtualization/composeAccessibilityHint(own:position:)``).
+    var hypenListPositionHint: String? {
+        get { self[HypenListPositionHintKey.self] }
+        set { self[HypenListPositionHintKey.self] = newValue }
+    }
+
     /// Set by ``View/hypenVirtScrollContainer(_:)`` on Hypen's scroll views.
     var hypenVirtScrollViewport: VirtScrollViewport? {
         get { self[VirtScrollViewportKey.self] }

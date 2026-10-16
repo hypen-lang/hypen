@@ -12,7 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   VoiceOver strings for windowed lists, localized by default (en, de, es, fr,
   it, ja, pt-BR, zh-Hans) with locale-formatted numbers ("Row 41 of 10,000").
   The package now declares `defaultLocalization: "en"` and processes
-  `Sources/HypenSwift/Resources`.
+  `Sources/HypenSwift/Resources`. Summaries use CLDR plural categories
+  (`Localizable.stringsdict`), and the position is appended to a row's own
+  accessibility hint (", ") instead of replacing it.
 - A windowed list nested in a Hypen scrollable Column / Row / List / Grid
   keeps its first visible row in place (scroll anchoring through the outer
   scroller's `ScrollViewProxy`), and the anchor is the first visible

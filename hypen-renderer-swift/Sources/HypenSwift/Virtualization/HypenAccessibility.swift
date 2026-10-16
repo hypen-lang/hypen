@@ -4,8 +4,9 @@ import Foundation
 /// (hypen-web/docs/virtualization.md §2), overridable by the host app.
 ///
 /// The defaults are localized from the package's
-/// `Resources/<lang>.lproj/Localizable.strings` (en, de, es, fr, it, ja,
-/// pt-BR, zh-Hans) with the numbers formatted for `Locale.current`. The
+/// `Resources/<lang>.lproj/Localizable.strings` and `Localizable.stringsdict`
+/// (CLDR plural categories) — en, de, es, fr, it, ja, pt-BR, zh-Hans — with
+/// the numbers formatted for `Locale.current`. The
 /// language follows the usual bundle rules: the user's preferred languages
 /// matched against the package's localizations — and, on Apple platforms,
 /// an app that does not itself declare a language keeps package strings in
@@ -29,11 +30,13 @@ public enum HypenAccessibility {
     }
 
     /// The windowed list container's accessibility value: `(total, isGrid)`.
-    /// Default: "10,000 rows" / "30 items", localized.
+    /// Default: "10,000 rows" / "30 items", localized with the language's
+    /// CLDR plural rules (`Localizable.stringsdict`).
     @MainActor public static var listSummary: (_ total: Int, _ isGrid: Bool) -> String = { total, isGrid in
-        Virtualization.accessibilitySummary(
+        let language = resolvedLocalization
+        return Virtualization.accessibilitySummary(
             total: total, columns: isGrid ? 2 : 1,
-            locale: .current, localize: { localizedFormat($0) }
+            locale: .current, localizePlural: { pluralFormat($0, count: $1, localization: language) }
         )
     }
 
@@ -45,15 +48,40 @@ public enum HypenAccessibility {
         return value == missing || value == key ? nil : value
     }
 
+    /// The bundled localization the bundle resolves for this process (the
+    /// user's preferred languages against the package's), for plurals.
+    public static var resolvedLocalization: String {
+        resourceBundle.preferredLocalizations.first ?? "en"
+    }
+
+    /// The plural variant of `key` for `count` in a bundled localization,
+    /// read from its `Localizable.stringsdict` and chosen by the language's
+    /// CLDR category (``Virtualization/pluralVariant(_:count:language:)``).
+    /// Parsed here rather than through Foundation's stringsdict formatting so
+    /// the numbers stay locale-formatted strings and every platform (Linux
+    /// included) picks the same variant. Nil when absent.
+    public static func pluralFormat(_ key: String, count: Int, localization: String) -> String? {
+        Virtualization.pluralVariant(pluralEntry(key, localization: localization), count: count, language: localization)
+    }
+
+    /// The raw `.stringsdict` entry for `key` in one bundled localization.
+    static func pluralEntry(_ key: String, localization: String) -> Any? {
+        table("Localizable.stringsdict", localization: localization)?[key]
+    }
+
     /// The format for `key` in one bundled localization (e.g. "de"); nil
     /// when that localization or key is absent.
     static func format(_ key: String, localization: String) -> String? {
+        table("Localizable.strings", localization: localization)?[key] as? String
+    }
+
+    /// A property-list table (`.strings` or `.stringsdict`, text or binary)
+    /// from `<localization>.lproj`.
+    private static func table(_ file: String, localization: String) -> [String: Any]? {
         guard let path = resourceBundle.path(forResource: localization, ofType: "lproj") else { return nil }
-        let file = URL(fileURLWithPath: path).appendingPathComponent("Localizable.strings")
-        guard let data = try? Data(contentsOf: file),
-              let table = try? PropertyListSerialization.propertyList(from: data, format: nil) as? [String: String]
-        else { return nil }
-        return table[key]
+        let url = URL(fileURLWithPath: path).appendingPathComponent(file)
+        guard let data = try? Data(contentsOf: url) else { return nil }
+        return (try? PropertyListSerialization.propertyList(from: data, format: nil)) as? [String: Any]
     }
 
     /// The `.lproj` localizations the package ships.

@@ -624,30 +624,84 @@ final class VirtualizationMathTests: XCTestCase {
 
     func testAccessibilityStringsComeFromTheInjectedLookupWithPositionalArguments() {
         // A language that names the total first: positional specifiers.
-        let ja: [String: String] = [
-            V.A11yKey.rowPosition: "%2$@ 行中 %1$@ 行目",
-            V.A11yKey.rowsOther: "%@ 行",
-        ]
+        let ja: [String: String] = [V.A11yKey.rowPosition: "%2$@ 行中 %1$@ 行目"]
         let lookup: (String) -> String? = { ja[$0] }
         XCTAssertEqual(V.accessibilityPosition(index: 40, total: 10_000, locale: en, localize: lookup),
                        "10,000 行中 41 行目")
-        XCTAssertEqual(V.accessibilitySummary(total: 5, locale: en, localize: lookup), "5 行")
         // A key the lookup lacks falls back to English.
         XCTAssertEqual(V.accessibilityPosition(index: 0, total: 3, columns: 2, locale: en, localize: lookup),
                        "Item 1 of 3")
-        XCTAssertEqual(V.accessibilitySummary(total: 1, locale: en, localize: lookup), "1 row")
+        // Plural variants come from the plural lookup (key, count).
+        let plural: (String, Int) -> String? = { key, n in key == V.A11yKey.rows ? "%2$@ 行" : nil }
+        XCTAssertEqual(V.accessibilitySummary(total: 5, locale: en, localizePlural: plural), "5 行")
+        XCTAssertEqual(V.accessibilitySummary(total: 1, columns: 3, locale: en, localizePlural: plural), "1 item")
     }
 
     func testAccessibilityRejectsATranslationWithTheWrongArguments() {
-        // A broken translation (a %d where an object is expected, or a missing
-        // argument) must not crash VoiceOver: English instead.
-        let broken: [String: String] = [
-            V.A11yKey.rowPosition: "Row %d of %@",
-            V.A11yKey.rowsOther: "rows",
-        ]
-        let lookup: (String) -> String? = { broken[$0] }
+        // A broken translation (a %d where an object is expected, or an
+        // argument that does not exist) must not crash VoiceOver: English.
+        let lookup: (String) -> String? = { _ in "Row %d of %@" }
         XCTAssertEqual(V.accessibilityPosition(index: 0, total: 2, locale: en, localize: lookup), "Row 1 of 2")
-        XCTAssertEqual(V.accessibilitySummary(total: 2, locale: en, localize: lookup), "2 rows")
+        let plural: (String, Int) -> String? = { _, _ in "%3$@ rows" }
+        XCTAssertEqual(V.accessibilitySummary(total: 2, locale: en, localizePlural: plural), "2 rows")
+    }
+
+    // MARK: CLDR plural categories (integers)
+
+    func testPluralCategoriesFollowCLDR() {
+        typealias P = Virtualization.PluralCategory
+        func cats(_ language: String, _ ns: [Int]) -> [P] { ns.map { V.pluralCategory($0, language: language) } }
+        let ns = [0, 1, 2, 5, 21, 1_000_000, 2_000_000, 1_000_001]
+        XCTAssertEqual(cats("en", ns), [.other, .one, .other, .other, .other, .other, .other, .other])
+        XCTAssertEqual(cats("de", ns), cats("en", ns))
+        XCTAssertEqual(cats("es", ns), [.other, .one, .other, .other, .other, .many, .many, .other])
+        XCTAssertEqual(cats("it", ns), [.other, .one, .other, .other, .other, .many, .many, .other])
+        XCTAssertEqual(cats("fr", ns), [.one, .one, .other, .other, .other, .many, .many, .other])
+        XCTAssertEqual(cats("pt-BR", ns), [.one, .one, .other, .other, .other, .many, .many, .other])
+        XCTAssertEqual(cats("pt-PT", [0, 1, 1_000_000]), [.other, .one, .many])
+        XCTAssertEqual(cats("ja", ns), Array(repeating: .other, count: ns.count))
+        XCTAssertEqual(cats("zh-Hans", ns), Array(repeating: .other, count: ns.count))
+        XCTAssertEqual(cats("fr_CA", [0]), [.one], "region / script suffixes are ignored")
+    }
+
+    func testPluralVariantSelectsFromAStringsdictEntry() {
+        let entry: [String: Any] = [
+            "NSStringLocalizedFormatKey": "%1$#@rows@",
+            "rows": [
+                "NSStringFormatSpecTypeKey": "NSStringPluralRuleType",
+                "NSStringFormatValueTypeKey": "ld",
+                "one": "%2$@ ligne",
+                "many": "%2$@ de lignes",
+                "other": "%2$@ lignes",
+            ] as [String: Any],
+        ]
+        XCTAssertEqual(V.pluralVariant(entry, count: 0, language: "fr"), "%2$@ ligne")
+        XCTAssertEqual(V.pluralVariant(entry, count: 7, language: "fr"), "%2$@ lignes")
+        XCTAssertEqual(V.pluralVariant(entry, count: 3_000_000, language: "fr"), "%2$@ de lignes")
+        // A category the entry lacks falls back to `other`.
+        XCTAssertEqual(V.pluralVariant(entry, count: 1, language: "ja"), "%2$@ lignes")
+        // Text around the variable is kept; `zero` wins for 0 when present (Apple's rule).
+        var wrapped = entry
+        wrapped["NSStringLocalizedFormatKey"] = "List: %1$#@rows@."
+        var rows = entry["rows"] as! [String: Any]
+        rows["zero"] = "empty"
+        wrapped["rows"] = rows
+        XCTAssertEqual(V.pluralVariant(wrapped, count: 2, language: "fr"), "List: %2$@ lignes.")
+        XCTAssertEqual(V.pluralVariant(wrapped, count: 0, language: "fr"), "List: empty.")
+        XCTAssertNil(V.pluralVariant(["NSStringLocalizedFormatKey": "%1$#@rows@"], count: 1, language: "fr"))
+        XCTAssertNil(V.pluralVariant("not a dict", count: 1, language: "fr"))
+    }
+
+    // MARK: Hint composition
+
+    func testThePositionHintIsAddedAfterTheRowsOwnHint() {
+        XCTAssertEqual(V.composeAccessibilityHint(own: "Opens the message", position: "Row 3 of 10"),
+                       "Opens the message, Row 3 of 10")
+        XCTAssertEqual(V.composeAccessibilityHint(own: nil, position: "Row 3 of 10"), "Row 3 of 10")
+        XCTAssertEqual(V.composeAccessibilityHint(own: "  ", position: "Row 3 of 10"), "Row 3 of 10")
+        XCTAssertEqual(V.composeAccessibilityHint(own: "Opens", position: nil), "Opens")
+        XCTAssertEqual(V.composeAccessibilityHint(own: "Opens", position: ""), "Opens")
+        XCTAssertNil(V.composeAccessibilityHint(own: nil, position: nil))
     }
 
     @MainActor
@@ -669,13 +723,46 @@ final class VirtualizationMathTests: XCTestCase {
         XCTAssertTrue(languages.contains("en"))
         XCTAssertGreaterThanOrEqual(languages.count, 5)
         for language in languages {
-            for key in V.A11yKey.all {
+            for key in V.A11yKey.positionKeys {
                 let format = try XCTUnwrap(HypenAccessibility.format(key, localization: language), "\(language) \(key)")
-                XCTAssertEqual(V.objectArgumentCount(format), V.A11yKey.argumentCount(key), "\(language) \(key): \(format)")
+                XCTAssertEqual(V.formatPositions(format), [1, 2], "\(language) \(key): \(format)")
+            }
+            for key in V.A11yKey.pluralKeys {
+                // Every CLDR category the language uses for integers has a
+                // variant, and each names only the formatted count (%2$@).
+                for n in [0, 1, 2, 5, 1_000_000] {
+                    let variant = try XCTUnwrap(
+                        HypenAccessibility.pluralFormat(key, count: n, localization: language), "\(language) \(key) \(n)")
+                    XCTAssertEqual(V.formatPositions(variant), [2], "\(language) \(key) \(n): \(variant)")
+                }
+                let entry = try XCTUnwrap(HypenAccessibility.pluralEntry(key, localization: language) as? [String: Any])
+                let variable = try XCTUnwrap(entry.values.compactMap { $0 as? [String: Any] }.first)
+                let categories = Set(variable.keys).intersection(V.PluralCategory.allCases.map(\.rawValue))
+                let expected: Set<String> = switch language.lowercased() { // SwiftPM may lowercase lproj names
+                case "ja", "zh-hans": ["other"]
+                case "en", "de": ["one", "other"]
+                default: ["one", "many", "other"]
+                }
+                XCTAssertEqual(categories, expected, "\(language) \(key)")
             }
         }
         XCTAssertEqual(HypenAccessibility.format(V.A11yKey.rowPosition, localization: "de"), "Zeile %1$@ von %2$@")
         XCTAssertNil(HypenAccessibility.format("no.such.key", localization: "en"))
+    }
+
+    func testBundledPluralsReadNaturallyPerLanguage() {
+        func summary(_ language: String, _ n: Int, grid: Bool = false) -> String {
+            V.accessibilitySummary(total: n, columns: grid ? 2 : 1, locale: en, localizePlural: {
+                HypenAccessibility.pluralFormat($0, count: $1, localization: language)
+            })
+        }
+        XCTAssertEqual(summary("en", 1), "1 row")
+        XCTAssertEqual(summary("en", 0), "0 rows")
+        XCTAssertEqual(summary("fr", 0), "0 ligne")
+        XCTAssertEqual(summary("fr", 1_000_000), "1,000,000 de lignes")
+        XCTAssertEqual(summary("es", 1_000_000, grid: true), "1,000,000 de elementos")
+        XCTAssertEqual(summary("de", 0), "0 Zeilen")
+        XCTAssertEqual(summary("ja", 1), "1 行")
     }
 
     // MARK: Scoped slot ids (anchoring through an outer scroller)

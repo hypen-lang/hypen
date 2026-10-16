@@ -410,20 +410,30 @@ removeProp, which restores the normal container rendering.
   = first visible materialized row, else first visible placeholder),
   `visibleSlotRange` (slot frames ∩ viewport), the accessibility formatters
   (`accessibilityPosition` "Row 41 of 10,000" / "Item 5 of 30",
-  `accessibilitySummary` "10,000 rows": injected `localize` lookup, numbers
-  via `NumberFormatter` for the locale, object-only `%@`/`%n$@` formats
-  validated and substituted by hand, English fallback), and
+  `accessibilitySummary` "10,000 rows": injected `localize` /
+  `localizePlural` lookups, numbers via `NumberFormatter` for the locale,
+  object-only `%@`/`%n$@` formats validated and substituted by hand, English
+  fallback), CLDR integer plural rules (`pluralCategory`, `pluralVariant`
+  over a `.stringsdict` entry), `composeAccessibilityHint` (own hint, then
+  position, ", "), and
   `VirtViewportTracker`.
   `VirtualizationMathTests` mirrors `hypen-web/tests/virtualization-math.test.ts`
   case for case (plus tracker / anchoring / a11y cases) — keep aligned.
 - `Virtualization/HypenAccessibility.swift` — public, host-overridable
   `HypenAccessibility.listPosition: (index, total, isGrid) -> String` and
   `listSummary: (total, isGrid) -> String` (`@MainActor` vars). Defaults read
-  `Resources/<lang>.lproj/Localizable.strings` from `Bundle.module` (en, de,
-  es, fr, it, ja, pt-BR, zh-Hans; `defaultLocalization: "en"` +
-  `resources: [.process("Resources")]` in Package.swift). Add a language by
-  adding an `.lproj` with all six `hypen.a11y.list.*` keys —
-  `testEveryBundledLocalizationHasEveryKeyWithTheSameArguments` checks it.
+  `Resources/<lang>.lproj/Localizable.strings` (positions) and
+  `Localizable.stringsdict` (summaries: `%1$#@rows@`, variants name `%2$@`,
+  one entry per CLDR category the language uses for integers) from
+  `Bundle.module` (en, de, es, fr, it, ja, pt-BR, zh-Hans;
+  `defaultLocalization: "en"` + `resources: [.process("Resources")]`). The
+  stringsdict is parsed by `HypenAccessibility.pluralFormat` and the variant
+  chosen by `Virtualization.pluralCategory` — not Foundation's stringsdict
+  formatting — so numbers stay locale-formatted and Linux picks the same
+  variant. Add a language with an `.lproj` holding both files and a
+  `pluralCategory` case; `testEveryBundledLocalizationHasEveryKeyWithTheSameArguments`
+  checks keys, arguments and categories (SwiftPM lowercases lproj names on
+  Linux).
 - `VirtViewportTracker` (pure) owns every decision: the visible range (best
   first: slot frames intersecting a Hypen scroller's viewport → list-edge
   geometry through the item size → slots the enclosing scroll view reports
@@ -478,9 +488,12 @@ removeProp, which restores the normal container rendering.
     the ancestor's published proxy (`scrollTo` reaches any identified
     descendant; frames and the unit point are in the outer viewport).
   - **Accessibility (§2)**: rows carry
-    `.accessibilityHint(HypenAccessibility.listPosition(…))` (SwiftUI has no
-    set-position API for arbitrary views; the hint reaches every element in
-    the row); the stack is `.accessibilityElement(children: .contain)` with
+    `.accessibilityHint(composeAccessibilityHint(own: <root element's
+    semantics description>, position: HypenAccessibility.listPosition(…)))`
+    (SwiftUI has no set-position API for arbitrary views; the hint reaches
+    every element in the row) and `\.hypenListPositionHint` in the
+    environment, which `SemanticsModifier`'s hint modifier appends to an
+    element's own hint, so the position never replaces a row's hint; the stack is `.accessibilityElement(children: .contain)` with
     `.accessibilityValue(HypenAccessibility.listSummary(…))`. Placeholders
     are `accessibilityHidden`.
 - Reports go `HypenRenderer.reportListViewport` → `viewportReporter` (wired
@@ -507,9 +520,9 @@ Known gaps:
   slots on screen, not in the host's viewport: a few slots wide when the host
   scroll view is shorter than the screen (harmless, a slightly larger
   window); on watchOS 10 / visionOS (no screen API) it is `onAppear`.
-- **Accessibility**: the hint replaces a hint a row's own semantics set; the
-  summary's plural is one / other (`HypenAccessibility.listSummary` can be
-  overridden for languages with more plural forms).
+- **Plural rules** cover the bundled languages (unknown languages use
+  English's one / other); a host shipping more overrides
+  `HypenAccessibility.listSummary`.
 
 ## Feature Parity with hypen-android
 

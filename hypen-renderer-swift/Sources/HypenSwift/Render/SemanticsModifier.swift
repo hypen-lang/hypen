@@ -77,8 +77,11 @@ private struct OptionalLabelModifier: ViewModifier {
 
 private struct OptionalHintModifier: ViewModifier {
     let hint: String?
+    /// Inside a windowed list row: its position, appended to this element's
+    /// own hint rather than replaced by the row's (VirtualizedLazyStack).
+    @Environment(\.hypenListPositionHint) private var listPosition
     func body(content: Content) -> some View {
-        if let hint = hint {
+        if let hint = Virtualization.composeAccessibilityHint(own: hint, position: hint == nil ? nil : listPosition) {
             content.accessibilityHint(hint)
         } else {
             content
