@@ -98,8 +98,19 @@
           },
           "action": {
             "type": "string",
-            "enum": ["initialRender", "updateState", "dispatchAction", "renderSource"],
+            "enum": ["initialRender", "updateState", "dispatchAction", "renderSource", "setViewport"],
             "description": "Type of action to perform"
+          },
+          "viewport": {
+            "type": "object",
+            "description": "Visible range to report for a windowed list (for setViewport action), as a renderer would via setListViewport. The list is the first element created so far with `elementType`.",
+            "properties": {
+              "elementType": { "type": "string" },
+              "start": { "type": "integer", "minimum": 0 },
+              "end": { "type": "integer", "minimum": 0 }
+            },
+            "required": ["elementType", "start", "end"],
+            "additionalProperties": false
           },
           "source": {
             "type": "string",
@@ -131,6 +142,11 @@
             "type": "array",
             "items": { "type": "string" },
             "description": "Expected patch types in exact emission order"
+          },
+          "allowExtraPatches": {
+            "type": "boolean",
+            "default": false,
+            "description": "When true, `expectedPatches` need only be a subset of the emitted patches (each matched once). Use when the contract is a few specific patches inside a batch whose rest (e.g. template rows) is not the point of the step"
           },
           "strictPatchOrder": {
             "type": "boolean",

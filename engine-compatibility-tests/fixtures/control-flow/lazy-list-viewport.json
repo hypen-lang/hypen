@@ -1,0 +1,514 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "lazy-list-viewport",
+  "description": "A List materializes only its window, reports it in __virt.window, moves it on a viewport report, and keeps its rows when an item is inserted above the window",
+  "category": "control-flow",
+  "priority": "P0",
+  "input": {
+    "source": "List(@state.items, key: \"id\", initialCount: 5) { Text(\"@{item.name}\") }",
+    "initialState": {
+      "items": [
+        {
+          "id": 0,
+          "name": "row 0"
+        },
+        {
+          "id": 1,
+          "name": "row 1"
+        },
+        {
+          "id": 2,
+          "name": "row 2"
+        },
+        {
+          "id": 3,
+          "name": "row 3"
+        },
+        {
+          "id": 4,
+          "name": "row 4"
+        },
+        {
+          "id": 5,
+          "name": "row 5"
+        },
+        {
+          "id": 6,
+          "name": "row 6"
+        },
+        {
+          "id": 7,
+          "name": "row 7"
+        },
+        {
+          "id": 8,
+          "name": "row 8"
+        },
+        {
+          "id": 9,
+          "name": "row 9"
+        },
+        {
+          "id": 10,
+          "name": "row 10"
+        },
+        {
+          "id": 11,
+          "name": "row 11"
+        },
+        {
+          "id": 12,
+          "name": "row 12"
+        },
+        {
+          "id": 13,
+          "name": "row 13"
+        },
+        {
+          "id": 14,
+          "name": "row 14"
+        },
+        {
+          "id": 15,
+          "name": "row 15"
+        },
+        {
+          "id": 16,
+          "name": "row 16"
+        },
+        {
+          "id": 17,
+          "name": "row 17"
+        },
+        {
+          "id": 18,
+          "name": "row 18"
+        },
+        {
+          "id": 19,
+          "name": "row 19"
+        },
+        {
+          "id": 20,
+          "name": "row 20"
+        },
+        {
+          "id": 21,
+          "name": "row 21"
+        },
+        {
+          "id": 22,
+          "name": "row 22"
+        },
+        {
+          "id": 23,
+          "name": "row 23"
+        },
+        {
+          "id": 24,
+          "name": "row 24"
+        },
+        {
+          "id": 25,
+          "name": "row 25"
+        },
+        {
+          "id": 26,
+          "name": "row 26"
+        },
+        {
+          "id": 27,
+          "name": "row 27"
+        },
+        {
+          "id": 28,
+          "name": "row 28"
+        },
+        {
+          "id": 29,
+          "name": "row 29"
+        },
+        {
+          "id": 30,
+          "name": "row 30"
+        },
+        {
+          "id": 31,
+          "name": "row 31"
+        },
+        {
+          "id": 32,
+          "name": "row 32"
+        },
+        {
+          "id": 33,
+          "name": "row 33"
+        },
+        {
+          "id": 34,
+          "name": "row 34"
+        },
+        {
+          "id": 35,
+          "name": "row 35"
+        },
+        {
+          "id": 36,
+          "name": "row 36"
+        },
+        {
+          "id": 37,
+          "name": "row 37"
+        },
+        {
+          "id": 38,
+          "name": "row 38"
+        },
+        {
+          "id": 39,
+          "name": "row 39"
+        },
+        {
+          "id": 40,
+          "name": "row 40"
+        },
+        {
+          "id": 41,
+          "name": "row 41"
+        },
+        {
+          "id": 42,
+          "name": "row 42"
+        },
+        {
+          "id": 43,
+          "name": "row 43"
+        },
+        {
+          "id": 44,
+          "name": "row 44"
+        },
+        {
+          "id": 45,
+          "name": "row 45"
+        },
+        {
+          "id": 46,
+          "name": "row 46"
+        },
+        {
+          "id": 47,
+          "name": "row 47"
+        },
+        {
+          "id": 48,
+          "name": "row 48"
+        },
+        {
+          "id": 49,
+          "name": "row 49"
+        }
+      ]
+    },
+    "module": {
+      "name": "LazyListModule",
+      "actions": [],
+      "stateKeys": [
+        "items"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render materializes the first window",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "List"
+        },
+        {
+          "type": "setProp",
+          "name": "__virt.window",
+          "value": {
+            "total": 50,
+            "start": 0,
+            "end": 5
+          }
+        }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "A viewport report moves the window: rows leave without exit transitions",
+      "action": "setViewport",
+      "viewport": {
+        "elementType": "List",
+        "start": 20,
+        "end": 30
+      },
+      "expectedPatches": [
+        {
+          "type": "remove",
+          "transition": false
+        },
+        {
+          "type": "setProp",
+          "name": "__virt.window",
+          "value": {
+            "total": 50,
+            "start": 20,
+            "end": 30
+          }
+        }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "Reporting the same range again is a no-op",
+      "action": "setViewport",
+      "viewport": {
+        "elementType": "List",
+        "start": 20,
+        "end": 30
+      },
+      "expectedPatchCount": 0
+    },
+    {
+      "description": "Inserting above the window shifts it and keeps every visible row",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": [
+            {
+              "id": 1000,
+              "name": "new"
+            },
+            {
+              "id": 0,
+              "name": "row 0"
+            },
+            {
+              "id": 1,
+              "name": "row 1"
+            },
+            {
+              "id": 2,
+              "name": "row 2"
+            },
+            {
+              "id": 3,
+              "name": "row 3"
+            },
+            {
+              "id": 4,
+              "name": "row 4"
+            },
+            {
+              "id": 5,
+              "name": "row 5"
+            },
+            {
+              "id": 6,
+              "name": "row 6"
+            },
+            {
+              "id": 7,
+              "name": "row 7"
+            },
+            {
+              "id": 8,
+              "name": "row 8"
+            },
+            {
+              "id": 9,
+              "name": "row 9"
+            },
+            {
+              "id": 10,
+              "name": "row 10"
+            },
+            {
+              "id": 11,
+              "name": "row 11"
+            },
+            {
+              "id": 12,
+              "name": "row 12"
+            },
+            {
+              "id": 13,
+              "name": "row 13"
+            },
+            {
+              "id": 14,
+              "name": "row 14"
+            },
+            {
+              "id": 15,
+              "name": "row 15"
+            },
+            {
+              "id": 16,
+              "name": "row 16"
+            },
+            {
+              "id": 17,
+              "name": "row 17"
+            },
+            {
+              "id": 18,
+              "name": "row 18"
+            },
+            {
+              "id": 19,
+              "name": "row 19"
+            },
+            {
+              "id": 20,
+              "name": "row 20"
+            },
+            {
+              "id": 21,
+              "name": "row 21"
+            },
+            {
+              "id": 22,
+              "name": "row 22"
+            },
+            {
+              "id": 23,
+              "name": "row 23"
+            },
+            {
+              "id": 24,
+              "name": "row 24"
+            },
+            {
+              "id": 25,
+              "name": "row 25"
+            },
+            {
+              "id": 26,
+              "name": "row 26"
+            },
+            {
+              "id": 27,
+              "name": "row 27"
+            },
+            {
+              "id": 28,
+              "name": "row 28"
+            },
+            {
+              "id": 29,
+              "name": "row 29"
+            },
+            {
+              "id": 30,
+              "name": "row 30"
+            },
+            {
+              "id": 31,
+              "name": "row 31"
+            },
+            {
+              "id": 32,
+              "name": "row 32"
+            },
+            {
+              "id": 33,
+              "name": "row 33"
+            },
+            {
+              "id": 34,
+              "name": "row 34"
+            },
+            {
+              "id": 35,
+              "name": "row 35"
+            },
+            {
+              "id": 36,
+              "name": "row 36"
+            },
+            {
+              "id": 37,
+              "name": "row 37"
+            },
+            {
+              "id": 38,
+              "name": "row 38"
+            },
+            {
+              "id": 39,
+              "name": "row 39"
+            },
+            {
+              "id": 40,
+              "name": "row 40"
+            },
+            {
+              "id": 41,
+              "name": "row 41"
+            },
+            {
+              "id": 42,
+              "name": "row 42"
+            },
+            {
+              "id": 43,
+              "name": "row 43"
+            },
+            {
+              "id": 44,
+              "name": "row 44"
+            },
+            {
+              "id": 45,
+              "name": "row 45"
+            },
+            {
+              "id": 46,
+              "name": "row 46"
+            },
+            {
+              "id": 47,
+              "name": "row 47"
+            },
+            {
+              "id": 48,
+              "name": "row 48"
+            },
+            {
+              "id": 49,
+              "name": "row 49"
+            }
+          ]
+        }
+      },
+      "expectedPatches": [
+        {
+          "type": "setProp",
+          "name": "__virt.window",
+          "value": {
+            "total": 51,
+            "start": 21,
+            "end": 31
+          }
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "create",
+        "instantiate",
+        "remove",
+        "move",
+        "insert"
+      ],
+      "allowExtraPatches": true
+    }
+  ]
+}

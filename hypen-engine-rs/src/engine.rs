@@ -390,6 +390,16 @@ impl Engine {
         }
     }
 
+    /// [`set_list_viewport`](Self::set_list_viewport) addressed by the id
+    /// string the element carries on the wire — what a renderer or a remote
+    /// `viewport` message has. A malformed id is ignored.
+    pub fn set_list_viewport_wire(&mut self, list_id: &str, start: usize, end: usize) {
+        let patches = self.core.set_list_viewport_wire(list_id, start, end);
+        if !patches.is_empty() {
+            self.emit_patches(patches);
+        }
+    }
+
     // ── Data Source Context ─────────────────────────────────────────────
 
     /// Set (or replace) a named data source context.
