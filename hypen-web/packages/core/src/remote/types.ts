@@ -17,6 +17,7 @@ export type RemoteMessage =
   | UpdateStateMessage
   | SubscribeStateMessage
   | DispatchActionMessage
+  | ViewportMessage
   | HelloMessage
   | SessionAckMessage
   | SessionExpiredMessage
@@ -53,6 +54,24 @@ export interface DispatchActionMessage {
   module: string;
   action: string;
   payload?: any;
+}
+
+/**
+ * Client → Server: the item range `[start, end)` (visible rows plus
+ * overscan) of the virtualized list whose element id is `listId` — the node
+ * carrying `__virt.window` (docs/virtualization.md §4).
+ *
+ * Per client: the server applies it to this session's engine only, never
+ * replays it to other sessions, never treats it as an action, and never
+ * answers with a `stateUpdate`. The window change streams back as ordinary
+ * `patch` messages. Accepted only after `hello`; a malformed message
+ * (non-integer or negative bounds, non-string `listId`) is ignored.
+ */
+export interface ViewportMessage {
+  type: "viewport";
+  listId: string;
+  start: number;
+  end: number;
 }
 
 /**

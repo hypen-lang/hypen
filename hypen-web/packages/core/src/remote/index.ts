@@ -30,6 +30,7 @@ export type {
   InitialTreeMessage,
   PatchMessage,
   DispatchActionMessage,
+  ViewportMessage,
   StateUpdateMessage,
   UpdateStateMessage,
   SubscribeStateMessage,

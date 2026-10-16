@@ -32,6 +32,7 @@ import type {
   InitialTreeMessage,
   PatchMessage,
   DispatchActionMessage,
+  ViewportMessage,
   UpdateStateMessage,
   SubscribeStateMessage,
   HelloMessage,
@@ -573,6 +574,28 @@ export class RemoteEngine implements Disposable {
       payload,
     };
 
+    this.ws.send(JSON.stringify(message));
+  }
+
+  /**
+   * Report the item range `[start, end)` — visible rows plus overscan — of
+   * the virtualized list whose element is `listId` (the node carrying
+   * `__virt.window`). Sent to the server as a `viewport` message; the
+   * window change streams back as ordinary patches. Renderer-facing
+   * (docs/virtualization.md §3–4): a renderer calls
+   * `engine.setListViewport?.(listId, start, end)` on whatever engine it is
+   * given, so this satisfies `IEngine.setListViewport` structurally.
+   *
+   * Dropped (not queued) while disconnected: every (re)established session
+   * streams a fresh initial tree, after which the renderer reports again.
+   */
+  setListViewport(listId: string, start: number, end: number): void {
+    if (this.state !== "connected" || !this.ws) {
+      log.debug("Cannot report list viewport: not connected");
+      return;
+    }
+
+    const message: ViewportMessage = { type: "viewport", listId, start, end };
     this.ws.send(JSON.stringify(message));
   }
 

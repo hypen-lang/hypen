@@ -37,6 +37,11 @@ function makeRenderer(): DOMRenderer {
     dispatchAction: (name: string, payload?: unknown) => {
       engine.dispatchAction(name, payload);
     },
+    // List virtualization: the renderer's viewport reports travel to the
+    // server as `viewport` messages (docs/virtualization.md §4).
+    setListViewport: (listId: string, start: number, end: number) => {
+      engine.setListViewport(listId, start, end);
+    },
   });
 }
 
