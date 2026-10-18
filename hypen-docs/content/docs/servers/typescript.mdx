@@ -806,15 +806,21 @@ Default levels: `info` in development, `warn` under test runners (`NODE_ENV=test
 
 ### DEBUG namespaces
 
-Set `DEBUG` to turn on every level for chosen loggers, as with the `debug` package:
+Set `DEBUG` to add the `debug` level for chosen loggers, as with the `debug` package. It only adds output: a matching logger prints every level, even when the global level is higher (`NODE_ENV=production` or `test`), and every other logger keeps the global level. Without `DEBUG`, `info`, `warn` and `error` messages already print in development.
 
 ```bash
-DEBUG=hypen:* bun run server.ts               # all Hypen loggers
+DEBUG=hypen:* bun run server.ts               # debug output from all Hypen loggers
 DEBUG=hypen:remote,hypen:router bun run server.ts
-DEBUG=hypen:*,-hypen:state bun run server.ts  # all but State
+DEBUG=hypen:*,-hypen:state bun run server.ts  # debug output from all but State
 ```
 
-Namespaces are `hypen:` plus the lower-cased logger tag (`hypen:remote`, `hypen:engine`, `hypen:router`, `hypen:state`, `hypen:module`, `hypen:loader`, `hypen:renderer`, ...); a namespace also covers its children. In a browser, set `localStorage.debug = "hypen:*"` and reload. From code, call `setDebugNamespaces(spec)` from `@hypen-space/core/logger`. `DEBUG` overrides the level for matching loggers unless the level is `"none"`. Under the CLI, `DEBUG=hypen:* hypen dev` is the same as `hypen dev --debug`.
+An excluded namespace (`-hypen:state`) is only left out of the extra `debug` output; its `info`, `warn` and `error` messages still print at the default level. To quiet a logger, raise the global level with `setLogLevel()`.
+
+Namespaces are `hypen:` plus the lower-cased logger tag (`hypen:remote`, `hypen:engine`, `hypen:router`, `hypen:state`, `hypen:module`, `hypen:loader`, `hypen:renderer`, ...); a namespace also covers its children. In a browser, set `localStorage.debug = "hypen:*"` and reload. From code, call `setDebugNamespaces(spec)` from `@hypen-space/core/logger`. `DEBUG` has no effect when the level is `"none"`. Under the CLI, `DEBUG=hypen:* hypen dev` is the same as `hypen dev --debug`.
+
+<Callout type="warn">
+`DEBUG` namespaces need a `@hypen-space/core` release newer than 0.6.6. On 0.6.6, `DEBUG` is ignored; use `setLogLevel("debug")` instead.
+</Callout>
 
 ### Loggers
 
@@ -827,8 +833,9 @@ import { frameworkLoggers, createLogger } from "@hypen-space/core";
 // module, lifecycle, loader, context, discovery, plugin, canvas, debug
 frameworkLoggers.remote.info("custom message");
 
-const log = createLogger("Billing"); // enabled by DEBUG=hypen:billing
-log.info("invoice sent");
+const log = createLogger("Billing");
+log.info("invoice sent");          // prints at the default "info" level
+log.debug("payload", { id: 42 });  // prints only with DEBUG=hypen:billing (or level "debug")
 ```
 
 ## Testing
@@ -865,12 +872,19 @@ test("increment increases count", async () => {
 
 ### Testing with HypenModuleInstance
 
-For integration tests with the full module lifecycle, run the definition on a real engine:
+For integration tests with the full module lifecycle, run the definition on a real engine. This file stands on its own (save it as, say, `counter.lifecycle.test.ts` and run `bun test`):
 
 ```typescript
 import { test, expect } from "bun:test";
+import { app, HypenModuleInstance } from "@hypen-space/core";
 import { Engine } from "@hypen-space/server";
-import { HypenModuleInstance } from "@hypen-space/core";
+
+const counterDef = app
+  .defineState({ count: 0 })
+  .onAction<{ by?: number }>("increment", ({ action, state }) => {
+    state.count += action.payload?.by ?? 1;
+  })
+  .build();
 
 test("module lifecycle", async () => {
   const engine = new Engine();

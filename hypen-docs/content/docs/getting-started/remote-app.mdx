@@ -54,11 +54,30 @@ You need [Bun](https://bun.sh) 1.2 or newer. Create a new project:
 ```bash
 mkdir counter-server
 cd counter-server
-bun init -y
+echo '{ "name": "counter-server", "private": true, "type": "module" }' > package.json
 bun add @hypen-space/core @hypen-space/server
+bun add -d @types/bun
 ```
 
-Create the folder somewhere that is **not inside another JavaScript project**. `bun init` and `bun add` work on the nearest `package.json`, so inside an existing project or workspace they would change that project instead. (`bun init -y` also creates an `index.ts` you won't need.)
+Create the folder somewhere that is **not inside another JavaScript project**. `bun add` works on the nearest `package.json`, so writing one first keeps it from changing a parent project or workspace instead. (This writes `package.json` by hand rather than with `bun init -y`, because Bun 1.4's `bun init -y` puts its files in an `init/` subfolder.)
+
+For editor autocomplete and `bunx tsc` type checks, add a `tsconfig.json`. The `DOM` libs are only needed for the browser client in Step 2, Option B, but they do no harm on the server:
+
+```json
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["bun"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  }
+}
+```
 
 Create `server.ts`:
 
@@ -172,11 +191,21 @@ engine.onPatches((patches) => renderer.applyPatches(patches));
 await engine.connect();
 ```
 
-And `index.html`, which loads it as a module script:
+`client.ts` uses `document`, so TypeScript needs the browser types. The `tsconfig.json` from Step 1 already has them. If you made the project with `bun init` instead, its `tsconfig.json` has `"lib": ["ESNext"]` and your editor (or `bunx tsc`) reports `TS2584: Cannot find name 'document'`; change that line to `"lib": ["ESNext", "DOM", "DOM.Iterable"]`. Bun runs and bundles the file either way.
+
+And `index.html`, which loads it as a module script. The `<style>` gives the page the same base styles as the built-in client (system font, no default margins):
 
 ```html
 <!DOCTYPE html>
 <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { font-family: system-ui, -apple-system, sans-serif; }
+    </style>
+  </head>
   <body>
     <div id="app"></div>
     <script type="module" src="./client.ts"></script>
@@ -193,6 +222,24 @@ bun --port=8080 ./index.html
 Open `http://localhost:8080`. (For a static deployment, `bun build ./index.html --outdir dist` writes the bundled page to `dist/`.)
 
 To draw on a `<canvas>` instead, use `CanvasRenderer` from `@hypen-space/web/canvas` the same way: `new CanvasRenderer(canvasElement, engine)`.
+
+The canvas renderer loads its layout engine from `/taffy_wasm_bg.wasm` on the page's origin. `bun ./canvas.html` answers that path with the HTML page, so the browser logs a warning that `WebAssembly.instantiateStreaming` failed because the server does not serve Wasm with the `application/wasm` MIME type, and the renderer falls back to a CDN copy. To serve the file yourself, run the page from a small `Bun.serve` script instead (here `canvas.html` holds `<canvas id="app" width="800" height="600"></canvas>` and the module script):
+
+```typescript
+// dev.ts: run with `bun dev.ts`
+import page from "./canvas.html";
+
+Bun.serve({
+  port: 8080,
+  routes: {
+    "/": page,
+    // Installed with @hypen-space/web; Bun.file serves it as application/wasm.
+    "/taffy_wasm_bg.wasm": Bun.file("node_modules/taffy-layout/pkg/taffy_wasm_bg.wasm"),
+  },
+  development: true,
+});
+console.log("Open http://localhost:8080");
+```
 
 ### Option C: Embed it in another Hypen app
 

@@ -31,10 +31,18 @@ All servers load the **same shared components** from `components/` and serve the
 ### TypeScript
 ```bash
 cd typescript
-bun install
+bun run setup        # installs hypen-web's deps + this example's (see note)
 bun run dev          # Start server on :3000
-bun run web          # Start web client on :3001
+bun run web          # Start web client on :3001 (WEB_PORT=... to change)
 ```
+
+> **First run:** the `@hypen-space/*` dependencies are `file:` links into
+> this repo's `hypen-web/packages/*`, and those packages resolve their own
+> dependencies (e.g. `@chenglou/pretext` for the web renderer) from
+> `hypen-web/node_modules`. `bun run setup` installs both in one go
+> (equivalent to `cd ../../../hypen-web && bun install`, then `bun install`
+> here). Skipping it fails the web build with
+> `Could not resolve: "@chenglou/pretext"`.
 
 The web client connects to the backend on the page's host at `PORT` (default
 3000) — the same variable every server below listens on — so
