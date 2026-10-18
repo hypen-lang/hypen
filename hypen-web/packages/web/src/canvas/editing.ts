@@ -1,4 +1,5 @@
 import { dispatchUIAction } from "@hypen-space/core";
+import { noteLocalBindWrite } from "../bind-echo.js";
 /**
  * Native Canvas Text Editing
  *
@@ -27,9 +28,11 @@ import { dispatchUIAction } from "@hypen-space/core";
  *     → node.props.value = value (local echo so the next paint is current)
  *     → engine.dispatchAction("__hypen_bind", {path, value})  (two-way bind)
  *     → scheduleRedraw + caret blink reset
- *   engine echoes SetProp("value") → onEngineValueEcho → same value → no-op
- *   (a *different* echo, e.g. engine-side formatting, rewrites the proxy
- *   and clamps the selection).
+ *   engine echoes SetProp("value") → the renderer classifies it against the
+ *   outstanding writes (bind-echo.ts): an echo of an OLDER keystroke is
+ *   dropped, the newest one is a no-op, and only a *different* value (an
+ *   action clearing the field, engine-side formatting) reaches
+ *   onEngineValueEcho, which rewrites the proxy and clamps the selection.
  */
 
 import type { Point, Rectangle, VirtualNode } from "./types.js";
@@ -456,6 +459,9 @@ export class TextEditController {
 
   private dispatchBind(value: string): void {
     if (!this.bindPath) return;
+    // Recorded before dispatch (a local engine may echo synchronously) so
+    // the renderer can drop echoes older than the text being edited.
+    if (this.state) noteLocalBindWrite(this.state.node, value);
     dispatchUIAction(this.engine, this.state?.node.id, "__hypen_bind", { path: this.bindPath, value });
   }
 

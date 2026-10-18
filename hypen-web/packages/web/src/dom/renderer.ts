@@ -215,6 +215,7 @@ import { createSafeAreaHandler } from "./components/safearea.js";
 import { createImageHandler } from "./components/image.js";
 import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
 import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
+import { classifyBindEcho } from "../bind-echo.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
@@ -1429,6 +1430,41 @@ export class DOMRenderer {
 
     this.debugTracker.trackRerender(id, element, `setProp:${name}`);
 
+    // `.bind()` text fields: an engine echo of an OLDER keystroke must not
+    // overwrite newer text the user already typed (remote round trips put
+    // several writes in flight). See bind-echo.ts.
+    if (
+      (name === "value" || name === "0") &&
+      (element.dataset.hypenType === "input" || element.dataset.hypenType === "textarea")
+    ) {
+      const field = element as HTMLInputElement | HTMLTextAreaElement;
+      const kind = classifyBindEcho(field, value);
+      if (kind === "stale") return;
+      if (kind === "latest" && field.value === String(value ?? "")) return;
+      if (kind === "foreign" && isFocusedTextField(field) && field.value !== String(value ?? "")) {
+        // Programmatic change while the user is in the field (an action
+        // reformatting or clearing it): apply, keeping the caret where it
+        // was (clamped) instead of letting the value write jump it.
+        const start = field.selectionStart;
+        const end = field.selectionEnd;
+        this.setPropValue(id, element, name, value);
+        if (start !== null && end !== null) {
+          const len = field.value.length;
+          try {
+            field.setSelectionRange(Math.min(start, len), Math.min(end, len));
+          } catch {
+            // input types without selection support (number, email…)
+          }
+        }
+        return;
+      }
+    }
+
+    this.setPropValue(id, element, name, value);
+  }
+
+  /** The prop write proper, after channel routing and bind-echo filtering. */
+  private setPropValue(id: string, element: HTMLElement, name: string, value: any): void {
     if (name === "slot.0" || name === "slot") {
       if (typeof value === "string" && value) {
         element.dataset.hypenSlot = value;
@@ -2145,4 +2181,10 @@ export class DOMRenderer {
   getDebugStats(): { totalRerenders: number; elementCount: number; avgRerenders: number } {
     return this.debugTracker.getStats();
   }
+}
+
+/** Whether `field` currently holds focus in its document. */
+function isFocusedTextField(field: HTMLElement): boolean {
+  const doc = field.ownerDocument ?? (typeof document !== "undefined" ? document : null);
+  return !!doc && doc.activeElement === field;
 }

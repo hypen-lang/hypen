@@ -54,6 +54,7 @@ import { CanvasDnd, ANIM_STATE_POSES_PROP } from "./dnd.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
 import { DND_PROP_PREFIX, DND_SOURCE_PROP } from "@hypen-space/core/dnd";
 import { setSafeAreaInsetOverrides } from "../safe-area.js";
+import { classifyBindEcho } from "../bind-echo.js";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
   devicePixelRatio: typeof window !== "undefined" ? window.devicePixelRatio || 1 : 1,
@@ -587,6 +588,17 @@ export class CanvasRenderer implements Renderer {
     // dragged node's translate, a pose-overridden key — is deferred until
     // release. The runtime's own writes bypass the gate.
     if (!fromDnd && this.dnd.deferEngineProp(node, name, value)) return;
+
+    // `.bind()` text fields: an engine echo of an OLDER keystroke must not
+    // replace newer text the user already typed (several writes are in
+    // flight over a remote round trip). `node.props.value` already holds the
+    // local text (TextEditController's local echo). See bind-echo.ts.
+    if (name === "value" && isEditableNode(node)) {
+      // The newest echo falls through: it equals the local text, so the
+      // edit session treats it as a no-op while the accessibility mirror
+      // picks up the confirmed value.
+      if (classifyBindEcho(node, value) === "stale") return;
+    }
 
     // Applicator base (e.g. `flex.0` → `flex`) — computed up front so the
     // transition channel can capture the previous FLAT value (which, for a

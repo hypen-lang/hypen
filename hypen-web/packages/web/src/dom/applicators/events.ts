@@ -1,4 +1,5 @@
 import { dispatchUIAction } from "@hypen-space/core";
+import { noteLocalBindWrite } from "../../bind-echo.js";
 /**
  * Event Applicators
  *
@@ -944,10 +945,14 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
       element instanceof HTMLInputElement ||
       element instanceof HTMLTextAreaElement
     ) {
-      // Input/Textarea: listen to input event, read .value
+      // Input/Textarea: listen to input event, read .value. The write is
+      // recorded BEFORE dispatch (a local engine may echo synchronously) so
+      // the renderer can tell this keystroke's echo from a programmatic
+      // change and drop echoes older than the text in the field.
       const listener = () => {
         const engine = getEngine(element);
         if (engine) {
+          noteLocalBindWrite(element, element.value);
           dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
             path: bindPath,
             value: element.value,
