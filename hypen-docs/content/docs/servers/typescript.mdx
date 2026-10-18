@@ -1,6 +1,6 @@
 ---
 title: TypeScript SDK
-description: Complete guide to building Hypen servers with TypeScript, Bun, and Node.js
+description: Complete guide to building Hypen servers with TypeScript and Bun
 ---
 
 # TypeScript SDK
@@ -10,12 +10,10 @@ The TypeScript SDK (`@hypen-space/core` + `@hypen-space/server`) is the primary 
 ## Installation
 
 ```bash
-# Using Bun (recommended)
 bun add @hypen-space/core @hypen-space/server
-
-# Using npm
-npm install @hypen-space/core @hypen-space/server
 ```
+
+`RemoteServer.listen()` runs on [Bun](https://bun.sh) (it is built on `Bun.serve`), so install Bun 1.x first. You can add the packages with npm or pnpm as well, but run the server with `bun`.
 
 For web client rendering, also install the web adapter:
 
@@ -56,20 +54,18 @@ myApp.module("Counter")
       .gap(16)
     }
     .padding(32)
-  `)
-  .build();
+  `);
 
-// 2. Serve the whole app — every registered module is streamed.
-new RemoteServer()
+// 2. Serve the app. With no .module() call, the entry is the module
+//    named "App" if there is one, otherwise the app's only module.
+await new RemoteServer()
   .app(myApp)
   .onConnection((client) => console.log(`Connected: ${client.id}`))
   .onDisconnection((client) => console.log(`Disconnected: ${client.id}`))
   .listen(3000);
-
-console.log("Server running on ws://localhost:3000");
 ```
 
-> **Single-module demo?** For a one-off counter you can skip `HypenApp` and chain `.module(name, def).ui(template)` directly on `RemoteServer`. Prefer the registry form once you have more than one module or want routing/nesting.
+`.ui(template)` finishes the module definition, so no `.build()` is needed after it (a trailing `.build()` is allowed and does nothing). Modules without an inline template end with `.build()` instead.
 
 Run it:
 
@@ -77,7 +73,13 @@ Run it:
 bun run server.ts
 ```
 
-Any Hypen client (web, Android, iOS) can connect and render this UI. See the [Remote App Tutorial](/docs/getting-started/remote-app) for connecting clients.
+The server logs `Hypen app streaming on ws://0.0.0.0:3000` and `Web client at http://localhost:3000`. Open http://localhost:3000 in a browser: the server ships a built-in web client that connects back over WebSocket and renders the UI with the DOM renderer. Native clients (Android, desktop) connect to `ws://<host>:3000`. See the [Remote App Tutorial](/docs/getting-started/remote-app) for connecting clients.
+
+The server also logs a warning that no `allowedOrigins`/`authenticate` is configured. That is expected in development; see [Authentication](#authentication) before you deploy.
+
+> **Several modules, none named `App`?** `.app(myApp)` then throws `entry is ambiguous (...)`. Name the entry module `App`, or pick it explicitly with `.module("Counter", def)`.
+
+> **Single-module demo?** You can skip `HypenApp` and pass a definition straight to the server: `new RemoteServer().module("Counter", app.defineState({ count: 0 }).ui(tpl)).listen(3000)`. The module's own template is used when neither `.ui()` nor `.source()` supplies one.
 
 ### serve() Helper
 
@@ -91,7 +93,8 @@ const counter = app
   .defineState({ count: 0 })
   .onAction("increment", ({ state }) => {
     state.count++;
-  });
+  })
+  .build();
 
 await serve({
   module: counter,
@@ -106,9 +109,11 @@ await serve({
 });
 ```
 
+`serve()` returns the started `RemoteServer`. Its options are `module`, `moduleName` (default `"App"`), `ui`, `source`, `port`, `hostname`, `compression`, `session`, `onConnection` and `onDisconnection`.
+
 ## App Builder API
 
-Modules are defined using the chainable `app` builder. Every method returns the builder, so calls can be chained:
+Modules are defined using the chainable `app` builder. Every method returns the builder, so calls can be chained. End the chain with `.build()`, or with `.ui(template)` for a module that carries its own template:
 
 ```typescript
 import { app } from "@hypen-space/core";
@@ -146,8 +151,9 @@ Lifecycle hook called when the module is initialized. Receives the state and an 
 
 ```typescript
 .onCreated(async (state, context) => {
-  // Fetch initial data
-  const response = await fetch("/api/todos");
+  // Fetch initial data. Modules run on the server, so use an absolute URL
+  // (there is no page origin to resolve "/api/todos" against).
+  const response = await fetch("https://api.example.com/todos");
   state.todos = await response.json();
 
   // Access router for navigation
@@ -172,11 +178,11 @@ Registers a handler for a named action. The handler receives a context object:
 })
 ```
 
-Example with typed payload:
+Example with typed payload. `action.payload` is optional in the type (a UI can dispatch an action without one), so read it with `?.` or a default:
 
 ```typescript
 .onAction<{ id: string }>("deleteTodo", ({ action, state }) => {
-  state.todos = state.todos.filter(t => t.id !== action.payload!.id);
+  state.todos = state.todos.filter(t => t.id !== action.payload?.id);
 })
 ```
 
@@ -216,13 +222,20 @@ Return values:
 
 ### build
 
-Finalizes the module definition. Required when passing to `RemoteServer.module()`:
+Finalizes the module definition. `.ui(template)` and `.uiFile(path)` also finalize it, so `.build()` after them is optional. `RemoteServer.module()` and `serve()` build an unbuilt builder for you, but ending the chain explicitly is clearer:
 
 ```typescript
 const myModule = app
   .defineState({ count: 0 })
   .onAction("increment", ({ state }) => { state.count++; })
   .build();
+
+const ui = `
+  Column {
+    Text("Count: @{state.count}")
+    Button { Text("+") }.onClick(@actions.increment)
+  }
+`;
 
 new RemoteServer()
   .module("Counter", myModule)
@@ -235,10 +248,11 @@ new RemoteServer()
 State uses a Proxy-based system that tracks mutations automatically. Assign values directly and changes propagate to the UI:
 
 ```typescript
-.onAction("updateProfile", ({ state, action }) => {
+.onAction<{ name: string; email: string }>("updateProfile", ({ state, action }) => {
+  if (!action.payload) return;
   // Direct mutation - tracked automatically
-  state.user.name = action.payload!.name;
-  state.user.email = action.payload!.email;
+  state.user.name = action.payload.name;
+  state.user.email = action.payload.email;
 
   // Array mutations work too
   state.tags.push("updated");
@@ -266,7 +280,8 @@ When multiple state changes happen in the same synchronous block, they are coale
 ```typescript
 import { batchStateUpdates } from "@hypen-space/core";
 
-.onAction("bulkUpdate", ({ state }) => {
+.onAction<Item[]>("bulkUpdate", ({ action, state }) => {
+  const newItems = action.payload ?? [];
   batchStateUpdates(state, () => {
     state.items = newItems;
     state.count = newItems.length;
@@ -278,14 +293,14 @@ import { batchStateUpdates } from "@hypen-space/core";
 
 ### State Snapshots
 
-Get a deep clone of the current state:
+Get a deep clone of the current state. Handlers run on the server, so browser APIs such as `localStorage` are not available; write to a file, a database or an API instead:
 
 ```typescript
 import { getStateSnapshot } from "@hypen-space/core";
 
-.onAction("save", ({ state }) => {
+.onAction("save", async ({ state }) => {
   const snapshot = getStateSnapshot(state);
-  localStorage.setItem("backup", JSON.stringify(snapshot));
+  await Bun.write("backup.json", JSON.stringify(snapshot));
 })
 ```
 
@@ -295,11 +310,29 @@ Hypen components pair a `.hypen` template with a TypeScript module. There are fo
 
 ### Folder-Based (Recommended)
 
+This is the layout `hypen init` creates:
+
 ```
 src/components/
-  Counter/
-    component.hypen    # UI template
+  App/
+    component.hypen    # UI template (the entry, see hypen.json "entry")
     component.ts       # Module logic
+  Counter/
+    component.hypen
+    component.ts
+```
+
+A `component.ts` default-exports a definition. The entry is usually unnamed (`app.defineState(...).build()`); child modules are named so templates can mount them and so their actions are routed to them:
+
+```typescript
+// src/components/Counter/component.ts
+import { app } from "@hypen-space/core";
+
+export default app
+  .module("Counter")
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .build();
 ```
 
 ### Sibling Files
@@ -309,6 +342,8 @@ src/components/
   Counter.hypen        # UI template
   Counter.ts           # Module logic
 ```
+
+Whatever the pattern, the component name comes from the file or folder name. Do not reuse the name of a built-in element (`Badge`, `Card`, `Text`, `Icon`, `Chart`...): built-ins take precedence, so `Badge()` would render the built-in and not your file. Discovery logs a warning when a name collides; use something like `StatusBadge` instead.
 
 ### Index Pattern
 
@@ -321,10 +356,11 @@ src/components/
 
 ### Single-File Component
 
-Embed the template directly in TypeScript using the `hypen` tagged template and `.ui()`:
+Embed the template directly in TypeScript using the `hypen` tagged template and `.ui()`. Saved as `src/components/Clicker.ts`, it is discovered as `Clicker` and can be mounted from another template as `Clicker()`; its state and actions are scoped to it (as if the template were wrapped in `module Clicker { ... }`):
 
 ```typescript
-import { app, hypen, state } from "@hypen-space/core";
+// src/components/Clicker.ts
+import { app, hypen } from "@hypen-space/core";
 
 export default app
   .defineState({ count: 0 })
@@ -363,17 +399,19 @@ const loaded = await loadDiscoveredComponents(components);
 A singleton loader for registering and retrieving components:
 
 ```typescript
+import { resolve } from "node:path";
 import { componentLoader } from "@hypen-space/server";
 
 // Register manually
 componentLoader.register("Counter", counterModule, counterTemplate);
 
-// Load from directory
-await componentLoader.loadFromComponentsDir("./src/components");
+// Load from directory (pass an absolute path). Picks up all four patterns
+// above, recursively, like discoverComponents().
+await componentLoader.loadFromComponentsDir(resolve("./src/components"));
 
 // Query
 componentLoader.has("Counter");       // true
-componentLoader.getNames();           // ["Counter"]
+componentLoader.getNames();           // ["Counter", "App", ...]
 const def = componentLoader.get("Counter");
 // { name, module, template, path }
 ```
@@ -398,52 +436,59 @@ watcher.stop();
 
 ## RemoteServer API
 
-`RemoteServer` streams UI over WebSocket to any Hypen client. It uses a fluent builder pattern:
+`RemoteServer` streams UI over WebSocket to any Hypen client. It uses a fluent builder pattern; `listen()` returns a promise of the started server:
 
 ```typescript
 import { RemoteServer } from "@hypen-space/server";
 
-const server = new RemoteServer()
+const server = await new RemoteServer()
   .app(myApp)
   .config({ port: 3000, hostname: "0.0.0.0" })
   .session({ ttl: 3600, concurrent: "kick-old" })
   .onConnection((client) => { /* ... */ })
-  .onDisconnection((client) => { /* ... */ });
-
-await server.listen(3000);
+  .onDisconnection((client) => { /* ... */ })
+  .listen();
 ```
 
 ### Methods
 
 | Method | Description |
 |--------|-------------|
-| `.app(hypenApp)` | Serve every module registered on a `HypenApp` (preferred) |
-| `.module(name, module)` | Single-module shortcut — skip `HypenApp` for demos |
-| `.ui(dsl)` | Top-level UI template string (pairs with `.module()`) |
-| `.source(dir)` | Discover `.hypen` + module files from a directory |
-| `.config({ port, hostname, compression })` | Server configuration |
-| `.session(config)` | Session management configuration |
-| `.onConnection(callback)` | Called when a client connects |
-| `.onDisconnection(callback)` | Called when a client disconnects |
-| `.listen(port?)` | Start the WebSocket server |
-| `.stop()` | Stop the server |
-| `.getClientCount()` | Get number of active connections |
-| `.getSessionStats()` | Get session statistics |
-| `.broadcast(message)` | Broadcast a message to all clients |
-| `.url` | Get the server WebSocket URL |
+| `.app(hypenApp)` | Register every named module on a `HypenApp` (nested modules, route modules). |
+| `.module(name, def)` | Set the entry (primary) module. Optional with `.app()` or `.source()`: the entry is then the module named `App`, or the only module. Accepts a built definition or an unbuilt builder. |
+| `.ui(dsl)` | Entry UI template. Optional when the entry module has its own template (`.ui()` on the module) or `.source()` finds one. |
+| `.source(dir)` | Discover `.hypen` + module files from a directory (see below). |
+| `.config(config)` | Server configuration (see [Configuration](#configuration)). |
+| `.session(config)` | Session management configuration. |
+| `.onConnection(callback)` | Called when a client's session is ready. |
+| `.onDisconnection(callback)` | Called when a client disconnects. |
+| `.onSessionCreate(callback)` | Called with each `RemoteSession` as soon as it is created, before the initial render. |
+| `.disableAutoRouter()` | Turn off the per-session router that is wired from `Router { Route ... }` blocks. |
+| `.exposeStats(enabled?)` | Who may read `/__hypen__/stats` (see [Health & Stats](#health--stats)). |
+| `.syncActions()` | Replay every client's actions on every other client's session. |
+| `.listen(port?)` | Start the Bun HTTP + WebSocket server. Returns `Promise<this>`. |
+| `.prepare()` / `.createSession(transport)` / `.createHandler()` | Host sessions on your own WebSocket stack instead of `listen()`. |
+| `.stop()` | Stop the server. |
+| `.getClientCount()` | Number of active connections. |
+| `.getSessionStats()` | `{ activeSessions, pendingSessions, totalConnections }` |
+| `.broadcast(message)` | Send a server message to every connected client. |
+| `.url` | `ws://host:port` built from `.config()` while the server is running, else `null`. |
 
 ### Component Directory Mode
 
-Instead of passing a UI string, point the server at a components directory:
+Instead of passing a UI string, point the server at a components directory laid out as in [Component Patterns](#component-patterns):
 
 ```typescript
-new RemoteServer()
-  .app(myApp)
-  .source("./src/components")  // Discovers and loads components
+import { RemoteServer } from "@hypen-space/server";
+
+await new RemoteServer()
+  .source("./src/components")  // discovers and loads every component
   .listen(3000);
 ```
 
-This uses the component discovery system to find templates and resolve imports automatically.
+Discovery imports each `component.ts`, so named modules (`app.module("Counter")`) register themselves; `.app()` is not needed. The entry is the component named `App` (or the only one); call `.module("Name", def)` to choose another. `.ui()` is optional because the entry's `.hypen` file supplies the template, and the `Router` blocks in it are wired automatically.
+
+`hypen dev` serves your project in this same mode, from the `components` directory in `hypen.json`.
 
 ### Configuration
 
@@ -452,9 +497,21 @@ new RemoteServer()
   .config({
     port: 3000,          // default: 3000
     hostname: "0.0.0.0", // default: "0.0.0.0"
-    compression: true,   // default: true
+    compression: true,   // default: true (permessage-deflate)
+    webClient: true,     // default: true, serve the built-in browser client
+    allowedOrigins: ["https://app.example.com"], // browser Origin allowlist
+    authenticate: (req) => checkToken(req),      // admit or refuse each upgrade
   })
 ```
+
+| Option | Description |
+|--------|-------------|
+| `port`, `hostname` | Where `listen()` binds. `listen(port)` overrides `port`. |
+| `compression` | Negotiate WebSocket `permessage-deflate`. |
+| `webClient` | Serve the built-in web client at `/` (plus the SPA fallback for app routes). `false` serves only the WebSocket and the `/__hypen__/` endpoints. |
+| `allowedOrigins` | Exact browser origins allowed to open the WebSocket. Other origins get 403. |
+| `authenticate` | `(request) => boolean \| Promise<boolean>`, called before every upgrade. See [Authentication](#authentication). |
+| `maxPayloadLength` | Largest accepted WebSocket message in bytes. |
 
 ### Compression
 
@@ -545,40 +602,29 @@ interface Session {
 
 ## Authentication
 
-Add authentication before the WebSocket upgrade:
+Connections are admitted before the WebSocket upgrade, before any session exists. Use `allowedOrigins` to stop other websites from opening sockets from a user's browser, and `authenticate` to check a token, cookie or signed query parameter:
 
 ```typescript
-Bun.serve({
-  port: 3000,
-  fetch(req, server) {
-    const url = new URL(req.url);
-
-    // Allow health checks
-    if (url.pathname === "/health") {
-      return new Response("OK");
-    }
-
-    // Validate auth
-    const token = req.headers.get("Authorization");
-    if (!validateToken(token)) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-
-    // Upgrade to WebSocket
-    if (server.upgrade(req, { data: { userId: getUserId(token) } })) {
-      return;
-    }
-
-    return new Response("Not Found", { status: 404 });
-  },
-  websocket: {
-    perMessageDeflate: true, // what `.listen()` does by default
-    // Wire up RemoteServer WebSocket handlers
-  },
-});
+new RemoteServer()
+  .app(myApp)
+  .config({
+    allowedOrigins: ["https://app.example.com"],
+    authenticate: async (req) => {
+      const url = new URL(req.url);
+      const token =
+        req.headers.get("authorization")?.replace(/^Bearer /, "") ??
+        url.searchParams.get("token");
+      return token !== null && (await validateToken(token));
+    },
+  })
+  .listen(3000);
 ```
 
-You can also use the client `props` sent in the `hello` message to pass metadata like auth tokens, platform info, or user preferences.
+- `authenticate` runs for every upgrade when it is set. Returning `false` refuses the connection with 403.
+- With `allowedOrigins` set, a request whose `Origin` is not listed is refused. Native clients send no `Origin`; they are admitted only when `authenticate` returns `true`.
+- With neither option set, every client is admitted and the server logs one warning at startup.
+
+Browsers cannot set headers on a WebSocket, so web clients usually pass a token in the query string or rely on a cookie. Clients can also send metadata in the `props` of their `hello` message; it is available as `session.props`.
 
 ## Routing
 
@@ -635,7 +681,15 @@ Button { Text("←") }.onClick(@router.back)
 ```
 
 The session mirrors the current path into primary `state.location`
-automatically when the primary's state shape carries that field.
+automatically when the primary's state shape carries that field. The
+built-in web client keeps the browser URL in sync with `state.location`:
+in-app navigation pushes a history entry, back/forward navigate, and
+opening or reloading a deep link such as `/counter` starts on that route.
+
+`@actions.*` are scoped to the module whose template uses them, so a
+child module cannot call its parent's action. Navigate with
+`@router.push` (or `context.router?.push()` in a handler) rather than a
+`navigate` action on the root module.
 
 Per-route modules load data in `onActivated` by reading route
 params off the router:
@@ -685,16 +739,16 @@ globalContext.getGlobalState();         // combined state snapshot
 
 ### Typed Events
 
-For type-safe event handling:
+For type-safe event handling, describe your events with a `type` alias. `TypedEventEmitter` needs a map that is assignable to `Record<string, unknown>`, which an `interface` is not, so `interface AppEvents { ... }` fails to type-check.
 
 ```typescript
 import { TypedEventEmitter } from "@hypen-space/core";
 
-interface AppEvents {
+type AppEvents = {
   "user:login": { userId: string; email: string };
   "user:logout": { userId: string };
-  "notification": { message: string; type: "info" | "error" };
-}
+  notification: { message: string; type: "info" | "error" };
+};
 
 const events = new TypedEventEmitter<AppEvents>();
 
@@ -706,18 +760,20 @@ events.on("user:login", (payload) => {
 events.emit("user:login", { userId: "1", email: "alice@example.com" });
 ```
 
-### Built-in Framework Events
+### Framework Events
 
-The global context emits these events automatically:
+`HypenFrameworkEvents` (exported as a type) declares the event names the framework reserves:
 
-| Event | Payload | When |
-|-------|---------|------|
-| `module:created` | `{ moduleId }` | Module initialized |
-| `module:destroyed` | `{ moduleId }` | Module unmounted |
-| `route:changed` | `{ from, to }` | Navigation occurred |
-| `state:updated` | `{ moduleId, paths }` | State changed |
-| `action:dispatched` | `{ moduleId, actionName, payload? }` | Action dispatched |
-| `error` | `{ message, error?, context? }` | Error occurred |
+| Event | Payload |
+|-------|---------|
+| `module:created` | `{ moduleId }` |
+| `module:destroyed` | `{ moduleId }` |
+| `route:changed` | `{ from, to }` |
+| `state:updated` | `{ moduleId, paths }` |
+| `action:dispatched` | `{ moduleId, actionName, payload? }` |
+| `error` | `{ message, error?, context? }` |
+
+Today the runtime emits only `error` (when a handler throws and `onError` does not handle it). The others are reserved names; for route changes use `router.onNavigate()`.
 
 ## Logging
 
@@ -727,65 +783,92 @@ Configure logging for debugging:
 import { setLogLevel, setDebugMode, configureLogger } from "@hypen-space/core";
 
 // Set global log level
-setLogLevel("debug");    // "debug" | "info" | "warn" | "error" | "silent"
+setLogLevel("debug");    // "debug" | "info" | "warn" | "error" | "none"
 
-// Enable debug mode (verbose output)
+// Shortcut: true = "debug", false = "error"
 setDebugMode(true);
 
-// Custom log handler
+// Full configuration. The handler is an object with one method per level.
 configureLogger({
   level: "info",
-  timestamp: true,
-  handler: (level, label, ...args) => {
-    myLogger.log(level, `[${label}]`, ...args);
+  timestamps: true,
+  colors: false,
+  handler: {
+    debug: (tag, ...args) => console.debug(`[${tag}]`, ...args),
+    info: (tag, ...args) => console.info(`[${tag}]`, ...args),
+    warn: (tag, ...args) => console.warn(`[${tag}]`, ...args),
+    error: (tag, ...args) => console.error(`[${tag}]`, ...args),
   },
 });
 ```
 
-Framework subsystems have individual loggers:
+Default levels: `info` in development, `warn` under test runners (`NODE_ENV=test`, which `bun test` sets), `error` with `NODE_ENV=production`.
+
+### DEBUG namespaces
+
+Set `DEBUG` to turn on every level for chosen loggers, as with the `debug` package:
+
+```bash
+DEBUG=hypen:* bun run server.ts               # all Hypen loggers
+DEBUG=hypen:remote,hypen:router bun run server.ts
+DEBUG=hypen:*,-hypen:state bun run server.ts  # all but State
+```
+
+Namespaces are `hypen:` plus the lower-cased logger tag (`hypen:remote`, `hypen:engine`, `hypen:router`, `hypen:state`, `hypen:module`, `hypen:loader`, `hypen:renderer`, ...); a namespace also covers its children. In a browser, set `localStorage.debug = "hypen:*"` and reload. From code, call `setDebugNamespaces(spec)` from `@hypen-space/core/logger`. `DEBUG` overrides the level for matching loggers unless the level is `"none"`. Under the CLI, `DEBUG=hypen:* hypen dev` is the same as `hypen dev --debug`.
+
+### Loggers
+
+Framework subsystems have individual loggers, and `createLogger(tag)` makes your own:
 
 ```typescript
-import { frameworkLoggers } from "@hypen-space/core";
+import { frameworkLoggers, createLogger } from "@hypen-space/core";
 
-// Available loggers: engine, app, state, router, events,
-// context, renderer, canvas, discovery, loader, hypen
+// frameworkLoggers: hypen, engine, router, state, events, remote, renderer,
+// module, lifecycle, loader, context, discovery, plugin, canvas, debug
+frameworkLoggers.remote.info("custom message");
+
+const log = createLogger("Billing"); // enabled by DEBUG=hypen:billing
+log.info("invoice sent");
 ```
 
 ## Testing
 
-Test modules without a running server:
+Test modules without a running server. A built definition keeps its action handlers in `handlers.onAction`, a `Map` from action name to handler (`actions` is only the list of names):
 
 ```typescript
+import { test, expect } from "bun:test";
 import { app } from "@hypen-space/core";
 
-// Build the module
 const counterDef = app
   .defineState({ count: 0 })
-  .onAction("increment", ({ state }) => { state.count++; })
+  .onAction<{ by?: number }>("increment", ({ action, state }) => {
+    state.count += action.payload?.by ?? 1;
+  })
   .build();
 
-// Test the action handler directly
-import { test, expect } from "bun:test";
-
-test("increment increases count", () => {
+test("increment increases count", async () => {
   const state = { count: 0 };
 
   // Call the action handler directly
-  counterDef.actions.increment({
-    action: { name: "increment" },
+  const increment = counterDef.handlers.onAction.get("increment")!;
+  await increment({
+    action: { name: "increment", payload: { by: 2 } },
     state,
-    context: null,
+    context: null as any, // not used by this handler
+    dataSources: {},
   });
 
-  expect(state.count).toBe(1);
+  expect(state.count).toBe(2);
+  expect(counterDef.actions).toEqual(["increment"]);
 });
 ```
 
 ### Testing with HypenModuleInstance
 
-For integration tests with the full module lifecycle:
+For integration tests with the full module lifecycle, run the definition on a real engine:
 
 ```typescript
+import { test, expect } from "bun:test";
 import { Engine } from "@hypen-space/server";
 import { HypenModuleInstance } from "@hypen-space/core";
 
@@ -808,13 +891,17 @@ test("module lifecycle", async () => {
 
 ## Health & Stats
 
-The `RemoteServer` exposes HTTP endpoints alongside the WebSocket:
+Internal HTTP endpoints live under the reserved `/__hypen__/` prefix, so app routes such as `/stats` or `/health` stay free:
 
-- **`GET /health`** — Returns `"OK"` for load balancer health checks
-- **`GET /stats`** — Returns session statistics as JSON
+- **`GET /__hypen__/health`**: `{"status":"ok","server":"hypen-remote"}`, for load balancer checks.
+- **`GET /__hypen__/stats`**: `{ activeSessions, pendingSessions, totalConnections }`. Private by default: only direct loopback requests get it (requests with `Forwarded`, `X-Forwarded-For` or `X-Real-IP` count as remote); everyone else gets a 404. `.exposeStats()` serves it to every client (restrict `/__hypen__/` at your proxy), and `.exposeStats(false)` turns it off.
+
+The legacy `GET /health` (plain `OK`) and `GET /stats` still answer requests that don't ask for HTML, for existing probes. A browser navigating to `/health` or `/stats` gets the app instead.
+
+With the built-in web client on, any other `GET` page navigation (accepting `text/html`, outside `/__hypen__/`, with no file extension) gets the app's HTML shell, so deep links work. Unknown asset paths get a 404.
 
 ```typescript
-const server = new RemoteServer()
+const server = await new RemoteServer()
   .module("App", appModule)
   .ui(ui)
   .listen(3000);
@@ -826,25 +913,12 @@ server.getSessionStats();    // { activeSessions, pendingSessions, totalConnecti
 
 ## Deployment
 
-Deploy your server to any platform that supports WebSockets:
+Deploy your server to any platform that runs Bun and supports WebSockets. Read the port from the environment:
 
-### Fly.io
-
-```toml
-# fly.toml
-[build]
-  builder = "heroku/buildpacks:20"
-
-[env]
-  PORT = "3000"
-
-[[services]]
-  internal_port = 3000
-  protocol = "tcp"
-
-  [[services.ports]]
-    port = 443
-    handlers = ["tls", "http"]
+```typescript
+await new RemoteServer()
+  .source("./src/components")
+  .listen(Number(process.env.PORT ?? 3000));
 ```
 
 ### Docker
@@ -859,18 +933,22 @@ EXPOSE 3000
 CMD ["bun", "run", "server.ts"]
 ```
 
+The same image works on Fly.io, Railway, Render and other container hosts; point their health check at `/__hypen__/health`.
+
+> A `hypen init` project can also be deployed as a static site: `hypen build` writes a self-contained `dist/` (including `dist/server.js`, a zero-dependency static server) that runs your modules in a Web Worker in the browser. Use `RemoteServer` when modules must run on your server (secrets, databases) or when native clients connect.
+
 ### Production Checklist
 
+- Set `allowedOrigins` and/or `authenticate` (the startup warning then goes away)
 - Set appropriate session TTL for your use case
-- Add authentication before WebSocket upgrade
-- Use the `/health` endpoint for load balancer checks
-- Monitor active connections via `/stats` or `getSessionStats()`
-- Each client gets its own module instance — plan memory accordingly
+- Use `/__hypen__/health` for load balancer checks
+- Monitor active connections via `getSessionStats()` (or `/__hypen__/stats` from the same host)
+- Each client gets its own module instance; plan memory accordingly
 - Consider `concurrent: "kick-old"` (default) to prevent stale connections
 
 ## Requirements
 
-- **Bun 1.0+** or **Node.js 18+**
+- **Bun 1.x** to run `RemoteServer.listen()` and the `hypen` CLI
 - TypeScript 5.0+ recommended
 
 ## See Also

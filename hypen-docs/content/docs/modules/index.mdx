@@ -13,6 +13,8 @@ A module consists of:
 - **Template** (`.hypen` file) — The declarative UI
 - **Definition** (TypeScript) — State, actions, and lifecycle handlers
 
+In a project created by `hypen init`, both live in the module's folder: `src/components/Counter/component.hypen` and `src/components/Counter/component.ts`.
+
 ```hypen
 module Counter {
     Column {
@@ -27,13 +29,23 @@ module Counter {
 import { app } from "@hypen-space/core";
 
 export default app
+  .module("Counter")
   .defineState({ count: 0 })
   .onAction("increment", async ({ state }) => {
     state.count++;
-  });
+  })
+  .build();
 ```
 
 ## API Reference
+
+### module
+
+`app.module("Name")` starts a definition registered under `Name`, the name templates use to render it (`Counter()`). Use it for every module that another template renders, with the same name as its folder and its `module Name { ... }` block; without it, `hypen dev` renders the module's state but rejects its actions as `invalid scoped UI action`. The entry module (`App`) can start from plain `app.defineState(...)`.
+
+```typescript
+app.module("Counter").defineState({ count: 0 })
+```
 
 ### defineState
 
@@ -190,6 +202,7 @@ See the [TypeScript SDK](/docs/servers/typescript#session-management) for detail
 Attach a state store for automatic persistence across sessions:
 
 ```typescript
+import { app } from "@hypen-space/core";
 import { durableObjectStore, session, global, withKey } from "@hypen-space/cf";
 
 // Per-session persistence
@@ -197,13 +210,16 @@ app.defineState({ draft: "" })
   .persist(durableObjectStore(session()))
 
 // Global (shared by all users)
-app.defineState({ messages: [] })
+app.defineState({ messages: [] as string[] })
   .persist(durableObjectStore(global()))
 
 // Keyed to a state value (e.g., user ID after login)
-app.defineState({ user: null, todos: [] })
+type User = { id: string; name: string };
+app.defineState<{ user: User | null; todos: string[] }>({ user: null, todos: [] })
   .persist(durableObjectStore(withKey(state => state.user?.id)))
 ```
+
+`durableObjectStore` works only on Cloudflare Workers with `@hypen-space/cf`. With `hypen dev` or `RemoteServer`, pass any object that implements `StateStore`.
 
 On restore, stored state is merged over `initialState`: new fields get defaults, existing fields are restored.
 
@@ -211,7 +227,7 @@ See the [Persistence Guide](/docs/guide/persistence) for details.
 
 ### build
 
-Finalizes the module definition. Required when passing to `RemoteServer.module()` or `HypenModuleInstance`:
+Finalizes the module definition. Every definition ends in exactly one terminal call: `.build()` when the template lives in a sibling `.hypen` file (or there is no template), otherwise `.ui()` / `.uiFile()`.
 
 ```typescript
 const myModule = app
@@ -220,12 +236,14 @@ const myModule = app
   .build();
 ```
 
+Pass the built definition to `RemoteServer.module()`, `serve({ module })` or `HypenModuleInstance`. `RemoteServer.module()` and `serve()` also accept an unbuilt builder and call `.build()` for you, but ending the chain yourself keeps the definition usable everywhere.
+
 ### ui
 
 For single-file components, embed the template directly using the `hypen` tagged template literal:
 
 ```typescript
-import { app, hypen, state } from "@hypen-space/core";
+import { app, hypen } from "@hypen-space/core";
 
 export default app
   .defineState({ count: 0 })
@@ -239,7 +257,7 @@ export default app
   `);
 ```
 
-The `.ui()` method calls `.build()` internally and returns the finalized module definition.
+The `.ui()` method calls `.build()` internally and returns the finalized module definition, so it is the last call in the chain. A trailing `.build()` after `.ui()` is allowed and does nothing. `.uiFile(path)` does the same with a template read from a file.
 
 ## State Management
 

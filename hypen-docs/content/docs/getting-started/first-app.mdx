@@ -11,6 +11,7 @@ Let's build a simple counter app to learn the basics of Hypen. By the end of thi
 - How to style with applicators
 - How to manage state with modules
 - How to handle user interactions
+- How to move between screens with the router
 
 ## What We're Building
 
@@ -21,29 +22,38 @@ A counter with increment and decrement buttons:
 │                         │
 │       Count: 0          │
 │                         │
-│    [ - ]     [ + ]      │
+│      [ - ]  [ + ]       │
 │                         │
+│      Back to Home       │
 └─────────────────────────┘
 ```
 
 ## Step 1: Create the Project
 
-Use the Hypen CLI to scaffold a new project:
+You need [Bun](https://bun.sh) 1.2 or newer (see [Installation](/docs/getting-started/installation)). Scaffold a new project with the Hypen CLI:
 
 ```bash
-# Install the CLI if you haven't already
-bun install -g @hypen-space/cli
-
-# Create a new project
-hypen init counter-app
+bunx @hypen-space/cli init counter-app
 cd counter-app
 ```
 
-The CLI creates a project structure with a starter `App` component. Let's replace it with our counter.
+Pick **TypeScript** and the **file-based** layout when asked (they are the defaults). Then start the dev server and leave it running:
 
-## Step 2: Create the Template
+```bash
+bun run dev
+```
 
-Create `src/components/Counter/component.hypen`:
+Open `http://localhost:3000`. The starter app has three modules in `src/components/`:
+
+- `App` is the root module. Its template holds a `Router` that shows `Home` at `/` and `Counter` at `/counter`.
+- `Home` is the welcome screen, with a **Go to Counter →** button.
+- `Counter` is a counter screen.
+
+In this tutorial you'll rewrite the `Counter` screen from scratch. Because it is already wired into the router, you don't need to touch `App` or `hypen.json`.
+
+## Step 2: Write the Template
+
+Replace the contents of `src/components/Counter/component.hypen` with:
 
 ```hypen
 module Counter {
@@ -64,9 +74,6 @@ module Counter {
             .padding(horizontal: 24, vertical: 12)
             .borderRadius(8)
 
-            Spacer()
-                .width(24)
-
             Button {
                 Text("+")
                     .fontSize(24)
@@ -77,10 +84,19 @@ module Counter {
             .padding(horizontal: 24, vertical: 12)
             .borderRadius(8)
         }
+        .gap(24)
+
+        Button {
+            Text("Back to Home")
+                .color("#2563EB")
+        }
+        .onClick(@router.push, to: "/")
+        .padding(12)
     }
     .padding(32)
     .gap(24)
     .horizontalAlignment("center")
+    .tw("w-full")
 }
 ```
 
@@ -94,7 +110,7 @@ module Counter {
 }
 ```
 
-`module` tells Hypen this component has state. The name `Counter` must match the TypeScript module file.
+`module` tells Hypen this component has state. The name `Counter` matches the module defined in `component.ts` next to it.
 
 ### State Bindings
 
@@ -111,9 +127,20 @@ Button { Text("+") }
     .onClick(@actions.increment)
 ```
 
-`.onClick(@actions.increment)` is an event applicator that triggers the `increment` action defined in the module.
+`.onClick(@actions.increment)` is an event applicator that triggers the `increment` action defined in this module.
 
-### Applicators
+Actions are scoped to the module whose template uses them: `@actions.increment` here always goes to `Counter`'s handlers. A child screen can't call an action that only its parent handles.
+
+### Navigation
+
+```hypen
+Button { Text("Back to Home") }
+    .onClick(@router.push, to: "/")
+```
+
+`@router.push` is a built-in action that works from any module. It navigates to the `to:` path, and the `Router` in `App` shows the matching `Route`. The browser URL follows along, so back/forward and reloading `/counter` work too. The other router actions are `@router.back`, `@router.forward` and `@router.replace` (with `to:`).
+
+### Layout and Applicators
 
 ```hypen
 .fontSize(48)
@@ -121,11 +148,13 @@ Button { Text("+") }
 .backgroundColor("#EF4444")
 ```
 
-Applicators style the component. They're chained with dots and applied in order.
+Applicators style the component. They're chained with dots and applied in order. `.gap(24)` on the `Row` puts 24 pixels between the two buttons, and `.horizontalAlignment("center")` centers the column's children.
 
-## Step 3: Create the Module
+`.tw("w-full")` applies a Tailwind class: it makes the page fill the screen width, which keeps it from shrinking to a narrow strip on desktop and Android. Use it on the root of every routed page.
 
-Create `src/components/Counter/component.ts`:
+## Step 3: Write the Module
+
+Replace the contents of `src/components/Counter/component.ts` with:
 
 ```typescript
 import { app } from "@hypen-space/core";
@@ -135,12 +164,13 @@ interface CounterState {
   count: number;
 }
 
-// Create the module
+// Create the module. The name must match `module Counter` in the template.
 export default app
+  .module("Counter")
   // Set initial state
   .defineState<CounterState>({ count: 0 })
 
-  // Handle increment action - receives context object
+  // Handle increment action - receives a context object
   .onAction("increment", ({ state }) => {
     state.count++;
     // State changes sync automatically via Proxy
@@ -171,66 +201,77 @@ Sets the initial state. The generic `<CounterState>` provides TypeScript type ch
 })
 ```
 
-- `action` - Contains event name, payload, and sender
+- `action` - Contains the action name, payload, and sender
 - `state` - The current state (mutable, auto-synced via Proxy)
 - `context` - GlobalContext for cross-module communication
-- `context.router` - HypenRouter for programmatic navigation
+- `context.router` - HypenRouter for programmatic navigation, e.g. `context.router?.push("/")`
+
+### Finishing with `.build()`
+
+`.build()` finishes the module definition. In file-based projects the template lives in `component.hypen`, so `.build()` is the last call. (When a module carries its template inline, end with `.ui(template)` instead; see [Building a Remote App](/docs/getting-started/remote-app).)
 
 ## Step 4: Run It!
 
-Start the development server using the CLI:
+The dev server you started in Step 1 reloads on save. If it isn't running, start it again:
 
 ```bash
-hypen dev
+bun run dev
 ```
 
-Open `http://localhost:3000` in your browser and you should see the counter. Click the buttons to increment and decrement!
+Open `http://localhost:3000` and click **Go to Counter →**, or open `http://localhost:3000/counter` directly. Click the buttons to increment and decrement, then **Back to Home** to return.
+
+Hot reload restarts the modules, so the count goes back to 0 when you save a file.
+
+<Callout type="warn">
+Projects created with CLI 0.6.6 or earlier have `Home` and `Counter` buttons that use `@actions.navigate`. Those clicks fail with `invalid scoped UI action`, because only `App` handles `navigate`. Replace them with `.onClick(@router.push, to: "/counter")` and `.onClick(@router.push, to: "/")`. Those versions also don't update the browser URL or open deep links like `/counter`; use the **Go to Counter →** button.
+</Callout>
 
 ### Preview with Hypen Studio
 
-For a richer development experience, launch [Hypen Studio](/docs/tooling/studio) — a full in-browser IDE with a code editor, live preview, state inspector, action log, and time-travel debugging:
+For a richer development experience, launch [Hypen Studio](/docs/tooling/studio). It is a full in-browser IDE with a code editor, live preview, state inspector, action log and time-travel debugging:
 
 ```bash
-hypen studio
+bun run studio
 ```
 
-Studio opens at `http://localhost:5173`. You can edit your component and module files directly in the editor and see changes reflected in the live preview instantly. Use the state inspector to watch `state.count` update as you click buttons, and the action log to verify each `increment` and `decrement` action fires correctly.
+Studio opens at `http://localhost:5173`. You can edit your component and module files in the editor and see the changes in the live preview. Use the state inspector to watch `state.count` update as you click buttons, and the action log to check that each `increment` and `decrement` action fires.
 
 ### Preview on Android and iOS
 
-Run your counter app on a real device or simulator:
+Run your counter app on a device, emulator or simulator:
 
 ```bash
 # Android (requires adb)
-hypen run android
+bunx hypen run android
 
 # iOS Simulator (requires Xcode)
-hypen run ios
+bunx hypen run ios
 ```
 
-The CLI downloads a lightweight runner app, detects your connected devices, and launches your counter with hot reload. The same Hypen code renders natively on each platform — DOM elements on Web, Jetpack Compose on Android, SwiftUI on iOS.
+The CLI downloads a lightweight runner app, detects your connected devices and launches your app with hot reload. The same Hypen code renders natively on each platform: DOM elements on the web, Jetpack Compose on Android, SwiftUI on iOS.
 
-Combine device preview with Studio to edit in the browser and see changes live on the device:
+Combine device preview with Studio to edit in the browser and see the changes on the device:
 
 ```bash
-hypen run android --studio
-hypen run ios --studio
+bunx hypen run android --studio
+bunx hypen run ios --studio
 ```
 
 ## What's Happening
 
-1. **Discovery** - The CLI discovers the Counter component in `src/components/`
-2. **Parse** - The Hypen engine parses the `.hypen` template
-3. **Initial Render** - Creates DOM elements with `count: 0`
-4. **Click** - User clicks "+" button
-5. **Action** - `@actions.increment` triggers the action handler
-6. **State Update** - `state.count++` modifies the state
-7. **Auto-Sync** - State changes are tracked via Proxy and sync automatically
-8. **Re-render** - Engine diffs and updates only the text "Count: 1"
+1. **Discovery** - The CLI discovers the modules in `src/components/` and starts from `App`
+2. **Parse** - The Hypen engine parses the `.hypen` templates
+3. **Routing** - `App`'s `Router` matches the current path (`/counter`) and renders `Counter`
+4. **Initial Render** - Creates DOM elements with `count: 0`
+5. **Click** - User clicks the "+" button
+6. **Action** - `@actions.increment` triggers `Counter`'s action handler
+7. **State Update** - `state.count++` modifies the state
+8. **Auto-Sync** - State changes are tracked via Proxy and sync automatically
+9. **Re-render** - The engine diffs and updates only the text "Count: 1"
 
 ## Challenges
 
-Try extending the counter:
+Try extending the counter. Each challenge adds a piece to the template and a handler to the module chain (before `.build()`).
 
 ### 1. Add a Reset Button
 
@@ -242,34 +283,36 @@ Button { Text("Reset") }
 ```
 
 ```typescript
-.onAction("reset", async ({ state }) => {
+.onAction("reset", ({ state }) => {
   state.count = 0;
 })
 ```
 
 ### 2. Add a Step Size
 
-Let users increment by different amounts:
+Let users add different amounts. Extra arguments after the action become its payload:
 
 ```hypen
 Row {
-    Button { Text("+1") }.onClick(@actions.increment, step: 1)
-    Button { Text("+5") }.onClick(@actions.increment, step: 5)
-    Button { Text("+10") }.onClick(@actions.increment, step: 10)
+    Button { Text("+1") }.onClick(@actions.add, step: 1)
+    Button { Text("+5") }.onClick(@actions.add, step: 5)
+    Button { Text("+10") }.onClick(@actions.add, step: 10)
 }
+.gap(8)
 ```
 
 ```typescript
-.onAction<{ step: number }>("increment", async ({ action, state }) => {
-  const step = action.payload!.step || 1;
-  state.count += step;
+.onAction<{ step: number }>("add", ({ action, state }) => {
+  state.count += action.payload?.step ?? 1;
 })
 ```
 
 ### 3. Prevent Negative Numbers
 
+Change the `decrement` handler:
+
 ```typescript
-.onAction("decrement", async ({ state }) => {
+.onAction("decrement", ({ state }) => {
   if (state.count > 0) {
     state.count--;
   }
@@ -284,3 +327,4 @@ You've built your first Hypen app! Continue learning:
 - [Components](/docs/guide/components) - All built-in components
 - [Styling](/docs/guide/styling) - Master applicators
 - [State & Modules](/docs/guide/state) - Advanced state management
+- [Building a Remote App](/docs/getting-started/remote-app) - Serve an app from your own server

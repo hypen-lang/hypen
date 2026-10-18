@@ -13,19 +13,21 @@ is the only layer that differs.
 
 ## Supported platforms
 
-| Platform | Package | Renders to | Status |
-|----------|---------|------------|--------|
-| [Web](/docs/adapters/web) | `@hypen-space/web` | DOM elements or 2D Canvas | Stable |
-| [Desktop](/docs/adapters/desktop) | `hypen-renderer-desktop` | Native window (winit + wgpu + Vello) | Stable |
-| [Android](/docs/adapters/android) | `space.hypen:hypen-renderer` | Jetpack Compose | Stable |
-| [iOS](/docs/adapters/ios) | `HypenSwift` | SwiftUI | Stable |
-| [Rust](/docs/adapters/rust) | `hypen-server` | Embedded engine, no WASM | Stable |
+| Platform | Package | Renders to | Where to get it |
+|----------|---------|------------|-----------------|
+| [Web](/docs/adapters/web) | `@hypen-space/web` | DOM elements or 2D Canvas | npm |
+| [Desktop](/docs/adapters/desktop) | `hypen-renderer-desktop` | Native window (winit + wgpu + Vello) | Not on crates.io yet; path dependency on the repository |
+| [Android](/docs/adapters/android) | `space.hypen:hypen-renderer` | Jetpack Compose | Maven Central (0.4.952, older than the repository) |
+| [iOS](/docs/adapters/ios) | `HypenSwift` | SwiftUI | Not published; local package from the repository |
+| [Rust](/docs/adapters/rust) | `hypen-server` | Embedded engine, no WASM | crates.io (0.6.x) |
 
 ## Two ways to run
 
-Every adapter above supports both of these. The choice is a deployment
-decision, not a code change — the same module and the same `.hypen` template
-work either way.
+The same module and the same `.hypen` template work either way, so the
+choice is a deployment decision rather than a code change. Remote works on
+every adapter; local works where the engine can run next to the renderer:
+Web (`hypen build`, or `@hypen-space/web-engine`), Desktop and Rust. The
+Android and iOS adapters are remote-only today.
 
 ### Local
 

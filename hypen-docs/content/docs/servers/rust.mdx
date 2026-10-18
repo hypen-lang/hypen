@@ -13,70 +13,110 @@ Add to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-hypen-server = "0.4"
+hypen-server = "0.6"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 ```
+
+The current release on crates.io is `0.6.6`.
 
 For async action handlers:
 
 ```toml
 [dependencies]
-hypen-server = { version = "0.4", features = ["async"] }
+hypen-server = { version = "0.6", features = ["async"] }
 tokio = { version = "1", features = ["full"] }
 ```
 
 ## Quick Start
 
-Create a counter module with the fluent API and serve it over WebSocket:
+`hypen-server` holds modules, state and sessions; it does not open a socket itself. This complete program serves a counter over WebSocket with `tokio-tungstenite`, one `RemoteSession` per connection:
+
+```toml
+[dependencies]
+hypen-server = "0.6"
+serde = { version = "1", features = ["derive"] }
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+```
 
 ```rust
+use std::sync::Arc;
+
+use futures_util::{SinkExt, StreamExt};
 use hypen_server::prelude::*;
+use hypen_server::remote::RemoteSession;
 use serde::{Deserialize, Serialize};
+use tokio::net::TcpListener;
+use tokio_tungstenite::tungstenite::Message;
 
 #[derive(Clone, Default, Serialize, Deserialize)]
 struct CounterState {
     count: i32,
 }
 
-fn main() -> Result<()> {
-    // 1. Define the module.
-    let counter = HypenApp::module::<CounterState>("Counter")
-        .state(CounterState::default())
-        .on_action::<()>("increment", |state, _, _ctx| { state.count += 1; })
-        .on_action::<()>("decrement", |state, _, _ctx| { state.count -= 1; })
-        .ui(r#"
-            Column {
-                Text("Count: @{state.count}")
-                Button("@actions.increment") { Text("+") }
-                Button("@actions.decrement") { Text("-") }
+#[tokio::main]
+async fn main() {
+    // 1. Define the module once; every connection gets its own session.
+    let counter = Arc::new(
+        HypenApp::module::<CounterState>("Counter")
+            .state(CounterState::default())
+            .on_action::<()>("increment", |state, _, _ctx| state.count += 1)
+            .on_action::<()>("decrement", |state, _, _ctx| state.count -= 1)
+            .ui(r#"
+                Column {
+                    Text("Count: @{state.count}")
+                    Button { Text("+") }.onClick(@actions.increment)
+                    Button { Text("-") }.onClick(@actions.decrement)
+                }
+            "#)
+            .build(),
+    );
+
+    // 2. Accept WebSocket connections and drive one RemoteSession per socket.
+    let port = std::env::var("PORT").unwrap_or_else(|_| "3000".into());
+    let listener = TcpListener::bind(format!("0.0.0.0:{port}")).await.expect("bind");
+    println!("Hypen server on ws://localhost:{port}");
+
+    loop {
+        let (stream, _) = listener.accept().await.expect("accept");
+        let counter = counter.clone();
+        tokio::spawn(async move {
+            let Ok(ws) = tokio_tungstenite::accept_async(stream).await else { return };
+            let session = RemoteSession::from_definition(counter, ComponentRegistry::new());
+            let (mut tx, mut rx) = ws.split();
+            while let Some(Ok(msg)) = rx.next().await {
+                match msg {
+                    // `hello`, `dispatchAction`, ... -> sessionAck, initialTree, patches
+                    Message::Text(text) => {
+                        for reply in session.handle_message(&text) {
+                            if tx.send(Message::Text(reply)).await.is_err() {
+                                return;
+                            }
+                        }
+                    }
+                    Message::Close(_) => break,
+                    _ => {}
+                }
             }
-        "#)
-        .build();
-
-    // 2. Register modules on a HypenApp via route-based wiring.
-    let app = HypenApp::builder()
-        .route("/", counter)
-        // .route("/feed", feed_module)
-        .build();
-
-    // 3. Plug `app` into your HTTP framework (Axum, Actix, etc.) via the
-    //    framework integration crate. The SDK provides the module system
-    //    and state management; the transport layer is framework-specific.
-
-    Ok(())
+            session.handle_close();
+        });
+    }
 }
 ```
 
-For quick unit testing you can also instantiate a single module without the `HypenApp` wrapper using `ModuleInstance::new(Arc::new(counter), None)?`. Real deployments should use `HypenApp::builder()` + route-based registration.
+Run it with `cargo run`, then point a Hypen client (Android, desktop, a web `RemoteEngine`) at `ws://localhost:3000` (`PORT` overrides the port). The session answers the client's `hello` with `sessionAck` and the `initialTree`, and each `dispatchAction` with patches. Unlike the TypeScript and Go servers, this loop serves no browser page; the same session works behind Axum, Actix or any other WebSocket stack.
+
+For quick unit testing you can also instantiate a single module without a socket, via `HypenApp::builder().build().instantiate(def)` (see [Module Instance Lifecycle](#module-instance-lifecycle)).
 
 The UI template uses Hypen DSL:
 
 ```hypen
 Column {
     Text("Count: @{state.count}")
-    Button("@actions.increment") { Text("+") }
-    Button("@actions.decrement") { Text("-") }
+    Button { Text("+") }.onClick(@actions.increment)
+    Button { Text("-") }.onClick(@actions.decrement)
 }
 ```
 
@@ -84,7 +124,7 @@ State is any type implementing `Serialize + DeserializeOwned + Clone + Send + Sy
 
 ## Module Builder API
 
-`HypenApp::module::<S>("name")` returns a `ModuleBuilder<S>` for fluent chaining. All configuration methods return `self`. Terminate with `.build()` or `.ui()`.
+`HypenApp::module::<S>("name")` returns a `ModuleBuilder<S>` for fluent chaining. All configuration methods, including `.ui()` and `.ui_file()`, return `self`. Always terminate with `.build()`, which returns the `ModuleDefinition<S>`.
 
 ```rust
 let module = HypenApp::module::<MyState>("MyModule")

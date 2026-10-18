@@ -21,6 +21,8 @@ module App {
 }
 ```
 
+Paths can be exact (`/search`), take parameters (`/users/:id`), or end in a wildcard (`/docs/*`). Add an `Else { NotFound() }` (or `Fallback { ... }`) child for paths no route matches.
+
 Navigate with the reserved `@router.*` namespace — no action handler required:
 
 ```hypen
@@ -31,24 +33,44 @@ Button { Text("Back") }
     .onClick(@router.back)
 ```
 
-Each `Route`'s body references a component (e.g. `HomePage()`). Register those as modules the same way you'd register any module; the SDK's auto-wire handles the rest:
+The root module's state must have a `location` string. `Router` matches its `Route(path: ...)` children against `@{state.location}`, and the runtime keeps that field in sync with every navigation. The scaffold's `App/component.ts` is exactly this:
 
 ```typescript
+// src/components/App/component.ts
 import { app } from "@hypen-space/core";
-import { RemoteServer } from "@hypen-space/server";
+
+export default app
+    .defineState<{ location: string }>({ location: "/" })
+    .build();
+```
+
+Each `Route`'s body references a component (e.g. `HomePage()`). Give it a folder with a `component.hypen` and, if it has state or actions, a `component.ts` registered under the same name:
+
+```typescript
+// src/components/HomePage/component.ts
+import { app } from "@hypen-space/core";
+
+type Post = { id: string; title: string };
 
 export default app
     .module("HomePage")
-    .defineState({ posts: [] })
+    .defineState<{ posts: Post[] }>({ posts: [] })
     .onCreated(async (state) => {
-        state.posts = await fetchFeed();
+        // Module code runs on the server: fetch absolute URLs
+        const res = await fetch("https://api.example.com/feed");
+        state.posts = await res.json();
     })
     .build();
+```
 
-// server/index.ts
+That's all `hypen dev` and `hypen build` need. If you host the server yourself, point `RemoteServer` at the same folder. With `.source()` the `.module()` call is optional: the module named `App` becomes the entry.
+
+```typescript
+// server.ts
+import { RemoteServer } from "@hypen-space/server";
+
 new RemoteServer()
-    .module("App", appModule)
-    .source("./components")
+    .source("./src/components")   // discovers App, HomePage, Search, Profile
     .listen(3000);
 ```
 
@@ -62,8 +84,19 @@ Four reserved actions — dispatch them from any DSL click, no user handler need
 | ------------------ | ------------------------------------------------------------------- |
 | `@router.push`     | Push a new path onto the history stack. Payload: `{ to: "/x" }`.    |
 | `@router.replace`  | Replace the current path in place. Payload: `{ to: "/x" }`.         |
-| `@router.back`     | Pop the current path off history.                                   |
+| `@router.back`     | Pop the current path off the session's history. Does nothing when there is nothing to go back to (for example right after opening a deep link). |
 | `@router.forward`  | Server-side no-op. Reserved for client-side history forward.        |
+
+`@actions.*` are scoped to the module whose template uses them, so a child screen can't call an action that only its parent handles. Navigate with `@router.*` rather than with a parent action like `@actions.navigate`.
+
+From a handler, navigate with `context.router`:
+
+```typescript
+.onAction("saveAndClose", async ({ state, context }) => {
+    await save(state);
+    context.router?.push("/");
+})
+```
 
 ```hypen
 Row {
@@ -73,13 +106,35 @@ Row {
 }
 ```
 
-The server's primary state mirrors the current path into `state.location` automatically (when the primary's state shape has a `location` field). You can bind against it for active-tab styling:
+The server mirrors the current path into the root module's `state.location` (when its state has a `location` field). You can bind against it for active-tab styling:
 
 ```hypen
 Button { Text("Search") }
     .onClick(@router.push, to: "/search")
     .color("@{state.location == '/search' ? '#3B82F6' : '#6B7280'}")
 ```
+
+## URLs, deep links and the back button
+
+On the web (`hypen dev`, `RemoteServer`'s built-in web client, and the static site from `hypen build`) the browser URL follows `state.location`:
+
+- **In-app navigation** (`@router.push`, `@router.replace`, `context.router?.push()`) updates the address bar and pushes a history entry, using real paths (`/counter`), not `#/counter`.
+- **Browser back / forward** navigate the app to the URL's path.
+- **Deep links and reloads**: opening `http://localhost:3000/counter` directly starts the app on that route.
+
+This needs a `Router { Route(path: ...) }` in the root template and a string `location` in the root module's state, which is what the scaffold sets up.
+
+For deep links to load, the server must answer any page URL with the app's HTML:
+
+- `RemoteServer` (and so `hypen dev`) does this already. Any `GET` that accepts `text/html`, outside `/__hypen__/`, whose last path segment has no file extension, gets the HTML shell. Unknown asset paths get a 404.
+- `node dist/server.js` (the server `hypen build` writes) does the same. On any other static host (Netlify, Cloudflare Pages, S3, nginx), serve the site from the origin root and configure an SPA fallback to `index.html`.
+
+`RemoteServer` keeps its own endpoints under the reserved `/__hypen__/` prefix, so app routes named `/stats` or `/health` work like any other route:
+
+| Endpoint | Returns |
+|----------|---------|
+| `GET /__hypen__/health` | `{"status":"ok","server":"hypen-remote"}` |
+| `GET /__hypen__/stats` | `{"activeSessions", "pendingSessions", "totalConnections"}`. Only answered for direct loopback requests by default; `.exposeStats()` serves it to every client, `.exposeStats(false)` disables it. |
 
 ## Route parameters
 
@@ -97,13 +152,18 @@ Read params inside a per-route module's lifecycle. `onActivated` fires on every 
 ```typescript
 import { app } from "@hypen-space/core";
 
+type User = { id: string; name: string };
+
 export default app
     .module("UserProfile")
     .defineState<{ user: User | null }>({ user: null })
     .onActivated(async (state, ctx) => {
         const match = ctx?.router?.matchPath("/users/:id", ctx.router.getCurrentPath());
         const id = match?.params.id;
-        if (id) state.user = await fetchUser(id);
+        if (id) {
+            const res = await fetch(`https://api.example.com/users/${id}`);
+            state.user = await res.json();
+        }
     })
     .build();
 ```
@@ -172,7 +232,7 @@ Opt out per module:
 
 ```typescript
 app.module("Ephemeral")
-    .defineState({ ... }, { persist: false })
+    .defineState({ draft: "" }, { persist: false })
     .build();
 ```
 
@@ -217,18 +277,25 @@ Path conflicts: the **outermost** Router wins. `discoverRouters` emits outer blo
 ```typescript
 // TypeScript — @hypen-space/server
 new RemoteServer()
-    .module("App", appModule)        // primary
-    .source("./components")          // discovers App, Home, Search, ...
+    .source("./src/components")      // discovers App, Home, Search, ...; App is the entry
+    .listen(3000);
+
+// Or name the entry explicitly
+new RemoteServer()
+    .module("App", appModule)        // appModule: the default export of App/component.ts
+    .source("./src/components")
     .listen(3000);
 ```
 
 ```go
 // Go — github.com/hypen-space/core/remote
-remote.NewRemoteServer().
+// appDef ends in .UI(appTemplate); ListenAndServe blocks until Stop()
+if err := remote.NewRemoteServer().
     WithDefinition(appDef).
     Source("./components").
-    UI(appTemplate).
-    ListenAndServe(":3000")
+    ListenAndServe(3000); err != nil {
+    log.Fatal(err)
+}
 ```
 
 ```swift
@@ -266,7 +333,7 @@ Route matching is an engine concern — not a renderer one. `Router` and `Route`
 - The renderer (DOM, Canvas, SwiftUI, Compose) applies patches. No platform carries routing logic.
 
 Same contract everywhere:
-- **Web**: browser `history.pushState` / hash navigation
+- **Web**: the browser URL follows `state.location` through `history.pushState` (see [URLs, deep links and the back button](#urls-deep-links-and-the-back-button))
 - **iOS**: SwiftUI view-tree swaps driven by `state.location`
 - **Android**: Compose recomposition driven by `state.location`
 - **Remote UI**: server-side state streamed over WebSocket

@@ -89,6 +89,10 @@ type DeviceResult<T> =
 - `simulated: true` means a [development fake](/docs/device/client-setup#development-the-fake-host)
   produced the result.
 
+<Callout type="info">
+`error` exists only on the failed branch, so check `res.ok` before reading `res.error` (or `res.value`). That check narrows the type only with `"strict": true` (or `"strictNullChecks": true`) in `tsconfig.json`, which the `hypen init` scaffold sets. Without it, TypeScript reports `Property 'error' does not exist on type 'DeviceResult<…>'` even after `if (!res.ok)`. If you can't turn strict mode on, compare explicitly: `if (res.ok === false) { res.error.code }` narrows in every mode.
+</Callout>
+
 For uploads, `value` carries **verified bytes** instead of the wire's size and
 hash. Each item is `{ channel, contentType, bytes: Uint8Array }`, plus `name`
 for `file.pick`. The server has already checked the item set, every size and
@@ -138,7 +142,8 @@ app
     );
     state.status = res.ok ? "picked" : res.error.code; // "cancelled" after abort
   })
-  .onAction("cancelPick", ({ state }) => pending.get(state)?.abort());
+  .onAction("cancelPick", ({ state }) => pending.get(state)?.abort())
+  .build();
 ```
 
 ### Keep the handler waiting
@@ -253,7 +258,8 @@ app
     });
     state.scanning = handle.id !== null;
   })
-  .onAction("stopScan", ({ state }) => scans.get(state)?.cancel());
+  .onAction("stopScan", ({ state }) => scans.get(state)?.cancel())
+  .build();
 ```
 
 Unlike a unary request, a stream keeps running after the handler that opened

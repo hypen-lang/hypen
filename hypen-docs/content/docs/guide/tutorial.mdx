@@ -52,19 +52,35 @@ hypen init chat-app
 cd chat-app
 ```
 
-This creates a project with a starter `App` component. The structure looks like:
+`hypen init` asks for a language, a module layout and which AI agent skill files to install. Pick **TypeScript** and **file-based** (the defaults; they are also what you get when the command runs without a terminal, for example in CI). It then installs the dependencies.
+
+The structure looks like:
 
 ```
 chat-app/
-├── hypen.json
-├── package.json
+├── hypen.json                 ← "entry": "App", "components": "./src/components"
+├── package.json               ← scripts: dev, studio, test, build, start, serve
+├── tsconfig.json
+├── .gitignore
 ├── src/
+│   ├── app.ts                 ← optional standalone server (not used by hypen dev)
 │   └── components/
-│       └── App/
-│           ├── component.hypen    ← UI template
-│           └── component.ts       ← State & logic
-└── tsconfig.json
+│       ├── App/
+│       │   ├── component.hypen    ← UI template: a Router over "/" and "/counter"
+│       │   └── component.ts       ← State & logic
+│       ├── Home/
+│       │   ├── component.hypen
+│       │   └── component.ts
+│       └── Counter/
+│           ├── component.hypen
+│           └── component.ts
+├── .claude/skills/hypen-ui.md ← only if you chose the Claude skill
+└── .agent/skills/hypen-ui.md  ← only if you chose the generic agent skill
 ```
+
+The starter app is a small two-screen app: `App` holds a `Router`, `Home` is the `/` screen and `Counter` the `/counter` screen, and the screens navigate with `@router.push`. In this tutorial you'll replace `App`'s template with the chat UI, so `Home` and `Counter` are no longer shown. You can leave them, or delete their folders together with the two lines in `src/app.ts` that import them.
+
+`src/app.ts` is **not** used by `hypen dev` or `hypen build`; they discover `src/components/*` on their own. It's an optional standalone remote-UI server (`bun run serve`) for native clients or self-hosting, and you can ignore it here.
 
 There are three ways to write a Hypen component:
 - **`.hypen` only** — a purely declarative component with no state or logic
@@ -79,7 +95,9 @@ Start the dev server to see changes live:
 hypen dev
 ```
 
-Open `http://localhost:3000` — you should see the starter app. Leave this running; it hot-reloads as you edit.
+Open `http://localhost:3000` — you should see the starter app's Home screen; "Go to Counter →" switches to the counter and the address bar changes to `/counter`. Leave this running; it hot-reloads as you edit.
+
+`bun run dev`, `bunx hypen dev` and a global `hypen dev` all do the same thing: a globally installed `hypen` hands project commands to the project's own `node_modules/@hypen-space/cli`.
 
 > **Tip:** You can also run `hypen studio` to open [Hypen Studio](/docs/tooling/studio), a full in-browser IDE with live preview, state inspector, time-travel debugging, and an integrated terminal.
 
@@ -376,7 +394,7 @@ Several new concepts here:
 
 **Expression bindings** like `"@{item.role == 'user' ? '#3B82F6' : '#F3F4F6'}"` let you compute values inline. User messages get a blue background; assistant messages get gray.
 
-**`List`** wraps the ForEach to make the message area scrollable.
+**`.scrollable(true)`** makes the message area scroll once the messages outgrow it.
 
 **`.onKey(@actions.sendMessage)`** fires the action when Enter is pressed, so users can send messages with the keyboard too.
 
@@ -480,12 +498,16 @@ export default app
 
 Notice we added `isLoading` to state. Let's show a typing indicator while we wait for the AI. We'll also disable the send button.
 
-Before running, set your API key:
+Before running, set your API key, either in your shell or in a `.env` file in the project root (Bun loads `.env` automatically):
 
 ```bash
 export OPENAI_API_KEY="sk-..."
 hypen dev
 ```
+
+<Callout type="warn">
+This works because under `hypen dev` your module code runs **on the server**, where `process.env.OPENAI_API_KEY` is available and never reaches the browser. The static site from `hypen build` is different: it bundles module code into a Web Worker that runs in the visitor's browser, with no `process.env`. Don't put secrets in modules you ship with `hypen build`; host an app like this one with a server instead (`bun run serve` runs `src/app.ts`, a `RemoteServer`).
+</Callout>
 
 ## Step 7: Add a loading indicator
 

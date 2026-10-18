@@ -5,64 +5,98 @@ description: Hypen adapter for Android with Jetpack Compose
 
 # Android Adapter
 
-The Android adapter renders Hypen components to native Jetpack Compose UI.
+The Android adapter (`space.hypen:hypen-renderer`) renders a remote Hypen app to native Jetpack Compose UI. It connects to a Hypen server over WebSocket, receives patches and renders them; module code runs on the server.
+
+## Trying it without an Android project
+
+`hypen run android` (from a project created with `hypen init`) starts the dev server, installs a prebuilt runner app on a connected device or emulator and points it at your app. See the [CLI docs](/docs/tooling/cli). Use the library below when you want Hypen inside your own app.
 
 ## Installation
 
-Add to your `build.gradle.kts`:
+The renderer is published to Maven Central as **`space.hypen:hypen-renderer`**. No extra repository is needed:
 
 ```kotlin
+// build.gradle.kts (app module)
 dependencies {
-    implementation("space.hypen:hypen-renderer:0.4.80")
+    implementation("space.hypen:hypen-renderer:0.4.952")
 }
+```
 
-// In settings.gradle.kts
+```kotlin
+// settings.gradle.kts
 dependencyResolutionManagement {
     repositories {
-        maven { url = uri("https://maven.hypen.space") }
+        google()
+        mavenCentral()
     }
 }
 ```
 
-## Basic Usage
+> **Version status.** `0.4.952` is the newest release on Maven Central, and it is older than the renderer in the repository (`0.6.5`). Fixes made since then, such as whole numbers rendering as `2` instead of `2.0`, are only in the repository. To use the current code, build it from a checkout of the [Hypen repository](https://github.com/hypen-lang/hypen):
+>
+> ```bash
+> cd hypen/hypen-renderer-android
+> ./gradlew :renderer:publishToMavenLocal   # space.hypen:hypen-renderer:0.6.5
+> ```
+>
+> then add `mavenLocal()` to your repositories and depend on `space.hypen:hypen-renderer:0.6.5`.
 
-```kotlin
-import space.hypen.renderer.HypenApp
+Your app needs the `INTERNET` permission. During development, a plain `ws://` server also needs cleartext traffic allowed (for example `android:usesCleartextTraffic="true"` on a debug build):
 
-@Composable
-fun MyScreen() {
-    HypenView(
-        source = """
-            Column {
-                Text("Hello from Hypen!")
-                    .fontSize(24)
-            }
-        """,
-        state = mapOf("name" to "World")
-    )
-}
+```xml
+<uses-permission android:name="android.permission.INTERNET" />
 ```
 
-## Remote Apps
+## Basic Usage
 
-Connect to a Hypen server:
+`HypenApp` is a composable that connects to a server and renders its UI. It shows a loading view while connecting and an error view if the connection fails:
 
 ```kotlin
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.runtime.Composable
+import androidx.compose.ui.Modifier
 import space.hypen.renderer.HypenApp
 
 @Composable
 fun RemoteScreen() {
-    // Use 10.0.2.2 for emulator to reach host machine
+    // 10.0.2.2 is the host machine as seen from the Android emulator.
+    // On a USB device, run `adb reverse tcp:3000 tcp:3000` and use ws://localhost:3000.
     HypenApp(
         url = "ws://10.0.2.2:3000",
-        modifier = Modifier.fillMaxSize()
+        modifier = Modifier.fillMaxSize(),
     )
 }
 ```
 
+Any Hypen server works: `hypen dev` (port 3000 by default), a TypeScript `RemoteServer`, or a Go, Kotlin, Swift or Rust server.
+
+### Parameters
+
+| Parameter | Default | Description |
+|---|---|---|
+| `url` | (required) | WebSocket URL of the Hypen server |
+| `modifier` | `Modifier` | Modifier for the root container |
+| `config` | `RemoteEngineConfig.DEFAULT` | Reconnect and timeout settings (`autoReconnect`, `reconnectIntervalMs`, `maxReconnectAttempts`, `connectTimeoutMs`, ...) |
+| `navigation` | `null` | `NavigationOptions(backAction = "...")` to send an action when the system back button is pressed |
+| `safeAreaInsets` | `null` | Override the insets `SafeArea` elements pad by (repository build only, not in 0.4.952) |
+| `deviceHost` | `null` | Device Capability host (camera, files, microphone, ...), e.g. `AndroidDeviceHost.create(activity, url)` (repository build only, not in 0.4.952) |
+| `loadingContent` | built-in | Composable shown while connecting |
+| `errorContent` | built-in | Composable shown on error, receives the message |
+
+In the repository build, the connection also survives Activity recreation (rotation, the system destroying the Activity behind a picker): the new Activity's `HypenApp` re-attaches to the same session.
+
+### Layout tip
+
+Routed pages fill the width only if they ask for it. Give page roots `w-full` (or `.fillMaxWidth()`), as the `hypen init` scaffold does, or they shrink to their content.
+
 ## Requirements
 
-- Android Studio Arctic Fox+
-- Kotlin 1.9+
 - minSdk 24+
-- Jetpack Compose 1.5+
+- Jetpack Compose (the library is built against compileSdk 36)
+- Kotlin 2.x recommended
+
+## See Also
+
+- [iOS Adapter](/docs/adapters/ios)
+- [Web Adapter](/docs/adapters/web)
+- [Remote App Tutorial](/docs/getting-started/remote-app)

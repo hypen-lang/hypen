@@ -45,6 +45,10 @@ Values you'll commonly see:
 
 ## Handling errors
 
+<Callout type="info">
+`error` exists only on the failed branch, so check `res.ok` before reading `res.error` (or `res.value`). That check narrows the type only with `"strict": true` (or `"strictNullChecks": true`) in `tsconfig.json`, which the `hypen init` scaffold sets. Without it, TypeScript reports `Property 'error' does not exist on type 'DeviceResult<…>'` even after `if (!res.ok)`. If you can't turn strict mode on, compare explicitly: `if (res.ok === false) { res.error.code }` narrows in every mode.
+</Callout>
+
 A missing capability is best handled **before** the request: check
 `supports()` and hide the button. For everything else, treat `cancelled`
 as quiet, show the rest, and log `platformDetail`:
