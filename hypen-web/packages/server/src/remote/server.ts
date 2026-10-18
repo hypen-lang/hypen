@@ -1159,8 +1159,10 @@ export class RemoteServer {
    * `clearResolvedComponents`, producing empty diffs, and the re-render
    * left nested modules' reactive wiring dead). Disconnected clients
    * auto-reconnect with their session id; the suspended session resumes,
-   * and its saved primary-module state is restored automatically (or via
-   * the module's `onReconnect` handler when one is defined).
+   * and EVERY module's saved state — primary, nested and route modules —
+   * is restored from the session snapshot under the state-shape rule
+   * (`mergeRestoredState`: keys that still exist with the same kind keep
+   * their values). A primary module's `onReconnect` handler still runs.
    */
   async reload(): Promise<void> {
     if (this._sourceDir) {

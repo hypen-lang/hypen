@@ -15,7 +15,8 @@
  * before.
  */
 
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "fs";
+import { join } from "path";
 import { fileURLToPath } from "url";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 
@@ -56,7 +57,55 @@ function findClientEntry(): string | null {
   );
 }
 
+/**
+ * Source directories the client bundle is built from, when this module runs
+ * from a source checkout (`src/remote/web-client.ts` inside the hypen-web
+ * workspace, with its sibling packages next to it). Empty for a published
+ * install running `dist/`.
+ */
+function checkoutSourceDirs(): string[] {
+  const self = existingPath(new URL(import.meta.url));
+  if (!self || !self.replace(/\\/g, "/").endsWith("/src/remote/web-client.ts")) return [];
+  const dirs = [
+    new URL("../", import.meta.url), // server/src
+    new URL("../../../core/src/", import.meta.url),
+    new URL("../../../web/src/", import.meta.url),
+    new URL("../../../device-web/src/", import.meta.url),
+  ];
+  return dirs.map((u) => existingPath(u)).filter((p): p is string => p !== null);
+}
+
+/** Newest mtime (ms) of any `.ts`/`.tsx`/`.js` file under `dirs`. */
+function newestSourceMtime(dirs: string[]): number {
+  let newest = 0;
+  const walk = (dir: string) => {
+    let entries: import("fs").Dirent[];
+    try {
+      entries = readdirSync(dir, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const path = join(dir, e.name);
+      if (e.isDirectory()) {
+        if (e.name !== "node_modules" && !e.name.startsWith(".")) walk(path);
+      } else if (/\.(tsx?|js|css)$/.test(e.name) && !/\.test\.tsx?$/.test(e.name)) {
+        try {
+          newest = Math.max(newest, statSync(path).mtimeMs);
+        } catch {
+          /* vanished mid-walk */
+        }
+      }
+    }
+  };
+  for (const dir of dirs) walk(dir);
+  return newest;
+}
+
 let bundlePromise: Promise<string | null> | null = null;
+/** When the cached bundle was produced (source checkouts re-check against it). */
+let bundleBuiltAt = 0;
+let lastStaleCheck = 0;
 
 /**
  * Return the browser client bundle, or `null` when it can't be produced in
@@ -68,6 +117,17 @@ let bundlePromise: Promise<string | null> | null = null;
  * attempt. Never rejects.
  */
 export function getWebClientBundle(): Promise<string | null> {
+  // Source checkout: a source edited after the cached bundle was produced
+  // invalidates it (checked at most once a second), so `hypen dev` always
+  // serves the client the checkout's sources describe.
+  if (bundlePromise && bundleBuiltAt > 0) {
+    const now = Date.now();
+    if (now - lastStaleCheck > 1000) {
+      lastStaleCheck = now;
+      const dirs = checkoutSourceDirs();
+      if (dirs.length > 0 && newestSourceMtime(dirs) > bundleBuiltAt) bundlePromise = null;
+    }
+  }
   if (!bundlePromise) {
     const attempt = loadOrBuildBundle().then((bundle) => {
       if (bundle === null && bundlePromise === attempt) {
@@ -81,10 +141,30 @@ export function getWebClientBundle(): Promise<string | null> {
 }
 
 async function loadOrBuildBundle(): Promise<string | null> {
+  const startedAt = Date.now();
+  // Published installs serve the prebuilt bundle. A source checkout serves
+  // it only while it is at least as new as every source it is built from —
+  // a stale `dist/web-client.bundle.js` (sources changed since the last
+  // `bun run build`) would silently ship old renderer/protocol code, so the
+  // client is bundled from `src` instead.
+  const sourceDirs = checkoutSourceDirs();
   const prebuilt = findPrebuiltBundle();
-  if (prebuilt) {
+  let prebuiltStale = false;
+  if (prebuilt && sourceDirs.length > 0) {
     try {
-      return readFileSync(prebuilt, "utf-8");
+      prebuiltStale = newestSourceMtime(sourceDirs) > statSync(prebuilt).mtimeMs;
+    } catch {
+      prebuiltStale = false;
+    }
+    if (prebuiltStale) {
+      log.info("Prebuilt web client bundle is older than its sources — bundling from src");
+    }
+  }
+  if (prebuilt && !prebuiltStale) {
+    try {
+      const text = readFileSync(prebuilt, "utf-8");
+      bundleBuiltAt = sourceDirs.length > 0 ? statSync(prebuilt).mtimeMs : 0;
+      return text;
     } catch (err) {
       log.warn("Failed to read prebuilt web client bundle:", err);
     }
@@ -139,6 +219,7 @@ async function loadOrBuildBundle(): Promise<string | null> {
       );
       return null;
     }
+    bundleBuiltAt = sourceDirs.length > 0 ? startedAt : 0;
     return out;
   } catch (err) {
     log.warn("Default web client bundle failed:", err);
@@ -197,3 +278,15 @@ export function renderFallbackHtml(wsHint: string): string {
 </html>
 `;
 }
+
+/** @internal — exposed for tests. */
+export const __webClientInternals = {
+  checkoutSourceDirs,
+  newestSourceMtime,
+  findPrebuiltBundle,
+  reset(): void {
+    bundlePromise = null;
+    bundleBuiltAt = 0;
+    lastStaleCheck = 0;
+  },
+};

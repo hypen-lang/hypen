@@ -10,6 +10,7 @@
  */
 
 import type { Session, SessionConfig } from "./types.js";
+import type { SessionSnapshot } from "./snapshot.js";
 
 /**
  * Internal representation of a pending (disconnected) session
@@ -17,6 +18,12 @@ import type { Session, SessionConfig } from "./types.js";
 interface PendingSession {
   session: Session;
   savedState: unknown;
+  /**
+   * Every module's state (primary, nested and route modules) plus the
+   * client-visible tree shape, so a resumed session restores ALL of it —
+   * not just the primary module's `savedState`.
+   */
+  snapshot?: SessionSnapshot;
   expiryTimer: ReturnType<typeof setTimeout>;
 }
 
@@ -189,11 +196,13 @@ export class SessionManager {
    * @param sessionId - The session to suspend
    * @param savedState - State snapshot to restore on reconnect
    * @param onExpire - Callback when TTL expires
+   * @param snapshot - Full session snapshot (all modules) to restore on resume
    */
   suspendSession(
     sessionId: string,
     savedState: unknown,
-    onExpire: SessionExpireCallback
+    onExpire: SessionExpireCallback,
+    snapshot?: SessionSnapshot
   ): void {
     const session = this.activeSessions.get(sessionId);
     if (!session) return;
@@ -216,6 +225,7 @@ export class SessionManager {
     this.pendingSessions.set(sessionId, {
       session,
       savedState,
+      ...(snapshot ? { snapshot } : {}),
       expiryTimer,
     });
   }
@@ -228,7 +238,7 @@ export class SessionManager {
    */
   resumeSession(
     sessionId: string
-  ): { session: Session; savedState: unknown } | null {
+  ): { session: Session; savedState: unknown; snapshot?: SessionSnapshot } | null {
     const pending = this.pendingSessions.get(sessionId);
     if (!pending) return null;
 
@@ -245,6 +255,7 @@ export class SessionManager {
     return {
       session: pending.session,
       savedState: pending.savedState,
+      ...(pending.snapshot ? { snapshot: pending.snapshot } : {}),
     };
   }
 

@@ -9,6 +9,8 @@ export interface DurableObjectStorage {
   get(key: string): Promise<unknown>;
   put(key: string, value: unknown): Promise<void>;
   delete(key: string): Promise<boolean>;
+  /** Optional (present on Cloudflare): used to sweep expired session snapshots. */
+  list?(options?: { prefix?: string }): Promise<Map<string, unknown>>;
 }
 
 export interface DurableObjectStateStore<T> extends StateStore<T> {

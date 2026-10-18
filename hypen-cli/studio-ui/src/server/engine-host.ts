@@ -9,9 +9,11 @@
  * action is replayed on every session's engine, so a tap on the web cell
  * updates the native mirror too (assuming deterministic handlers).
  *
- * On source file changes, `reload()` → `remoteServer.reload()` which uses
- * the engine's reconciler to emit minimal patches instead of tearing down
- * the tree. `reset()` is the escape hatch for when state gets wedged:
+ * On source file changes, `reload()` → `remoteServer.reload()`, which
+ * briefly disconnects every client (close 1012); each one redials with its
+ * session id and resumes against the fresh code with every module's state
+ * (primary, nested, route modules) restored from the suspended session's
+ * snapshot. `reset()` is the escape hatch for when state gets wedged:
  * closes every live session so clients reconnect into a clean engine.
  *
  * When the entry .hypen has no sibling .ts module, we synthesise a mock
