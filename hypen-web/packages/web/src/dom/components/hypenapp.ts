@@ -289,25 +289,19 @@ export function createHypenAppHandler(options: HypenAppHandlerOptions = {}): Com
     };
     activeInstances.set(element, instance);
 
-    // Same replacement-root handling as the generic client: a fresh root
-    // insert after we've already rendered one means "replace the tree".
-    let hasRenderedRoot = false;
+    // Same replacement handling as the generic client: only a fresh
+    // `initialTree` (a reconnect) replaces the mounted tree. A normal batch
+    // that creates+inserts under `root` (a top-level Router's first visit
+    // to a route) is incremental — clearing there wiped the Router's
+    // cached route subtrees and left later `attach` patches dangling.
+    let hasRenderedTree = false;
+    engine.onInitialTree(() => {
+      if (hasRenderedTree) renderer.clear();
+      hasRenderedTree = true;
+    });
     engine.onPatches((patches: Patch[]) => {
       visibility.setStatus("connected");
-      const createdIds = new Set(
-        patches.filter((patch) => patch.type === "create").map((patch) => patch.id),
-      );
-      const hasReplacementRoot = patches.some(
-        (patch) =>
-          patch.type === "insert" &&
-          patch.parentId === "root" &&
-          createdIds.has(patch.id),
-      );
-      if (hasReplacementRoot && hasRenderedRoot) {
-        renderer.clear();
-      }
       renderer.applyPatches(patches);
-      hasRenderedRoot = hasRenderedRoot || hasReplacementRoot;
     });
 
     engine

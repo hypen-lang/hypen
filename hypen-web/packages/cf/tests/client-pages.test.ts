@@ -21,6 +21,14 @@ describe("buildClientPages", () => {
     expect(pages["/client.js"]!.contentType).toContain("javascript");
   });
 
+  it("declares an inline icon so browsers never request /favicon.ico (a 426 from the WS handler)", () => {
+    const pages = buildClientPages({
+      routes: { "/": { js: "D" }, "/canvas": { js: "C", renderer: "canvas" } },
+    });
+    expect(pages["/"]!.body).toContain('<link rel="icon" href="data:,">');
+    expect(pages["/canvas"]!.body).toContain('<link rel="icon" href="data:,">');
+  });
+
   it("uses the Canvas shell for a canvas bundle, and a nested bundle URL", () => {
     const pages = buildClientPages({
       routes: { "/canvas": { js: "CJS", renderer: "canvas" } },

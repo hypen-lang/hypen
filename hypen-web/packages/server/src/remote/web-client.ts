@@ -154,6 +154,7 @@ export function renderClientHtml(): string {
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Hypen App</title>
+  <link rel="icon" href="data:,">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; }
@@ -179,6 +180,7 @@ export function renderFallbackHtml(wsHint: string): string {
 <head>
   <meta charset="UTF-8">
   <title>Hypen Remote Server</title>
+  <link rel="icon" href="data:,">
   <style>
     body { font-family: system-ui, sans-serif; margin: 4rem auto; max-width: 40rem; padding: 0 1rem; color: #1f2937; }
     code { background: #f3f4f6; padding: 2px 6px; border-radius: 4px; }

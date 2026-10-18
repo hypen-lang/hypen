@@ -29,7 +29,13 @@
  * ```
  */
 
-import type { HypenModule, HypenModuleDefinition, HypenApp } from "@hypen-space/core/app";
+import type {
+  HypenModule,
+  HypenModuleDefinition,
+  HypenModuleLike,
+  HypenApp,
+} from "@hypen-space/core/app";
+import { resolveModuleDefinition } from "@hypen-space/core/app";
 import type {
   RemoteMessage,
   RemoteClient,
@@ -105,6 +111,26 @@ function normalizeOrigin(origin: string): string {
   } catch {
     return origin.trim().toLowerCase();
   }
+}
+
+/** Does the request's `Accept` header list `text/html` (a page navigation)? */
+function acceptsHtml(req: Request): boolean {
+  const accept = req.headers.get("accept");
+  return accept !== null && /(^|[,\s])text\/html(\s*[;,]|\s*$)/i.test(accept);
+}
+
+/**
+ * Is this request a browser navigation to an app route that the HTML shell
+ * should answer (SPA fallback)? A GET/HEAD that accepts HTML, outside the
+ * reserved `/__hypen__/` prefix, whose last path segment doesn't look like
+ * a file (`/logo.png`, `/app.js` stay 404s instead of returning HTML).
+ */
+function isAppNavigation(req: Request, pathname: string, wantsHtml = acceptsHtml(req)): boolean {
+  if (req.method !== "GET" && req.method !== "HEAD") return false;
+  if (!wantsHtml) return false;
+  if (pathname.startsWith("/__hypen__/")) return false;
+  const last = pathname.slice(pathname.lastIndexOf("/") + 1);
+  return !/\.[a-z0-9]+$/i.test(last);
 }
 
 /**
@@ -217,6 +243,12 @@ export class RemoteServer {
    */
   private _agentOptions: AgentOptions | null = null;
   private _agent: AgentSurface | null = null;
+  /**
+   * Who `GET /__hypen__/stats` answers. `"local"` (default): only direct
+   * loopback requests (the `hypen` CLI on the same machine) — session counts
+   * are operational data, not something every visitor should read.
+   */
+  private _statsAccess: "local" | "public" | "off" = "local";
 
   /**
    * Build (once) the `SessionHost` adapter that `RemoteSession` consumes.
@@ -282,11 +314,15 @@ export class RemoteServer {
   }
 
   /**
-   * Set the module for this app
+   * Set the entry (primary) module for this app.
+   *
+   * Accepts a built definition or a builder not yet built (it is built
+   * here). When neither `.ui()` nor a `.source()` entry supplies a
+   * template, the definition's own `template` (from `.ui(tpl)`) is used.
    */
-  module(name: string, module: HypenModule<any>): this {
+  module(name: string, module: HypenModuleLike<any>): this {
     this._moduleName = name;
-    this._module = module;
+    this._module = resolveModuleDefinition(module);
     return this;
   }
 
@@ -297,6 +333,11 @@ export class RemoteServer {
    * are automatically discovered and registered with each client's engine on
    * connect. The primary module (set via `.module()`) is excluded from
    * auto-registration.
+   *
+   * `.module()` is optional with `.app()`: without it the entry is the
+   * module named `"App"` if the app (or `.source()` discovery) has one,
+   * otherwise the app's only module. `new RemoteServer().app(myApp)` alone
+   * therefore serves a one-module app.
    *
    * @example
    * ```typescript
@@ -551,6 +592,49 @@ export class RemoteServer {
   }
 
   /**
+   * Who may read session counts as JSON at `GET /__hypen__/stats`
+   * (`{ activeSessions, pendingSessions, totalConnections }`).
+   *
+   * By default only direct loopback requests get them (local tooling such as
+   * the `hypen` CLI); everyone else gets a 404, and a request carrying
+   * `Forwarded` / `X-Forwarded-For` / `X-Real-IP` counts as remote even from
+   * 127.0.0.1, so a same-host reverse proxy doesn't publish them.
+   * `exposeStats()` serves them to every client — restrict `/__hypen__/` at
+   * your proxy if the server is public; `exposeStats(false)` turns the
+   * endpoint off entirely. `getSessionStats()` returns the same data
+   * in-process either way.
+   *
+   * Every internal endpoint lives under `/__hypen__/`, so app routes such as
+   * `/stats` or `/health` stay free for `Route(path: ...)`.
+   */
+  exposeStats(enabled: boolean = true): this {
+    this._statsAccess = enabled ? "public" : "off";
+    return this;
+  }
+
+  /** May this request read `/__hypen__/stats`? See `exposeStats()`. */
+  private statsAllowed(
+    req: Request,
+    server: { requestIP(req: Request): { address: string } | null },
+  ): boolean {
+    if (this._statsAccess === "public") return true;
+    if (this._statsAccess === "off") return false;
+    if (
+      req.headers.has("forwarded") ||
+      req.headers.has("x-forwarded-for") ||
+      req.headers.has("x-real-ip")
+    ) {
+      return false;
+    }
+    const address = server.requestIP(req)?.address ?? "";
+    return (
+      address === "::1" ||
+      address.startsWith("127.") ||
+      address.startsWith("::ffff:127.")
+    );
+  }
+
+  /**
    * Register a callback that fires when a new `RemoteSession` is created —
    * synchronously, before the hello handshake completes and before the
    * initial render. Use this to wire per-session helpers (routers, shared
@@ -580,8 +664,10 @@ export class RemoteServer {
    */
   async prepare(): Promise<this> {
     if (this._prepared) return this;
-    if (!this._module) {
-      throw new Error("Module not set. Call .module() before prepare()/listen()");
+    if (!this._module && !this._app && !this._sourceDir) {
+      throw new Error(
+        "Module not set. Call .module(name, def), .app(app) or .source(dir) before prepare()/listen()"
+      );
     }
     if (this._sourceDir) {
       await this.discoverFromSource();
@@ -595,8 +681,15 @@ export class RemoteServer {
         this._app = app;
       }
     }
+    if (!this._module) this.resolveEntryModule();
+    if (!this._ui && this._module?.template) {
+      this._ui = this._module.template;
+    }
     if (!this._ui) {
-      throw new Error("UI not set. Call .ui() or .source() before prepare()/listen()");
+      throw new Error(
+        `UI not set for "${this._moduleName}". Give the module a template with .ui(tpl), ` +
+          "or call .ui() / .source() before prepare()/listen()"
+      );
     }
     this._sessionManager = new SessionManager(this._sessionConfig);
     this.resolveDevicePolicy();
@@ -791,21 +884,37 @@ export class RemoteServer {
           return; // Connection upgraded
         }
 
-        // Health check endpoint
-        if (url.pathname === "/health") {
+        const webClient = this._config.webClient !== false;
+        const wantsHtml = acceptsHtml(req);
+        // What any path the server doesn't serve gets. With the web client
+        // on it is a real 404 (the SPA fallback below already answered page
+        // navigations); `webClient: false` keeps the historical 200.
+        const unknownPath = () =>
+          new Response("Hypen Remote Server", { status: webClient ? 404 : 200 });
+
+        // Internal endpoints live under the reserved `/__hypen__/` prefix so
+        // they never shadow an app route (`Route(path: "/stats")`).
+        // `/__hypen__/health` also identifies the process as a Hypen server
+        // (tools probing a port shouldn't mistake any `/health` for one)
+        // without revealing anything about its sessions.
+        if (url.pathname === "/__hypen__/health") {
+          return Response.json({ status: "ok", server: "hypen-remote" });
+        }
+        // Legacy `/health` and `/stats`, kept for existing probes (curl, load
+        // balancers, k8s, older `hypen` CLIs — none ask for HTML). A browser
+        // navigating to either gets the app instead, so app routes of those
+        // names still deep-link.
+        const legacyProbe = !(webClient && wantsHtml);
+        if (url.pathname === "/health" && legacyProbe) {
           return new Response("OK", { status: 200 });
         }
-
-        // Stats endpoint
-        if (url.pathname === "/stats") {
-          const stats = this._sessionManager?.getStats() ?? {
-            activeSessions: 0,
-            pendingSessions: 0,
-            totalConnections: 0,
-          };
-          return new Response(JSON.stringify(stats), {
-            headers: { "Content-Type": "application/json" },
-          });
+        if (
+          url.pathname === "/__hypen__/stats" ||
+          (url.pathname === "/stats" && legacyProbe)
+        ) {
+          // Denied looks exactly like an unknown path.
+          if (!this.statsAllowed(req, server)) return unknownPath();
+          return Response.json(this.getSessionStats());
         }
 
         // Agent REST surface. `null` unless `.agent()` was called, and
@@ -820,7 +929,11 @@ export class RemoteServer {
         // Default browser client (on unless config.webClient === false):
         // `/` serves the HTML shell, `/__hypen__/client.js` the bundled
         // RemoteEngine + DOMRenderer client that dials back over WebSocket.
-        if (this._config.webClient !== false) {
+        // Any other page navigation (a GET that accepts HTML, outside
+        // `/__hypen__/`, not naming a file) gets the same shell — the SPA
+        // fallback that makes deep links and reloads on `/counter` work; the
+        // client then starts the session at that path.
+        if (webClient) {
           if (url.pathname === "/__hypen__/client.js") {
             const bundle = await getWebClientBundle();
             if (bundle) {
@@ -830,7 +943,11 @@ export class RemoteServer {
             }
             return new Response("Web client bundle unavailable", { status: 503 });
           }
-          if (url.pathname === "/" || url.pathname === "/index.html") {
+          if (
+            url.pathname === "/" ||
+            url.pathname === "/index.html" ||
+            isAppNavigation(req, url.pathname, wantsHtml)
+          ) {
             const bundle = await getWebClientBundle();
             const wsProto = "ws";
             const html = bundle
@@ -842,7 +959,8 @@ export class RemoteServer {
           }
         }
 
-        return new Response("Hypen Remote Server", { status: 200 });
+        // Assets, `/__hypen__/*` and non-page requests that matched nothing.
+        return unknownPath();
       },
     });
 
@@ -923,6 +1041,55 @@ export class RemoteServer {
         log.info(`Set UI from discovered "${this._moduleName}" (${this._ui.length} bytes, first 80: ${JSON.stringify(this._ui.substring(0, 80))})`);
       }
     }
+  }
+
+  /**
+   * Pick the entry module when `.module()` was not called: the module named
+   * `"App"` (the scaffold convention and the `.module()` default name) if
+   * the app registry or `.source()` discovery has one, otherwise the only
+   * candidate. Framework builtins (`__Router`, …) never count. Anything else
+   * is ambiguous and throws, naming the candidates.
+   */
+  private resolveEntryModule(): void {
+    const candidates = new Map<string, { module?: HypenModuleDefinition<any>; template?: string }>();
+    for (const [name, comp] of this._discoveredComponents) {
+      if (name.startsWith("__")) continue;
+      candidates.set(name, { module: comp.module, template: comp.template });
+    }
+    if (this._app) {
+      for (const [name, def] of this._app.components) {
+        if (name.startsWith("__")) continue;
+        const found = candidates.get(name);
+        // A registry definition carries the handlers; prefer it over an
+        // auto-stateless discovered module, keep the discovered template.
+        candidates.set(name, { module: def, template: found?.template ?? def.template });
+      }
+    }
+
+    let name: string | undefined;
+    if (candidates.has(this._moduleName)) name = this._moduleName;
+    else if (candidates.size === 1) name = candidates.keys().next().value;
+
+    const picked = name !== undefined ? candidates.get(name) : undefined;
+    if (name === undefined || !picked) {
+      const names = Array.from(candidates.keys());
+      throw new Error(
+        names.length === 0
+          ? "Module not set. Call .module(name, def), or register a module on the app passed to .app()"
+          : `Module not set and the entry is ambiguous (${names.join(", ")}). ` +
+              `Name one "App", or call .module(name, def) to choose the entry`
+      );
+    }
+    this._moduleName = name;
+    // A template-only candidate becomes a stateless module.
+    this._module = picked.module ?? {
+      actions: [],
+      stateKeys: [],
+      initialState: {},
+      handlers: { onAction: new Map() },
+    };
+    if (!this._ui && picked.template) this._ui = picked.template;
+    log.info(`Entry module: "${name}" (no .module() call)`);
   }
 
   /**
@@ -1061,7 +1228,8 @@ export class RemoteServer {
  * Convenience function to create and start a RemoteServer
  */
 export async function serve(options: {
-  module: HypenModule<any>;
+  /** A built definition or an unbuilt builder (built here). */
+  module: HypenModuleLike<any>;
   moduleName?: string;
   ui?: string;
   source?: string;

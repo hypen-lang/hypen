@@ -216,6 +216,35 @@ describe("ComponentLoader", () => {
     });
   });
 
+  describe("loadFromComponentsDir patterns", () => {
+    test("loads folder, index, sibling and single-file components", async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("fs");
+      const { join, resolve } = await import("path");
+      const { tmpdir } = await import("os");
+      const dir = mkdtempSync(join(tmpdir(), "hypen-loader-"));
+      const core = JSON.stringify(resolve(import.meta.dir, "../packages/core/src/index.ts"));
+      try {
+        mkdirSync(join(dir, "App"));
+        writeFileSync(join(dir, "App", "component.hypen"), "module App { Text('app') }");
+        writeFileSync(join(dir, "App", "component.ts"), `import { app } from ${core};\nexport default app.defineState({}).build();`);
+        mkdirSync(join(dir, "Footer"));
+        writeFileSync(join(dir, "Footer", "index.hypen"), "Text('footer')");
+        writeFileSync(join(dir, "Pill.hypen"), "Text('pill')");
+        writeFileSync(
+          join(dir, "Clicker.ts"),
+          `import { app, hypen } from ${core};\nexport default app.defineState({ count: 0 }).ui(hypen\`Text("c")\`);`
+        );
+        const fresh = new ComponentLoader();
+        await fresh.loadFromComponentsDir(dir);
+        expect(fresh.getNames().sort()).toEqual(["App", "Clicker", "Footer", "Pill"]);
+        expect(fresh.get("Clicker")!.template).toContain('Text("c")');
+        expect(fresh.get("App")!.path).toBe(join(dir, "App"));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("integration", () => {
     test("multiple components can be registered and retrieved", () => {
       const modules = [

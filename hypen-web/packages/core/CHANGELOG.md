@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- `RemoteSession`: named child modules mounted directly in a template
+  (`module App { Column { Counter() } }`, or a second module inside one `Route`)
+  now get a session-lifetime module instance, so their actions run instead of
+  failing with "invalid scoped UI action". Route components stay owned by the
+  auto-wired `ManagedRouter`.
+- `RemoteSession`: a stateful child template without its own `module Name { }`
+  wrapper (the single-file `app.defineState(...).ui(hypen...)` form) is
+  scoped to its component name, so `@{state.*}` and `@actions.*` resolve to it.
+- The browser entry (`index.browser`) now exports `hypen`, `state`, `item` and
+  `index`, so single-file components bundle under `hypen build`.
+
 ### Changed
 - Device Capability Protocol (RFC 001, unreleased): the device plane is on by default on every
   server host — `SessionHost.deviceEnabled` is replaced by the opt-out `deviceDisabled`. Legacy

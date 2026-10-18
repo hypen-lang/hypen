@@ -1,4 +1,5 @@
-import { describe, expect, test, beforeEach, afterEach } from "bun:test";
+import { describe, expect, test, beforeEach, afterEach, spyOn } from "bun:test";
+import { frameworkLoggers } from "../packages/core/src/logger";
 import { existsSync, mkdirSync, writeFileSync, rmSync } from "fs";
 import { join, resolve } from "path";
 import {
@@ -37,6 +38,23 @@ describe("Component Discovery", () => {
       expect(components[0].name).toBe("Counter");
       expect(components[0].hasModule).toBe(true);
       expect(components[0].template).toBe("Text('Counter')");
+    });
+
+    test("warns when a component name shadows a built-in element", async () => {
+      writeFileSync(join(testDir, "Badge.ts"), "export default {}");
+      writeFileSync(join(testDir, "Badge.hypen"), "Text('Badge')");
+      writeFileSync(join(testDir, "Pill.hypen"), "Text('Pill')");
+      const warn = spyOn(frameworkLoggers.discovery, "warn").mockImplementation(() => {});
+      try {
+        const components = await discoverComponents(testDir, { patterns: ["sibling"] });
+        expect(components.map((c) => c.name).sort()).toEqual(["Badge", "Pill"]);
+        const messages = warn.mock.calls.map((c) => String(c[0]));
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain('"Badge"');
+        expect(messages[0]).toContain("built-in");
+      } finally {
+        warn.mockRestore();
+      }
     });
 
     test("discovers sibling-based components", async () => {
