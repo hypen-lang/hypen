@@ -380,7 +380,13 @@ const server = serve({
 
     "/api/engine/status": {
       async GET(req) {
-        return Response.json({ ready: engineHost.isReady() });
+        // `state` lets the editor Preview decide between streaming from
+        // /ws/engine (real module handlers) and its layout-only fallback.
+        return Response.json({
+          ready: engineHost.isReady(),
+          ...engineHost.status(),
+          remoteUrl: remoteUrl || undefined,
+        });
       },
     },
 

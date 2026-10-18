@@ -23,6 +23,9 @@ import {
 import { pink, yellow, dim, boldPink, boldYellow } from "./colors.js";
 import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
 import { importFromProject } from "./dev-resolve.js";
+import { DevServerError } from "./dev-errors.js";
+
+export { DevServerError };
 
 export interface DevOptions {
   /**
@@ -56,15 +59,14 @@ export interface DevOptions {
   /**
    * @deprecated No effect under Bun: the dev server streams patches to the
    * built-in web client instead of bundling a browser SPA, so there is no
-   * HTML template to swap. Passing it logs a warning. (Still honored by the
-   * Node fallback dev server.)
+   * HTML template to swap. Passing it logs a warning.
    */
   htmlTemplate?: string;
 
   /**
    * @deprecated No effect under Bun: the dev server no longer generates
    * `.hypen/` files (use `hypen generate` for that). Passing it logs a
-   * warning. (Still honored by the Node fallback dev server.)
+   * warning.
    */
   outDir?: string;
 
@@ -178,21 +180,6 @@ if (import.meta.hot) {
 
 export default app;
 `;
-}
-
-/**
- * Error thrown by `dev()` for expected failure modes, so programmatic
- * callers can catch and handle them. The CLI catches it, prints the
- * message, and exits — `dev()` itself never kills the host process.
- */
-export class DevServerError extends Error {
-  constructor(
-    message: string,
-    readonly code: "ENTRY_NOT_FOUND" | "PORT_IN_USE"
-  ) {
-    super(message);
-    this.name = "DevServerError";
-  }
 }
 
 /**

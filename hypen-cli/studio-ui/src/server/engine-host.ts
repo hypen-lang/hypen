@@ -72,6 +72,8 @@ export class StudioEngineHost {
   private readonly options: StudioEngineHostOptions;
   private remoteServer: RemoteServer | null = null;
   private ready = false;
+  /** Set once bootstrap returned without a usable engine (see status()). */
+  private unavailableReason: string | null = null;
   private readyPromise: Promise<void> | null = null;
   private readonly sessions = new WeakMap<ServerWebSocket<any>, WsSessionHandle>();
   // Live sessions keyed by transport so we can iterate on state-push.
@@ -88,7 +90,17 @@ export class StudioEngineHost {
 
   async start(): Promise<void> {
     if (this.readyPromise) return this.readyPromise;
-    this.readyPromise = this.bootstrap();
+    this.readyPromise = this.bootstrap().then(
+      () => {
+        if (!this.ready && !this.unavailableReason) {
+          this.unavailableReason = "engine did not start";
+        }
+      },
+      (err) => {
+        this.unavailableReason = err?.message ?? String(err);
+        throw err;
+      }
+    );
     return this.readyPromise;
   }
 
@@ -106,7 +118,9 @@ export class StudioEngineHost {
         console.log(
           `  [engine] server-based project — previews connect to ${remoteUrl}.`
         );
+        this.unavailableReason = `server-based project (previews use ${remoteUrl})`;
       } else {
+        this.unavailableReason = "server-based project without a running server";
         console.warn(
           `  [engine] server-based project (entry: ${this.options.entryName}) — ` +
             `run \`hypen dev\` and connect Test Mode to its ws:// URL to preview.`
@@ -130,6 +144,7 @@ export class StudioEngineHost {
         `  [engine] no components directory found — tried: ${candidates.join(", ")}. ` +
           `Studio will render nothing until one exists.`
       );
+      this.unavailableReason = "no components directory";
       return;
     }
 
@@ -142,6 +157,7 @@ export class StudioEngineHost {
         `  [engine] entry "${this.options.entryName}" not found in ${componentsAbs} — ` +
           `studio will render nothing until the file is created.`
       );
+      this.unavailableReason = `entry "${this.options.entryName}" not found`;
       return;
     }
 
@@ -358,6 +374,18 @@ export class StudioEngineHost {
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  /**
+   * Lifecycle for clients deciding whether to stream from `/ws/engine`:
+   * `starting` (sockets attached now are queued until bootstrap finishes),
+   * `ready`, or `unavailable` (bootstrap finished without an engine — e.g.
+   * no entry component yet; sockets would never be served).
+   */
+  status(): { state: "starting" | "ready" | "unavailable"; reason?: string } {
+    if (this.ready) return { state: "ready" };
+    if (this.unavailableReason) return { state: "unavailable", reason: this.unavailableReason };
+    return { state: "starting" };
   }
 }
 
