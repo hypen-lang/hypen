@@ -363,13 +363,13 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
-    // The old children STAY linked in their old order for the whole pass
-    // (the final list is installed from `new_child_ids` after it): they are
-    // still on screen, and content a reused row creates in place (an `If`
-    // row turning on) anchors on the row that follows it there
-    // (`InstanceTree::render_anchor_after`). Rows created in this pass are
-    // appended behind them, i.e. at the end of this container's range —
-    // exactly the post-create render order the placement pass assumes.
+    // The LOGICAL parent's child list keeps its OLD order for the whole pass
+    // (creation appends to it) and is replaced by the desired order at the
+    // end. Reconciling a reused child that is itself control flow (an `If`
+    // per item, a nested ForEach as the row root) looks up the rendered node
+    // FOLLOWING it to anchor anything it inserts — which is the next old
+    // row, still in the renderer at this point — so its siblings must still
+    // be visible here.
 
     // One fingerprint for the whole pass — every child stamped this cycle
     // shares it, and a keyed match only skips when BOTH its stored item and
@@ -582,7 +582,6 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
-    // Install the final child order on the LOGICAL parent.
     if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
         parent_node.children = new_child_ids.iter().copied().collect();
     }
