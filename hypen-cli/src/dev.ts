@@ -56,16 +56,15 @@ export interface DevOptions {
   debug?: boolean;
 
   /**
-   * @deprecated Only honored by the Node fallback dev server (browser-SPA
-   * flow). Under Bun the dev server streams patches to the built-in web
-   * client and this logs a warning instead.
+   * @deprecated No effect: the dev server streams patches to the built-in
+   * web client (Bun and Node alike), so there is no HTML template to swap.
+   * Passing it logs a warning.
    */
   htmlTemplate?: string;
 
   /**
-   * @deprecated Only honored by the Node fallback dev server (browser-SPA
-   * flow). Under Bun the dev server generates no files and this logs a
-   * warning instead (use `hypen generate` for codegen).
+   * @deprecated No effect: the dev server generates no files (use
+   * `hypen generate` for codegen). Passing it logs a warning.
    */
   outDir?: string;
 
@@ -237,7 +236,8 @@ async function getImplementation() {
 /**
  * Start a development server
  *
- * Automatically uses Bun.serve() in Bun or http.createServer() in Node.js
+ * Both runtimes run the project through a RemoteServer: Bun.serve() under
+ * Bun, node:http + a minimal WebSocket server under Node (see dev-node.ts).
  */
 export async function dev(options: DevOptions): Promise<{
   url: string;

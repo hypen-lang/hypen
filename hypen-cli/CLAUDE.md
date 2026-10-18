@@ -16,7 +16,8 @@ hypen-cli/
 │   ├── index.ts              # Public API exports
 │   ├── dev.ts                # Runtime-agnostic dev server wrapper
 │   ├── dev-bun.ts            # Bun.serve() dev server implementation
-│   ├── dev-node.ts           # Node.js http.createServer() + esbuild
+│   ├── dev-node.ts           # Node.js dev server (RemoteServer on node:http)
+│   ├── node-ws.ts            # Minimal RFC 6455 server for dev-node
 │   ├── run.ts                # Android/iOS native runner
 │   ├── skills.ts             # AI agent skill installation
 │   ├── skill-content.ts      # Hypen DSL skill documentation
@@ -94,17 +95,32 @@ Two implementations with intentionally different architectures:
   File watching hot-reloads all connected clients via `reload()`;
   component `.ts` modules are re-imported with mtime cache-busting.
   `htmlTemplate`/`outDir` are deprecated no-ops here (warn when passed).
-- `dev-node.ts` (fallback) — the legacy browser-SPA flow:
-  http.createServer() + esbuild, generates entry files, client-side WASM.
-  Serves the WASM engine locally from the project's web-engine install
-  when present.
+- `dev-node.ts` (Node fallback) — the same RemoteServer architecture:
+  `RemoteServer.prepare()` + `createSession()` behind `node:http` and the
+  minimal RFC 6455 server in `node-ws.ts` (`listen()` is `Bun.serve`, and
+  the CLI carries no `ws` dependency). Same routes as `listen()`: web
+  client at `/` + `/__hypen__/client.js` (the bundle shipped in
+  `@hypen-space/server`), SPA fallback for app-route navigations,
+  `/__hypen__/health`, `/health`, `/stats`; hot reload via `reload()`.
+  Packages resolve from the project (`dev-resolve.ts`, `createRequire`
+  under Node). Needs Node TypeScript type stripping (>= 22.18) to import
+  `component.ts`; otherwise throws `DevServerError("UNSUPPORTED_RUNTIME")`
+  telling the user to use Bun.
 
-`dev()` throws (`DevServerError` under Bun) on expected failures like a
+`dev()` throws `DevServerError` (both runtimes) on expected failures like a
 missing entry component or a taken port — it never calls `process.exit`;
 the CLI wrapper in `bin/hypen.ts` catches and exits.
 
 ### Studio
 `hypen studio` spawns `studio-ui/` as a child process via `bun --hot`, passing config through environment variables (`HYPEN_PROJECT_DIR`, `HYPEN_COMPONENTS_DIR`, `HYPEN_ENTRY`, etc.).
+
+The editor Preview streams from the studio-hosted RemoteServer
+(`/ws/engine`, `studio-ui/src/server/engine-host.ts`) — the same engine Test
+Mode cells use — so entry + nested module handlers and `@router.*` all run
+for real; edits reach it via autosave + the components watcher. It falls
+back to an in-browser, layout-only render only when `/api/engine/status`
+reports `unavailable` (no entry yet, etc.). The phone frame lays the app out
+at a device's logical size (393x852) and scales it down.
 
 ### Native Runners (`hypen run`)
 1. Starts RemoteServer (WebSocket) on port 3000

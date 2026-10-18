@@ -152,6 +152,10 @@ const COMMAND_HELP: Record<string, string> = {
   (hypen.json "entry" is a .ts/.js script) run that script with ${dim("bun --hot")}
   and receive the port as ${dim("PORT")}.
 
+  Runs under Bun or Node. Under Node the project's ${dim("component.ts")} modules
+  are imported directly, which needs Node >= 22.18 (TypeScript type
+  stripping); older Node versions exit with instructions to use Bun.
+
   ${boldYellow("Examples:")}
     ${dim("$")} hypen dev
     ${dim("$")} hypen dev --port 4000 --debug

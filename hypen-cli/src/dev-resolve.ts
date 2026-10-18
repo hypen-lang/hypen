@@ -18,7 +18,9 @@
  */
 
 import { existsSync, readFileSync, realpathSync } from "fs";
+import { createRequire } from "module";
 import { dirname, join, resolve } from "path";
+import { pathToFileURL } from "url";
 
 /** Walk up from `start` to the nearest dir containing `package.json` named `name`. */
 export function findPackageRoot(start: string, name: string): string | null {
@@ -87,15 +89,27 @@ export function findLocalCli(cwd: string, selfRoot: string | null): LocalCli | n
 
 /**
  * Resolve `specifier` as if imported from a file in `projectRoot`. Returns
- * null when the project doesn't have it (or not running under Bun).
+ * null when the project doesn't have it.
+ *
+ * Bun resolves with its own resolver (`bun` export condition → the
+ * package's TS sources). Node uses `createRequire`, which walks the
+ * project's node_modules like an import would; the `@hypen-space/*`
+ * packages publish a `default` condition next to `import`, so this lands on
+ * the same `dist/*.js` file an ESM import resolves to.
  */
 export function resolveFromProject(
   specifier: string,
   projectRoot: string = process.cwd()
 ): string | null {
-  if (typeof globalThis.Bun === "undefined") return null;
+  if (typeof globalThis.Bun !== "undefined") {
+    try {
+      return Bun.resolveSync(specifier, projectRoot);
+    } catch {
+      return null;
+    }
+  }
   try {
-    return Bun.resolveSync(specifier, projectRoot);
+    return createRequire(join(resolve(projectRoot), "package.json")).resolve(specifier);
   } catch {
     return null;
   }
@@ -112,6 +126,10 @@ export async function importFromProject<T>(
   projectRoot: string = process.cwd()
 ): Promise<T> {
   const resolved = resolveFromProject(specifier, projectRoot);
-  if (resolved) return (await import(resolved)) as T;
+  if (resolved) {
+    // Node's ESM loader only takes URLs for absolute paths.
+    const target = typeof globalThis.Bun !== "undefined" ? resolved : pathToFileURL(resolved).href;
+    return (await import(target)) as T;
+  }
   return fallback();
 }
