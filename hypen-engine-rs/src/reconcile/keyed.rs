@@ -286,12 +286,13 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
-    // Detach the old children from the LOGICAL parent up front so creation
-    // doesn't append at arbitrary positions during the pass — the final
-    // children list is rebuilt in desired order as we go.
-    if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-        parent_node.children.clear();
-    }
+    // The LOGICAL parent's child list keeps its OLD order for the whole pass
+    // (creation appends to it) and is replaced by the desired order at the
+    // end. Reconciling a reused child that is itself control flow (an `If`
+    // per item, a nested ForEach as the row root) looks up the rendered node
+    // FOLLOWING it to anchor anything it inserts — which is the next old
+    // row, still in the renderer at this point — so its siblings must still
+    // be visible here.
 
     // One fingerprint for the whole pass — every child stamped this cycle
     // shares it, and a keyed match only skips when BOTH its stored item and
@@ -359,9 +360,6 @@ pub(crate) fn reconcile_iterable_children_full(
                 // full reconcile sees those.
                 let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
 
-                if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-                    parent_node.children.push_back(old_id);
-                }
                 if !memo_hit {
                     // Fast path: apply just the item-dependent prop deltas
                     // via the compiled binding map. Falls back to full
@@ -406,9 +404,6 @@ pub(crate) fn reconcile_iterable_children_full(
                 });
                 let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
 
-                if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-                    parent_node.children.push_back(old_id);
-                }
                 if !memo_hit {
                     // Same fast path as the keyed branch: positional reuse
                     // re-resolves every item-dependent prop against the new
@@ -492,6 +487,10 @@ pub(crate) fn reconcile_iterable_children_full(
             new_child_ids.push(child_id);
             new_child_keys.push(child_key);
         }
+    }
+
+    if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
+        parent_node.children = new_child_ids.iter().copied().collect();
     }
 
     // Stamp keys onto the (re-used or freshly created) tree nodes so the

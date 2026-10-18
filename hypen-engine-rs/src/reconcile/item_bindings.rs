@@ -289,9 +289,20 @@ fn replace_ir_node_impl(
             props,
             module_scope,
         } => {
-            // Note: source binding is kept as-is; nested ForEach maintains its own iteration context
             // Replace in props
-            let new_props = replace_props_item_bindings(props, item, item_name);
+            let mut new_props = replace_props_item_bindings(props, item, item_name);
+
+            // The source binding is kept as-is (it is the node's identity for
+            // dependency purposes), but when it reads THIS loop's item —
+            // `ForEach(items: @category.products)` under `as: "category"`, or
+            // `@item.products` under the default name — the array is only
+            // knowable here. Bake it into the reserved items prop, which
+            // iteration prefers over evaluating `source` against state (see
+            // `foreach_items`). Without it the inner loop looked
+            // `products` up in module state and rendered nothing.
+            if let Some(items) = outer_item_source(source, item, item_name) {
+                new_props.insert(FOREACH_ITEMS_PROP.to_string(), Value::Static(items));
+            }
 
             // Recursively replace in template (but inner ForEach has its own item context)
             let new_template: Vec<IRNode> = template
@@ -389,6 +400,49 @@ fn replace_ir_node_impl(
                 module_scope: module_scope.clone(),
             }
         }
+    }
+}
+
+/// Reserved `IRNode::ForEach` prop carrying the array of a nested ForEach
+/// whose `items:` source reads an enclosing loop's item. Set only by
+/// substitution; never authored, never sent to renderers (control-flow
+/// containers are not materialized).
+pub(crate) const FOREACH_ITEMS_PROP: &str = "__items";
+
+/// Resolve a nested ForEach's `source` against the enclosing loop's `item`
+/// when the binding names that loop variable: `@item.x` for the default
+/// name, `@<as>.x` for a custom one (parsed as a data-source binding whose
+/// provider is the variable name).
+fn outer_item_source(
+    source: &Binding,
+    item: &serde_json::Value,
+    item_name: &str,
+) -> Option<serde_json::Value> {
+    let names_this_loop = match &source.source {
+        crate::reactive::BindingSource::Item => item_name == "item",
+        crate::reactive::BindingSource::DataSource(provider) => provider == item_name,
+        crate::reactive::BindingSource::State => false,
+    };
+    if !names_this_loop {
+        return None;
+    }
+    if source.path.is_empty() {
+        return Some(item.clone());
+    }
+    navigate_item_path(item, &source.full_path()).cloned()
+}
+
+/// The array a ForEach iterates: the substituted outer-item array when
+/// present (see [`FOREACH_ITEMS_PROP`]), else its source evaluated against
+/// state.
+pub(crate) fn foreach_items<'a>(
+    source: &Binding,
+    props: &'a Props,
+    state: &'a serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    match props.get(FOREACH_ITEMS_PROP) {
+        Some(Value::Static(items)) => Some(items),
+        _ => super::resolve::evaluate_binding_ref(source, state),
     }
 }
 
