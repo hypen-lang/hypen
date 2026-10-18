@@ -632,33 +632,44 @@ pub(crate) fn reconcile_iterable_children_full(
         in_lis[idx] = true;
     }
 
-    // Walk backwards so each Move's anchor (the first rendered node of the
-    // children after it) is already in its final position — the forward
-    // direction is wrong for any reorder needing two or more moves (e.g.
-    // [a,b,c] → [c,b,a]). The last child anchors on whatever renders after
-    // this container's range (`None` under a real element), never a blind
-    // append past the container's following siblings. A child rooted at
-    // control flow (an `If` per item) moves as its rendered roots; an empty
-    // one moves nothing and anchors nothing.
-    if in_lis.iter().any(|&kept| !kept) {
-        let tree = &*ctx.tree;
-        let patches = &mut *ctx.patches;
-        let mut anchor = tree.range_end_anchor(parent_id);
-        for new_idx in (0..new_child_ids.len()).rev() {
-            let child = new_child_ids[new_idx];
+    // Walk backwards so each Move's anchor (the first rendered node of
+    // `new_child_ids[i + 1..]`) is already in its final position — the
+    // forward direction is wrong for any reorder needing two or more moves
+    // (e.g. [a,b,c] → [c,b,a]).
+    //
+    // A child may be a transparent control-flow node (an `If` / `When` per
+    // row, a nested ForEach as the row root). The renderer never created it,
+    // so it can neither be moved nor anchored on: move every node it renders,
+    // in order, and anchor on the first node the following children render.
+    // `anchor` tracks that node as the walk goes; `None` = end of this
+    // iterable's region (re-anchored by the enclosing control-flow reconcile
+    // when the region is followed by siblings).
+    let mut anchor: Option<NodeId> = None;
+    let mut rendered: Vec<NodeId> = Vec::new();
+    for new_idx in (0..new_child_ids.len()).rev() {
+        let child = new_child_ids[new_idx];
+        let is_flow = ctx
+            .tree
+            .get(child)
+            .is_some_and(|n| n.control_flow.is_some());
+        if !is_flow {
             if !in_lis[new_idx] {
-                let before_id = anchor;
-                tree.for_each_rendered_root(child, &mut |root| {
-                    patches.push(if at_root {
-                        Patch::move_root(root, before_id)
-                    } else {
-                        Patch::move_node(render_parent, root, before_id)
-                    });
-                });
+                ctx.patches
+                    .push(Patch::move_node(render_parent, child, anchor));
             }
-            if let Some(first) = tree.first_rendered(child) {
-                anchor = Some(first);
+            anchor = Some(child);
+            continue;
+        }
+        rendered.clear();
+        super::diff::collect_rendered_nodes(ctx.tree, child, &mut rendered);
+        if !in_lis[new_idx] {
+            for &node in &rendered {
+                ctx.patches
+                    .push(Patch::move_node(render_parent, node, anchor));
             }
+        }
+        if let Some(&first) = rendered.first() {
+            anchor = Some(first);
         }
     }
 

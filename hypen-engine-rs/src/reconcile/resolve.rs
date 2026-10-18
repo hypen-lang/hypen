@@ -108,7 +108,7 @@ pub(crate) fn resolve_props_iter<'a>(
     let mut evaluator: Option<exprimo::Evaluator> = None;
 
     for (key, value) in props {
-        match resolve_single_value(value, state, item, data_sources, &mut evaluator) {
+        match resolve_prop_value(key, value, state, item, data_sources, &mut evaluator) {
             Some(v) => {
                 resolved.insert(key.to_string(), v);
             }
@@ -117,6 +117,39 @@ pub(crate) fn resolve_props_iter<'a>(
     }
 
     Arc::new(resolved)
+}
+
+/// Resolve ONE prop, knowing its key: [`resolve_single_value`] plus the
+/// per-prop rules that depend on what the prop MEANS. Every prop-resolution
+/// path (full resolve, binding-map fast path, row prototypes) goes through
+/// this so the rules cannot drift between them.
+///
+/// `.sharedElement` identity (`__anim.sharedKey`): a bound key whose data
+/// has not arrived yet (`"story-@{state.story.id}"` while `story` is null)
+/// resolves to ABSENT rather than the generic raw-template fallback or
+/// `null`. Raw DSL text is not an identity — renderers would try to match
+/// it (and warn about it) — and the real key follows as a `SetProp` once
+/// the state lands.
+pub(crate) fn resolve_prop_value(
+    key: &str,
+    value: &Value,
+    state: &serde_json::Value,
+    item: Option<&serde_json::Value>,
+    data_sources: Option<&IndexMap<String, serde_json::Value>>,
+    evaluator: &mut Option<exprimo::Evaluator>,
+) -> Option<serde_json::Value> {
+    if key == crate::ir::anim::ANIM_SHARED_KEY_PROP {
+        if let Value::TemplateString { template, .. } = value {
+            let eval = evaluator
+                .get_or_insert_with(|| crate::reactive::build_evaluator(state, item, data_sources));
+            return crate::reactive::evaluate_template_string(template, eval)
+                .ok()
+                .map(serde_json::Value::String);
+        }
+        return resolve_single_value(value, state, item, data_sources, evaluator)
+            .filter(|v| !v.is_null());
+    }
+    resolve_single_value(value, state, item, data_sources, evaluator)
 }
 
 /// Resolve ONE raw prop value against state/item/data-source context.

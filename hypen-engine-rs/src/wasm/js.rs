@@ -446,15 +446,14 @@ impl WasmEngine {
 
                                     if let Some(component_spec) = resolved_doc.components.first() {
                                         let ir_node = ast_to_ir_node(component_spec);
-                                        if let IRNode::Element(ir_element) = &ir_node {
-                                            let ir_element = ir_element.clone();
-                                            let component = crate::ir::Component::new(
-                                                name.clone(),
-                                                move |_props| ir_element.clone(),
-                                            )
-                                            .with_source_path(&path);
-                                            self.core.component_registry.register(component);
-                                        }
+                                        // Any root shape: control-flow roots
+                                        // expand in place where used.
+                                        let component = crate::ir::Component::from_spec(
+                                            name.clone(),
+                                            component_spec,
+                                        )
+                                        .with_source_path(&path);
+                                        self.core.component_registry.register(component);
 
                                         self.resolve_ir_node_components_with_context(
                                             &ir_node,
@@ -465,15 +464,12 @@ impl WasmEngine {
                                     hypen_parser::parse_component(&resolved_source)
                                 {
                                     let ir_node = ast_to_ir_node(&component_spec);
-                                    if let IRNode::Element(ir_element) = &ir_node {
-                                        let ir_element = ir_element.clone();
-                                        let component = crate::ir::Component::new(
-                                            name.clone(),
-                                            move |_props| ir_element.clone(),
-                                        )
-                                        .with_source_path(&path);
-                                        self.core.component_registry.register(component);
-                                    }
+                                    let component = crate::ir::Component::from_spec(
+                                        name.clone(),
+                                        &component_spec,
+                                    )
+                                    .with_source_path(&path);
+                                    self.core.component_registry.register(component);
 
                                     self.resolve_ir_node_components_with_context(
                                         &ir_node,
@@ -580,29 +576,13 @@ impl WasmEngine {
                                         let name = element.element_type.clone();
                                         let path_clone = path.clone();
 
-                                        if let IRNode::Element(ir_element) = &ir_node {
-                                            let ir_element = ir_element.clone();
-                                            let spec_is_module = component_spec.declaration_type
-                                                == hypen_parser::DeclarationType::Module;
-                                            let spec_module_name = if spec_is_module {
-                                                Some(component_spec.name.to_lowercase())
-                                            } else {
-                                                None
-                                            };
-
-                                            let mut component = crate::ir::Component::new(
-                                                name.clone(),
-                                                move |_props| ir_element.clone(),
-                                            )
-                                            .with_source_path(&path);
-
-                                            if spec_is_module {
-                                                component.is_module = true;
-                                                component.module_name = spec_module_name;
-                                            }
-
-                                            self.core.component_registry.register(component);
-                                        }
+                                        // Any root shape: control-flow roots
+                                        // (`module App { Router { ... } }`)
+                                        // expand in place where used.
+                                        let component =
+                                            crate::ir::Component::from_spec(name, &component_spec)
+                                                .with_source_path(&path);
+                                        self.core.component_registry.register(component);
 
                                         self.resolve_ir_node_components_with_context(
                                             &ir_node,
