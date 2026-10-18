@@ -116,6 +116,15 @@ await engine.connect();
 <!-- index.html -->
 <!DOCTYPE html>
 <html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Same base styles as the built-in client -->
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { font-family: system-ui, -apple-system, sans-serif; }
+    </style>
+  </head>
   <body>
     <div id="app"></div>
     <script type="module" src="./client.ts"></script>
@@ -127,6 +136,18 @@ await engine.connect();
 bun add @hypen-space/web
 bun --port=8080 ./index.html   # then open http://localhost:8080
 ```
+
+`client.ts` uses `document`, so type-checking it needs the browser libs. The `tsconfig.json` that `bun init` writes has `"lib": ["ESNext"]`, which gives `TS2584: Cannot find name 'document'` in the editor or `bunx tsc`; change it to:
+
+```json
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  }
+}
+```
+
+(only the `lib` line changes; keep the other options). Bun runs and bundles the page either way.
 
 Or render to a web canvas, with the same setup:
 
@@ -145,6 +166,9 @@ engine.onPatches((patches) => renderer.applyPatches(patches));
 
 await engine.connect();
 ```
+
+The canvas renderer fetches its layout engine from `/taffy_wasm_bg.wasm` on the page's origin. `bun ./canvas.html` answers that path with HTML, so the browser warns that `WebAssembly.instantiateStreaming` got the wrong MIME type and the renderer falls back to a CDN copy. To serve it locally, run the page from `Bun.serve` with a route for the file: `"/taffy_wasm_bg.wasm": Bun.file("node_modules/taffy-layout/pkg/taffy_wasm_bg.wasm")` next to `"/": page` (where `import page from "./canvas.html"`). The [remote app guide](https://docs.hypen.space/docs/getting-started/remote-app) has the full script.
+
 </details>
 
 <details>

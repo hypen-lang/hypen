@@ -23,7 +23,8 @@ food-ordering/
 │   └── Search/              # Restaurant + dish search
 ├── data/                    # SQLite schema + seed
 ├── resources/               # SVG icons used by the UI
-└── rust/                    # Rust server (Tokio + Tungstenite)
+├── rust/                    # Rust server (Tokio + Tungstenite)
+└── cloudflare/              # TypeScript port as a Cloudflare Worker (Durable Object)
 ```
 
 ## Architecture
@@ -42,6 +43,8 @@ exactly what the destination route needs.
 
 ## Running
 
+### Rust server
+
 ```bash
 cd rust
 cargo run                            # Server on ws://localhost:3000
@@ -51,6 +54,43 @@ PORT=4000 cargo run                  # …or pick a port
 You can connect using any of the Hypen web clients (e.g. the social
 example's `typescript/web` setup, pointed at the food ordering
 WebSocket port).
+
+### Cloudflare Worker
+
+`cloudflare/` is the same app as a Cloudflare Worker: one Durable Object
+session per browser (state persisted in the DO), serving the built-in DOM
+client at `/`. The menu data is bundled in `src/module.ts` and the UI in
+`src/components/*.hypen`, so it doesn't use `data/` or the SQLite seed.
+
+```bash
+cd cloudflare
+bun install
+bun run dev                          # wrangler dev → http://localhost:8787
+```
+
+Open `http://localhost:8787`. Arguments after `bun run dev` go to
+`wrangler dev`, so pick other ports with:
+
+```bash
+bun run dev -- --port 8792 --inspector-port 9231
+```
+
+Pass a distinct `--inspector-port` when another `wrangler dev` is already
+running, or the second one fails with `Address already in use
+(127.0.0.1:9230)`. `scripts/dev-examples.sh food-ordering` (from the repo
+root) starts it on port 8792, the port the home-screen launcher's Food icon
+connects to.
+
+Unlike the other examples, this one is built from this checkout's SDK
+sources: `wrangler.jsonc` aliases `@hypen-space/core` and `@hypen-space/cf`
+to `../../../hypen-web/packages/*/src`, and `src/worker.ts` imports the
+client bundle from `hypen-web/packages/cf/dist/client/generic.js`. Run it
+from inside the repository, not from a copy of the folder. Deploy with
+`bun run deploy`; `bun run typecheck` type-checks it.
+
+Expected `wrangler dev` warnings: `no allowedOrigins/authenticate
+configured` (fine locally), and in the browser console `device plane
+disabled on this connection` (this app uses no device features).
 
 ## Routes
 
