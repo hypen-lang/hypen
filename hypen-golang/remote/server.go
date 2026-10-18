@@ -2,6 +2,7 @@ package remote
 
 import (
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -40,8 +41,12 @@ type RemoteServer struct {
 	moduleName string
 	definition *core.ModuleDefinition // Raw definition for per-action handler access
 	ui         string
-	config     ServerConfig
-	sourceDir  string // When set, use engine + component resolver for patches
+	// uiFromDefinition is true while ui holds the template taken from a
+	// WithDefinition module (so a later WithDefinition may replace it, but
+	// an explicit UI() call always wins).
+	uiFromDefinition bool
+	config           ServerConfig
+	sourceDir        string // When set, use engine + component resolver for patches
 
 	sessions   map[*RemoteSession]struct{}
 	connToSess map[*websocket.Conn]*RemoteSession
@@ -395,8 +400,9 @@ func (s *RemoteServer) Sessions() []*RemoteSession {
 // match is used.
 //
 // Returns ErrNoSuchSession when no ready, open session carries the id,
-// and ErrNoEngine when one does but the server runs the legacy no-engine
-// path (Source() and UI() not both configured).
+// and ErrNoEngine when one does but it has no guarded action surface (no
+// UI configured, or a map-style WithState/Serve OnAction handler instead
+// of a WithDefinition module).
 //
 // Ready closes only after the template's Router auto-wiring has installed
 // the `router.*` handlers behind hypen.navigate / hypen.back, so a handle
@@ -429,7 +435,7 @@ func (s *RemoteServer) Attach(sessionID string) (*AgentHandle, error) {
 			continue // already torn down
 		default:
 		}
-		if sess.Engine() == nil {
+		if sess.Engine() == nil || sess.usesLegacyShim() {
 			matchedWithoutEngine = true
 			continue
 		}
@@ -464,7 +470,10 @@ func (s *RemoteServer) WithState(name string, initialState map[string]any) *Remo
 
 // WithDefinition wires a typed ModuleDefinition (built via core.NewApp[T]) as the
 // primary module for this server. It adapts the per-action handlers stored in the
-// definition into the server's ActionHandler format.
+// definition into the server's ActionHandler format. When the definition carries
+// a template (set with .UI(...) / .UIFile(...) on the builder) it becomes the
+// server's UI, so no separate UI() call is needed; an explicit UI() call
+// overrides it regardless of order.
 func (s *RemoteServer) WithDefinition(def *core.ModuleDefinition) *RemoteServer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -475,6 +484,12 @@ func (s *RemoteServer) WithDefinition(def *core.ModuleDefinition) *RemoteServer 
 	}
 	s.moduleName = name
 	s.definition = def
+	// The module's own template (core.NewApp(...).UI(...)) is the server's
+	// UI unless UI() was called explicitly.
+	if def.Template != "" && (s.ui == "" || s.uiFromDefinition) {
+		s.ui = def.Template
+		s.uiFromDefinition = true
+	}
 
 	s.module = &ModuleConfig{
 		Name:         name,
@@ -515,11 +530,13 @@ func (s *RemoteServer) OnAction(handler ActionHandler) *RemoteServer {
 	return s
 }
 
-// UI sets the UI DSL string
+// UI sets the UI DSL string. Optional when WithDefinition is given a module
+// that already has a template; an explicit UI() always takes precedence.
 func (s *RemoteServer) UI(dsl string) *RemoteServer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.ui = dsl
+	s.uiFromDefinition = false
 	return s
 }
 
@@ -537,6 +554,18 @@ func (s *RemoteServer) Config(config ServerConfig) *RemoteServer {
 	// unconditionally: the zero value already means "compression on".
 	s.config.DisableCompression = config.DisableCompression
 	s.upgrader.EnableCompression = !config.DisableCompression
+	s.config.DisableWebClient = config.DisableWebClient
+	return s
+}
+
+// DisableWebClient stops Listen() from serving the built-in browser client
+// at `/` (the WebSocket endpoint is unaffected). Equivalent to
+// Config(ServerConfig{DisableWebClient: true}) without touching the other
+// settings.
+func (s *RemoteServer) DisableWebClient() *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.config.DisableWebClient = true
 	return s
 }
 
@@ -855,44 +884,107 @@ func (s *RemoteServer) OnDisconnection(callback ServerConnectionCallback) *Remot
 	return s
 }
 
-// Listen starts the WebSocket server. Convenience wrapper that backs
-// `Prepare()` + `CreateSession()` with a gorilla/websocket adapter. For
-// custom integrations use the transport-agnostic primitives directly.
+// Listen starts the HTTP/WebSocket server and BLOCKS until Stop() is
+// called (or the server fails, e.g. the port is taken — the error is
+// logged), like net/http's ListenAndServe, so `main` can end with it:
+//
+//	remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
+//
+// It serves the WebSocket endpoint at `/` and `/ws`, `/health`, and —
+// unless DisableWebClient() — a built-in browser client at
+// http://localhost:<port>/. Use ListenAsync to start in the background,
+// or ListenAndServe to get the error back. Panics if the server is not
+// configured (see Prepare). Convenience wrapper that backs `Prepare()` +
+// `CreateSession()` with a gorilla/websocket adapter; for custom
+// integrations use the transport-agnostic primitives directly.
 func (s *RemoteServer) Listen(port ...int) *RemoteServer {
 	if err := s.Prepare(); err != nil {
 		panic(err.Error())
 	}
+	if err := s.ListenAndServe(port...); err != nil {
+		logServer.Error("Server error: %v", err)
+	}
+	return s
+}
+
+// ListenAndServe is Listen returning the error instead of logging it. It
+// blocks until Stop() (then returns nil) or a listen/serve failure.
+func (s *RemoteServer) ListenAndServe(port ...int) error {
+	ln, srv, err := s.start(port...)
+	if err != nil {
+		return err
+	}
+	if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+		return err
+	}
+	return nil
+}
+
+// ListenAsync starts the server in the background and returns immediately.
+// The port is bound before it returns, so clients can connect right away;
+// a bind failure is logged. Call Stop() to shut it down.
+func (s *RemoteServer) ListenAsync(port ...int) *RemoteServer {
+	if err := s.Prepare(); err != nil {
+		panic(err.Error())
+	}
+	ln, srv, err := s.start(port...)
+	if err != nil {
+		logServer.Error("Server error: %v", err)
+		return s
+	}
+	go func() {
+		if err := srv.Serve(ln); err != nil && err != http.ErrServerClosed {
+			logServer.Error("Server error: %v", err)
+		}
+	}()
+	return s
+}
+
+// start validates the configuration, binds the listener and installs the
+// http.Server (so Stop() can close it). Serving is up to the caller.
+func (s *RemoteServer) start(port ...int) (net.Listener, *http.Server, error) {
+	if err := s.Prepare(); err != nil {
+		return nil, nil, err
+	}
 
 	s.mu.Lock()
-	if len(port) > 0 {
+	if len(port) > 0 && port[0] > 0 {
 		s.config.Port = port[0]
 	}
 	addr := fmt.Sprintf("%s:%d", s.config.Hostname, s.config.Port)
+	webClient := !s.config.DisableWebClient
+	hostname, portNum := s.config.Hostname, s.config.Port
 	s.mu.Unlock()
+
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		return nil, nil, err
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/", s.handleHTTP)
 	mux.HandleFunc("/ws", s.handleWebSocket)
 	mux.HandleFunc("/health", s.handleHealth)
 
-	s.server = &http.Server{
+	srv := &http.Server{
 		Addr:    addr,
 		Handler: mux,
 	}
+	s.mu.Lock()
+	s.server = srv
+	s.mu.Unlock()
 
-	go func() {
-		logServer.Info("Hypen app streaming on ws://%s", addr)
-		if err := s.server.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logServer.Error("Server error: %v", err)
-		}
-	}()
-
-	return s
+	logServer.Info("Hypen app streaming on ws://%s", addr)
+	if webClient {
+		logServer.Info("Web client at %s", webClientURL(hostname, portNum))
+	}
+	return ln, srv, nil
 }
 
-// ListenAsync starts the server and returns immediately
-func (s *RemoteServer) ListenAsync(port ...int) *RemoteServer {
-	return s.Listen(port...)
+// Wait blocks until Stop() is called. Pairs with ListenAsync / Serve when
+// main has nothing else to do.
+func (s *RemoteServer) Wait() {
+	<-s.done
 }
 
 // Stop stops the server and tears down all sessions.
@@ -947,6 +1039,13 @@ func (s *RemoteServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	// Check if this is a WebSocket upgrade request
 	if websocket.IsWebSocketUpgrade(r) {
 		s.handleWebSocket(w, r)
+		return
+	}
+
+	s.mu.RLock()
+	webClient := !s.config.DisableWebClient
+	s.mu.RUnlock()
+	if webClient && serveWebClient(w, r) {
 		return
 	}
 
@@ -1176,7 +1275,9 @@ func Serve(options ServeOptions) *RemoteServer {
 		server.OnDisconnection(options.OnDisconnection)
 	}
 
-	return server.Listen(options.Port)
+	// Serve keeps its historical non-blocking contract (it returns the
+	// running server); block with Wait() or `select {}` afterwards.
+	return server.ListenAsync(options.Port)
 }
 
 // ServeOptions contains options for the Serve convenience function

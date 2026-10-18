@@ -25,11 +25,11 @@ var (
 	// completed, or the session has already been destroyed).
 	ErrNoSuchSession = errors.New("remote: no ready session with that id")
 
-	// ErrNoEngine is returned when the session exists but never built an
-	// engine — the server was configured without both Source() and UI(),
-	// so it runs the legacy no-engine shim, which exposes no guarded
-	// external surface.
-	ErrNoEngine = errors.New("remote: session has no engine (attach requires Source() and UI())")
+	// ErrNoEngine is returned when the session exists but has no engine
+	// action surface — no UI was configured, or the module is a map-style
+	// WithState/Serve OnAction handler (the legacy shim), which registers
+	// no actions on the engine and so exposes no guarded external surface.
+	ErrNoEngine = errors.New("remote: session has no engine action surface (attach requires WithDefinition and a UI)")
 
 	// ErrSessionClosed is returned by every handle method once the user
 	// session behind it has been destroyed. The handle itself is inert

@@ -409,10 +409,12 @@ func TestAttach_BeforeHelloIsNotReady(t *testing.T) {
 }
 
 func TestAttach_NoEngineServer(t *testing.T) {
-	// WithState + UI but no Source: the session runs the legacy shim and
-	// never builds an engine, so there is no guarded surface to bind.
+	// WithState + a map-style OnAction: the session renders through the
+	// engine but dispatches via the legacy ModuleConfig shim, registering
+	// no actions on the engine, so there is no guarded surface to bind.
 	server := NewRemoteServer().
 		WithState("Counter", map[string]any{"count": 0}).
+		OnAction(func(_ string, _ any, state map[string]any) map[string]any { return state }).
 		UI(`Text("hi")`)
 	if err := server.Prepare(); err != nil {
 		t.Fatalf("Prepare: %v", err)

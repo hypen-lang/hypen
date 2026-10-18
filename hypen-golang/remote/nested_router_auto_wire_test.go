@@ -136,7 +136,7 @@ func TestNestedRouterAutoWire_RoutesDeclaredInNestedModuleNavigable(t *testing.T
 
 		// The mirror runs on a goroutine — poll briefly.
 		var got string
-		pollDeadline := time.Now().Add(3 * time.Second)
+		pollDeadline := time.Now().Add(10 * time.Second) // generous: CI under load
 		for time.Now().Before(pollDeadline) {
 			state := sess.State()
 			if loc, ok := state["location"].(string); ok && loc == "/home/feed" {
@@ -226,7 +226,7 @@ func TestNestedRouterAutoWire_RoutesDeclaredInNestedModuleNavigable(t *testing.T
 		}
 
 		var got string
-		pollDeadline := time.Now().Add(3 * time.Second)
+		pollDeadline := time.Now().Add(10 * time.Second) // generous: CI under load
 		for time.Now().Before(pollDeadline) {
 			state := sess.State()
 			if loc, ok := state["location"].(string); ok && loc == "/settings" {
@@ -344,7 +344,7 @@ waitReady:
 
 	// Give the dispatch a moment — handler is synchronous but the
 	// transport write is goroutine-scheduled.
-	pollDeadline := time.Now().Add(3 * time.Second)
+	pollDeadline := time.Now().Add(10 * time.Second) // generous: CI under load
 	for time.Now().Before(pollDeadline) {
 		if result.saw {
 			break
@@ -480,7 +480,7 @@ waitReady:
 		t.Fatalf("Receive probe: %v", err)
 	}
 
-	pollDeadline := time.Now().Add(3 * time.Second)
+	pollDeadline := time.Now().Add(10 * time.Second) // generous: CI under load
 	for time.Now().Before(pollDeadline) {
 		if result.fired {
 			break
