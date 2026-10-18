@@ -68,6 +68,10 @@ import { BaseEngine } from "../engine-base.js";
 
 const log = frameworkLoggers.remote;
 
+/** Upper bound on how long the router → `state.location` mirror waits for
+ *  the target module to activate before rendering the route anyway. */
+const LOCATION_MIRROR_WAIT_MS = 250;
+
 /**
  * Server → client messages emitted by a `RemoteSession`.
  */
@@ -1531,7 +1535,24 @@ export class RemoteSession {
 
       router.onNavigate((rs) => {
         const path = rs.currentPath;
-        queueMicrotask(() => {
+        // Write `location` only once ManagedRouter has mounted/activated the
+        // target module, so the navigation batch renders the route with the
+        // state `onActivated` wrote (e.g. a resolved `.sharedElement` key)
+        // instead of an empty first frame. The microtask hop lets
+        // `handleRouteChange` chain its navPromise first (this listener is
+        // registered before `managed.start()`); the cap keeps a slow
+        // `onActivated` (I/O) from stalling navigation.
+        queueMicrotask(async () => {
+          let timer: ReturnType<typeof setTimeout> | undefined;
+          await Promise.race([
+            managed.waitForNavigation(),
+            new Promise<void>((resolve) => {
+              timer = setTimeout(resolve, LOCATION_MIRROR_WAIT_MS);
+            }),
+          ]);
+          clearTimeout(timer);
+          // A newer navigation superseded this one; its own mirror writes.
+          if (router.getCurrentPath() !== path) return;
           try {
             const state = this._moduleInstance?.getState() as
               | Record<string, unknown>
