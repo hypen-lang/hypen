@@ -116,4 +116,23 @@ describe("Food ordering layout contracts", () => {
       "Napoli Pizzeria",
     );
   });
+
+  test("prices render with two decimals, never as raw floats", async () => {
+    const { money, searchRestaurants } = await import(
+      "./food-ordering/cloudflare/src/module"
+    );
+    expect(money(14.5)).toBe("14.50");
+    expect(money(16)).toBe("16.00");
+    expect(money(0.1 + 0.2)).toBe("0.30");
+    expect(searchRestaurants("Pizza")[0].deliveryFeeLabel).toMatch(/^\d+\.\d{2}$/);
+
+    const dir = `${root}/food-ordering/cloudflare/src/components`;
+    for (const file of new Bun.Glob("*.hypen").scanSync(dir)) {
+      const template = await Bun.file(`${dir}/${file}`).text();
+      // Every "$" amount must come from a pre-formatted *Label field.
+      for (const match of template.matchAll(/\$@\{([^}]+)\}|'\$' \+ ([\w.]+)/g)) {
+        expect(`${file}: ${match[1] ?? match[2]}`).toMatch(/Label$/);
+      }
+    }
+  });
 });

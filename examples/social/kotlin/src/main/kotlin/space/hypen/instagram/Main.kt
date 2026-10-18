@@ -277,15 +277,9 @@ fun buildStoryModule(conn: Connection): ModuleDefinition<MutableMap<String, Any?
                 state.story = null
                 return@onActivated
             }
-            val u = try { getUser(conn, id) } catch (_: Exception) {
-                state.story = null
-                return@onActivated
-            }
-            state.story = ViewedStory(
-                id = id,
-                user = u,
-                imageUrl = u.avatarUrl,
-            )
+            // id is a story id (see StoryItem); getStory falls back to a
+            // user id for deep links and returns null for anything unknown.
+            state.story = getStory(conn, id)
         }
     }
 

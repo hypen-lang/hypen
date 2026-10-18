@@ -68,15 +68,28 @@ nested, why BottomNav skips `app.module(...)`).
 
 ```bash
 cd typescript
-bun install
+bun run setup        # installs hypen-web's deps + this example's (see note)
 
-# Start the server (websocket on :3000):
+# Start the server (websocket on :3000, override with PORT=...):
 bun run dev
 
-# In a second terminal, start the web client on :3001:
+# In a second terminal, start the web client on :3001 (override with WEB_PORT=...):
 bun run web
 # Then open http://localhost:3001
 ```
+
+> **First run:** the `@hypen-space/*` dependencies are `file:` links into
+> this repo's `hypen-web/packages/*`, and those packages resolve their own
+> dependencies (e.g. `@chenglou/pretext` for the web renderer) from
+> `hypen-web/node_modules`. `bun run setup` installs both in one go
+> (equivalent to `cd ../../../hypen-web && bun install`, then `bun install`
+> here). Skipping it fails the web build with
+> `Could not resolve: "@chenglou/pretext"`.
+
+The web client connects to the backend on the page's host at the
+server's `PORT` (default 3000; `serve.ts` injects it, `WS_URL=...`
+overrides it). To point an already-open page somewhere else, add
+`?ws=ws://host:port` to the URL.
 
 The DB file (`calorie-counter.db`) is created on first boot from
 `data/schema.sql`. Reset it any time with:

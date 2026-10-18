@@ -43,13 +43,26 @@ func initDatabase() *sql.DB {
 	return db
 }
 
+// sqliteTimeLayouts covers SQLite's CURRENT_TIMESTAMP text form and the
+// RFC 3339 form the driver yields when it scans a DATETIME column.
+var sqliteTimeLayouts = []string{"2006-01-02 15:04:05", time.RFC3339Nano, "2006-01-02T15:04:05"}
+
 func formatTimeAgo(dateStr string) string {
-	t, err := time.Parse("2006-01-02 15:04:05", dateStr)
+	var t time.Time
+	var err error
+	for _, layout := range sqliteTimeLayouts {
+		if t, err = time.Parse(layout, dateStr); err == nil {
+			break
+		}
+	}
 	if err != nil {
 		return dateStr
 	}
 	diff := time.Since(t)
 	minutes := int(math.Floor(diff.Minutes()))
+	if minutes < 0 {
+		minutes = 0
+	}
 	if minutes < 60 {
 		return fmt.Sprintf("%dm", minutes)
 	}

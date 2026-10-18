@@ -27,7 +27,10 @@ impl SessionTransport for Transport { fn send_ui(&self,s:String) { self.send_tex
 #[tokio::main]
 async fn main() {
     let ui=std::fs::read_to_string("../app.hypen").unwrap();
-    let server=DeviceServer::new(DeviceServerConfig::default().allow_origin("http://127.0.0.1:45100")
+    // DEVICE_LAB_WEB_PORT (default 45100) / DEVICE_LAB_RUST_PORT (default 45105) override the ports.
+    let web_port=std::env::var("DEVICE_LAB_WEB_PORT").ok().and_then(|p| p.parse::<u16>().ok()).unwrap_or(45100);
+    let port=std::env::var("DEVICE_LAB_RUST_PORT").ok().and_then(|p| p.parse::<u16>().ok()).unwrap_or(45105);
+    let server=DeviceServer::new(DeviceServerConfig::default().allow_origin(format!("http://127.0.0.1:{web_port}"))
         .authenticate(|r| r.path.split('?').nth(1).unwrap_or("").split('&').any(|p|p=="token=device-lab")));
     let mut builder=HypenApp::module::<Lab>("App").state(Lab { server:"Rust".into(), runs:0,
         result:"Connected. Choose a check.".into(), detail:String::new(), history:String::new() }).ui(&ui);
@@ -82,8 +85,8 @@ async fn main() {
         });
     }
     let definition=Arc::new(builder.build());
-    let listener=tokio::net::TcpListener::bind("127.0.0.1:45105").await.unwrap();
-    println!("Device Lab Rust 45105");
+    let listener=tokio::net::TcpListener::bind(("127.0.0.1", port)).await.unwrap();
+    println!("Device Lab Rust {port}");
     loop {
         let (tcp,_)=listener.accept().await.unwrap();let ds=server.clone();let def=definition.clone();
         tokio::spawn(async move {

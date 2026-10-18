@@ -2,6 +2,7 @@
   "name": "hypen-calorie-counter-ts",
   "type": "module",
   "scripts": {
+    "setup": "bun install --cwd ../../../hypen-web && bun install",
     "dev": "bun run server/index.ts",
     "web": "bun --hot web/serve.ts",
     "db:reset": "rm -f calorie-counter.db && bun run dev"

@@ -50,6 +50,35 @@ final class Database: @unchecked Sendable {
         )
     }
 
+    /// Resolve a "/story/:id" route param. The param is a *story* id
+    /// (StoryItem pushes "/story/@{item.id}" with ids from the stories
+    /// table), so look it up there first and fall back to a user id for deep
+    /// links. Nil when neither matches.
+    func queryStory(id: String) -> ViewedStory? {
+        var stmt: OpaquePointer?
+        defer { sqlite3_finalize(stmt) }
+        let sql = """
+            SELECT s.id, s.image_url, u.id, u.username, u.display_name, u.avatar_url
+            FROM stories s JOIN users u ON s.user_id = u.id WHERE s.id = ?
+            """
+        sqlite3_prepare_v2(db, sql, -1, &stmt, nil)
+        sqlite3_bind_text(stmt, 1, (id as NSString).utf8String, -1, nil)
+        if sqlite3_step(stmt) == SQLITE_ROW {
+            return ViewedStory(
+                id: col(stmt, 0),
+                user: User(id: col(stmt, 2), username: col(stmt, 3), displayName: col(stmt, 4), avatarUrl: col(stmt, 5)),
+                imageUrl: col(stmt, 1)
+            )
+        }
+        let u = queryUser(id: id)
+        guard !u.id.isEmpty else { return nil }
+        return ViewedStory(
+            id: id,
+            user: User(id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl),
+            imageUrl: u.avatarUrl
+        )
+    }
+
     func queryPosts(currentUserId: String) -> [Post] {
         var stmt: OpaquePointer?
         defer { sqlite3_finalize(stmt) }

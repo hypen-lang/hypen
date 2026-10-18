@@ -1,0 +1,3 @@
+# Copy to .dev.vars (git-ignored) and fill in a free key from https://www.omdbapi.com/apikey.aspx
+# Leave unset to use the bundled fallback catalog.
+OMDB_API_KEY=

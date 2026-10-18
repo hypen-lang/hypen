@@ -79,7 +79,7 @@ Column {
                 Row {
                     Text("Subtotal")
                         .tw("text-sm text-gray-600 flex-1")
-                    Text("$@{state.cartSubtotal}")
+                    Text("$@{state.cartSubtotalLabel}")
                         .tw("text-sm")
                 }
                 .tw("mt-3 items-center")
@@ -87,7 +87,7 @@ Column {
                 Row {
                     Text("Delivery fee")
                         .tw("text-sm text-gray-600 flex-1")
-                    Text("$@{state.cartDeliveryFee}")
+                    Text("$@{state.cartDeliveryFeeLabel}")
                         .tw("text-sm")
                 }
                 .tw("mt-2 items-center")
@@ -98,7 +98,7 @@ Column {
                 Row {
                     Text("Total")
                         .tw("text-base font-bold flex-1")
-                    Text("$@{state.cartTotal}")
+                    Text("$@{state.cartTotalLabel}")
                         .tw("text-base font-bold")
                 }
                 .tw("items-center")
@@ -106,7 +106,7 @@ Column {
             .tw("bg-white px-4 py-4 mt-2")
 
             Button {
-                Text("Place order · $@{state.cartTotal}")
+                Text("Place order · $@{state.cartTotalLabel}")
                     .tw("text-base font-bold text-white")
             }
             .tw("mx-4 my-4 py-4 bg-orange-500 rounded-full items-center justify-center")

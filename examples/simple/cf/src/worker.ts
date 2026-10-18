@@ -18,9 +18,14 @@ const counter = app
     module App {
       Column {
         Row {
-          Button("@actions.inc") { Text("Home") }
+          // Navigate with .onClick(@router.push, to: "...") — the to: argument
+          // rides along with the click as the action payload. (A positional
+          // Button("@router.push", to: ...) drops to.)
+          Button { Text("Home") }
+            .onClick(@router.push, to: "/")
             .color("@{state.location == '/' ? '#2563eb' : '#9ca3af'}")
-          Button("@router.push", to: "/about") { Text("About") }
+          Button { Text("About") }
+            .onClick(@router.push, to: "/about")
             .color("@{state.location == '/about' ? '#2563eb' : '#9ca3af'}")
         }
           .tw("gap-4 p-4")
@@ -36,8 +41,14 @@ const counter = app
               .tw("items-center justify-center flex-1 gap-2")
           }
           Route(path: "/about") {
-            Text("A whole Hypen app in one worker.ts.")
-              .tw("text-xl p-8")
+            Column {
+              Text("A whole Hypen app in one worker.ts.")
+                .tw("text-xl")
+              Button { Text("Back to the counter") }
+                .onClick(@router.push, to: "/")
+                .tw("bg-blue-600 text-white rounded px-4 py-2 mt-3")
+            }
+              .tw("items-center p-8 gap-2")
           }
         }
           .tw("flex-1")

@@ -5,7 +5,9 @@ import wasmModule from "hypen-engine/hypen_engine_bg.wasm";
 // @ts-ignore - The web-target glue exports initSync(module) and WasmEngine.
 import * as wasm from "hypen-engine";
 // @ts-ignore - Wrangler's Text rule imports the prebuilt generic client as a string.
-import genericClientJs from "../node_modules/@hypen-space/cf/dist/client/generic.js";
+// Taken from this checkout (like the core/cf aliases in wrangler.jsonc), so the
+// client always matches the SDK source the worker is built from.
+import genericClientJs from "../../../../hypen-web/packages/cf/dist/client/generic.js";
 
 import { appModule } from "./module";
 import { appTemplate, templates } from "./templates";
