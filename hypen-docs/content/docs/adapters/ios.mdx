@@ -9,16 +9,28 @@ The iOS adapter (`HypenSwift`) renders Hypen components to native SwiftUI views.
 
 ## Installation
 
-Add the package to your Xcode project via Swift Package Manager:
+> **Not published yet.** The iOS renderer is not available as a public Swift package (the `github.com/nicktowe/hypen-renderer-swift` URL this page used to show is private). The source lives in the `hypen-renderer-swift/` directory of the [Hypen repository](https://github.com/hypen-lang/hypen) (package `HypenSwift`). Swift Package Manager can't depend on a subdirectory of a remote repository, so clone it and add it as a local package.
+
+```bash
+git clone https://github.com/hypen-lang/hypen.git
+```
 
 ```swift
-// In Package.swift
+// Package.swift (swift-tools-version: 6.0)
 dependencies: [
-    .package(url: "https://github.com/nicktowe/hypen-renderer-swift.git", from: "1.0.0")
+    .package(path: "../hypen/hypen-renderer-swift")
+],
+targets: [
+    .target(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "HypenSwift", package: "hypen-renderer-swift"),
+        ]
+    ),
 ]
 ```
 
-Or in Xcode: **File > Add Package Dependencies**, then enter the repository URL.
+In Xcode: **File > Add Package Dependencies > Add Local...**, then pick the `hypen-renderer-swift` folder.
 
 ## Basic Usage
 

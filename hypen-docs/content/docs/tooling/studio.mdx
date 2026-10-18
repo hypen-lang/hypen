@@ -11,7 +11,7 @@ Hypen Studio is a full-featured, in-browser IDE for building Hypen applications.
 hypen studio
 ```
 
-Studio opens at `http://localhost:5173` by default.
+Studio opens at `http://localhost:5173` by default, or on the next free port if 5173 is taken. Pass `--no-open` if you don't want a browser tab opened for you.
 
 <img src="/tooling/studio.png" alt="Hypen Studio: file explorer, editor, and live preview connected to a running app" />
 
@@ -60,7 +60,7 @@ Studio uses Monaco (the engine behind VS Code) for code editing. It supports:
 
 - **Syntax highlighting** for `.hypen`, `.ts`, `.tsx`, `.js`, `.json`, `.css`, and `.md` files
 - **Multi-tab editing** — open as many files as you need
-- **Language Server Protocol (LSP)** — if `@hypen-space/lsp` is installed, you get completions, diagnostics, and hover info for `.hypen` files
+- **Language Server Protocol (LSP)**: completions, diagnostics, and hover info for `.hypen` files. The CLI installs `@hypen-space/lsp` as a dependency; if it is missing, Studio prints a warning and the editor runs without language features
 - **Auto-save** — changes are saved and hot-reloaded automatically
 
 ## Live Preview
@@ -192,13 +192,16 @@ hypen studio [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--port <number>`, `-p` | `5173` | Port to run Studio on |
-| `--open` | `true` | Open browser automatically |
+| `-p, --port <port>` | `5173` | Port to run Studio on. If it is taken, the next free port is used |
+| `--no-open` | | Don't open a browser tab (by default one is opened) |
+| `--session <id>` | | Load a session teleported from hypen.space into a new `./hypen-<id>` project and open it |
+
+`hypen studio --help` prints the same list. For Test Mode options, see [`hypen test`](/docs/tooling/cli#hypen-test).
 
 ## Requirements
 
 - **Bun** runtime (Studio's server is built with Bun)
-- A Hypen project with `hypen.json` and a `src/components/` directory
+- A Hypen project: run `hypen studio` in the directory that holds `hypen.json`. Both the file-based (`src/components/`) and server-based (script `entry`) layouts work
 
 ## See Also
 

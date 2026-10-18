@@ -65,8 +65,10 @@ Column {
     Text("Responsive")
 }
     .tw("p-4 md:p-8 lg:p-12")
-    .padding(8)
-    .padding@md(16)
+
+// Or, without Tailwind, a value map keyed by breakpoint
+Text("Responsive")
+    .padding({default: 8, md: 16})
 ```
 
 The desktop renderer threads window width through every prop read, so

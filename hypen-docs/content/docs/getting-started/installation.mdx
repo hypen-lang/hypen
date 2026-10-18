@@ -5,152 +5,199 @@ description: Install the Hypen CLI and set up your development environment
 
 # Installation
 
-The fastest way to get started with Hypen is using the CLI.
+The fastest way to get started with Hypen is the CLI.
 
-## Install the CLI
+## Requirements
 
-```bash
-# Using Bun (recommended)
-bun install -g @hypen-space/cli
+- **[Bun](https://bun.sh) 1.2 or newer.** The `hypen` CLI is a Bun program (its launcher runs `bun`), so Node.js and npm alone can't run it. Install Bun with `curl -fsSL https://bun.sh/install | bash`.
+- A modern browser with WebAssembly support (Chrome, Firefox, Safari, Edge).
+- Optional, for device previews: `adb` for Android, Xcode for the iOS Simulator.
 
-# Using npm
-npm install -g @hypen-space/cli
-```
+Node.js is only needed if you want to serve a production build with `node dist/server.js`; `bun dist/server.js` works too.
 
 ## Create a New Project
 
+You don't need to install anything globally. Run the CLI straight from npm:
+
 ```bash
-hypen init my-app
+bunx @hypen-space/cli init my-app
 cd my-app
 ```
 
-This creates a new Hypen project with:
-- A starter component with state and actions
-- TypeScript configuration
-- A `hypen.json` configuration file
+`hypen init` asks for a language (TypeScript, Go or Kotlin), a module layout (file-based or server-based) and which AI agent skill files to add, then installs the dependencies. Outside an interactive terminal it picks TypeScript and the file-based layout.
 
-## Start Development Server
+The CLI is also added to the project as a dev dependency, so every command below works through the project's own scripts.
+
+### Optional: install the CLI globally
 
 ```bash
-hypen dev
+bun add -g @hypen-space/cli
+hypen --version
 ```
 
-This starts a hot-reloading development server at `http://localhost:3000`.
+A global `hypen` hands project commands (`dev`, `build`, `studio`, `test`, `run`, ...) to the project's own `node_modules/@hypen-space/cli` when there is one, and prints `Using project-local @hypen-space/cli vX` when it does. That makes `bun run dev`, `bunx hypen dev` and a global `hypen dev` equivalent. Set `HYPEN_NO_LOCAL_CLI=1` to turn the hand-off off.
+
+<Callout type="warn">
+The hand-off is new and not in CLI 0.6.6 or earlier. With those versions a global `hypen dev` uses its own copy of the Hypen packages, and actions in nested modules fail with `invalid scoped UI action`. If you see that, run `bun run dev` from the project instead.
+</Callout>
+
+## Start the Development Server
+
+```bash
+bun run dev
+```
+
+This starts a hot-reloading development server. Open `http://localhost:3000` in your browser: you'll see the starter app's Home screen, with a button that navigates to a Counter screen. Native runners connect to the same server at `ws://localhost:3000`.
+
+Use `bunx hypen dev --port 4000` for another port, and `bunx hypen dev --debug` (or `DEBUG=hypen:* bun run dev`) for verbose framework logs.
+
+## Project Structure
+
+`hypen init my-app` (TypeScript, file-based layout) creates:
+
+```
+my-app/
+├── src/
+│   ├── app.ts                     # Optional standalone server (see below)
+│   └── components/
+│       ├── App/                   # Root module: owns the Router
+│       │   ├── component.hypen
+│       │   └── component.ts
+│       ├── Home/                  # "/" screen
+│       │   ├── component.hypen
+│       │   └── component.ts
+│       └── Counter/               # "/counter" screen
+│           ├── component.hypen
+│           └── component.ts
+├── .claude/skills/hypen-ui.md     # Only if you chose the Claude skill
+├── .agent/skills/hypen-ui.md      # Only if you chose the generic agent skill
+├── .gitignore
+├── hypen.json                     # entry: "App", components: "./src/components"
+├── package.json
+└── tsconfig.json
+```
+
+Each folder under `src/components/` is one module: `component.hypen` holds the UI template and `component.ts` holds the state and actions. `hypen dev` and `hypen build` discover them automatically and start from the module named in `hypen.json`'s `entry` (`App`).
+
+`src/app.ts` is **not** used by `hypen dev` or `hypen build`. It runs the same app as a standalone remote-UI (WebSocket) server, for native clients or for hosting the server yourself (`bun run serve`, `PORT` env var, default 3000). Delete it if you don't need it.
+
+The skill files teach AI coding agents the Hypen syntax. They are listed in `.gitignore`.
+
+### Generated `package.json`
+
+The `@hypen-space/*` packages are pinned to the CLI's own version (for example `^0.6.5`), so a project is reproducible. The scripts are:
+
+| Script | Runs | What it does |
+|--------|------|--------------|
+| `dev` | `hypen dev` | Dev server with hot reload |
+| `studio` | `hypen studio` | Hypen Studio IDE |
+| `test` | `hypen test` | Studio Test Mode (live previews and device mirrors) |
+| `build` | `hypen build` | Production build into `dist/` |
+| `start` | `node dist/server.js` | Serves the `hypen build` output (`PORT`, default 3000) |
+| `serve` | `bun src/app.ts` | Standalone remote-UI server |
+
+The server-based layout has no `serve` script, and its `start` is `bun dist/main.js`.
 
 ## Preview Your App
 
 ### Hypen Studio
 
-[Hypen Studio](/docs/tooling/studio) is a full in-browser IDE for building Hypen apps. It includes a code editor with LSP support, live preview, file browser, and powerful debugging tools — state inspector, action log, time-travel debugging, console, and an integrated terminal.
+[Hypen Studio](/docs/tooling/studio) is a full in-browser IDE for building Hypen apps. It has a code editor with LSP support, live preview, a file browser and debugging tools: state inspector, action log, time-travel debugging, console and an integrated terminal.
 
 ```bash
-hypen studio
+bun run studio
 ```
 
-Studio opens at `http://localhost:5173`. See the [Studio documentation](/docs/tooling/studio) for the full feature reference.
+Studio opens at `http://localhost:5173` (or the next free port). Pass `--no-open` to skip opening a browser tab. See the [Studio documentation](/docs/tooling/studio) for the full feature reference.
 
-### Preview on Android and iOS
+### Preview on Android, iOS and desktop
 
-You can preview your app on a physical device or simulator directly from the CLI:
+You can preview your app on a device, emulator or simulator straight from the CLI:
 
 ```bash
-# Android (requires adb)
-hypen run android
+# Android device or emulator (requires adb)
+bunx hypen run android
 
-# iOS Simulator (requires Xcode)
-hypen run ios
+# iOS Simulator (requires Xcode, macOS only)
+bunx hypen run ios
 ```
 
-The CLI downloads a runner app, detects connected devices, and launches your app with hot reload. Add `--studio` to open Hypen Studio alongside the device runner — edit in the browser, see changes on the device in real time:
+The CLI downloads a runner app, picks the connected device and launches your app with hot reload. Add `--studio` to open Hypen Studio alongside the runner, so you edit in the browser and see the change on the device:
 
 ```bash
-hypen run android --studio
-hypen run ios --studio
+bunx hypen run android --studio
 ```
 
-## Project Structure
+For Android, the CLI first tries `adb reverse` so the device reaches your dev server at `ws://localhost:<port>`, which works for emulators and USB devices without shared Wi-Fi. With several devices attached, pick one with `ANDROID_SERIAL=<serial>`. The runner APK is only reinstalled when it changed; `--clean` forces a fresh download and install.
 
-The CLI creates this structure:
-
-```
-my-app/
-├── src/
-│   └── components/
-│       └── App/
-│           ├── component.hypen    # UI template
-│           └── component.ts       # Module logic
-├── hypen.json                     # Project configuration
-├── package.json
-└── tsconfig.json
-```
+`hypen run desktop` opens the app in Hypen Browser, the native desktop runner. Prebuilt desktop runners are **not published yet**, so the download fails and the CLI prints build-from-source steps. In short: build `hypen-browser` from a [hypen checkout](https://github.com/hypen-lang/hypen) with `cargo build --release -p hypen-browser` (Linux needs `libdbus-1-dev libclang-dev libasound2-dev`, see `hypen-browser/README.md`), then point the CLI at the binary with `HYPEN_DESKTOP_RUNNER=/path/to/hypen-browser`.
 
 ## CLI Commands
 
+Inside a project, run these as `bunx hypen <command>` (or plain `hypen <command>` with a global install). `hypen <command> --help` prints a command's own flags.
+
 | Command | Description |
 |---------|-------------|
-| `hypen init <name>` | Create a new Hypen project |
-| `hypen dev` | Start development server with hot reload |
-| `hypen build` | Build for production |
-| `hypen generate` | Generate component imports |
-| `hypen studio` | Open Hypen Studio IDE |
-| `hypen run android` | Install and launch on Android device/emulator |
-| `hypen run ios` | Install and launch on iOS Simulator |
+| `hypen init [name]` | Create a new Hypen project |
+| `hypen dev` | Dev server with hot reload (`-p/--port`, `-d/--debug`, `--a11y`) |
+| `hypen build` | Production build (`-o/--outDir`, `--no-minify`, `-s/--sourcemap`) |
+| `hypen generate` | Write `.hypen/components.generated.ts` with component imports |
+| `hypen check [path...]` | Accessibility checks over `.hypen` files, e.g. `hypen check src/components/App/component.hypen` |
+| `hypen studio` | Open Hypen Studio (`-p/--port`, `--no-open`) |
+| `hypen test` | Studio Test Mode |
+| `hypen run android` | Install and launch on an Android device or emulator |
+| `hypen run ios` | Install and launch on the iOS Simulator |
+| `hypen run desktop` | Launch in Hypen Browser (runner must be built from source for now) |
+
+`hypen build` writes a self-contained static site to `dist/`: the page, a worker that runs your modules, the engine WASM (nothing is loaded from a CDN at runtime) and a small `server.js`. Run it with `bun run start` (`node dist/server.js`). Any static host works too, as long as the site is served from the domain root and unknown paths fall back to `index.html`.
 
 ## Manual Setup (Alternative)
 
-If you prefer to set up manually:
-
 ### Web
 
+To add Hypen to an existing Bun project:
+
 ```bash
-mkdir my-hypen-app
-cd my-hypen-app
-npm init -y
-npm install @hypen-space/core @hypen-space/web @hypen-space/web-engine
+bun add @hypen-space/core @hypen-space/web @hypen-space/web-engine
 ```
 
-See the [Web Adapter docs](/docs/adapters/web) for detailed web setup.
+See the [Web Adapter docs](/docs/adapters/web) for the browser setup, or [Building a Remote App](/docs/getting-started/remote-app) to stream an app from a server.
 
 ### Android
 
-Add to your `build.gradle.kts`:
+The Android renderer is on Maven Central as `space.hypen:hypen-renderer`. Add it to your app's `build.gradle.kts`:
 
 ```kotlin
 dependencies {
-    implementation("space.hypen:hypen-android:0.1.0")
+    implementation("space.hypen:hypen-renderer:0.4.952")
 }
 ```
 
-See the [Android Adapter docs](/docs/adapters/android) for detailed Android setup.
+<Callout type="warn">
+0.4.952 is the newest published version and is older than the current Hypen packages (0.6.x). Recent renderer fixes are not in it yet. Maven Central is the only repository you need.
+</Callout>
+
+See the [Android Adapter docs](/docs/adapters/android) for the rest of the setup.
 
 ### iOS
 
-See the [iOS Adapter docs](/docs/adapters/ios) for iOS setup.
-
-## Requirements
-
-- **Node.js 18+** or **Bun 1.0+**
-- Modern browser with WASM support (Chrome, Firefox, Safari, Edge)
+The SwiftUI renderer lives in this repository under `hypen-renderer-swift/`. It is not yet published as a public Swift package, so add it to Xcode as a local package from a checkout. The `hypen run ios` Simulator runner works today without it. See the [iOS Adapter docs](/docs/adapters/ios).
 
 ## IDE Setup
 
-For the best development experience, install the Hypen Language Server:
-
 ### VS Code / Cursor
 
-1. Download the `.vsix` from [releases](https://github.com/hypen-lang/hypen/releases)
-2. Extensions → Install from VSIX
-3. Select the file and reload
+The Hypen language extension (syntax highlighting, diagnostics and completion through the Hypen language server) has **no published release yet**, so there is no `.vsix` to download. To try it, build it from a checkout of the repository: see "Building VSIX Package" in `hypen-lsp/README.md`. That build needs Rust and `wasm-pack`, because it compiles the parser and engine to WebAssembly.
 
-See [LSP Documentation](/docs/tooling/lsp) for more details.
+See the [LSP documentation](/docs/tooling/lsp) for more details.
 
 ## Verify Installation
 
 ```bash
-hypen --version
+bunx hypen --version
 ```
 
-You should see the version number printed.
+Run it inside your project. You should see `hypen v` followed by the version number.
 
 ## Next Steps
 

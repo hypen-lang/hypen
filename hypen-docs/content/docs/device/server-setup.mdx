@@ -154,6 +154,10 @@ the Rust device broker. If you
 without the `device-broker` feature, the Worker runs without the device plane
 and logs one warning.
 
+<Callout type="warn">
+`hypen-engine` 0.6.5 and earlier on npm were built without the device broker. With them, `wrangler dev` logs `Device plane off: no device broker … — sessions stay UI-only`, and every `context.device` call returns `unavailable`; the UI still works. Use `hypen-engine` 0.6.6 or newer (it exports `WasmDeviceBroker`).
+</Callout>
+
 What's different about Cloudflare:
 
 - **Turn WebSocket compression off with `no_web_socket_compression`.** The

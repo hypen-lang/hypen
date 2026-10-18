@@ -243,20 +243,23 @@ Switch {}
 
 ### Select
 
-Dropdown selection.
+Dropdown selection. `options` takes strings or `{ value, label, disabled }` objects. The `onChange` payload is `{ value, selectedIndex }`, and `value` is always a string.
 
 ```hypen
-Select {}
+Select(options: [
+    { value: "us", label: "United States" },
+    { value: "ca", label: "Canada" }
+])
     .value(@state.country)
     .onChange(@actions.updateCountry)
 ```
 
 ### Slider
 
-Range slider.
+Range slider. `onChange` fires on release with payload `{ value }`, where `value` is a **string** (`"73"`): convert it with `Number(action.payload!.value)`. See [Inputs](/docs/guide/inputs#slider).
 
 ```hypen
-Slider {}
+Slider(min: 0, max: 100, step: 1)
     .value(@state.volume)
     .onChange(@actions.updateVolume)
 ```
@@ -423,7 +426,8 @@ export default app
   })
   .onAction("togglePlay", ({ state }) => {
     state.playback.playing = !state.playback.playing;
-  });
+  })
+  .build();
 ```
 
 Reports flow the other way too. `position` updates at most every 250 ms while
@@ -545,7 +549,7 @@ Link(href: "/about") {
 
 ### Router / Route
 
-Declarative routing driven by module state. Routes are matched by the platform renderer based on `state.location`. For a complete routing guide, see **[Routing](/docs/guide/routing)**.
+Declarative routing driven by module state. The engine matches `state.location` against each `Route(path:)` and renders the matching body; renderers only see patches. For a complete routing guide, see **[Routing](/docs/guide/routing)**.
 
 ```hypen
 Router {
@@ -553,7 +557,7 @@ Router {
         HomePage()
     }
     Route(path: "/users/:id") {
-        UserProfile(userId: @state.params.id)
+        UserProfile()   // reads :id in its onActivated via context.router
     }
     Route(path: "/settings") {
         SettingsPage()
@@ -571,9 +575,9 @@ Router {
   the DSL.
 
 **Route Arguments:**
-- `path`: URL pattern (supports `:param` segments)
+- `path`: URL pattern (supports `:param` segments and a trailing `/*` wildcard)
 
-An `Else { ... }` child renders when no route matches.
+An `Else { ... }` (or `Fallback { ... }`) child renders when no route matches.
 
 ## Control Flow Components
 
@@ -588,7 +592,7 @@ ForEach(items: @state.todos, key: "id") {
     Row {
         Checkbox {}
             .checked(@item.completed)
-            .onChange(@actions.toggleTodo)
+            .onChange(@actions.toggleTodo, id: @item.id)
 
         Text(@item.title)
             .fontSize(16)
@@ -596,7 +600,7 @@ ForEach(items: @state.todos, key: "id") {
             .flex(1)
 
         Button { Text("Delete") }
-            .onClick(@actions.deleteTodo)
+            .onClick(@actions.deleteTodo, id: @item.id)
             .color("#EF4444")
     }
     .padding(12)
