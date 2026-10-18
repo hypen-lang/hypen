@@ -260,6 +260,29 @@ export interface RemoteSessionOptions {
 
 let nextSessionCounter = 1;
 
+const MODULE_DECL = /^\s*(?:(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*)*module\b/;
+
+/**
+ * A child template whose definition carries state or actions but which
+ * does not declare `module Name { ... }` itself (the single-file
+ * `app.defineState(...).ui(hypen\`Column { ... }\`)` form) is wrapped in
+ * one under its component name. Without the wrapper the engine scopes
+ * nothing to it: `@{state.*}` reads the parent module (rendering `null`)
+ * and its clicks route to a parent with no such handler.
+ */
+function scopeTemplate(
+  name: string,
+  template: string,
+  def: HypenModuleDefinition<any> | undefined
+): string {
+  if (!def || MODULE_DECL.test(template)) return template;
+  const state = def.initialState;
+  const hasState =
+    state !== null && typeof state === "object" && Object.keys(state).length > 0;
+  if (!hasState && (def.actions?.length ?? 0) === 0) return template;
+  return `module ${name} {\n${template}\n}`;
+}
+
 /**
  * One client's worth of server-side state. Transport-agnostic.
  */
@@ -342,6 +365,15 @@ export class RemoteSession {
    * element list. Torn down alongside the session in `destroy()`.
    */
   private _autoManagedRouter: ManagedRouter | null = null;
+  /**
+   * Instances of named child modules mounted directly in a template (e.g.
+   * `module App { Column { Counter() } }`, or a second module inside one
+   * Route) rather than as a route's component. Without an instance, no
+   * `__hypen_scoped:<name>:*` handlers exist and every click on them fails
+   * as "invalid scoped UI action". Route components are left to the
+   * ManagedRouter, which owns their lifecycle.
+   */
+  private _nestedInstances: HypenModuleInstance<any>[] = [];
   /**
    * Toggled by `RemoteServer.disableAutoRouter()` when the host wants
    * to wire a ManagedRouter by hand via `onSessionCreate` instead.
@@ -577,6 +609,9 @@ export class RemoteSession {
   private liveModuleInstances(): HypenModuleInstance<any>[] {
     const out: HypenModuleInstance<any>[] = [];
     if (this._moduleInstance) out.push(this._moduleInstance);
+    for (const instance of this._nestedInstances) {
+      if (!out.includes(instance)) out.push(instance);
+    }
     for (const instance of this._autoManagedRouter?.liveInstances() ?? []) {
       if (!out.includes(instance)) out.push(instance);
     }
@@ -1020,6 +1055,16 @@ export class RemoteSession {
       this._autoManagedRouter = null;
     }
 
+    const nested = this._nestedInstances;
+    this._nestedInstances = [];
+    for (const instance of nested) {
+      try {
+        await instance.destroy();
+      } catch (err) {
+        log.error(`Nested module destroy() failed on ${this.id}:`, err);
+      }
+    }
+
     if (this._moduleInstance) {
       try {
         await this._moduleInstance.destroy();
@@ -1043,14 +1088,22 @@ export class RemoteSession {
   private setupComponentResolver(): void {
     this.engine.setComponentResolver((componentName, _contextPath) => {
       const comp = this.host.discoveredComponents.get(componentName);
-      if (comp) return { source: comp.template, path: componentName };
+      if (comp) {
+        return {
+          source: scopeTemplate(componentName, comp.template, comp.module),
+          path: componentName,
+        };
+      }
       // Server-based apps register modules programmatically with inline
       // `.ui()` templates and never populate `discoveredComponents`, so
       // fall back to the HypenApp registry. Without this, a template
       // referencing `Home()` renders an opaque Create the renderer drops.
       const registered = this.host.app?.get(componentName);
       if (registered?.template) {
-        return { source: registered.template, path: componentName };
+        return {
+          source: scopeTemplate(componentName, registered.template, registered),
+          path: componentName,
+        };
       }
       return null;
     });
@@ -1060,9 +1113,41 @@ export class RemoteSession {
     const primary = this.host.moduleName;
     const registered: string[] = [];
 
+    // Route components are mounted (and unmounted / persisted) by the
+    // auto-wired ManagedRouter; every other child module with handlers gets
+    // one session-lifetime instance here so its actions are routable. With
+    // auto-routing disabled the host wires routes itself, so a template that
+    // declares Router blocks keeps the legacy register-only behaviour.
+    const blocks = this.discoverRouterBlocks();
+    const eager = this.autoRouterEnabled || blocks.length === 0;
+    const routed = new Set<string>();
+    for (const block of blocks) {
+      for (const route of block.routes) {
+        const component = this.pickComponent(route.elementNames);
+        if (component) routed.add(component);
+      }
+    }
+    const mountInstance = (name: string, def: HypenModuleDefinition<any>): boolean => {
+      if (!eager || routed.has(name) || name.startsWith("__")) return false;
+      const instance = new HypenModuleInstance(
+        this.engine,
+        // The registry key is the engine scope (`module Counter { ... }`);
+        // an unnamed definition (`app.defineState(...)`) takes it too.
+        { ...def, name: def.name || name } as HypenModuleDefinition<any>,
+        undefined,
+        this._globalContext,
+        this._sessionId ?? undefined
+      );
+      if (this._deviceBroker) instance.attachDevice(this._deviceBroker);
+      this._globalContext.registerModule(name.toLowerCase(), instance);
+      this._nestedInstances.push(instance);
+      return true;
+    };
+
     if (this.host.app) {
       for (const [name, def] of this.host.app.components) {
-        if (name === primary) continue;
+        // The entry is the primary module, whatever name it is served under.
+        if (name === primary || def === this.host.module) continue;
         const stateKeys =
           def.initialState !== null && typeof def.initialState === "object"
             ? Object.keys(def.initialState as object)
@@ -1071,12 +1156,14 @@ export class RemoteSession {
           def.initialState !== null && typeof def.initialState === "object"
             ? structuredClone(def.initialState)
             : {};
-        this.engine.registerModule(
-          name,
-          def.actions ?? [],
-          stateKeys,
-          snapshot
-        );
+        if (!mountInstance(name, def)) {
+          this.engine.registerModule(
+            name,
+            def.actions ?? [],
+            stateKeys,
+            snapshot
+          );
+        }
         log.debug(
           `Registered nested module "${name}" (${def.actions?.length ?? 0} actions, ${stateKeys.length} state keys)`
         );
@@ -1117,7 +1204,9 @@ export class RemoteSession {
         def.initialState !== null && typeof def.initialState === "object"
           ? JSON.parse(JSON.stringify(def.initialState))
           : {};
-      this.engine.registerModule(name, def.actions ?? [], stateKeys, snapshot);
+      if (!mountInstance(name, def)) {
+        this.engine.registerModule(name, def.actions ?? [], stateKeys, snapshot);
+      }
       log.debug(`Registered nested module "${name}" from discovery`);
       registered.push(name);
     }
@@ -1243,7 +1332,11 @@ export class RemoteSession {
           this.host.module,
           undefined,
           this._globalContext,
-          session.id
+          session.id,
+          // The entry backs the engine's primary slot even when it is a
+          // named module (`app.module("Counter")…`), so an unwrapped
+          // template still binds `@{state.*}` and `@actions.*` to it.
+          { primary: true }
         );
         this._globalContext.registerModule(
           this.host.moduleName.toLowerCase(),
@@ -1265,6 +1358,8 @@ export class RemoteSession {
     await this._moduleInstance.waitForReady();
 
     this.registerNestedModules();
+    // Child modules' onCreated mutations belong in the initial tree too.
+    await Promise.all(this._nestedInstances.map((i) => i.waitForReady()));
 
     // Flush state proxy microtasks so onCreated mutations propagate.
     await new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -1355,40 +1450,7 @@ export class RemoteSession {
     // registry so a single-module app with an inline `Router {}` still gets its
     // `@router.push` handler + `state.location` mirror wired.
     const app = this.host.app ?? new HypenAppClass();
-
-    // Collect router blocks from both the primary template AND every
-    // discovered child component template. `discoverRouters` walks a
-    // single IR tree and does not resolve `Foo()` component references
-    // — child templates live in separate source strings in
-    // `host.discoveredComponents`. Running discover on each separately
-    // and concatenating (primary first) gives us the true cross-tree
-    // router inventory. Without this pass, a nested `module Home {
-    // Router { ... } }` block declared in `Home/component.hypen`
-    // (the canonical `.source()`-discovery shape) is silently
-    // invisible to the SDK and the route never mounts.
-    const discovered: ReturnType<BaseEngine["discoverRouters"]> = [];
-    const runDiscover = (source: string, label: string): void => {
-      try {
-        const blocks = this.engine.discoverRouters(source);
-        for (const b of blocks) discovered.push(b);
-      } catch (err) {
-        log.error(`Auto-router: discoverRouters failed on ${label}:`, err);
-      }
-    };
-    runDiscover(this.host.ui, this.id);
-    for (const [name, comp] of this.host.discoveredComponents) {
-      if (comp.template) runDiscover(comp.template, `${this.id} / ${name}`);
-    }
-    // Server-based apps carry child templates in the HypenApp registry
-    // (`.module("Name").ui(...)`) instead of `discoveredComponents` —
-    // scan those too so their nested Router blocks mount.
-    if (this.host.app) {
-      for (const [name, def] of this.host.app.components) {
-        if (name === this.host.moduleName) continue;
-        if (this.host.discoveredComponents.has(name)) continue;
-        if (def.template) runDiscover(def.template, `${this.id} / ${name}`);
-      }
-    }
+    const discovered = this.discoverRouterBlocks();
     if (discovered.length === 0) return;
 
     // Build a single top-level ManagedRouter covering every route from
@@ -1516,6 +1578,51 @@ export class RemoteSession {
     // HypenRouter doesn't fire onNavigate on subscribe; kick an
     // explicit push so the initial route mounts.
     router.push(router.getCurrentPath());
+  }
+
+  /**
+   * Router blocks of the primary template AND every child template
+   * (primary first). Parsed once per session and shared by nested-module
+   * registration and the auto-wired ManagedRouter.
+   */
+  private _routerBlocks: ReturnType<BaseEngine["discoverRouters"]> | null = null;
+  private discoverRouterBlocks(): ReturnType<BaseEngine["discoverRouters"]> {
+    if (this._routerBlocks) return this._routerBlocks;
+    // Collect router blocks from both the primary template AND every
+    // discovered child component template. `discoverRouters` walks a
+    // single IR tree and does not resolve `Foo()` component references
+    // — child templates live in separate source strings in
+    // `host.discoveredComponents`. Running discover on each separately
+    // and concatenating (primary first) gives us the true cross-tree
+    // router inventory. Without this pass, a nested `module Home {
+    // Router { ... } }` block declared in `Home/component.hypen`
+    // (the canonical `.source()`-discovery shape) is silently
+    // invisible to the SDK and the route never mounts.
+    const discovered: ReturnType<BaseEngine["discoverRouters"]> = [];
+    const runDiscover = (source: string, label: string): void => {
+      try {
+        const blocks = this.engine.discoverRouters(source);
+        for (const b of blocks) discovered.push(b);
+      } catch (err) {
+        log.error(`Auto-router: discoverRouters failed on ${label}:`, err);
+      }
+    };
+    runDiscover(this.host.ui, this.id);
+    for (const [name, comp] of this.host.discoveredComponents) {
+      if (comp.template) runDiscover(comp.template, `${this.id} / ${name}`);
+    }
+    // Server-based apps carry child templates in the HypenApp registry
+    // (`.module("Name").ui(...)`) instead of `discoveredComponents` —
+    // scan those too so their nested Router blocks mount.
+    if (this.host.app) {
+      for (const [name, def] of this.host.app.components) {
+        if (name === this.host.moduleName || def === this.host.module) continue;
+        if (this.host.discoveredComponents.has(name)) continue;
+        if (def.template) runDiscover(def.template, `${this.id} / ${name}`);
+      }
+    }
+    this._routerBlocks = discovered;
+    return discovered;
   }
 
   /** Pick the first element name that resolves to a registered module. */

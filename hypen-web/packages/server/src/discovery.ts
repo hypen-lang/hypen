@@ -85,6 +85,22 @@ export interface WatchOptions extends DiscoveryOptions {
 /**
  * Discover all Hypen components in a directory
  */
+/**
+ * Element names every renderer handles natively (the engine's
+ * `DEFAULT_PRIMITIVES`, hypen-engine-rs/src/ir/component.rs; kept in sync by
+ * tests/builtin-primitives.test.ts). The engine never asks the component
+ * resolver for these, so a user component with one of these names is
+ * shadowed: `Badge()` renders the built-in, not `Badge.hypen`.
+ */
+export const BUILT_IN_PRIMITIVES: ReadonlySet<string> = new Set([
+  "Text", "Column", "Row", "Button", "Input", "Textarea", "Image", "Container",
+  "Box", "Center", "List", "Spacer", "Stack", "Divider", "Grid", "Card",
+  "Heading", "Checkbox", "Select", "Switch", "Slider", "Scrubber", "Spinner",
+  "Badge", "Avatar", "ProgressBar", "Video", "Audio", "Paragraph", "Icon",
+  "SafeArea", "Chart", "Axis", "Line", "Area", "Bars", "Points", "Rule",
+  "Marker", "Path",
+]);
+
 export async function discoverComponents(
   baseDir: string,
   options: DiscoveryOptions = {}
@@ -301,6 +317,14 @@ export async function discoverComponents(
 
   if (patterns.includes("single-file")) {
     await scanForSingleFileComponents(resolvedDir);
+  }
+
+  for (const component of components) {
+    if (BUILT_IN_PRIMITIVES.has(component.name)) {
+      frameworkLoggers.discovery.warn(
+        `Component "${component.name}" (${relative(resolvedDir, component.hypenPath || component.modulePath || "") || component.name}) has the same name as the built-in ${component.name} element, which takes precedence: ${component.name}() will render the built-in, not this component. Rename it (e.g. "My${component.name}").`
+      );
+    }
   }
 
   log(`Discovered ${components.length} components`);

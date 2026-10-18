@@ -197,6 +197,7 @@ export class RemoteEngine implements Disposable {
 
   // Callbacks
   private readonly patchCallbacks: Array<(patches: Patch[]) => void> = [];
+  private readonly initialTreeCallbacks: Array<() => void> = [];
   private readonly stateCallbacks: Array<(state: unknown) => void> = [];
   private readonly connectionCallbacks: Array<() => void> = [];
   private readonly disconnectionCallbacks: Array<() => void> = [];
@@ -618,6 +619,20 @@ export class RemoteEngine implements Disposable {
   }
 
   /**
+   * Register callback fired when the server sends a full `initialTree`
+   * (every connect, including reconnects and resumed sessions), just
+   * before that tree's patches reach the `onPatches` callbacks. A client
+   * that already rendered a tree must drop it here: the initial tree is a
+   * complete replacement, while ordinary patch batches are incremental —
+   * a batch that creates and inserts a node under `root` (e.g. a top-level
+   * Router's first visit to a route) must NOT wipe what is already mounted.
+   */
+  onInitialTree(callback: () => void): this {
+    this.initialTreeCallbacks.push(callback);
+    return this;
+  }
+
+  /**
    * Register callback for state updates
    */
   onStateUpdate(callback: (state: unknown) => void): this {
@@ -844,6 +859,8 @@ export class RemoteEngine implements Disposable {
     this.moduleName = message.module;
     this.currentState = message.state;
     this.currentRevision = message.revision;
+
+    this.initialTreeCallbacks.forEach((cb) => cb());
 
     // Apply initial patches
     if (message.patches.length > 0) {

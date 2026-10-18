@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeEach, describe, expect, mock, test } from "bun:test";
-import { setLogLevel } from "../packages/core/src/logger";
+import { getLogLevel, setLogLevel } from "../packages/core/src/logger";
 
 class FakeWasmEngine {
   static instances: FakeWasmEngine[] = [];
@@ -154,7 +154,7 @@ describe("Engine", () => {
     const engine = new Engine();
     await engine.init();
 
-    const previousLevel = "info";
+    const previousLevel = getLogLevel();
     setLogLevel("debug");
 
     const logSpy = mock(() => {});
@@ -182,7 +182,7 @@ describe("Engine", () => {
     const engine = new Engine();
     await engine.init();
 
-    const previousLevel = "info";
+    const previousLevel = getLogLevel();
     setLogLevel("debug");
 
     const logSpy = mock(() => {});

@@ -140,7 +140,7 @@ describeFn("Engine (browser)", () => {
 
     expect(FakeWasmEngine.instances.length).toBe(1);
     expect(wasmInitMock.mock.calls.length).toBe(1);
-    expect(wasmInitMock.mock.calls[0]).toEqual([mockInitOptions.wasmUrl]);
+    expect(wasmInitMock.mock.calls[0]).toEqual([{ module_or_path: mockInitOptions.wasmUrl }]);
   });
 
   test("propagates wasm init failure", async () => {

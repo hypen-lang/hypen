@@ -24,8 +24,8 @@
  * do not overlap.
  */
 
-import { existsSync, readdirSync, readFileSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync } from "fs";
+import { dirname, join } from "path";
 import type { HypenModuleDefinition } from "@hypen-space/core/app";
 import { frameworkLoggers } from "@hypen-space/core/logger";
 
@@ -119,8 +119,10 @@ export class ComponentLoader {
   }
 
   /**
-   * Auto-load all components from a directory
-   * Scans for subdirectories containing component.ts and component.hypen
+   * Auto-load all components from a directory, recursively, in every
+   * pattern `discoverComponents` supports: folder (`Name/component.*`),
+   * index (`Name/index.*`), sibling (`Name.hypen` + optional `Name.ts`) and
+   * single-file (`Name.ts` with an inline `.ui(hypen\`...\`)` template).
    */
   async loadFromComponentsDir(baseDir: string): Promise<void> {
     try {
@@ -129,18 +131,20 @@ export class ComponentLoader {
         return;
       }
 
-      const entries = readdirSync(baseDir, { withFileTypes: true });
-
-      for (const entry of entries) {
-        if (!entry.isDirectory()) continue;
-
-        const componentDir = join(baseDir, entry.name);
-        const hypenPath = join(componentDir, "component.hypen");
-
-        // Only load if component.hypen exists
-        if (existsSync(hypenPath)) {
-          await this.loadFromDirectory(entry.name, componentDir);
-        }
+      const { discoverComponents, loadDiscoveredComponents } = await import(
+        "./discovery"
+      );
+      const discovered = await discoverComponents(baseDir);
+      const loaded = await loadDiscoveredComponents(discovered);
+      for (const component of discovered) {
+        const entry = loaded.get(component.name);
+        if (!entry) continue;
+        const file = component.hypenPath ?? component.modulePath;
+        const path =
+          file && /[\\/](component|index)\.(hypen|ts)$/.test(file)
+            ? dirname(file)
+            : file ?? component.name;
+        this.register(entry.name, entry.module, entry.template, path);
       }
 
       log.debug(`Loaded ${this.components.size} components from ${baseDir}`);

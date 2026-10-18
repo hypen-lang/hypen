@@ -33,6 +33,12 @@ const result = await Bun.build({
   target: "browser",
   format: "esm",
   sourcemap: "external",
+  // Pins the default WASM CDN URL (src/engine.ts) to this exact version.
+  define: {
+    __HYPEN_WEB_ENGINE_VERSION__: JSON.stringify(
+      (await Bun.file("./package.json").json()).version
+    ),
+  },
   external: [
     "@hypen-space/core",
     "@hypen-space/core/*",

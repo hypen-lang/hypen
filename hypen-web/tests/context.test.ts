@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach, mock, spyOn } from "bun:test";
 import { HypenGlobalContext } from "../packages/core/src/context";
 import { app } from "../packages/core/src/app";
 import type { HypenModuleInstance } from "../packages/core/src/app";
-import { setLogLevel } from "../packages/core/src/logger";
+import { getLogLevel, setLogLevel } from "../packages/core/src/logger";
 
 // Mock engine for testing
 class FakeEngine {
@@ -52,7 +52,7 @@ describe("HypenGlobalContext", () => {
         updateState: () => {},
       } as any;
 
-      const warnSpy = spyOn(console, "warn");
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
       context.registerModule("test", instance1);
       context.registerModule("test", instance2);
@@ -231,9 +231,9 @@ describe("HypenGlobalContext", () => {
       });
 
       test("handles event with no listeners", () => {
-        const previousLevel = "info";
+        const previousLevel = getLogLevel();
         setLogLevel("debug");
-        const logSpy = spyOn(console, "log");
+        const logSpy = spyOn(console, "log").mockImplementation(() => {});
 
         try {
           context.emit("nonexistent-event");
@@ -254,7 +254,7 @@ describe("HypenGlobalContext", () => {
         });
         const handler2 = mock(() => {});
 
-        const errorSpy = spyOn(console, "error");
+        const errorSpy = spyOn(console, "error").mockImplementation(() => {});
 
         context.on("test-event", handler1);
         context.on("test-event", handler2);
