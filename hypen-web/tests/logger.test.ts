@@ -53,7 +53,7 @@ describe("Logger", () => {
 
   describe("Logger methods", () => {
     test("debug logs when level is debug", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -63,14 +63,14 @@ describe("Logger", () => {
         log.debug("test message");
 
         expect(consoleSpy).toHaveBeenCalled();
-        expect(consoleSpy.mock.calls[0][0]).toContain("[Test]");
+        expect(consoleSpy.mock.calls[0]![0]).toContain("[Test]");
       } finally {
         console.log = originalLog;
       }
     });
 
     test("debug does not log when level is higher", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -86,7 +86,7 @@ describe("Logger", () => {
     });
 
     test("error always logs unless level is none", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalError = console.error;
       console.error = consoleSpy;
 
@@ -140,7 +140,7 @@ describe("Logger", () => {
 
   describe("Logger.child", () => {
     test("creates a child logger with combined tag", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -151,7 +151,7 @@ describe("Logger", () => {
         child.debug("test");
 
         expect(consoleSpy).toHaveBeenCalled();
-        expect(consoleSpy.mock.calls[0][0]).toContain("[Parent:Child]");
+        expect(consoleSpy.mock.calls[0]![0]).toContain("[Parent:Child]");
       } finally {
         console.log = originalLog;
       }
@@ -197,7 +197,7 @@ describe("Logger", () => {
 
   describe("Logger.debugIf and warnIf", () => {
     test("debugIf only logs when condition is true", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -235,7 +235,7 @@ describe("Logger", () => {
 
   describe("Logger.time and timeAsync", () => {
     test("time measures function execution", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -246,14 +246,14 @@ describe("Logger", () => {
 
         expect(result).toBe(42);
         expect(consoleSpy).toHaveBeenCalled();
-        expect(consoleSpy.mock.calls[0][1]).toMatch(/operation: \d+\.\d+ms/);
+        expect(consoleSpy.mock.calls[0]![1]).toMatch(/operation: \d+\.\d+ms/);
       } finally {
         console.log = originalLog;
       }
     });
 
     test("timeAsync measures async function execution", async () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -267,14 +267,14 @@ describe("Logger", () => {
 
         expect(result).toBe("done");
         expect(consoleSpy).toHaveBeenCalled();
-        expect(consoleSpy.mock.calls[0][1]).toMatch(/async-op: \d+\.\d+ms/);
+        expect(consoleSpy.mock.calls[0]![1]).toMatch(/async-op: \d+\.\d+ms/);
       } finally {
         console.log = originalLog;
       }
     });
 
     test("time skips measurement when log level is higher", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -293,7 +293,7 @@ describe("Logger", () => {
 
   describe("log shorthand", () => {
     test("log.debug logs with tag", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -302,7 +302,7 @@ describe("Logger", () => {
         log.debug("MyTag", "test message");
 
         expect(consoleSpy).toHaveBeenCalled();
-        expect(consoleSpy.mock.calls[0][0]).toContain("[MyTag]");
+        expect(consoleSpy.mock.calls[0]![0]).toContain("[MyTag]");
       } finally {
         console.log = originalLog;
       }
@@ -311,7 +311,7 @@ describe("Logger", () => {
 
   describe("configureLogger", () => {
     test("configures timestamps option", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -322,7 +322,7 @@ describe("Logger", () => {
         log.debug("test");
 
         // Should include ISO timestamp format
-        expect(consoleSpy.mock.calls[0][0]).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
+        expect(consoleSpy.mock.calls[0]![0]).toMatch(/\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/);
 
         // Reset
         configureLogger({ timestamps: false });
@@ -362,7 +362,7 @@ describe("Logger", () => {
 
   describe("default logger instance", () => {
     test("logger is a default Hypen logger", () => {
-      const consoleSpy = mock(() => {});
+      const consoleSpy = mock((..._args: any[]) => {});
       const originalLog = console.log;
       console.log = consoleSpy;
 
@@ -371,7 +371,7 @@ describe("Logger", () => {
         logger.debug("test");
 
         expect(consoleSpy).toHaveBeenCalled();
-        expect(consoleSpy.mock.calls[0][0]).toContain("[Hypen]");
+        expect(consoleSpy.mock.calls[0]![0]).toContain("[Hypen]");
       } finally {
         console.log = originalLog;
       }

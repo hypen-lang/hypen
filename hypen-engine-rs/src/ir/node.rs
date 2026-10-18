@@ -53,6 +53,9 @@ pub enum Value {
 
 /// First-class IR node - distinguishes between regular elements and control flow constructs
 /// This provides type-safe pattern matching in the reconciler and clear separation of concerns
+// `Element` dominates the enum's size, but it is also by far the most common
+// variant; boxing it would add an allocation per element node for no gain.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum IRNode {
     /// Regular UI element (Text, Column, Button, etc.)

@@ -137,7 +137,7 @@ describe("Engine", () => {
 
     const wasm = FakeWasmEngine.instances[0];
     const patches = [{ type: "create" }];
-    wasm.renderCallback?.(patches);
+    wasm!.renderCallback?.(patches);
 
     expect(handler).toHaveBeenCalledWith(patches);
   });
@@ -147,7 +147,7 @@ describe("Engine", () => {
     await engine.init();
     engine.renderSource("Column {}");
 
-    expect(FakeWasmEngine.instances[0].renderSources).toEqual(["Column {}"]);
+    expect(FakeWasmEngine.instances[0]!.renderSources).toEqual(["Column {}"]);
   });
 
   test("notifyStateChange clones payload and logs paths", async () => {
@@ -166,7 +166,7 @@ describe("Engine", () => {
       engine.updateStateSparse(null, ["count"], state);
       state.count = 99;
 
-      expect(FakeWasmEngine.instances[0].updateStateSparseCalls[0]).toEqual({
+      expect(FakeWasmEngine.instances[0]!.updateStateSparseCalls[0]).toEqual({
         scope: "",
         paths: ["count"],
         values: { count: 1 },
@@ -206,7 +206,7 @@ describe("Engine", () => {
     engine.updateState(null, payload);
     payload.value.nested = false;
 
-    expect(FakeWasmEngine.instances[0].updateStateCalls[0]).toEqual({
+    expect(FakeWasmEngine.instances[0]!.updateStateCalls[0]).toEqual({
       scope: "",
       state: { value: { nested: true } },
     });
@@ -229,12 +229,12 @@ describe("Engine", () => {
 
     const wasm = FakeWasmEngine.instances[0];
     // structuredClone preserves Maps correctly
-    expect(wasm.updateStateSparseCalls[0].paths).toEqual(["list", "mapLike"]);
-    expect(wasm.updateStateSparseCalls[0].values.list).toEqual([1, { nested: [2, 3] }]);
-    expect(wasm.updateStateSparseCalls[0].values.mapLike.get("key")).toEqual({ deep: true });
+    expect(wasm!.updateStateSparseCalls[0]!.paths).toEqual(["list", "mapLike"]);
+    expect(wasm!.updateStateSparseCalls[0]!.values.list).toEqual([1, { nested: [2, 3] }]);
+    expect((wasm!.updateStateSparseCalls[0]!.values.mapLike as Map<string, unknown>).get("key")).toEqual({ deep: true });
 
-    expect((wasm.updateStateCalls[0].state as any).list).toEqual([1, { nested: [2, 3] }]);
-    expect((wasm.updateStateCalls[0].state as any).mapLike.get("key")).toEqual({ deep: true });
+    expect((wasm!.updateStateCalls[0]!.state as any).list).toEqual([1, { nested: [2, 3] }]);
+    expect((wasm!.updateStateCalls[0]!.state as any).mapLike.get("key")).toEqual({ deep: true });
   });
 
   test("dispatchAction delegates", async () => {
@@ -242,7 +242,7 @@ describe("Engine", () => {
     await engine.init();
 
     engine.dispatchAction("save", { id: 1 });
-    expect(FakeWasmEngine.instances[0].dispatchCalls).toEqual([
+    expect(FakeWasmEngine.instances[0]!.dispatchCalls).toEqual([
       { name: "save", payload: { id: 1 } },
     ]);
   });
@@ -252,7 +252,7 @@ describe("Engine", () => {
     await engine.init();
 
     engine.dispatchAction("noop");
-    expect(FakeWasmEngine.instances[0].dispatchCalls).toEqual([
+    expect(FakeWasmEngine.instances[0]!.dispatchCalls).toEqual([
       { name: "noop", payload: null },
     ]);
   });
@@ -270,7 +270,7 @@ describe("Engine", () => {
     try {
       engine.onAction("increment", handler);
       const wasm = FakeWasmEngine.instances[0];
-      wasm.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
+      wasm!.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
 
       await Promise.resolve();
 
@@ -294,7 +294,7 @@ describe("Engine", () => {
     try {
       engine.onAction("increment", handler);
       const wasm = FakeWasmEngine.instances[0];
-      await wasm.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
+      await wasm!.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
 
       expect(handler).toHaveBeenCalled();
       expect(errorSpy).not.toHaveBeenCalled();
@@ -308,7 +308,7 @@ describe("Engine", () => {
     await engine.init();
 
     engine.setModule("Counter", ["increment"], ["count"], { count: 0 });
-    expect(FakeWasmEngine.instances[0].moduleInit).toEqual({
+    expect(FakeWasmEngine.instances[0]!.moduleInit).toEqual({
       name: "Counter",
       actions: ["increment"],
       stateKeys: ["count"],
@@ -324,16 +324,16 @@ describe("Engine", () => {
     engine.setModule("Cart", ["add"], ["items"], { items: [] });
 
     const wasm = FakeWasmEngine.instances[0];
-    expect(wasm.moduleInit).toEqual({
+    expect(wasm!.moduleInit).toEqual({
       name: "Cart",
       actions: ["add"],
       stateKeys: ["items"],
       initialState: { items: [] },
     });
 
-    wasm.revision = 5;
+    wasm!.revision = 5;
     expect(engine.getRevision()).toBe(5);
-    wasm.revision = 9;
+    wasm!.revision = 9;
     expect(engine.getRevision()).toBe(9);
   });
 
@@ -342,7 +342,7 @@ describe("Engine", () => {
     await engine.init();
 
     const wasm = FakeWasmEngine.instances[0];
-    wasm.revision = 42;
+    wasm!.revision = 42;
     expect(engine.getRevision()).toBe(42);
   });
 });

@@ -41,12 +41,13 @@ class FakeEngine {
     const parts = path.split('.');
     let current = obj;
     for (let i = 0; i < parts.length - 1; i++) {
-      if (!(parts[i] in current)) {
-        current[parts[i]] = {};
+      const part = parts[i]!;
+      if (!(part in current)) {
+        current[part] = {};
       }
-      current = current[parts[i]];
+      current = current[part];
     }
-    current[parts[parts.length - 1]] = value;
+    current[parts[parts.length - 1]!] = value;
   }
 
   // Get reconstructed current state
@@ -95,9 +96,9 @@ describe("HypenModuleInstance", () => {
     });
 
     expect(engine.notifyCalls.length).toBe(1);
-    expect(engine.notifyCalls[0].scope).toBe("counter");
-    expect(engine.notifyCalls[0].paths).toEqual(["count"]);
-    expect(engine.notifyCalls[0].changedValues.count).toBe(1);
+    expect(engine.notifyCalls[0]!.scope).toBe("counter");
+    expect(engine.notifyCalls[0]!.paths).toEqual(["count"]);
+    expect(engine.notifyCalls[0]!.changedValues.count).toBe(1);
   });
 
   test("action handlers receive context and propagate state changes", async () => {
@@ -124,7 +125,7 @@ describe("HypenModuleInstance", () => {
   test("destroy invokes onDestroyed once", async () => {
     const engine = new FakeEngine();
     let destroyed = 0;
-    const definition: HypenModuleDefinition = app
+    const definition = app
       .defineState({ active: true })
       .onDestroyed(() => {
         destroyed += 1;

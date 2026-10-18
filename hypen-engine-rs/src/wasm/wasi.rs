@@ -41,20 +41,20 @@ use super::ffi::{ActionPayload, ModuleConfig, SparseStateUpdate};
 // Global engine instance for WASI (single-threaded).
 // WASI runtimes are typically single-threaded, so we use thread-local storage.
 thread_local! {
-    static ENGINE: RefCell<Option<WasiEngine>> = RefCell::new(None);
-    static PATCH_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-    static ACTION_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-    static IMPORT_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static ENGINE: RefCell<Option<WasiEngine>> = const { RefCell::new(None) };
+    static PATCH_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static ACTION_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static IMPORT_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// Stores a UTF-8 error message from the last failed operation.
     /// Populated whenever a function returns a non-zero error code.
-    static ERROR_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static ERROR_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// Stores the JSON result of the last successful `hypen_portable_*`
     /// call. Read with [`hypen_get_portable_result`] / _len.
-    static PORTABLE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static PORTABLE_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// Stores the JSON result of the last successful external-surface call
     /// (`hypen_list_*`, `hypen_get_state_at`). Read with
     /// [`hypen_get_external_result`] / _len.
-    static EXTERNAL_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static EXTERNAL_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Internal engine state for WASI.

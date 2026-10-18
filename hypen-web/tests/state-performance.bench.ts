@@ -84,7 +84,7 @@ class TestEngine {
   }
 
   updateState(state: any) {
-    this.engine.updateState(state);
+    this.engine.updateState(null, state);
   }
 
   getPatches() {

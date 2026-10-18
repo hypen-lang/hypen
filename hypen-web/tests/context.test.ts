@@ -490,7 +490,7 @@ describe("HypenGlobalContext", () => {
 
       // Logger listens for increment events
       context.on("increment", (payload) => {
-        const logger = context.getModule("logger");
+        const logger = context.getModule<{ messages: string[] }>("logger");
         const state = logger.getState();
         state.messages.push(`Incremented by ${payload}`);
       });
@@ -500,7 +500,7 @@ describe("HypenGlobalContext", () => {
       counterRef.setState({ count: 5 });
       context.emit("increment", 5);
 
-      const loggerState = context.getModule("logger").getState();
+      const loggerState = context.getModule<{ messages: string[] }>("logger").getState();
       expect(loggerState.messages).toContain("Incremented by 5");
     });
 
@@ -520,8 +520,8 @@ describe("HypenGlobalContext", () => {
       context.registerModule("module1", instance1);
       context.registerModule("module2", instance2);
 
-      const state1 = context.getModule("module1").getState();
-      const state2 = context.getModule("module2").getState();
+      const state1 = context.getModule<{ value: number }>("module1").getState();
+      const state2 = context.getModule<{ value: number }>("module2").getState();
 
       expect(state1.value).toBe(1);
       expect(state2.value).toBe(2);

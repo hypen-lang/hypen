@@ -27,8 +27,8 @@ const (
 
 // Global configuration
 var (
-	globalLevel                = LogLevelError // Default to error-only
-	globalOutput    io.Writer = os.Stderr
+	globalLevel            = LogLevelError // Default to error-only
+	globalOutput io.Writer = os.Stderr
 	globalMu     sync.RWMutex
 )
 

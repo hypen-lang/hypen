@@ -22,8 +22,11 @@ fn render(engine: &mut Engine, source: &str) {
     engine.render_ir_node(&ast_to_ir_node(doc.components.first().expect("component")));
 }
 
+/// Every dispatch seen, as `(action, sender)`.
+type Dispatches = Arc<Mutex<Vec<(String, Option<String>)>>>;
+
 /// Render, install the primary module, record every dispatch's sender.
-fn app(actions: &[&str]) -> (Engine, Arc<Mutex<Vec<(String, Option<String>)>>>) {
+fn app(actions: &[&str]) -> (Engine, Dispatches) {
     let mut engine = Engine::new();
     render(
         &mut engine,

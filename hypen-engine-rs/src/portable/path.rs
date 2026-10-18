@@ -4,7 +4,7 @@
 //!
 //! * [`path_get`]   — read the value at a dotted path, `None` if missing
 //! * [`path_set`]   — write a value at a dotted path, auto-vivifying
-//!                    objects and growing arrays with `null` padding
+//!   objects and growing arrays with `null` padding
 //! * [`path_has`]   — test for presence
 //! * [`path_delete`] — remove a key/index; returns `true` if something was removed
 //! * [`path_move`] — move an array element within or between arrays

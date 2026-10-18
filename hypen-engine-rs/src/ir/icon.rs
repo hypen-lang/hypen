@@ -142,38 +142,30 @@ pub fn parse_svg(svg: &str) -> IconData {
     let mut paths = Vec::new();
 
     // Extract <path> elements
-    for cap in RegexLite::new(r#"<path\s+([^>]*?)/?>(?:</path>)?"#, svg) {
-        if let Some(attrs) = cap {
-            if let Some(path) = parse_path_attrs(&attrs, &root) {
-                paths.push(path);
-            }
+    for attrs in RegexLite::new(r#"<path\s+([^>]*?)/?>(?:</path>)?"#, svg).flatten() {
+        if let Some(path) = parse_path_attrs(&attrs, &root) {
+            paths.push(path);
         }
     }
 
     // Extract <circle> elements
-    for cap in RegexLite::new(r#"<circle\s+([^>]*?)/?>(?:</circle>)?"#, svg) {
-        if let Some(attrs) = cap {
-            if let Some(path) = circle_to_path(&attrs, &root) {
-                paths.push(path);
-            }
+    for attrs in RegexLite::new(r#"<circle\s+([^>]*?)/?>(?:</circle>)?"#, svg).flatten() {
+        if let Some(path) = circle_to_path(&attrs, &root) {
+            paths.push(path);
         }
     }
 
     // Extract <line> elements
-    for cap in RegexLite::new(r#"<line\s+([^>]*?)/?>(?:</line>)?"#, svg) {
-        if let Some(attrs) = cap {
-            if let Some(path) = line_to_path(&attrs, &root) {
-                paths.push(path);
-            }
+    for attrs in RegexLite::new(r#"<line\s+([^>]*?)/?>(?:</line>)?"#, svg).flatten() {
+        if let Some(path) = line_to_path(&attrs, &root) {
+            paths.push(path);
         }
     }
 
     // Extract <rect> elements
-    for cap in RegexLite::new(r#"<rect\s+([^>]*?)/?>(?:</rect>)?"#, svg) {
-        if let Some(attrs) = cap {
-            if let Some(path) = rect_to_path(&attrs, &root) {
-                paths.push(path);
-            }
+    for attrs in RegexLite::new(r#"<rect\s+([^>]*?)/?>(?:</rect>)?"#, svg).flatten() {
+        if let Some(path) = rect_to_path(&attrs, &root) {
+            paths.push(path);
         }
     }
 
@@ -230,8 +222,6 @@ impl RootDefaults {
     }
 }
 
-/// Load an icon pack from a directory of SVG files.
-///
 // ── SVG Parsing Helpers ─────────────────────────────────────────────
 
 /// Minimal regex-like matcher for SVG attribute extraction.
