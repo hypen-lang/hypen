@@ -16,8 +16,8 @@
 //	// on disconnect
 //	session.Destroy()
 //
-// `RemoteServer.Listen()` is unchanged — it is now sugar over these
-// primitives backed by a gorilla/websocket adapter.
+// `RemoteServer.Listen()` is sugar over these primitives backed by a
+// gorilla/websocket adapter.
 package remote
 
 import (
@@ -899,6 +899,12 @@ func (s *RemoteSession) autoWireManagedRouter() {
 	}
 	logServer.Info("Auto-router: wired %d routes for %s", added, s.ID)
 
+	// Expose the router to every module handler: lifecycle hooks
+	// (OnCreated/OnActivated/...) and actions read it via
+	// `ctx.GetRouter()`, as in the TS/Kotlin/Swift SDKs. Set before
+	// managed.Start() so the first route's OnActivated already sees it.
+	globalContext.SetRouter(router)
+
 	// Mirror router path → primary module's `location` field, if the
 	// state shape has one. Running on a goroutine keeps the write off
 	// HypenRouter's synchronous notify path (Wazero rejects recursive
@@ -945,11 +951,14 @@ func (s *RemoteSession) Closed() <-chan struct{} {
 // registers resources / components / modules / action handlers, renders
 // the DSL once to produce the initial patch stream, and installs the
 // patch callback for subsequent updates. Returns the initial patches.
-// Returns an empty slice if no sourceDir/ui is configured.
+// Returns an empty slice if no ui is configured. sourceDir is optional:
+// without it the inline template renders on its own (only primitives and
+// components registered on the engine are available), matching the
+// TypeScript server's `.ui(...)`-only quick start.
 func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 	sourceDir := s.host.SourceDir()
 	ui := s.host.UI()
-	if sourceDir == "" || ui == "" {
+	if ui == "" {
 		return []Patch{}
 	}
 
@@ -969,15 +978,38 @@ func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 		logServer.Error("Failed to register resources: %v", err)
 	}
 
-	// Discover and register components.
-	discovered, discErr := core.DiscoverComponents(sourceDir, nil)
-	if discErr != nil {
-		logServer.Error("Component discovery failed: %v", discErr)
-	} else {
-		for _, comp := range discovered {
-			if regErr := engine.RegisterComponent(comp.Name, comp.Template, comp.HypenPath); regErr != nil {
-				logServer.Error("Failed to register component %s: %v", comp.Name, regErr)
+	// Discover and register components (only when a source dir is set).
+	registeredComponents := make(map[string]bool)
+	if sourceDir != "" {
+		discovered, discErr := core.DiscoverComponents(sourceDir, nil)
+		if discErr != nil {
+			logServer.Error("Component discovery failed: %v", discErr)
+		} else {
+			for _, comp := range discovered {
+				if regErr := engine.RegisterComponent(comp.Name, comp.Template, comp.HypenPath); regErr != nil {
+					logServer.Error("Failed to register component %s: %v", comp.Name, regErr)
+				} else {
+					registeredComponents[comp.Name] = true
+				}
 			}
+		}
+	}
+
+	// Named modules that carry their own template (built with
+	// `.Name("Home").UI(tpl)`) are components too: without registering
+	// them, `Home` inside the primary's `Router { Route ... }` resolves to
+	// nothing and the screen renders blank. Discovered files win on a name
+	// clash; the primary's template is the root UI, not a component.
+	for _, name := range core.App.GetNames() {
+		if registeredComponents[name] || strings.EqualFold(name, s.host.ModuleName()) {
+			continue
+		}
+		def := core.App.Get(name)
+		if def == nil || strings.TrimSpace(def.Template) == "" {
+			continue
+		}
+		if regErr := engine.RegisterComponent(name, def.Template, ""); regErr != nil {
+			logServer.Error("Failed to register module component %s: %v", name, regErr)
 		}
 	}
 
@@ -1226,10 +1258,20 @@ func (s *RemoteSession) liveEngine() (*core.WasmEngine, error) {
 	if s.destroyed {
 		return nil, ErrSessionClosed
 	}
-	if s.engine == nil {
+	if s.engine == nil || s.usesLegacyShim() {
 		return nil, ErrNoEngine
 	}
 	return s.engine, nil
+}
+
+// usesLegacyShim reports whether renderer dispatches run through the
+// map-style ModuleConfig.OnAction handler (WithState/Serve + OnAction, no
+// WithDefinition) instead of per-action engine handlers. Such a session
+// may still render through the engine, but it registers no actions on it,
+// so it exposes no guarded external surface (Attach → ErrNoEngine).
+func (s *RemoteSession) usesLegacyShim() bool {
+	module := s.host.Module()
+	return s.host.Definition() == nil && module != nil && module.OnAction != nil
 }
 
 // DispatchExternal dispatches an action into this session's engine on
@@ -1373,8 +1415,17 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 	s.mu.Unlock()
 
 	moduleName := s.host.ModuleName()
+	module := s.host.Module()
 
-	if engine != nil {
+	// Map-style handler (WithState/Serve + OnAction): no per-action
+	// handlers are registered on the engine, so run the ModuleConfig shim.
+	// Framework actions (two-way binding, reorder, pin) still go through
+	// the engine, whose reserved handlers are registered for every module.
+	legacy := s.usesLegacyShim()
+	if legacy {
+		actionName, payload = unwrapUIAction(actionName, payload)
+	}
+	if engine != nil && (!legacy || strings.HasPrefix(actionName, "__hypen")) {
 		if err := engine.DispatchAction(actionName, payload); err != nil {
 			logServer.Error("Engine DispatchAction failed: %v", err)
 		}
@@ -1382,8 +1433,7 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 		return
 	}
 
-	// Legacy path: no sourceDir, no engine. Use the ModuleConfig shim.
-	module := s.host.Module()
+	// Legacy path: the ModuleConfig.OnAction shim.
 	if module == nil || module.OnAction == nil {
 		return
 	}
@@ -1396,6 +1446,17 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 	}
 	s.mu.Lock()
 	s.state = newState
+	s.mu.Unlock()
+	if engine != nil {
+		// Re-render: the patch callback ships the patches and bumps the
+		// revision; the stateUpdate below carries that same revision.
+		if _, err := engine.UpdateState(newState); err != nil {
+			logServer.Error("Engine UpdateState failed: %v", err)
+		}
+		s.sendStateUpdate(moduleName)
+		return
+	}
+	s.mu.Lock()
 	s.revision++
 	rev := s.revision
 	s.mu.Unlock()
@@ -1405,6 +1466,30 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 		State:    newState,
 		Revision: rev,
 	})
+}
+
+// uiActionEnvelope is the engine's UI dispatch entry point: renderers send
+// `{node, action, payload}` under this name and the engine resolves the
+// owning module (hypen-engine-rs action_routing::UI_ACTION).
+const uiActionEnvelope = "__hypen_dispatch"
+
+// unwrapUIAction turns a renderer's `__hypen_dispatch` envelope into the
+// plain action name + payload the legacy ModuleConfig.OnAction shim
+// expects. Reserved framework actions keep the envelope so the engine can
+// resolve them. Anything else passes through unchanged.
+func unwrapUIAction(name string, payload any) (string, any) {
+	if name != uiActionEnvelope {
+		return name, payload
+	}
+	env, ok := payload.(map[string]any)
+	if !ok {
+		return name, payload
+	}
+	inner, _ := env["action"].(string)
+	if inner == "" || strings.HasPrefix(inner, "__") {
+		return name, payload
+	}
+	return inner, env["payload"]
 }
 
 func (s *RemoteSession) stateCopyLocked() map[string]any {
