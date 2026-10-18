@@ -31,7 +31,7 @@ Column {
             .tw("text-xs md:text-sm text-gray-500 mt-1 leading-5")
 
         Row {
-            Text("$@{item.price}")
+            Text("$@{item.priceLabel}")
                 .tw("text-base md:text-lg font-bold text-gray-900 flex-1")
 
             If(condition: "@{item.cartQuantity == 0}") {

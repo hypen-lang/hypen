@@ -1,9 +1,13 @@
 use rusqlite::{params, Connection};
 
 use crate::db::format_time_ago;
-use crate::types::{Comment, Post, PostThumbnail, Story, User};
+use crate::types::{Comment, Post, PostThumbnail, Story, User, ViewedStory};
 
-pub fn get_user(conn: &Connection, id: &str) -> User {
+/// Look up a user by id. Returns `None` for an unknown id instead of
+/// panicking: these run inside request handlers while the shared DB
+/// mutex is held, and a panic there poisons the lock for every other
+/// connection.
+pub fn get_user(conn: &Connection, id: &str) -> Option<User> {
     conn.query_row(
         "SELECT id, username, display_name, avatar_url, bio, posts_count, followers_count, following_count FROM users WHERE id = ?1",
         params![id],
@@ -20,7 +24,42 @@ pub fn get_user(conn: &Connection, id: &str) -> User {
             })
         },
     )
-    .expect("User not found")
+    .ok()
+}
+
+/// Resolve a `/story/:id` route param. The param is a *story* id
+/// (`StoryItem` pushes `/story/@{item.id}` with the id from `stories`), so
+/// look it up in the stories table first. Fall back to treating it as a
+/// user id for deep links that name a user, mirroring the TS reference.
+pub fn get_story(conn: &Connection, id: &str) -> Option<ViewedStory> {
+    let story = conn
+        .query_row(
+            "SELECT s.id, s.image_url, u.id, u.username, u.display_name, u.avatar_url
+             FROM stories s JOIN users u ON s.user_id = u.id
+             WHERE s.id = ?1",
+            params![id],
+            |row| {
+                Ok(ViewedStory {
+                    id: row.get(0)?,
+                    image_url: row.get(1)?,
+                    user: User {
+                        id: row.get(2)?,
+                        username: row.get(3)?,
+                        display_name: row.get(4)?,
+                        avatar_url: row.get(5)?,
+                        ..Default::default()
+                    },
+                })
+            },
+        )
+        .ok();
+    story.or_else(|| {
+        get_user(conn, id).map(|u| ViewedStory {
+            id: id.to_string(),
+            image_url: u.avatar_url.clone(),
+            user: u,
+        })
+    })
 }
 
 pub fn get_feed_posts(conn: &Connection, current_user_id: &str) -> Vec<Post> {
@@ -224,4 +263,49 @@ pub fn get_user_post_thumbnails(conn: &Connection, user_id: &str) -> Vec<PostThu
     .unwrap()
     .filter_map(|r| r.ok())
     .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn seeded() -> Connection {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(include_str!("../../data/schema.sql")).unwrap();
+        conn.execute_batch(include_str!("../../data/seed.sql")).unwrap();
+        conn
+    }
+
+    #[test]
+    fn story_route_param_is_a_story_id() {
+        // Regression: `/story/s1` used to be passed to `get_user`, which
+        // panicked ("User not found") and poisoned the shared DB lock.
+        let conn = seeded();
+        let story = get_story(&conn, "s1").expect("s1 is a seeded story");
+        assert_eq!(story.id, "s1");
+        assert_eq!(story.user.id, "u2");
+        assert!(story.image_url.contains("unsplash"));
+    }
+
+    #[test]
+    fn story_falls_back_to_user_id_and_never_panics() {
+        let conn = seeded();
+        assert_eq!(get_story(&conn, "u2").unwrap().user.id, "u2");
+        assert!(get_story(&conn, "nope").is_none());
+        assert!(get_user(&conn, "nope").is_none());
+    }
+
+    #[test]
+    fn seeded_comment_counts_match_comment_rows() {
+        let conn = seeded();
+        let mismatches: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM posts p
+                 WHERE p.comments_count != (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id)",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(mismatches, 0);
+    }
 }

@@ -11,6 +11,7 @@ home-screen/
 └── cloudflare/
     ├── src/
     │   ├── launcher.ts    # APPS list + generated home-screen DSL + module
+    │   ├── endpoints.ts   # local (default) vs deployed app URLs
     │   ├── unsplash.ts    # wallpaper photos + the per-breakpoint crop ladder
     │   ├── geo.ts         # request.cf geo + Open-Meteo weather
     │   └── worker.ts      # defineHypenWorker wiring
@@ -21,34 +22,57 @@ home-screen/
 
 ## Run it (locally, with the sibling examples)
 
+The launcher's icons point at **local** `wrangler dev` workers by default
+(`ws://localhost:<port>/ws`, see `src/endpoints.ts`) — a fresh clone never
+talks to anyone's deployed workers.
+
 The easy way — from the repo root:
 
 ```bash
-scripts/dev-examples.sh        # launcher + simple + todo + calculator
+scripts/dev-examples.sh        # launcher + todo + calculator
 scripts/dev-examples.sh all    # every example
 ```
 
-It builds the engine WASM and package dists if missing, installs each
-example, works around bun's `file:`-symlink/esbuild issue, assigns the
-ports below, and gives each instance its own inspector port.
+It installs each example (published packages; add `--local` to run against
+this checkout's engine and SDK builds), assigns the ports below, and gives
+each instance its own inspector port.
 
-Or by hand: each embedded app is a separate worker, so give each its own
-port. In separate terminals (`bun install` once in each directory first):
+Or by hand: each embedded app is a separate worker on its own port. In
+separate terminals (`bun install` once in each directory first; every
+instance needs a distinct `--inspector-port`):
 
-```bash
-cd examples/home-screen/cloudflare     && bun run dev                # :8787 — the launcher
-cd examples/simple/cf                  && wrangler dev --port 8788   # Counter
-cd examples/todo/cloudflare            && wrangler dev --port 8789   # Todo
-cd examples/calorie-counter/cloudflare && wrangler dev --port 8790   # Calories
-cd examples/movie-discovery/cloudflare && wrangler dev --port 8791   # Movies
-cd examples/food-ordering/cloudflare   && wrangler dev --port 8792   # Food
-cd examples/social/cloudflare          && wrangler dev --port 8793   # Social
-cd examples/calculator/cloudflare      && wrangler dev --port 8794   # Calculator
-```
+| Icon | Example | Port | Command |
+|------|---------|------|---------|
+| (launcher) | `home-screen/cloudflare` | 8787 | `bunx wrangler dev --port 8787 --inspector-port 9230` |
+| Todo | `todo/cloudflare` | 8789 | `bunx wrangler dev --port 8789 --inspector-port 9231` |
+| Calories | `calorie-counter/cloudflare` | 8790 | `bunx wrangler dev --port 8790 --inspector-port 9232` |
+| MovieDB | `movie-discovery/cloudflare` | 8791 | `bunx wrangler dev --port 8791 --inspector-port 9233` |
+| Food | `food-ordering/cloudflare` | 8792 | `bunx wrangler dev --port 8792 --inspector-port 9234` |
+| Social | `social/cloudflare` | 8793 | `bunx wrangler dev --port 8793 --inspector-port 9235` |
+| Calculator | `calculator/cloudflare` | 8794 | `bunx wrangler dev --port 8794 --inspector-port 9236` |
+| Hypeflix | `hypeflix/cloudflare` | 8795 | `bunx wrangler dev --port 8795 --inspector-port 9237` |
+
+(`simple/cf` runs on 8788 under `dev-examples.sh` but has no launcher icon.)
 
 Open `http://localhost:8787` and tap an icon. You only need the launcher plus
 whichever apps you actually want to open — icons for apps that aren't running
 show HypenApp's connection-failed message instead.
+
+To open the launcher from another device (e.g. a phone on your LAN), set
+`HYPEN_LOCAL_HOST` to this machine's address so the icons and wallpapers
+point there instead of `localhost`:
+
+```bash
+bunx wrangler dev --port 8787 --ip 0.0.0.0 --var HYPEN_LOCAL_HOST:192.168.1.20
+```
+
+`wrangler dev` logs `no allowedOrigins/authenticate configured — any client
+can connect` (set them before deploying) and, depending on the installed
+`hypen-engine` build, `Device plane off: no device broker … — sessions stay
+UI-only`. The latter disables the Files app's upload/download (they ride the
+device plane); `scripts/dev-examples.sh --local` runs against this checkout's
+engine build (`hypen-engine-rs/pkg/web`, from `./build-wasm.sh`), which
+includes the broker.
 
 ## R2 storage setup (Files app)
 
@@ -122,15 +146,20 @@ Create the Files bucket first (see
 bunx wrangler r2 bucket create hypen-home-files
 ```
 
-Deploy the sibling examples (`bun run deploy` in each), then edit the `APPS`
-list in `src/launcher.ts` and swap each `url` for the deployed endpoint, e.g.
+Deploy the sibling examples (`bun run deploy` in each), then deploy the
+launcher with your `workers.dev` subdomain so its icons (and wallpaper URLs)
+point at the deployed workers instead of localhost:
 
-```ts
-url: "wss://hypen-todo.<your-subdomain>.workers.dev/ws",
+```bash
+bunx wrangler deploy --var HYPEN_WORKERS_SUBDOMAIN:<your-subdomain>
 ```
 
-(`wss://`, not `https://` — `HypenApp` speaks the Hypen remote-UI WebSocket
-protocol.) Then deploy the launcher itself.
+Every icon then connects to `wss://<worker-name>.<your-subdomain>.workers.dev/ws`,
+where `<worker-name>` is that example's `wrangler.jsonc` `name` (`hypen-todo`,
+`hypen-calculator`, …). `HypenApp` speaks the Hypen remote-UI WebSocket
+protocol, hence `wss://`. To point an icon somewhere else entirely, edit its
+`url` in the `APPS` list in `src/launcher.ts`. A plain `bun run deploy`
+without the variable deploys a launcher whose icons point at `localhost`.
 
 ## What it shows off
 

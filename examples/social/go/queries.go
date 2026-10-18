@@ -9,6 +9,30 @@ func getUser(db *sql.DB, id string) User {
 	return u
 }
 
+// getStory resolves a "/story/:id" route param. The param is a *story* id
+// (StoryItem pushes "/story/@{item.id}" with ids from the stories table), so
+// look it up there first and fall back to a user id for deep links. Returns
+// nil when neither matches.
+func getStory(db *sql.DB, id string) *ViewedStory {
+	var s ViewedStory
+	err := db.QueryRow(`
+		SELECT s.id, s.image_url, u.id, u.username, u.display_name, u.avatar_url
+		FROM stories s JOIN users u ON s.user_id = u.id
+		WHERE s.id = ?`, id).Scan(&s.ID, &s.ImageUrl, &s.User.ID, &s.User.Username, &s.User.DisplayName, &s.User.AvatarUrl)
+	if err == nil {
+		return &s
+	}
+	u := getUser(db, id)
+	if u.ID == "" {
+		return nil
+	}
+	return &ViewedStory{
+		ID:       id,
+		User:     User{ID: u.ID, Username: u.Username, DisplayName: u.DisplayName, AvatarUrl: u.AvatarUrl},
+		ImageUrl: u.AvatarUrl,
+	}
+}
+
 func getFeedPosts(db *sql.DB, currentUserId string) []Post {
 	rows, err := db.Query(`
 		SELECT p.id, p.image_url, p.caption, p.location, p.likes_count, p.comments_count, p.created_at,

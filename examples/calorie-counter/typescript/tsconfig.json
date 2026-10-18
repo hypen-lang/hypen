@@ -11,6 +11,7 @@
       "@hypen-space/core": ["../../../hypen-web/packages/core/src/index.ts"],
       "@hypen-space/core/*": ["../../../hypen-web/packages/core/src/*"],
       "@hypen-space/server": ["../../../hypen-web/packages/server/src/index.ts"],
+      "@hypen-space/server/remote": ["../../../hypen-web/packages/server/src/remote/server.ts"],
       "@hypen-space/server/*": ["../../../hypen-web/packages/server/src/*"],
       "@hypen-space/web": ["../../../hypen-web/packages/web/src/index.ts"],
       "@hypen-space/web/*": ["../../../hypen-web/packages/web/src/*"]

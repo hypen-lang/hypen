@@ -2,6 +2,7 @@
   "name": "hypen-movie-discovery-ts",
   "type": "module",
   "scripts": {
+    "setup": "bun install --cwd ../../../hypen-web && bun install",
     "dev": "bun run server/index.ts",
     "web": "bun --hot web/serve.ts"
   },

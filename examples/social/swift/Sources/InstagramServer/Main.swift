@@ -270,16 +270,9 @@ func buildStoryModule(database: Database, app: HypenApp) -> ModuleDefinition {
                 state.story = nil
                 return
             }
-            let u = database.queryUser(id: id)
-            guard !u.id.isEmpty else {
-                state.story = nil
-                return
-            }
-            state.story = ViewedStory(
-                id: id,
-                user: User(id: u.id, username: u.username, displayName: u.displayName, avatarUrl: u.avatarUrl),
-                imageUrl: u.avatarUrl
-            )
+            // id is a story id (see StoryItem); queryStory falls back to a
+            // user id for deep links and returns nil for anything unknown.
+            state.story = database.queryStory(id: id)
         }
         .build()
 }

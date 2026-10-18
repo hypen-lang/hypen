@@ -42,7 +42,7 @@ Button {
             Text("@{item.cuisine} · @{item.deliveryTimeMin}–@{item.deliveryTimeMax} min · @{item.distanceKm} km")
                 .tw("text-xs text-gray-500 mt-1 text-left")
 
-            Text("@{item.deliveryFee == 0 ? 'Free delivery' : '$' + item.deliveryFee + ' delivery'}")
+            Text("@{item.deliveryFee == 0 ? 'Free delivery' : '$' + item.deliveryFeeLabel + ' delivery'}")
                 .tw("text-xs font-semibold mt-2 text-left")
                 .color("@{item.deliveryFee == 0 ? '#16A34A' : '#6B7280'}")
         }

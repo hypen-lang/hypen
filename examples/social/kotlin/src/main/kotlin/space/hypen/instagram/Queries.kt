@@ -17,6 +17,34 @@ fun getUser(conn: Connection, id: String): User {
     )
 }
 
+/**
+ * Resolve a "/story/:id" route param. The param is a *story* id (StoryItem
+ * pushes "/story/@{item.id}" with ids from the stories table), so look it up
+ * there first and fall back to a user id for deep links. Null when neither
+ * matches.
+ */
+fun getStory(conn: Connection, id: String): ViewedStory? {
+    val rs = conn.prepareStatement("""
+        SELECT s.id, s.image_url, u.id AS uid, u.username, u.display_name, u.avatar_url
+        FROM stories s JOIN users u ON s.user_id = u.id
+        WHERE s.id = ?
+    """).apply { setString(1, id) }.executeQuery()
+    if (rs.next()) {
+        return ViewedStory(
+            id = rs.getString("id"),
+            user = User(
+                id = rs.getString("uid"),
+                username = rs.getString("username"),
+                displayName = rs.getString("display_name"),
+                avatarUrl = rs.getString("avatar_url"),
+            ),
+            imageUrl = rs.getString("image_url") ?: "",
+        )
+    }
+    val u = try { getUser(conn, id) } catch (_: Exception) { return null }
+    return ViewedStory(id = id, user = u, imageUrl = u.avatarUrl)
+}
+
 fun getFeedPosts(conn: Connection, currentUserId: String): MutableList<Post> {
     val rs = conn.prepareStatement("""
         SELECT p.*, u.username, u.display_name, u.avatar_url

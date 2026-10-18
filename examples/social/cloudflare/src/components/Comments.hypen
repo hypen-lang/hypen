@@ -29,9 +29,12 @@ module Comments {
                             Text("@{item.user.username}")
                                 .fontSize(13)
                                 .fontWeight("600")
-                            Text(" @{item.text}")
+                            Text("@{item.text}")
                                 .fontSize(13)
                         }
+                        // A leading space inside the text is collapsed by the
+                        // flex layout, so the gap separates name and comment.
+                        .gap(4)
                         Text("@{item.timeAgo}")
                             .fontSize(11)
                             .color("#8e8e8e")

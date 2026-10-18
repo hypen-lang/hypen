@@ -1,70 +1,74 @@
 ---
 name: run-examples
-description: Run the Cloudflare example apps (examples/*) locally with wrangler dev — WASM build, bun file:-symlink workaround, port map, and browser-verification recipe. Use when asked to run, preview, demo, or screenshot the example apps, or when wrangler dev fails with "Could not resolve hypen-engine" / inspector "Address already in use".
+description: Run the Cloudflare example apps (examples/*) locally with wrangler dev — install, port map, the --local overlay for unreleased engine/SDK changes, expected warnings, and browser-verification recipe. Use when asked to run, preview, demo, or screenshot the example apps, or when wrangler dev fails with inspector "Address already in use" or logs "Device plane off".
 ---
 
 # Running the Example Apps Locally
 
 The examples under `examples/` are Cloudflare Workers built on
-`@hypen-space/cf`. They run locally with `wrangler dev`, but a fresh clone
-needs three things lined up first. **Use the script — it handles all of
-them:**
+`@hypen-space/cf`. They depend on the **published** `@hypen-space/*` and
+`hypen-engine` packages, so any single example runs from a fresh clone with
+no WASM build and no `file:` links:
 
 ```bash
-scripts/dev-examples.sh                  # launcher set: home-screen, simple, todo, calculator
+cd examples/todo/cloudflare
+bun install
+bun run dev                 # wrangler dev → http://localhost:8787
+```
+
+To run several at once (e.g. the home-screen launcher plus the apps it
+embeds), use the script — it assigns the ports and inspector ports:
+
+```bash
+scripts/dev-examples.sh                  # launcher set: home-screen, todo, calculator
 scripts/dev-examples.sh all              # every example
 scripts/dev-examples.sh todo             # just one
-scripts/dev-examples.sh --fresh ...      # force-rebuild WASM + package dists
+scripts/dev-examples.sh --local ...      # overlay this checkout's engine + SDK builds
+scripts/dev-examples.sh --local --fresh  # ...rebuilding the hypen-web dists first
 ```
 
 Then open `http://localhost:8787` — the home-screen launcher embeds the
-other examples via `HypenApp`, so with the default set you can tap through
-Counter, Todo, and Calculator from the phone UI.
+other examples via `HypenApp`, so you can tap through Todo and Calculator
+from the phone UI. Logs go to `${TMPDIR:-/tmp}/hypen-dev-examples/<name>.log`.
 
 ## Port map
 
 Ports are load-bearing: the launcher's `APPS` list
-(`examples/home-screen/cloudflare/src/launcher.ts`) points at them.
+(`examples/home-screen/cloudflare/src/launcher.ts`, URLs built in
+`src/endpoints.ts`) points each icon at `ws://localhost:<port>/ws` by
+default. (Set `HYPEN_WORKERS_SUBDOMAIN` only for a deploy; it switches the
+icons to `wss://<worker>.<subdomain>.workers.dev/ws`.)
 
-| Example | Directory | Port |
-|---|---|---|
-| home-screen | `examples/home-screen/cloudflare` | 8787 |
-| simple (Counter) | `examples/simple/cf` | 8788 |
-| todo | `examples/todo/cloudflare` | 8789 |
-| calorie-counter | `examples/calorie-counter/cloudflare` | 8790 |
-| movie-discovery | `examples/movie-discovery/cloudflare` | 8791 |
-| food-ordering | `examples/food-ordering/cloudflare` | 8792 |
-| social | `examples/social/cloudflare` | 8793 |
-| calculator | `examples/calculator/cloudflare` | 8794 |
-| hypeflix | `examples/hypeflix/cloudflare` | 8795 |
+| Example | Directory | Port | Launcher icon |
+|---|---|---|---|
+| home-screen | `examples/home-screen/cloudflare` | 8787 | (the launcher) |
+| simple | `examples/simple/cf` | 8788 | — |
+| todo | `examples/todo/cloudflare` | 8789 | Todo |
+| calorie-counter | `examples/calorie-counter/cloudflare` | 8790 | Calories |
+| movie-discovery | `examples/movie-discovery/cloudflare` | 8791 | MovieDB |
+| food-ordering | `examples/food-ordering/cloudflare` | 8792 | Food |
+| social | `examples/social/cloudflare` | 8793 | Social |
+| calculator | `examples/calculator/cloudflare` | 8794 | Calculator |
+| hypeflix | `examples/hypeflix/cloudflare` | 8795 | Hypeflix |
 
-## The three gotchas the script handles
+## Gotchas
 
-If you run the steps by hand (or are debugging the script), these are the
-failure modes:
-
-1. **Build artifacts must exist first.** Examples depend on
-   `hypen-engine: file:../../../hypen-engine-rs/pkg/web` — built by
-   `wasm-pack build --target web --out-dir pkg/web --features js,device-broker` in
-   `hypen-engine-rs/`. The `@hypen-space/*` packages also need their `dist/`
-   built (`bun run build:core && bun run build:web` in `hypen-web/`, plus
-   `bun run build` in `hypen-web/packages/cf`) because wrangler's esbuild
-   resolves the `import` export condition, which points at `dist/`.
-
-2. **bun `file:` deps are per-file symlink farms, and esbuild realpaths
-   them.** Imports *inside* `@hypen-space/cf` (e.g. `import "hypen-engine"`)
-   then re-resolve from the real `hypen-web/packages/cf/` path, where there
-   is no `node_modules` — the build fails with
-   `Could not resolve "hypen-engine"` (or an ENOENT for
-   `hypen_engine_bg.wasm`). Fix: dereference the installed local packages
-   into real copies (`cp -rL`) after `bun install`. This only affects local
-   `file:` development; deployed/npm installs are unaffected.
-
-3. **Concurrent `wrangler dev` instances collide on inspector port 9230.**
+1. **Concurrent `wrangler dev` instances collide on inspector port 9230.**
    Pass a distinct `--inspector-port` per instance or the second one dies
-   with `Address already in use (127.0.0.1:9230)`.
+   with `Address already in use (127.0.0.1:9230)`. The script hands out
+   9230, 9231, … (`HYPEN_EXAMPLES_INSPECTOR_BASE` moves the range).
 
-4. **wrangler dev's ProxyWorker compresses WebSockets with context
+2. **Expected `wrangler dev` warnings.** On the first connection the DO logs
+   - `no allowedOrigins/authenticate configured — any client can connect` —
+     fine locally; set them before deploying.
+   - `Device plane off: no device broker: deviceWasm is missing or lacks
+     WasmDeviceBroker … — sessions stay UI-only` — the installed
+     `hypen-engine` web build has no device broker. Only
+     `context.device.request(...)` features are affected (home-screen's Files
+     uploads/downloads, social's media upload); every other screen works.
+     Use `--local` (below) to get a broker-enabled engine.
+
+3. **wrangler dev's ProxyWorker compresses WebSockets with context
    takeover.** It is pinned to compatibility date 2023-12-18, so it ignores
    the examples' `no_web_socket_compression` flag, and browsers then refuse
    the device plane (the console warns "device plane disabled on this
@@ -72,8 +76,22 @@ failure modes:
    installed wrangler's ProxyWorker (`patch_wrangler_proxy`). Deployed
    Workers take it from `wrangler.jsonc`.
 
-The social and home-screen examples also bind R2 buckets (`MEDIA`,
-`FILES`). `wrangler dev` emulates them under `.wrangler/state`; a deploy needs
+4. **Testing unreleased engine/SDK changes (`--local`).** The script then
+   overwrites each example's `node_modules/hypen-engine` with
+   `hypen-engine-rs/pkg/web` (build it with `cd hypen-engine-rs &&
+   ./build-wasm.sh`; the script refuses to start without it) and
+   `@hypen-space/{core,web,cf}` with this checkout's dists (rebuilt when
+   stale or with `--fresh`). Mixing a new engine with old published
+   packages is a protocol mismatch, which is why all four are overlaid
+   together. A later run without `--local` reinstalls the published
+   packages. `food-ordering` is the exception: its `wrangler.jsonc` aliases
+   `@hypen-space/core` and `@hypen-space/cf` to `hypen-web/packages/*/src`
+   permanently.
+
+Some examples need extra setup: movie-discovery reads `OMDB_API_KEY` from
+`.dev.vars` (optional — it falls back to bundled titles), and the social and
+home-screen examples bind R2 buckets (`MEDIA`, `FILES`). `wrangler dev`
+emulates those under `.wrangler/state`; a deploy needs
 `wrangler r2 bucket create` once per bucket (see each README).
 
 To test the device plane headlessly: a picker is `page.waitForEvent("filechooser")`
@@ -82,16 +100,20 @@ CDP `Input.dispatchDragEvent` with `data.files`. For `file.save`, delete
 `window.showSaveFilePicker` in an init script so the `<a download>` fallback
 runs.
 
-Also: after rebuilding the engine WASM, refresh each example's
-`node_modules/hypen-engine` copy (the script always re-copies it) and
-restart wrangler. If a Durable Object's persisted state confuses testing,
-delete the example's `.wrangler/` directory — but never while its server is
-running (wrangler keeps its bundle temp files there).
+Stopping: `wrangler dev` is `bunx` → node → workerd; killing only the
+`bunx` PID can leave workerd holding the port. Start it with `setsid` and
+kill the process group, or Ctrl-C the script (it stops every instance). If a
+Durable Object's persisted state confuses testing, delete the example's
+`.wrangler/` directory — but never while its server is running (wrangler
+keeps its bundle temp files there).
 
 ## Verifying in a browser
 
 Headless Chromium is preinstalled in CI/agent containers at
-`/opt/pw-browsers/chromium`; drive it with `playwright-core`:
+`/opt/pw-browsers/chromium`; drive it with Playwright (in those containers
+it is installed globally — `require("/opt/node22/lib/node_modules/playwright")`
+from a node script — otherwise `bunx playwright-core` / `import from
+"playwright-core"`):
 
 ```ts
 import { chromium } from "playwright-core";

@@ -59,7 +59,7 @@ Column {
             Text(" · ")
                 .tw("text-sm text-gray-300 px-2")
 
-            Text("$@{state.restaurant.deliveryFee} fee")
+            Text("$@{state.restaurant.deliveryFeeLabel} fee")
                 .tw("text-sm text-gray-600")
         }
         .tw("mt-2 items-center")
@@ -87,10 +87,10 @@ Column {
                 }
                 .tw("flex-1")
 
-                Text("$@{state.cartSubtotal}")
+                Text("$@{state.cartSubtotalLabel}")
                     .tw("text-base font-bold text-white")
             }
-            .tw("items-center")
+            .tw("w-full items-center gap-4")
         }
         .tw("mx-4 my-4 py-3 px-5 bg-orange-500 rounded-full")
         .onClick(@router.push, to: "/cart")

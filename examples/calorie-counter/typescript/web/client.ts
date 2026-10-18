@@ -5,7 +5,18 @@ import { RemoteEngine } from "@hypen-space/core/remote/client";
 import { DOMRenderer } from "@hypen-space/web/dom";
 
 const SESSION_KEY = "hypen-calorie-counter-session";
-const WS_URL = "ws://localhost:3000";
+// Which backend to talk to: `?ws=ws://host:port` wins, then the URL the web
+// server injected into the page (serve.ts knows the backend's PORT / WS_URL),
+// then the default backend port on this page's own host.
+function resolveWsUrl(): string {
+  const fromQuery = new URLSearchParams(location.search).get("ws");
+  if (fromQuery) return fromQuery;
+  const injected = document.querySelector<HTMLMetaElement>('meta[name="hypen-ws"]')?.content;
+  if (injected) return injected;
+  const scheme = location.protocol === "https:" ? "wss" : "ws";
+  return `${scheme}://${location.hostname || "localhost"}:3000`;
+}
+const WS_URL = resolveWsUrl();
 
 const appContainer = document.getElementById("app")!;
 const statusEl = document.getElementById("status");

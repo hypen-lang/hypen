@@ -36,14 +36,20 @@ describe("Social app contracts", () => {
     expect(post).toContain('.tw("px-5")');
   });
 
-  test("navigation has no create tab and inbox rows open a real conversation", async () => {
+  test("the create tab opens CreatePost and inbox rows open a real conversation", async () => {
     const bottomNav = await source("social/cloudflare/src/components/BottomNav.hypen");
     const app = await source("social/cloudflare/src/components/App.hypen");
     const messages = await source("social/cloudflare/src/components/Messages.hypen");
     const conversation = await source("social/cloudflare/src/components/Conversation.hypen");
     const worker = await source("social/cloudflare/src/worker.ts");
 
-    expect(bottomNav).not.toContain("plus-square");
+    // The create tab came back with device-plane photo posts (0.6.5): it
+    // must route to a real CreatePost screen backed by its module.
+    expect(bottomNav).toContain("@resources.plus-square");
+    expect(bottomNav).toContain('.onClick(@router.push, to: "/create")');
+    expect(app).toContain('Route(path: "/create")');
+    expect(app).toContain("CreatePost()");
+    expect(worker).toContain("createPostModule");
     expect(app).toContain('Route(path: "/dm/:id")');
     expect(messages).toContain('.onClick(@router.push, to: "/dm/@{item.id}")');
     expect(conversation).toContain("List(@state.chatMessages");
@@ -92,5 +98,22 @@ describe("Social app contracts", () => {
     expect(count("stories")).toBe(29);
     expect(count("conversations")).toBe(6);
     expect(count("messages")).toBe(16);
+  });
+
+  test("every seeded post's comments_count matches its comment rows", async () => {
+    // "View all N comments" must never promise more than the list shows.
+    for (const dir of ["social/data", "social/cloudflare/src"]) {
+      const db = new Database(":memory:");
+      db.exec(await source(`${dir}/schema.sql`));
+      db.exec(await source(`${dir}/seed.sql`));
+
+      const mismatched = db
+        .query(
+          `SELECT p.id FROM posts p
+           WHERE p.comments_count != (SELECT COUNT(*) FROM comments c WHERE c.post_id = p.id)`,
+        )
+        .all();
+      expect(mismatched).toEqual([]);
+    }
   });
 });

@@ -2,7 +2,7 @@ use rusqlite::{params, Connection};
 
 use crate::db::format_placed_at;
 use crate::types::{
-    CartItem, Category, MenuItem, OrderDetail, OrderLineItem, OrderSummary, Restaurant, User,
+    money, CartItem, Category, MenuItem, OrderDetail, OrderLineItem, OrderSummary, Restaurant, User,
 };
 
 pub fn get_user(conn: &Connection, id: &str) -> User {
@@ -42,6 +42,7 @@ pub fn get_categories(conn: &Connection) -> Vec<Category> {
 
 fn map_restaurant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Restaurant> {
     let is_open_int: i32 = row.get(10)?;
+    let delivery_fee: f64 = row.get(8)?;
     Ok(Restaurant {
         id: row.get(0)?,
         name: row.get(1)?,
@@ -51,7 +52,8 @@ fn map_restaurant_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Restaurant> {
         rating_count: row.get(5)?,
         delivery_time_min: row.get(6)?,
         delivery_time_max: row.get(7)?,
-        delivery_fee: row.get(8)?,
+        delivery_fee,
+        delivery_fee_label: money(delivery_fee),
         distance_km: row.get(9)?,
         is_open: is_open_int == 1,
         description: row.get::<_, String>(11).unwrap_or_default(),
@@ -101,13 +103,15 @@ pub fn get_menu_items(conn: &Connection, restaurant_id: &str) -> Vec<MenuItem> {
     stmt.query_map(params![restaurant_id], |row| {
         let is_veg: i32 = row.get(6)?;
         let is_pop: i32 = row.get(7)?;
+        let price: f64 = row.get(5)?;
         Ok(MenuItem {
             id: row.get(0)?,
             restaurant_id: row.get(1)?,
             name: row.get(2)?,
             description: row.get::<_, String>(3).unwrap_or_default(),
             image_url: row.get(4)?,
-            price: row.get(5)?,
+            price,
+            price_label: money(price),
             is_vegetarian: is_veg == 1,
             is_popular: is_pop == 1,
             section: row.get::<_, String>(8).unwrap_or_else(|_| "Mains".into()),
@@ -159,8 +163,10 @@ pub fn get_cart_items(conn: &Connection, user_id: &str) -> Vec<CartItem> {
             name: row.get(3)?,
             image_url: row.get(4)?,
             price,
+            price_label: money(price),
             quantity: qty,
             line_total: round2(price * qty as f64),
+            line_total_label: money(price * qty as f64),
         })
     })
     .unwrap()
@@ -340,6 +346,7 @@ pub fn get_orders(conn: &Connection, user_id: &str) -> Vec<OrderSummary> {
                 status_label: status_label(&status).to_string(),
                 status,
                 total: round2(total),
+                total_label: money(total),
                 items_summary,
                 placed_at: format_placed_at(&placed_at),
             }
@@ -409,8 +416,10 @@ pub fn get_order_detail(conn: &Connection, order_id: &str) -> Option<OrderDetail
                 name: row.get(2)?,
                 image_url: row.get(3)?,
                 price,
+                price_label: money(price),
                 quantity: qty,
                 line_total: round2(price * qty as f64),
+                line_total_label: money(price * qty as f64),
             })
         })
         .unwrap()
@@ -425,8 +434,11 @@ pub fn get_order_detail(conn: &Connection, order_id: &str) -> Option<OrderDetail
         status_description: status_description(&status).to_string(),
         status,
         subtotal: round2(subtotal),
+        subtotal_label: money(subtotal),
         delivery_fee: round2(delivery_fee),
+        delivery_fee_label: money(delivery_fee),
         total: round2(total),
+        total_label: money(total),
         address,
         placed_at: format_placed_at(&placed_at),
         items,

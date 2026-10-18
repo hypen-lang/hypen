@@ -55,7 +55,7 @@ Column {
                             .tw("text-xs text-gray-600 mt-2 text-left")
 
                         Row {
-                            Text("$@{item.total}")
+                            Text("$@{item.totalLabel}")
                                 .tw("text-sm font-bold flex-1 text-left")
                             Row {
                                 Text("View details")
