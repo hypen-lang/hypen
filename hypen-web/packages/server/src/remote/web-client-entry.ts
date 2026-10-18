@@ -12,7 +12,7 @@
  * renderer.
  */
 
-import { RemoteEngine } from "@hypen-space/core/remote/client";
+import { RemoteEngine, syncUrlWithRouter } from "@hypen-space/core/remote/client";
 import { DOMRenderer } from "@hypen-space/web";
 
 const container = document.getElementById("app");
@@ -46,106 +46,15 @@ let renderer = makeRenderer();
 engine.onSessionEstablished(() => {
   container.innerHTML = "";
   renderer = makeRenderer();
-  urlSync.sessionStarted();
 });
 
 engine.onPatches((patches) => renderer.applyPatches(patches));
 
-// ---------------------------------------------------------------------------
-// URL <-> route sync
-//
-// Routing is server-side: a `Router { Route(path: ...) }` renders whatever
-// the root module's `state.location` holds (the `hypen init` convention,
-// and the engine's default Router binding). This keeps the address bar in
-// step with it:
-//
-//   - the app navigates (state.location changes)  -> history.pushState
-//   - back / forward (popstate)                    -> `router.replace` to
-//                                                     the URL's path
-//   - the page loads on a deep link (`/counter`)   -> `router.replace`
-//     before the first paint is shown, so a reload stays on the route.
-//
-// `router.replace` is the action the server's auto-wired router installs
-// for every app with a Router block; it moves the router, which writes
-// `state.location`. Apps whose state has no string `location` are left
-// alone.
-// ---------------------------------------------------------------------------
-
-const LOCATION_KEY = "location";
-/** Give up waiting for a URL-driven navigation after this long. */
-const NAVIGATION_TIMEOUT_MS = 1500;
-
-function readLocation(state: unknown): string | null {
-  if (!state || typeof state !== "object") return null;
-  const value = (state as Record<string, unknown>)[LOCATION_KEY];
-  return typeof value === "string" && value.startsWith("/") ? value : null;
-}
-
-const urlSync = (() => {
-  /** First state of the current session not seen yet. */
-  let awaitingInitial = true;
-  /** Last `state.location` the server reported, or null when unknown. */
-  let serverLocation: string | null = null;
-  /** Path a URL-driven navigation is waiting for the server to reach. */
-  let pending: string | null = null;
-  let pendingTimer: ReturnType<typeof setTimeout> | null = null;
-
-  function settle(): void {
-    pending = null;
-    if (pendingTimer !== null) clearTimeout(pendingTimer);
-    pendingTimer = null;
-    container!.style.visibility = "";
-  }
-
-  /** Ask the server to show `path`; hold history pushes until it does. */
-  function navigateTo(path: string, hideUntilThere: boolean): void {
-    if (pendingTimer !== null) clearTimeout(pendingTimer);
-    pending = path;
-    if (hideUntilThere) container!.style.visibility = "hidden";
-    pendingTimer = setTimeout(settle, NAVIGATION_TIMEOUT_MS);
-    engine.dispatchAction("router.replace", { to: path });
-  }
-
-  window.addEventListener("popstate", () => {
-    if (serverLocation === null) return; // app has no `state.location`
-    const path = location.pathname;
-    if (path === serverLocation && pending === null) return;
-    navigateTo(path, false);
-  });
-
-  return {
-    sessionStarted(): void {
-      awaitingInitial = true;
-      serverLocation = null;
-      settle();
-    },
-    onState(state: unknown): void {
-      const loc = readLocation(state);
-      if (awaitingInitial) {
-        awaitingInitial = false;
-        if (loc === null) return;
-        // Navigation is server state; ask for every later change.
-        engine.subscribeState();
-        serverLocation = loc;
-        if (loc !== location.pathname) navigateTo(location.pathname, true);
-        return;
-      }
-      if (loc === null) return;
-      serverLocation = loc;
-      if (pending !== null) {
-        // Intermediate states while the server catches up with the URL
-        // must not push history entries of their own.
-        if (loc === pending) settle();
-        return;
-      }
-      if (loc !== location.pathname) {
-        history.pushState(null, "", loc);
-      }
-    },
-  };
-})();
-
-engine.onStateUpdate((state) => urlSync.onState(state));
+// URL <-> route sync (shared with the Go server's and Cloudflare's clients):
+// the app navigating pushes history entries with the route's path,
+// back/forward and deep links (`/counter`, served the same shell) move the
+// server's router with `router.replace`. See `syncUrlWithRouter`.
+syncUrlWithRouter(engine, { container });
 
 function showBanner(text: string): void {
   let banner = document.getElementById("hypen-status");

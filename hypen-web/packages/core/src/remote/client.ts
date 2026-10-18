@@ -65,6 +65,16 @@ import {
 import { retry, type RetryOptions } from "../retry.js";
 import { frameworkLoggers } from "../logger.js";
 
+// Browser URL <-> server route sync used by the default web clients.
+export {
+  syncUrlWithRouter,
+  normalizeBase,
+  locationToPath,
+  pathToLocation,
+  type UrlSyncEngine,
+  type UrlSyncOptions,
+} from "./url-sync.js";
+
 const log = frameworkLoggers.remote;
 
 export type RemoteConnectionState =

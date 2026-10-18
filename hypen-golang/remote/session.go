@@ -915,7 +915,7 @@ func (s *RemoteSession) autoWireManagedRouter() {
 	if hasLocation {
 		router.OnNavigate(func(rs core.RouteState) {
 			path := rs.CurrentPath
-			go s.UpdatePrimaryState(map[string]any{"location": path})
+			go s.mirrorLocation(path)
 		})
 	}
 
@@ -923,6 +923,42 @@ func (s *RemoteSession) autoWireManagedRouter() {
 	s.mu.Lock()
 	s.autoManaged = managed
 	s.mu.Unlock()
+}
+
+// mirrorLocation writes the router's path into the primary module's
+// `location` and tells the client. Clients key URL sync (history entries,
+// deep links, back/forward) off `state.location` in stateUpdate messages,
+// and the stateUpdate a dispatch sends is snapshotted before this mirror
+// runs (it must run off the router's notify path), so without its own
+// update the client would never learn the new route.
+//
+// Runs after the dispatch that navigated, in dispatch order: on the
+// session's dispatch queue when a device plane is attached, otherwise
+// under dispatchMu, so its stateUpdate always follows that dispatch's
+// (stale) one and the client ends on the current location.
+func (s *RemoteSession) mirrorLocation(path string) {
+	run := func() {
+		s.mu.Lock()
+		destroyed := s.destroyed
+		s.mu.Unlock()
+		if destroyed {
+			return
+		}
+		s.UpdatePrimaryState(map[string]any{"location": path})
+		s.sendStateUpdate(s.host.ModuleName())
+	}
+	if q := s.queue(); q != nil {
+		q.enqueue(false, run)
+		return
+	}
+	s.dispatchMu.Lock()
+	if q := s.queue(); q != nil {
+		s.dispatchMu.Unlock()
+		q.enqueue(false, run)
+		return
+	}
+	defer s.dispatchMu.Unlock()
+	run()
 }
 
 // Ready returns a channel that is closed once the hello handshake,
