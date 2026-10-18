@@ -21,53 +21,93 @@ Hypen is a monorepo containing multiple packages:
 | `hypen-renderer-swift/` | iOS/macOS renderer | Swift |
 | `hypen-renderer-android/` | Android renderer | Kotlin |
 | `hypen-golang/` | Go implementation | Go |
+| `hypen-browser/` | Desktop Hypen Browser | Rust |
 | `hypen-lsp/` | Language Server | TypeScript |
 | `hypen-docs/` | Documentation site | Fumadocs/Next.js |
 
 ### Development Setup
 
 Pick the area you want to work on rather than trying to bootstrap every platform at once.
+All commands below are run from the repository root; each block uses a `( cd … )`
+subshell so you can paste them in order without ending up in the wrong directory.
 
 #### Rust Components (Parser, Engine)
 
 ```bash
-# Prerequisites: Rust 1.70+, wasm-pack
+# Prerequisites: Rust 1.70+, wasm-pack, and the wasm32-wasip1 target:
+#   cargo install wasm-pack        (or the installer at https://rustwasm.github.io/wasm-pack/)
+#   rustup target add wasm32-wasip1
 
 # Parser
-cd parser
-cargo test
+(cd parser && cargo test)
 
 # Engine
-cd hypen-engine-rs
-cargo test
-./build-wasm.sh  # Build WASM targets
+(cd hypen-engine-rs && cargo test)
+
+# Build the WASM targets (same as `bun run build:wasm` from the root)
+hypen-engine-rs/build-wasm.sh
 ```
+
+`build-wasm.sh` does not install missing tools on its own: it stops and tells
+you what to install. Pass `--install-tools` (or set `HYPEN_INSTALL_TOOLS=1`) if
+you want it to run `cargo install wasm-pack` / `rustup target add` for you.
+
+Expect `build-wasm.sh` to modify **committed files outside the engine**. It
+copies the fresh builds into `hypen-web/` (server, web-engine and the test
+fixture glue) and `hypen-golang/hypen_engine.wasm`, then regenerates the UniFFI
+bindings in `hypen-kotlin/` and `hypen-server-swift/`. Only commit those files
+when your change actually touches the engine; otherwise discard them. For
+JS-only iterations, `HYPEN_SKIP_BINDINGS=1` (or `bun run build:wasm:js`) skips
+the slow bindings step.
+
+#### Hypen Browser (desktop)
+
+`hypen-browser/` links system libraries (D-Bus, libclang, ALSA) for its device
+capabilities. On Linux, install the packages listed under
+[Linux build dependencies](hypen-browser/README.md#linux-build-dependencies)
+before `cargo build -p hypen-browser`, or the build stops in a `-sys` crate.
 
 #### TypeScript Components (Web SDK, CLI)
 
 ```bash
 # Prerequisites: Bun 1.0+ or Node.js 18+
 
-cd hypen-web
-bun install
-bun test
-bun run playground  # Interactive development
+(cd hypen-web && bun install && bun test)
+(cd hypen-web && bun run playground)  # Interactive development
 ```
 
 For CLI work:
 
 ```bash
-cd hypen-cli
-bun install
-bun test
+(cd hypen-cli && bun install)
+(cd hypen-lsp && bun install)   # needed by hypen-cli's LSP integration tests
+(cd hypen-cli && bun test)
 ```
+
+The studio's LSP integration tests (`studio-ui/src/lib/lsp-server.test.ts`)
+spawn the real server from `hypen-lsp/`, which needs that package's own
+dependencies. Without `hypen-lsp/node_modules` those 4 tests are skipped with a
+warning telling you to run the install above.
 
 For docs work:
 
 ```bash
-cd hypen-docs
-bun install
-bun dev
+(cd hypen-docs && bun install && bun dev)
+```
+
+> **Lockfiles:** several packages depend on published `@hypen-space/*`
+> versions by caret range, so a plain `bun install` may re-resolve them and
+> rewrite the committed `bun.lock` (e.g. `hypen-cli/bun.lock`). Don't commit
+> that drift as part of an unrelated change — discard it with
+> `git restore -- '*bun.lock'`, or use `bun install --frozen-lockfile` to see
+> whether a lockfile is out of date. Lockfile refreshes belong in their own PR.
+
+#### Go SDK
+
+```bash
+# Prerequisites: Go 1.25+ (hypen-golang/go.mod declares `go 1.25.0`;
+# older toolchains refuse to build it unless GOTOOLCHAIN can download 1.25)
+(cd hypen-golang && go test ./...)
 ```
 
 #### Mobile Renderers
@@ -170,16 +210,16 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 ### Running Tests
 
 ```bash
-# All Rust tests
-cd parser && cargo test
-cd hypen-engine-rs && cargo test
+# All Rust tests (from the repository root)
+(cd parser && cargo test)
+(cd hypen-engine-rs && cargo test)
 
 # TypeScript tests
-cd hypen-web && bun test
+(cd hypen-web && bun test)
 
-# Specific test file
-cargo test test_component_parsing
-bun test tests/variant-handling.test.ts
+# Specific test
+(cd parser && cargo test test_component_parsing)
+(cd hypen-web && bun test tests/variant-handling.test.ts)
 ```
 
 ### Writing Tests
