@@ -208,35 +208,13 @@ export function createDevA11yChecker(opts: {
   return () => (chain = chain.then(run).catch(() => {}));
 }
 
-export interface BuildOptions {
-  /**
-   * Path to components directory
-   */
-  components: string;
-
-  /**
-   * Entry component name
-   */
-  entry: string;
-
-  /**
-   * Output directory
-   * Default: "dist"
-   */
-  outDir?: string;
-
-  /**
-   * Enable minification
-   * Default: true
-   */
-  minify?: boolean;
-
-  /**
-   * Enable source maps
-   * Default: false
-   */
-  sourcemap?: boolean;
-}
+/**
+ * Options for the production build. Same shape `hypen build` uses (see
+ * `./build.ts`): `components`, `entry`, `outDir`, `minify`, `sourcemap`,
+ * plus `root` and `log`.
+ */
+export type { BuildOptions, BuildResult } from "./build.js";
+import type { BuildOptions, BuildResult } from "./build.js";
 
 /**
  * Detect if running in Bun
@@ -270,12 +248,19 @@ export async function dev(options: DevOptions): Promise<{
 }
 
 /**
- * Build for production
+ * Build a component-based project for production — the same static site
+ * `hypen build` emits (index.html + main.js + engine WASM + server.js).
+ * See `./build.ts`. Requires Bun.
  *
- * Automatically uses Bun.build() in Bun or esbuild in Node.js
+ * @throws {BuildError} on a missing entry/runtime package, a failed bundle,
+ *   or when not running under Bun.
  */
-export async function build(options: BuildOptions): Promise<void> {
-  const impl = await getImplementation();
+export async function build(options: BuildOptions): Promise<BuildResult> {
+  if (!isBun()) {
+    const { BuildError } = await import("./build.js");
+    throw new BuildError("`hypen build` requires the Bun runtime. Install from https://bun.sh");
+  }
+  const impl = await import("./build.js");
   return impl.build(options);
 }
 

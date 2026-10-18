@@ -148,6 +148,9 @@ export function Preview({
       div.style.inset = "0";
       div.style.overflowY = "auto";
       div.style.overflowX = "hidden";
+      // Same fullscreen contract as the `hypen dev` client (#app): a flex
+      // column whose root component stretches to the device frame.
+      div.className = "hypen-preview-root";
       containerRef.current.appendChild(div);
       rendererContainerRef.current = div;
     }
@@ -353,6 +356,11 @@ export function Preview({
       rendererContainerRef.current.innerHTML = "";
       rendererRef.current.clear();
       engineRef.current.reset();
+      // The WASM reset() rebuilds the engine core from scratch, which also
+      // drops the default primitives Engine.init() registered. Without
+      // them every Column/Text/Row is routed to the component resolver and
+      // logs a "did not resolve" warning. Re-register them.
+      engineRef.current.wasmEngine?.registerDefaultPrimitives?.();
 
       // Parse explicit imports and build import map
       const imports = parseImports(hypenFile.content);

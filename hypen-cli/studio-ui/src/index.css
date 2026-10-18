@@ -154,3 +154,15 @@
 code, pre, .font-mono {
   font-family: 'JetBrains Mono', ui-monospace, monospace;
 }
+
+/* DOM preview mount (Preview / PreviewFrame): mirror the `hypen dev` web
+   client's #app so the root component fills the frame there too (a
+   `bg-*` on it covers the whole screen and `justify-center` centres). */
+.hypen-preview-root {
+  display: flex;
+  flex-direction: column;
+}
+.hypen-preview-root > * {
+  flex: 1;
+}
+

@@ -77,6 +77,7 @@ function mountTarget(host: HTMLDivElement, renderer: RendererKind): HTMLDivEleme
   div.style.position = "absolute";
   div.style.inset = "0";
   div.style.overflow = "auto";
+  div.className = "hypen-preview-root";
   host.appendChild(div);
   return div;
 }
