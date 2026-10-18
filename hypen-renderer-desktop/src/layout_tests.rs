@@ -8478,3 +8478,119 @@ fn incremental_image_create_uses_loaded_natural_size_like_bulk() {
         );
     }
 }
+
+#[test]
+fn row_follows_parent_items_center_like_the_dom_row() {
+    // The scaffold Counter: `Column { Row { Button("-") Button("+") } }
+    // .tw("items-center")`. The DOM Row sets no `align-self`, so the
+    // Column's `align-items: center` centres it. Desktop used to force
+    // `AlignSelf::Start` on every Row, pinning the buttons to the left.
+    for parent_type in ["Column", "Center"] {
+        let mut tree = Tree::new();
+        let mut props = vec![("width", json!("100%"))];
+        if parent_type == "Column" {
+            props.push(("alignItems", json!("center")));
+        }
+        tree.apply(&create_patch("col", parent_type, &props));
+        tree.apply(&insert_patch(ROOT_ID, "col"));
+        tree.apply(&create_patch("row", "Row", &[]));
+        tree.apply(&insert_patch("col", "row"));
+        add_text(&mut tree, "row", "t1", "Minus");
+        add_text(&mut tree, "row", "t2", "Plus");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let col = find_item(&pass, "col").rect;
+        let row = find_item(&pass, "row").rect;
+
+        assert!(row.w < col.w - 100.0, "{parent_type}: row should wrap its content, got {row:?} in {col:?}");
+        let left = row.x - col.x;
+        let right = (col.x + col.w) - (row.x + row.w);
+        assert!(
+            (left - right).abs() <= 1.0,
+            "{parent_type}: row not centred: {left} left vs {right} right ({row:?} in {col:?})",
+        );
+    }
+}
+
+#[test]
+fn row_in_default_column_stays_at_the_start_edge() {
+    // A plain Column is `align-items: flex-start` on the DOM, so a Row
+    // without its own alignment still hugs the leading edge.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("col", "Column", &[("width", json!("100%"))]));
+    tree.apply(&insert_patch(ROOT_ID, "col"));
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch("col", "row"));
+    add_text(&mut tree, "row", "t1", "One");
+    add_text(&mut tree, "row", "t2", "Two");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let col = find_item(&pass, "col").rect;
+    let row = find_item(&pass, "row").rect;
+    assert!((row.x - col.x).abs() <= 0.5, "row left the start edge: {row:?} in {col:?}");
+    assert!(row.w < col.w - 100.0, "row should wrap its content, got {row:?} in {col:?}");
+}
+
+#[test]
+fn row_follows_parent_alignment_through_incremental_patches() {
+    // Same contract on the patch path: a Row inserted under a centred
+    // Column is centred, and flipping the Column back to the default
+    // alignment returns it to the start edge.
+    let initial = vec![
+        create_patch(
+            "col",
+            "Column",
+            &[("width", json!("100%")), ("alignItems", json!("center"))],
+        ),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch("t1", "Text", &[("0", json!("Minus"))]),
+        insert_patch("row", "t1"),
+        create_patch("t2", "Text", &[("0", json!("Plus"))]),
+        insert_patch("row", "t2"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let col = find_item(&pass, "col").rect;
+    let row = find_item(&pass, "row").rect;
+    let left = row.x - col.x;
+    let right = (col.x + col.w) - (row.x + row.w);
+    assert!(row.w < col.w - 100.0, "row should wrap its content: {row:?} in {col:?}");
+    assert!((left - right).abs() <= 1.0, "row not centred: {left} vs {right}");
+
+    let reset = vec![Patch::RemoveProp {
+        id: "col".into(),
+        name: "alignItems".into(),
+    }];
+    tree.apply_batch(&reset);
+    assert!(taffy.apply_patches(&reset, &tree, 1.0, vp(800.0)));
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        2,
+    );
+    let col = find_item(&pass, "col").rect;
+    let row = find_item(&pass, "row").rect;
+    assert!((row.x - col.x).abs() <= 0.5, "row should return to the start edge: {row:?} in {col:?}");
+}

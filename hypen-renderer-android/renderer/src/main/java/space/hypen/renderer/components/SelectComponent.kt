@@ -18,6 +18,7 @@ import space.hypen.renderer.render.LocalActionDispatcher
 import space.hypen.renderer.render.LocalComposeRenderer
 import space.hypen.renderer.model.ActionValue
 import space.hypen.renderer.model.HypenElement
+import space.hypen.renderer.model.propToDisplayString
 
 /**
  * Handler for Select/Dropdown component.
@@ -54,7 +55,7 @@ class SelectComponent : ComponentHandler {
         // Options can be passed as a list
         val optionsList = element.props["options"]
         val explicitOptions = when (optionsList) {
-            is List<*> -> optionsList.mapNotNull { it?.toString() }
+            is List<*> -> optionsList.mapNotNull { propToDisplayString(it) }
             else -> emptyList()
         }
         val childOptions = selectChildOptions(renderer?.getChildren(element.id).orEmpty())

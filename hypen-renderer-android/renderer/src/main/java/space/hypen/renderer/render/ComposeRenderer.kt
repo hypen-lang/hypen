@@ -18,6 +18,7 @@ import space.hypen.renderer.dnd.DndHost
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.model.Patch
 import space.hypen.renderer.model.PatchType
+import space.hypen.renderer.model.propToDisplayString
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -271,7 +272,7 @@ class ComposeRenderer(
         val props = patch.props ?: emptyMap()
 
         // Extract text content from props if present
-        val textContent = props["0"]?.toString() ?: props["text"]?.toString()
+        val textContent = propToDisplayString(props["0"]) ?: propToDisplayString(props["text"])
 
         val existing = elements[id]
         val element = if (existing != null) {
@@ -337,7 +338,7 @@ class ComposeRenderer(
         // Handle special props
         if (name == "0" || name == "text") {
             // Text content update
-            element.textContent = patch.value?.toString()
+            element.textContent = propToDisplayString(patch.value)
         }
 
         log.debug { "Set prop: $id.$name = ${patch.value}" }
