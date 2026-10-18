@@ -23,9 +23,7 @@ use std::sync::{Arc, Mutex};
 pub mod device;
 
 use crate::{
-    engine_core::EngineCore,
-    ir::{ast_to_ir_node, IRNode},
-    lifecycle::ModuleInstance,
+    engine_core::EngineCore, ir::ast_to_ir_node, lifecycle::ModuleInstance,
     reconcile::Patch as InternalPatch,
 };
 
@@ -1191,29 +1189,11 @@ impl HypenEngine {
             HypenError::ParseError(msg)
         })?;
 
-        let ir_node = ast_to_ir_node(&component_spec);
-        let ir_element = match ir_node {
-            IRNode::Element(e) => e,
-            _ => {
-                // Root of a component should always be an Element
-                return Err(HypenError::ComponentError(
-                    "Component root must be an element".to_string(),
-                ));
-            }
-        };
-        let is_module = component_spec.declaration_type == hypen_parser::DeclarationType::Module;
-        let module_name = if is_module {
-            Some(component_spec.name.to_lowercase())
-        } else {
-            None
-        };
-
-        let mut comp = crate::ir::Component::new(component.name, move |_props| ir_element.clone())
+        // Any root shape is registrable: Element roots are ordinary
+        // templates; control-flow roots (`module App { Router { ... } }`)
+        // expand in place where the component is used.
+        let comp = crate::ir::Component::from_spec(component.name, &component_spec)
             .with_source_path(&component.path);
-        if is_module {
-            comp.is_module = true;
-            comp.module_name = module_name;
-        }
 
         state.core.register_component(comp);
 
@@ -1493,6 +1473,53 @@ mod tests {
             saw_bob,
             "expected a patch carrying 'Bob' after set_context replaced the deep provider state; got: {:?}",
             patches
+        );
+    }
+
+    #[test]
+    fn test_register_component_accepts_router_root() {
+        // `module App { Router { ... } }` lowers to a Router root once the
+        // module wrapper is unwrapped. It used to be rejected with
+        // "Component root must be an element".
+        let engine = make_engine();
+        engine.register_default_primitives();
+        engine.set_module(ModuleConfig {
+            name: "Shell".to_string(),
+            actions: vec![],
+            state_keys: vec![],
+            initial_state_json: "{}".to_string(),
+        });
+        engine.register_module(ModuleConfig {
+            name: "App".to_string(),
+            actions: vec![],
+            state_keys: vec![],
+            initial_state_json: r#"{"location":"/"}"#.to_string(),
+        });
+        engine
+            .register_component(ComponentDef {
+                name: "App".to_string(),
+                source: r#"module App { Router { Route(path: "/") { Text("home") } } }"#
+                    .to_string(),
+                path: "/App.hypen".to_string(),
+            })
+            .expect("Router-root component registers");
+
+        let patches = engine
+            .render_source("Column { App() }".to_string())
+            .expect("render");
+        let types: Vec<_> = patches
+            .iter()
+            .filter_map(|p| p.element_type.clone())
+            .collect();
+        assert!(
+            !types.iter().any(|t| t == "App"),
+            "the component must expand, not render as an unknown element: {types:?}"
+        );
+        assert!(
+            patches
+                .iter()
+                .any(|p| p.props_json.as_deref().is_some_and(|j| j.contains("home"))),
+            "the matched route renders: {patches:?}"
         );
     }
 }

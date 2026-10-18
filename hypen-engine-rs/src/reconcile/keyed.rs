@@ -539,19 +539,45 @@ pub(crate) fn reconcile_iterable_children_full(
         in_lis[idx] = true;
     }
 
-    // Walk backwards so each Move's anchor (`new_child_ids[i + 1]`) is already
-    // in its final position — the forward direction is wrong for any reorder
-    // needing two or more moves (e.g. [a,b,c] → [c,b,a]).
+    // Walk backwards so each Move's anchor (the first rendered node of
+    // `new_child_ids[i + 1..]`) is already in its final position — the
+    // forward direction is wrong for any reorder needing two or more moves
+    // (e.g. [a,b,c] → [c,b,a]).
+    //
+    // A child may be a transparent control-flow node (an `If` / `When` per
+    // row, a nested ForEach as the row root). The renderer never created it,
+    // so it can neither be moved nor anchored on: move every node it renders,
+    // in order, and anchor on the first node the following children render.
+    // `anchor` tracks that node as the walk goes; `None` = end of this
+    // iterable's region (re-anchored by the enclosing control-flow reconcile
+    // when the region is followed by siblings).
+    let mut anchor: Option<NodeId> = None;
+    let mut rendered: Vec<NodeId> = Vec::new();
     for new_idx in (0..new_child_ids.len()).rev() {
-        if in_lis[new_idx] {
+        let child = new_child_ids[new_idx];
+        let is_flow = ctx
+            .tree
+            .get(child)
+            .is_some_and(|n| n.control_flow.is_some());
+        if !is_flow {
+            if !in_lis[new_idx] {
+                ctx.patches
+                    .push(Patch::move_node(render_parent, child, anchor));
+            }
+            anchor = Some(child);
             continue;
         }
-        let before_id = new_child_ids.get(new_idx + 1).copied();
-        ctx.patches.push(Patch::move_node(
-            render_parent,
-            new_child_ids[new_idx],
-            before_id,
-        ));
+        rendered.clear();
+        super::diff::collect_rendered_nodes(ctx.tree, child, &mut rendered);
+        if !in_lis[new_idx] {
+            for &node in &rendered {
+                ctx.patches
+                    .push(Patch::move_node(render_parent, node, anchor));
+            }
+        }
+        if let Some(&first) = rendered.first() {
+            anchor = Some(first);
+        }
     }
 
     // Remove old children that weren't reused.

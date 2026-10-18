@@ -1314,6 +1314,23 @@ fn first_rendered_node(tree: &InstanceTree, id: NodeId) -> Option<NodeId> {
         .find_map(|&child| first_rendered_node(tree, child))
 }
 
+/// Every node a renderer knows about at the top of `id`'s region, in render
+/// order: `id` itself for an element; for a transparent control-flow
+/// container, the rendered nodes of each of its children, flattened through
+/// nested control flow (nothing when it currently renders nothing).
+pub(crate) fn collect_rendered_nodes(tree: &InstanceTree, id: NodeId, out: &mut Vec<NodeId>) {
+    let Some(node) = tree.get(id) else {
+        return;
+    };
+    if node.control_flow.is_none() {
+        out.push(id);
+        return;
+    }
+    for &child in &node.children {
+        collect_rendered_nodes(tree, child, out);
+    }
+}
+
 /// The rendered node that must stay immediately AFTER everything `id`
 /// renders, within `id`'s render parent — i.e. the insert-before anchor for
 /// content a transparent control-flow node adds after its siblings already

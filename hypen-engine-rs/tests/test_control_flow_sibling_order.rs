@@ -49,6 +49,12 @@ impl MockDom {
     }
 
     fn link(&mut self, parent: &str, id: &str, before: Option<&str>) {
+        // Transparent control-flow containers are never created on the
+        // renderer: an Insert/Move/Attach naming one targets nothing.
+        assert!(
+            self.types.contains_key(id),
+            "patch links {id}, which the renderer never created (a control-flow container?)"
+        );
         self.unlink(id);
         let kids = self.children.entry(parent.to_string()).or_default();
         let pos = match before {
@@ -437,4 +443,145 @@ fn when_branch_with_different_element_type_replaces_in_place() {
     );
     let out = h.update(json!({"status": "idle"}));
     assert_eq!(out, ["header", "ready", "footer"]);
+}
+
+// ---------------------------------------------------------------------------
+// Keyed reorder of rows whose root is a transparent control-flow node.
+//
+// The placement pass used to `Move` the row root itself — an `__Conditional`
+// / `__ForEach` id the renderer never created — and anchor on the next row
+// root, which may be just as invisible. Each rendered child must move instead.
+// ---------------------------------------------------------------------------
+
+fn todo(id: &str, done: bool) -> serde_json::Value {
+    json!({"id": id, "content": id, "done": done})
+}
+
+#[test]
+fn reorder_rows_with_if_root() {
+    let src = r#"
+    Column {
+        ForEach(items: @state.todos, key: "id") {
+            If(condition: @item.done) { Text("@{item.content}") }
+        }
+        Text("footer")
+    }
+    "#;
+    let mut h = Harness::new(
+        src,
+        json!({"todos": [todo("a", true), todo("b", true), todo("c", true)]}),
+    );
+    assert_eq!(h.texts(), ["a", "b", "c", "footer"]);
+    let out = h.update(json!({"todos": [todo("c", true), todo("b", true), todo("a", true)]}));
+    assert_eq!(out, ["c", "b", "a", "footer"]);
+    let out = h.update(json!({"todos": [todo("b", true), todo("a", true), todo("c", true)]}));
+    assert_eq!(out, ["b", "a", "c", "footer"]);
+}
+
+#[test]
+fn reorder_rows_with_if_root_some_hidden() {
+    let src = r#"
+    Column {
+        ForEach(items: @state.todos, key: "id") {
+            If(condition: @item.done) { Text("@{item.content}") }
+        }
+        Text("footer")
+    }
+    "#;
+    let mut h = Harness::new(
+        src,
+        json!({"todos": [todo("a", true), todo("b", false), todo("c", true), todo("d", true)]}),
+    );
+    assert_eq!(h.texts(), ["a", "c", "d", "footer"]);
+    // The hidden row `b` lands where the next visible row's anchor must be
+    // skipped over.
+    let out = h.update(json!({"todos": [
+        todo("d", true), todo("a", true), todo("b", false), todo("c", true)
+    ]}));
+    assert_eq!(out, ["d", "a", "c", "footer"]);
+    let out = h.update(json!({"todos": [
+        todo("c", true), todo("b", true), todo("d", true), todo("a", true)
+    ]}));
+    assert_eq!(out, ["c", "b", "d", "a", "footer"]);
+}
+
+#[test]
+fn reorder_rows_with_multi_child_if_root() {
+    let src = r#"
+    Column {
+        ForEach(items: @state.todos, key: "id") {
+            If(condition: @item.done) {
+                Text("@{item.content}:1")
+                Text("@{item.content}:2")
+            }
+        }
+        Text("footer")
+    }
+    "#;
+    let mut h = Harness::new(
+        src,
+        json!({"todos": [todo("a", true), todo("b", true), todo("c", true)]}),
+    );
+    assert_eq!(
+        h.texts(),
+        ["a:1", "a:2", "b:1", "b:2", "c:1", "c:2", "footer"]
+    );
+    let out = h.update(json!({"todos": [todo("c", true), todo("a", true), todo("b", true)]}));
+    assert_eq!(out, ["c:1", "c:2", "a:1", "a:2", "b:1", "b:2", "footer"]);
+}
+
+#[test]
+fn reorder_rows_with_when_root() {
+    let src = r#"
+    Column {
+        ForEach(items: @state.rows, key: "id") {
+            When(value: @item.kind) {
+                Case(match: "big") { Heading("@{item.id}") Text("@{item.id}!") }
+                Else { Text("@{item.id}") }
+            }
+        }
+        Text("footer")
+    }
+    "#;
+    let row = |id: &str, kind: &str| json!({"id": id, "kind": kind});
+    let mut h = Harness::new(
+        src,
+        json!({"rows": [row("a", "big"), row("b", "small"), row("c", "big")]}),
+    );
+    assert_eq!(h.texts(), ["a!", "b", "c!", "footer"]);
+    let out = h.update(json!({"rows": [row("c", "big"), row("b", "small"), row("a", "big")]}));
+    assert_eq!(out, ["c!", "b", "a!", "footer"]);
+    let column = h.dom.children["root"][0].clone();
+    let kinds: Vec<&str> = h.dom.children[&column]
+        .iter()
+        .map(|id| h.dom.types[id].as_str())
+        .collect();
+    assert_eq!(
+        kinds,
+        ["Heading", "Text", "Text", "Heading", "Text", "Text"]
+    );
+}
+
+#[test]
+fn reorder_rows_with_nested_foreach_root() {
+    let src = r#"
+    Column {
+        ForEach(items: @state.groups, key: "id", as: "group") {
+            ForEach(items: @group.items, key: "id") {
+                Text("@{group.id}/@{item.id}")
+            }
+        }
+        Text("footer")
+    }
+    "#;
+    let g = |id: &str, items: &[&str]| json!({"id": id, "items": items.iter().map(|i| json!({"id": i})).collect::<Vec<_>>()});
+    let mut h = Harness::new(
+        src,
+        json!({"groups": [g("x", &["1", "2"]), g("y", &[]), g("z", &["3"])]}),
+    );
+    assert_eq!(h.texts(), ["x/1", "x/2", "z/3", "footer"]);
+    let out = h.update(json!({"groups": [g("z", &["3"]), g("y", &[]), g("x", &["1", "2"])]}));
+    assert_eq!(out, ["z/3", "x/1", "x/2", "footer"]);
+    let out = h.update(json!({"groups": [g("y", &["4"]), g("x", &["1", "2"]), g("z", &["3"])]}));
+    assert_eq!(out, ["y/4", "x/1", "x/2", "z/3", "footer"]);
 }
