@@ -4,11 +4,25 @@
  * Bun compatibility with vscode-languageserver/node.
  */
 import { describe, test, expect, afterEach } from "bun:test";
+import { existsSync } from "fs";
 import { resolve } from "path";
 import type { Subprocess } from "bun";
 
 const LSP_DIR = resolve(import.meta.dir, "../../../../hypen-lsp");
 const SERVER_PATH = resolve(LSP_DIR, "src/server.ts");
+
+// The server imports vscode-languageserver from hypen-lsp's own node_modules,
+// which `bun install` in hypen-cli does not create. Skip (loudly) rather than
+// fail with an opaque "Stream ended" when the sibling package isn't installed.
+const LSP_DEPS_INSTALLED = existsSync(
+  resolve(LSP_DIR, "node_modules/vscode-languageserver")
+);
+if (!LSP_DEPS_INSTALLED) {
+  console.warn(
+    `[lsp-server.test] Skipping LSP integration tests: hypen-lsp dependencies are not installed.\n` +
+      `  Run: (cd ${LSP_DIR} && bun install)`
+  );
+}
 
 // --- Content-Length framing helpers ---
 
@@ -60,7 +74,7 @@ async function readMessage(
 
 // --- Tests ---
 
-describe("LSP server via Bun (integration)", () => {
+describe.skipIf(!LSP_DEPS_INSTALLED)("LSP server via Bun (integration)", () => {
   let proc: Subprocess | null = null;
 
   afterEach(() => {

@@ -68,6 +68,7 @@ function getDefaultHtmlTemplate(entry: string): string {
        env(safe-area-inset-*) reports real values for the SafeArea component. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Hypen App</title>
+  <link rel="icon" href="data:,">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; }
@@ -424,9 +425,17 @@ export async function dev(options: DevOptions): Promise<{
 }
 
 /**
- * Build for production (Node.js version)
+ * Build for production (Node.js version) — legacy browser-SPA build.
+ *
+ * @deprecated `hypen build` no longer uses this. Use `build` from
+ * `@hypen-space/cli` (the static site `hypen build` emits; see
+ * `src/build.ts`). Kept only for existing programmatic callers.
  */
 export async function build(options: BuildOptions): Promise<void> {
+  console.warn(
+    "[hypen] The runtime-specific `build` export is deprecated and differs from `hypen build`. " +
+      "Use `import { build } from \"@hypen-space/cli\"` instead."
+  );
   const {
     components: componentsDir,
     entry,

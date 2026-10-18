@@ -6,7 +6,7 @@
  * WebSocket protocol. Layouts mirror the TypeScript generator:
  *
  *   - `file-based`: modules are declared in Kotlin; UI templates live in
- *     `components/<Name>/<Name>.hypen` and are picked up via
+ *     `components/<Name>/component.hypen` and are picked up via
  *     `watchComponents(...)`.
  *   - `server-based`: UI templates are kept as Kotlin string constants
  *     inside `Main.kt` and applied with `.ui(...)`.
@@ -78,12 +78,12 @@ const HOME_HYPEN = `module Home {
       .tw("bg-white border border-blue-600 rounded-lg px-4 py-2")
       .padding(12)
       .borderRadius(8)
-      .onClick(@actions.navigate, to: "/counter")
+      .onClick(@router.push, to: "/counter")
     }
     .tw("flex-row gap-3 mt-6")
     .gap(12)
   }
-  .tw("flex-1 items-center justify-center p-8 bg-gray-50")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-gray-50")
   .padding(32)
   .gap(8)
 }
@@ -141,9 +141,9 @@ const COUNTER_HYPEN = `module Counter {
     }
     .tw("mt-8 bg-transparent")
     .padding(12)
-    .onClick(@actions.navigate, to: "/")
+    .onClick(@router.push, to: "/")
   }
-  .tw("flex-1 items-center justify-center p-8 bg-white")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-white")
   .padding(32)
   .gap(12)
 }
@@ -167,8 +167,7 @@ repositories {
 }
 
 dependencies {
-    // Resolve the latest published SDK from Maven Central, mirroring the
-    // TypeScript scaffold's use of "latest" for @hypen-space/* (avoids a
+    // Resolve the latest published SDK from Maven Central (avoids a
     // hardcoded version number that goes stale between releases).
     implementation("space.hypen:hypen-kotlin:latest.release")
     implementation("io.ktor:ktor-server-core:3.1.1")
@@ -178,8 +177,18 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 
+// Emit Java 17 bytecode with whichever JDK 17+ runs Gradle. (A
+// \`jvmToolchain(17)\` would instead require exactly JDK 17 to be
+// installed, and fail on machines that only have a newer one.)
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 kotlin {
-    jvmToolchain(17)
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
 
 application {
@@ -219,9 +228,13 @@ function hypenConfig(): string {
 }
 
 function mainKotlin(layout: ModuleLayout): string {
+  // File-based: the root template still has to be on the App module — the
+  // server renders it first and reads its Router block to wire routes (a
+  // \`module App { Router { ... } }\` file can't be mounted as a component).
+  // Home/Counter come from \`watchComponents\` below.
   const uiCalls = layout === "server-based"
     ? `        ui(appTemplate)\n`
-    : ``;
+    : `        ui(java.io.File("components/App/component.hypen").readText())\n`;
   const homeUi = layout === "server-based" ? `        ui(homeTemplate)\n` : ``;
   const counterUi = layout === "server-based" ? `        ui(counterTemplate)\n` : ``;
 
@@ -264,10 +277,13 @@ import space.hypen.core.*
 
 // ---------- State types ----------
 
+// \`location\` is the current route path. The template's Router matches its
+// Route(path: ...) children against @{state.location}, and the server keeps
+// it in sync when a screen calls @router.push / @router.back, so App needs
+// no navigation handlers. Don't remove it.
 @Serializable
 data class AppState(
     var location: String = "/",
-    var previousLocation: String = "/",
 )
 
 @Serializable
@@ -280,16 +296,6 @@ data class HomeState(
 data class CounterState(var count: Int = 0)
 
 // ---------- Typed actions (sealed for exhaustive handling) ----------
-
-sealed interface AppAction : HypenAction {
-    @Serializable
-    data class Navigate(val to: String) : AppAction {
-        override val _actionName: String get() = "navigate"
-    }
-    data object NavigateBack : AppAction {
-        override val _actionName: String get() = "navigateBack"
-    }
-}
 
 sealed interface HomeAction : HypenAction {
     data object Tap : HomeAction {
@@ -322,17 +328,6 @@ fun main() {
 
     val appModule = hypen(AppState()) {
         name("App")
-        onAction<AppAction.Navigate> { action, state, _ ->
-            if (action.to.isNotEmpty() && action.to != state.location) {
-                state.previousLocation = state.location
-                state.location = action.to
-            }
-        }
-        onAction<AppAction.NavigateBack> { _, state, _ ->
-            val back = state.previousLocation.ifEmpty { "/" }
-            state.previousLocation = state.location
-            state.location = back
-        }
 ${uiCalls}    }
 
     val homeModule = hypen(HomeState()) {
@@ -409,7 +404,7 @@ ${routes}${watchCall}    }
 function readme(projectName: string, layout: ModuleLayout): string {
   const layoutNote =
     layout === "file-based"
-      ? "UI templates live in `components/<Name>/<Name>.hypen` and hot-reload via `watchComponents`."
+      ? "UI templates live in `components/<Name>/component.hypen` and hot-reload via `watchComponents`."
       : "UI templates are inline string constants in `src/main/kotlin/app/hypen/starter/Main.kt`.";
 
   return `# ${projectName}
@@ -419,7 +414,8 @@ Hypen project scaffolded with \`hypen init\` (Kotlin, ${layout}).
 ## Requirements
 
 - JDK 17+
-- Gradle (or use the generated \`./gradlew\` wrapper)
+- Gradle 8+ (\`hypen init\` generates a \`./gradlew\` wrapper when Gradle is
+  installed; otherwise run \`gradle wrapper\` once, or use \`gradle run\`)
 - The native Hypen engine library — see \`hypen-kotlin/README.md\` for
   platform-specific build instructions, then add
   \`-Djna.library.path=<path-to-libhypen>\` to the run command.
@@ -467,8 +463,8 @@ export function generateKotlinProject(opts: Options): void {
     ]) {
       ensureDir(projectDir, rel);
     }
-    write(projectDir, "components/App/App.hypen", APP_HYPEN);
-    write(projectDir, "components/Home/Home.hypen", HOME_HYPEN);
-    write(projectDir, "components/Counter/Counter.hypen", COUNTER_HYPEN);
+    write(projectDir, "components/App/component.hypen", APP_HYPEN);
+    write(projectDir, "components/Home/component.hypen", HOME_HYPEN);
+    write(projectDir, "components/Counter/component.hypen", COUNTER_HYPEN);
   }
 }

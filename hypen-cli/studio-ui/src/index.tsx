@@ -299,15 +299,15 @@ function findWasmBrowserDir(): string | null {
 }
 const wasmBrowserDir = findWasmBrowserDir();
 
-function wasmFileResponse(fileName: string, contentType: string): Response {
+function wasmFileResponse(fileName: string, contentType: string, head = false): Response {
   if (!wasmBrowserDir) return new Response("Not Found", { status: 404 });
-  try {
-    return new Response(Bun.file(join(wasmBrowserDir, fileName)), {
-      headers: { "Content-Type": contentType },
-    });
-  } catch {
-    return new Response("Not Found", { status: 404 });
-  }
+  const path = join(wasmBrowserDir, fileName);
+  if (!existsSync(path)) return new Response("Not Found", { status: 404 });
+  // HEAD (the client's availability probe) must not carry the file body:
+  // Bun streams a Bun.file body even for HEAD and Chromium then logs the
+  // probe as an aborted request (net::ERR_ABORTED).
+  if (head) return new Response(null, { headers: { "Content-Type": contentType } });
+  return new Response(Bun.file(path), { headers: { "Content-Type": contentType } });
 }
 
 const server = serve({
@@ -318,11 +318,11 @@ const server = serve({
     // HEAD is the client's availability probe (lib/wasm-urls.ts).
     "/wasm/hypen_engine.js": {
       GET: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
-      HEAD: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
+      HEAD: () => wasmFileResponse("hypen_engine.js", "application/javascript", true),
     },
     "/wasm/hypen_engine_bg.wasm": {
       GET: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
-      HEAD: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
+      HEAD: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm", true),
     },
 
     // TS→JS transpile for the in-browser preview's sibling `.ts` modules.

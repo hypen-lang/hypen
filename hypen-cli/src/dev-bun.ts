@@ -22,6 +22,7 @@ import {
 } from "@hypen-space/server";
 import { pink, yellow, dim, boldPink, boldYellow } from "./colors.js";
 import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
+import { importFromProject } from "./dev-resolve.js";
 
 export interface DevOptions {
   /**
@@ -126,6 +127,7 @@ function getDefaultHtmlTemplate(entry: string): string {
        env(safe-area-inset-*) reports real values for the SafeArea component. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Hypen App</title>
+  <link rel="icon" href="data:,">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; }
@@ -253,11 +255,21 @@ export async function dev(options: DevOptions): Promise<{
   const resolvedComponentsDir = resolve(componentsDir);
   log("Components directory:", resolvedComponentsDir);
 
-  const { RemoteServer } = await import("@hypen-space/server/remote");
-  const { discoverComponents, loadDiscoveredComponents } = await import(
-    "@hypen-space/server"
+  // Runtime packages come from the project when it has them, so the
+  // RemoteServer, the component loader, and the project's component.ts
+  // files all share ONE @hypen-space/core (see dev-resolve.ts).
+  const { RemoteServer } = await importFromProject(
+    "@hypen-space/server/remote",
+    () => import("@hypen-space/server/remote")
   );
-  const { configureLogger } = await import("@hypen-space/core");
+  const { discoverComponents, loadDiscoveredComponents } = await importFromProject(
+    "@hypen-space/server",
+    () => import("@hypen-space/server")
+  );
+  const { configureLogger } = await importFromProject(
+    "@hypen-space/core",
+    () => import("@hypen-space/core")
+  );
 
   const discovered = await discoverComponents(resolvedComponentsDir);
   const loaded = await loadDiscoveredComponents(discovered);
@@ -356,9 +368,17 @@ export async function dev(options: DevOptions): Promise<{
 }
 
 /**
- * Build for production
+ * Build for production — legacy browser-SPA build.
+ *
+ * @deprecated `hypen build` no longer uses this. Use `build` from
+ * `@hypen-space/cli` (the static site `hypen build` emits; see
+ * `src/build.ts`). Kept only for existing programmatic callers.
  */
 export async function build(options: BuildOptions): Promise<void> {
+  console.warn(
+    "[hypen] The runtime-specific `build` export is deprecated and differs from `hypen build`. " +
+      "Use `import { build } from \"@hypen-space/cli\"` instead."
+  );
   const {
     components: componentsDir,
     entry,

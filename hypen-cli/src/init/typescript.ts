@@ -14,50 +14,106 @@
  *     files are written.
  *
  * Both layouts share the same demo surface:
- *   - `App`      root module, owns routing state and `navigate` action
+ *   - `App`      root module, owns the `Router` and its `location` state
  *   - `Home`     greeting screen with typed `updateGreeting` action
  *   - `Counter`  counter with typed increment/decrement/reset actions
+ *
+ * Screens navigate with the built-in `@router.push` action, which works
+ * from any module. A module's own `@actions.*` are scoped to that module,
+ * so a child screen can't dispatch an action that only its parent handles.
  */
 
-import { mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { dim } from "../colors.js";
 import type { ModuleLayout } from "./prompts.js";
 
-const DEP_VERSION = "latest";
+/**
+ * Version of the running `@hypen-space/cli`, read from its package.json.
+ *
+ * Walks up from this file: from source (`src/init/typescript.ts`) the
+ * package root is two levels up, from the published bundle
+ * (`dist/bin/hypen.js`) it is also two. Returns `null` when no
+ * `@hypen-space/cli` package.json is found.
+ */
+export function readCliVersion(): string | null {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 6 && dir !== "/" && dir !== "."; i++) {
+      const pkgPath = resolve(dir, "package.json");
+      if (existsSync(pkgPath)) {
+        try {
+          const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+          if (pkg?.name === "@hypen-space/cli" && typeof pkg.version === "string") {
+            return pkg.version;
+          }
+        } catch {}
+      }
+      dir = dirname(dir);
+    }
+  } catch {}
+  return null;
+}
+
+/**
+ * Dependency range for the `@hypen-space/*` packages, derived from a CLI
+ * version. The CLI and the SDK packages are released in lockstep, so
+ * `^<cli version>` gives a reproducible project that matches the CLI that
+ * created it. Falls back to `"latest"` only when the version is unknown
+ * (`null` / `0.0.0`), e.g. when running from an unusual checkout layout.
+ */
+export function depRangeForVersion(version: string | null): string {
+  if (!version || version === "0.0.0") return "latest";
+  return `^${version}`;
+}
 
 /**
  * Version used for the `@hypen-space/*` dependencies in every generated
  * `package.json`. Exported so `bin/hypen.ts` can reuse the same value
- * when patching up a project post-teleport without duplicating the
- * stopgap comment below.
- *
- * **Stopgap**: the local CLI `VERSION` has outrun what's published to
- * npm. Using `^${VERSION}` emits a constraint the registry can't
- * resolve, so every freshly scaffolded project's `bun install` fails.
- * Pinning to `"latest"` unblocks new users immediately. Revert once
- * the publish flow catches up.
+ * when patching up a project post-teleport.
  */
-export const TS_DEP_VERSION = DEP_VERSION;
+export const TS_DEP_VERSION = depRangeForVersion(readCliVersion());
+const DEP_VERSION = TS_DEP_VERSION;
+
+/**
+ * `npm start` for each layout, matching what `hypen build` writes:
+ *   - file-based (`entry` is a component): a static site plus a
+ *     zero-dependency `dist/server.js` (PORT env var, default 3000).
+ *   - server-based (`entry` is `./src/app.ts`): the entry script bundled
+ *     to `dist/main.js` with dependencies external, run with Bun.
+ */
+function startScript(layout: ModuleLayout): string {
+  return layout === "server-based" ? "bun dist/main.js" : "node dist/server.js";
+}
 
 /**
  * Shape of the `package.json` written by the TypeScript generator.
  * Exported so it can be used by repair flows (e.g. `ensureProjectDeps`
  * after a teleport) instead of hand-maintaining a parallel copy.
  */
-export function buildTsPackageJson(projectName: string): string {
+export function buildTsPackageJson(
+  projectName: string,
+  layout: ModuleLayout = "file-based",
+): string {
+  const scripts: Record<string, string> = {
+    dev: "hypen dev",
+    studio: "hypen studio",
+    test: "hypen test",
+    build: "hypen build",
+    start: startScript(layout),
+  };
+  if (layout === "file-based") {
+    // `src/app.ts` is not used by `hypen dev` or `hypen build`; it runs the
+    // app as a standalone remote-UI (WebSocket) server.
+    scripts.serve = "bun src/app.ts";
+  }
   return JSON.stringify(
     {
       name: projectName,
       version: "0.1.0",
       type: "module",
-      scripts: {
-        dev: "hypen dev",
-        studio: "hypen studio",
-        test: "hypen test",
-        build: "hypen build",
-        start: "node dist/main.js",
-      },
+      scripts,
       dependencies: {
         "@hypen-space/core": DEP_VERSION,
         "@hypen-space/server": DEP_VERSION,
@@ -66,8 +122,7 @@ export function buildTsPackageJson(projectName: string): string {
       },
       devDependencies: {
         "@hypen-space/cli": DEP_VERSION,
-        "@types/bun": "latest",
-        esbuild: "^0.20.0",
+        "@types/bun": "^1.2.0",
         typescript: "^5.0.0",
       },
     },
@@ -93,8 +148,8 @@ function ensureDir(projectDir: string, relPath: string): void {
   mkdirSync(full, { recursive: true });
 }
 
-function packageJson(name: string): string {
-  return buildTsPackageJson(name);
+function packageJson(name: string, layout: ModuleLayout): string {
+  return buildTsPackageJson(name, layout);
 }
 
 function tsconfigJson(): string {
@@ -174,37 +229,24 @@ Thumbs.db
 // ---------------------------------------------------------------------------
 
 /**
- * Root module. Holds routing state (`location`) plus a typed `navigate`
- * action dispatched from child screens. `.onAction<NavigatePayload>` gives
- * `action.payload` full TS inference inside the handler.
+ * Root module. Holds the `location` the template's `Router` matches
+ * against. Navigation needs no handler here: screens use the built-in
+ * `@router.push` / `@router.back` actions and the runtime keeps
+ * `state.location` in sync with the current route (and the browser URL).
  */
 const APP_MODULE_TS = `import { app } from "@hypen-space/core";
 
 type AppState = {
-  /** Current route path — drives the Router in the template. */
+  /**
+   * Current route path. \`Router\` matches its \`Route(path: ...)\` children
+   * against \`@{state.location}\`, and the runtime updates it whenever a
+   * screen calls \`@router.push\` / \`@router.back\`. Don't remove it.
+   */
   location: string;
-  /** Previous route path, used by \`navigateBack\`. */
-  previousLocation: string;
 };
 
-type NavigatePayload = { to: string };
-
 export default app
-  .defineState<AppState>({
-    location: "/",
-    previousLocation: "/",
-  })
-  .onAction<NavigatePayload>("navigate", ({ action, state }) => {
-    const to = action.payload?.to;
-    if (!to || to === state.location) return;
-    state.previousLocation = state.location;
-    state.location = to;
-  })
-  .onAction("navigateBack", ({ state }) => {
-    const back = state.previousLocation || "/";
-    state.previousLocation = state.location;
-    state.location = back;
-  })
+  .defineState<AppState>({ location: "/" })
   .build();
 `;
 
@@ -224,7 +266,7 @@ const APP_TEMPLATE_HYPEN = `module App {
 
 /**
  * Home screen — demonstrates typed actions with a string payload and
- * dispatches the parent's \`navigate\` action to move to the counter.
+ * navigates to the counter with the built-in `@router.push` action.
  */
 const HOME_MODULE_TS = `import { app } from "@hypen-space/core";
 
@@ -273,11 +315,11 @@ const HOME_TEMPLATE_HYPEN = `module Home {
           .tw("text-blue-600 font-semibold")
       }
       .tw("bg-white border border-blue-600 rounded-lg px-4 py-2")
-      .onClick(@actions.navigate, to: "/counter")
+      .onClick(@router.push, to: "/counter")
     }
     .tw("flex-row gap-3 mt-6")
   }
-  .tw("flex-1 items-center justify-center p-8 bg-gray-50")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-gray-50")
 }
 `;
 
@@ -348,9 +390,9 @@ const COUNTER_TEMPLATE_HYPEN = `module Counter {
         .tw("text-blue-600 font-semibold")
     }
     .tw("mt-8 bg-transparent p-3")
-    .onClick(@actions.navigate, to: "/")
+    .onClick(@router.push, to: "/")
   }
-  .tw("flex-1 items-center justify-center p-8 bg-white gap-3")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-white gap-3")
 }
 `;
 
@@ -379,7 +421,19 @@ function generateFileBased(opts: Options): void {
   write(projectDir, "src/components/Counter/component.hypen", COUNTER_TEMPLATE_HYPEN);
 
   const appEntry = `/**
- * Hypen application entry point (file-based layout).
+ * Standalone remote-UI server (file-based layout).
+ *
+ * \`hypen dev\` and \`hypen build\` do NOT use this file: they discover
+ * \`src/components/*\` on their own (see hypen.json).
+ *
+ * It is the production entry for hosting the app as a remote-UI server:
+ * module code runs here, and clients (native Android/iOS/desktop renderers,
+ * or a browser using \`RemoteEngine\`) connect to it over WebSocket.
+ * Run it with \`bun run serve\` (\`bun src/app.ts\`); PORT env var, default 3000.
+ *
+ * For a static browser deployment use \`bun run build\` + \`bun run start\`
+ * instead (\`dist/server.js\`, no server-side code). Delete this file if
+ * you don't need a remote-UI server.
  *
  * Modules and their \`.hypen\` templates are discovered from
  * \`src/components/*\` by \`serve({ source })\`.
@@ -430,11 +484,10 @@ function generateServerBased(opts: Options): void {
   const appModule = `import { app, hypen } from "@hypen-space/core";
 
 type AppState = {
+  // Current route path: Router matches against @{state.location}, and the
+  // runtime updates it on @router.push / @router.back. Don't remove it.
   location: string;
-  previousLocation: string;
 };
-
-type NavigatePayload = { to: string };
 
 // Keep the DSL string as a named export so \`src/app.ts\` can pass it to
 // \`RemoteServer.ui(...)\` without reaching into a built module definition.
@@ -452,19 +505,10 @@ export const AppTemplate = hypen\`module App {
 .tw("flex-1 w-full h-full bg-white")
 \`;
 
+// Screens navigate with the built-in @router.push / @router.back actions,
+// so App needs no navigation handlers of its own.
 export const AppModule = app
-  .defineState<AppState>({ location: "/", previousLocation: "/" })
-  .onAction<NavigatePayload>("navigate", ({ action, state }) => {
-    const to = action.payload?.to;
-    if (!to || to === state.location) return;
-    state.previousLocation = state.location;
-    state.location = to;
-  })
-  .onAction("navigateBack", ({ state }) => {
-    const back = state.previousLocation || "/";
-    state.previousLocation = state.location;
-    state.location = back;
-  })
+  .defineState<AppState>({ location: "/" })
   .ui(AppTemplate);
 `;
 
@@ -507,11 +551,11 @@ export const HomeModule = app
           .tw("text-blue-600 font-semibold")
       }
       .tw("bg-white border border-blue-600 rounded-lg px-4 py-2")
-      .onClick(@actions.navigate, to: "/counter")
+      .onClick(@router.push, to: "/counter")
     }
     .tw("flex-row gap-3 mt-6")
   }
-  .tw("flex-1 items-center justify-center p-8 bg-gray-50")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-gray-50")
 }
 \`);
 `;
@@ -573,9 +617,9 @@ export const CounterModule = app
         .tw("text-blue-600 font-semibold")
     }
     .tw("mt-8 bg-transparent p-3")
-    .onClick(@actions.navigate, to: "/")
+    .onClick(@router.push, to: "/")
   }
-  .tw("flex-1 items-center justify-center p-8 bg-white gap-3")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-white gap-3")
 }
 \`);
 `;
@@ -623,7 +667,7 @@ console.log(\`Remote server: \${server.url}\`);
 export function generateTypescriptProject(opts: Options): void {
   const { projectDir, projectName, layout } = opts;
 
-  write(projectDir, "package.json", packageJson(projectName));
+  write(projectDir, "package.json", packageJson(projectName, layout));
   write(projectDir, "hypen.json", hypenConfig(layout));
   write(projectDir, "tsconfig.json", tsconfigJson());
   write(projectDir, ".gitignore", gitignore());
