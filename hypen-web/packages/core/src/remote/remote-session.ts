@@ -63,6 +63,15 @@ import {
   isOversizeDeviceText,
 } from "./device/strict-json.js";
 import { TemplateExpander } from "../patch-expand.js";
+import {
+  NodeShadow,
+  SESSION_SNAPSHOT_VERSION,
+  isSessionSnapshot,
+  mergeRestoredState,
+  snapshotPath,
+  type SessionSnapshot,
+  type SnapshotTree,
+} from "./snapshot.js";
 import { frameworkLoggers } from "../logger.js";
 import { BaseEngine } from "../engine-base.js";
 
@@ -169,6 +178,16 @@ export interface SessionHost {
    */
   readonly deviceBrokerFactory?: DeviceBrokerFactory;
   readonly sessionManager: SessionManager;
+  /**
+   * Durable session snapshots (optional). A host whose process can lose its
+   * in-memory sessions while the client stays connected — a Cloudflare
+   * Durable Object that hibernates — persists every change through
+   * `saveSnapshot` and hands it back through `loadSnapshot` when the session
+   * id is re-adopted, so module state, the active route and node identity
+   * survive. Hosts without them keep in-memory resume via `SessionManager`.
+   */
+  loadSnapshot?(sessionId: string): Promise<SessionSnapshot | null | undefined>;
+  saveSnapshot?(sessionId: string, snapshot: SessionSnapshot): void | Promise<void>;
   readonly discoveredComponents: Map<
     string,
     { template: string; module?: HypenModuleDefinition<any> }
@@ -264,6 +283,15 @@ export interface RemoteSessionOptions {
 
 let nextSessionCounter = 1;
 
+/**
+ * How long after a restore a message may still address the previous
+ * incarnation's node ids (in flight before the client applied the new tree).
+ */
+const PREVIOUS_TREE_WINDOW_MS = 30_000;
+
+/** Upper bound on waiting for the initial route mount in `initializeLegacy`. */
+const LEGACY_NAVIGATION_WAIT_MS = 5_000;
+
 const MODULE_DECL = /^\s*(?:(?:\/\/[^\n]*(?:\n|$)|\/\*[\s\S]*?\*\/)\s*)*module\b/;
 
 /**
@@ -311,6 +339,32 @@ export class RemoteSession {
    * in later streamed batches.
    */
   private readonly templateExpander = new TemplateExpander();
+
+  /**
+   * Structure of the tree the client currently shows, kept from every patch
+   * sent (initial tree and streaming). Snapshotted with module state so a
+   * rebuilt session can re-target messages addressed to the previous
+   * engine's node ids.
+   */
+  private readonly shadow = new NodeShadow();
+  /**
+   * Module states (lowercase id → state) from the snapshot this session was
+   * restored from, not yet consumed by a module instance. Route modules are
+   * constructed lazily on navigation, so entries stay here until their
+   * route is visited — and are carried into every later snapshot meanwhile.
+   */
+  private _restoreModules = new Map<string, unknown>();
+  /** Tree of the previous incarnation (restored snapshot) for id re-targeting. */
+  private _previousTree: SnapshotTree | null = null;
+  private _previousTreeUntil = 0;
+  /**
+   * The next UI dispatch was sent against the previous incarnation's tree
+   * (the message that woke a hibernated host): re-target it unconditionally.
+   */
+  private _retargetNext = false;
+  private _snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+  private _snapshotDirty = false;
+  private _snapshotSaving: Promise<void> | null = null;
 
   private _sessionId: string | null = null;
   private _helloReceived = false;
@@ -475,7 +529,28 @@ export class RemoteSession {
   async initializeLegacy(sessionId?: string): Promise<void> {
     if (this._helloReceived || this._destroyed) return;
     this._initializedByGrace = true;
+    // A recovered (hibernation) session: the message that triggered this
+    // initialisation was addressed to the previous engine's tree.
+    if (sessionId !== undefined && sessionId === this.recoverySessionId) {
+      this._retargetNext = true;
+    }
     await this.initializeSession(sessionId, undefined);
+    // The caller dispatches the triggering message right after this: the
+    // restored route's module must be mounted (its handlers registered) by
+    // then. Capped so a slow `onActivated` cannot stall the socket.
+    const managed = this._autoManagedRouter;
+    if (managed) {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        managed.waitForNavigation(),
+        new Promise<void>((resolve) => {
+          timer = setTimeout(resolve, LEGACY_NAVIGATION_WAIT_MS);
+        }),
+      ]);
+      clearTimeout(timer);
+      // Let the mount's state flush render before the dispatch resolves.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
   }
 
   get moduleInstance(): HypenModuleInstance<any> | null {
@@ -890,8 +965,10 @@ export class RemoteSession {
           const action = msg as DispatchActionMessage;
           // Node ids are session-local. Resolve to an engine-validated scoped
           // handler before sending the semantic outcome to another session.
+          const retarget = this._retargetNext;
+          this._retargetNext = false;
           const resolved = action.action === "__hypen_dispatch"
-            ? this.engine.resolveUIAction(action.action, action.payload)
+            ? this.resolveUIDispatch(action.action, action.payload, retarget)
             : { name: action.action, payload: action.payload };
           this.engine.dispatchAction(resolved.name, resolved.payload);
 
@@ -1002,6 +1079,22 @@ export class RemoteSession {
     }
 
     const currentState = this._moduleInstance?.getState() ?? {};
+    // Take the full snapshot before any teardown mutates module state, and
+    // commit it to the host's durable store (if any) so a reconnect within
+    // the TTL — even into a fresh process — restores every module.
+    const snapshot = this._ready ? this.takeSnapshot() : null;
+    if (this._snapshotTimer) {
+      clearTimeout(this._snapshotTimer);
+      this._snapshotTimer = null;
+    }
+    if (snapshot && this._sessionId && this.host.saveSnapshot) {
+      try {
+        await this._snapshotSaving;
+        await this.host.saveSnapshot(this._sessionId, snapshot);
+      } catch (err) {
+        log.error(`Session ${this.id}: snapshot save on close failed:`, err);
+      }
+    }
 
     // onDisconnect hook
     if (this._sessionId && this.host.module.handlers.onDisconnect) {
@@ -1035,7 +1128,8 @@ export class RemoteSession {
                   session: expiredSession,
                 });
               }
-            }
+            },
+            snapshot ?? undefined
           );
         }
       }
@@ -1137,13 +1231,18 @@ export class RemoteSession {
         this.engine,
         // The registry key is the engine scope (`module Counter { ... }`);
         // an unnamed definition (`app.defineState(...)`) takes it too.
-        { ...def, name: def.name || name } as HypenModuleDefinition<any>,
+        // A restored session seeds the instance with its saved state.
+        this.seededDefinition(
+          { ...def, name: def.name || name } as HypenModuleDefinition<any>,
+          name.toLowerCase()
+        ),
         undefined,
         this._globalContext,
         this._sessionId ?? undefined
       );
       if (this._deviceBroker) instance.attachDevice(this._deviceBroker);
       this._globalContext.registerModule(name.toLowerCase(), instance);
+      instance.onStateChange(() => this.markSnapshotDirty());
       this._nestedInstances.push(instance);
       return true;
     };
@@ -1157,9 +1256,10 @@ export class RemoteSession {
             ? Object.keys(def.initialState as object)
             : [];
         const snapshot =
-          def.initialState !== null && typeof def.initialState === "object"
+          this.peekRestoredState(name.toLowerCase(), def) ??
+          (def.initialState !== null && typeof def.initialState === "object"
             ? structuredClone(def.initialState)
-            : {};
+            : {});
         if (!mountInstance(name, def)) {
           this.engine.registerModule(
             name,
@@ -1205,9 +1305,10 @@ export class RemoteSession {
           ? Object.keys(def.initialState as object)
           : [];
       const snapshot =
-        def.initialState !== null && typeof def.initialState === "object"
+        this.peekRestoredState(name.toLowerCase(), def) ??
+        (def.initialState !== null && typeof def.initialState === "object"
           ? JSON.parse(JSON.stringify(def.initialState))
-          : {};
+          : {});
       if (!mountInstance(name, def)) {
         this.engine.registerModule(name, def.actions ?? [], stateKeys, snapshot);
       }
@@ -1226,6 +1327,210 @@ export class RemoteSession {
         `Registered ${visible.length} nested module${visible.length === 1 ? "" : "s"}: ${visible.join(", ")}`
       );
     }
+  }
+
+  // ------------------------------------------------------------------
+  // session snapshots (hibernation wake / hot-reload resume)
+  // ------------------------------------------------------------------
+
+  /**
+   * Everything needed to rebuild this session elsewhere: every live module's
+   * state (plus restored states of route modules not re-mounted yet) and
+   * the client-visible tree shape.
+   */
+  takeSnapshot(): SessionSnapshot {
+    const modules: Record<string, unknown> = {};
+    for (const [id, state] of this._restoreModules) modules[id] = state;
+    try {
+      Object.assign(modules, this._globalContext.getGlobalState());
+    } catch (err) {
+      log.error(`Session ${this.id}: module state snapshot failed:`, err);
+    }
+    const tree = this.shadow.serialize();
+    return {
+      v: SESSION_SNAPSHOT_VERSION,
+      savedAt: Date.now(),
+      modules,
+      ...(tree ? { tree } : {}),
+      ...(this._sessionId && this.host.sessionManager.requiresResumeToken(this._sessionId)
+        ? { device: true as const }
+        : {}),
+    };
+  }
+
+  /**
+   * Note a change that the durable snapshot must capture. Coalesced: the
+   * save runs once per burst (a macrotask later), or right away when the
+   * host calls `flushSnapshot()` after handling a message.
+   */
+  private markSnapshotDirty(): void {
+    if (!this.host.saveSnapshot || this._destroyed || !this._ready) return;
+    this._snapshotDirty = true;
+    if (this._snapshotTimer) return;
+    this._snapshotTimer = setTimeout(() => {
+      this._snapshotTimer = null;
+      void this.flushSnapshot();
+    }, 0);
+  }
+
+  /**
+   * Commit a pending snapshot to the host's durable store now. Hosts that
+   * can be evicted between messages (a hibernating Durable Object) await
+   * this after every message so the state that message produced is durable
+   * before the runtime may drop the process.
+   */
+  async flushSnapshot(): Promise<void> {
+    // Let the observable-state flush (a microtask) and any patches it
+    // renders land first.
+    await new Promise<void>((resolve) => queueMicrotask(resolve));
+    await this._snapshotSaving;
+    if (!this._snapshotDirty || !this.host.saveSnapshot || !this._sessionId || this._destroyed) {
+      return;
+    }
+    this._snapshotDirty = false;
+    const snapshot = this.takeSnapshot();
+    const sessionId = this._sessionId;
+    const saving = (async () => {
+      try {
+        await this.host.saveSnapshot!(sessionId, snapshot);
+      } catch (err) {
+        log.error(`Session ${this.id}: snapshot save failed:`, err);
+      }
+    })();
+    this._snapshotSaving = saving;
+    await saving;
+    if (this._snapshotSaving === saving) this._snapshotSaving = null;
+  }
+
+  /** The host's stored snapshot for `sessionId`, if valid and within the TTL. */
+  private async loadHostSnapshot(
+    sessionId: string,
+    trustedRecovery: boolean
+  ): Promise<SessionSnapshot | null> {
+    if (!this.host.loadSnapshot) return null;
+    let stored: unknown;
+    try {
+      stored = await this.host.loadSnapshot(sessionId);
+    } catch (err) {
+      log.error(`Session ${this.id}: snapshot load failed:`, err);
+      return null;
+    }
+    if (!isSessionSnapshot(stored)) return null;
+    const ttlMs = this.host.sessionManager.getTtl() * 1000;
+    if (Date.now() - stored.savedAt > ttlMs) return null;
+    // A device session resumes only with its resume token (RFC 001 §5);
+    // the stored snapshot cannot check one, so only the server-owned
+    // recovery channel may restore it.
+    if (stored.device && !trustedRecovery) return null;
+    return stored;
+  }
+
+  /** Make `snapshot` the source of this session's module states and old tree. */
+  private adoptSnapshot(snapshot: SessionSnapshot): void {
+    this._restoreModules = new Map(Object.entries(snapshot.modules ?? {}));
+    if (snapshot.tree && Array.isArray(snapshot.tree.ids)) {
+      this._previousTree = snapshot.tree;
+      this._previousTreeUntil = Date.now() + PREVIOUS_TREE_WINDOW_MS;
+    }
+    log.info(
+      `Session ${this.id}: restoring ${this._restoreModules.size} module state(s) from snapshot`
+    );
+  }
+
+  /**
+   * Consume the restored state for `moduleId`, merged onto the definition's
+   * current initial state under the state-shape rule (`mergeRestoredState`).
+   */
+  private takeRestoredState(
+    moduleId: string,
+    definition: HypenModuleDefinition<any>
+  ): unknown {
+    if (!this._restoreModules.has(moduleId)) return undefined;
+    const saved = this._restoreModules.get(moduleId);
+    this._restoreModules.delete(moduleId);
+    return JSON.parse(JSON.stringify(mergeRestoredState(definition.initialState, saved)));
+  }
+
+  /**
+   * The restored state for `moduleId` WITHOUT consuming it — used to
+   * pre-register a routed module's engine scope so the initial tree already
+   * renders it with its restored state (the ManagedRouter consumes it when
+   * it constructs the instance).
+   */
+  private peekRestoredState(
+    moduleId: string,
+    definition: HypenModuleDefinition<any>
+  ): unknown {
+    if (!this._restoreModules.has(moduleId)) return undefined;
+    return JSON.parse(
+      JSON.stringify(mergeRestoredState(definition.initialState, this._restoreModules.get(moduleId)))
+    );
+  }
+
+  /** `def` seeded with the restored state of `moduleId`, or `def` itself. */
+  private seededDefinition<D extends HypenModuleDefinition<any>>(def: D, moduleId: string): D {
+    const seeded = this.takeRestoredState(moduleId, def);
+    return seeded === undefined ? def : ({ ...def, initialState: seeded } as D);
+  }
+
+  /**
+   * Resolve a `__hypen_dispatch` envelope. Node ids are engine-local: after
+   * a hibernation wake the client still addresses the PREVIOUS engine's
+   * nodes until it has applied the new initial tree. Such an id is mapped,
+   * by its structural position in the snapshotted tree, onto the node at
+   * the same position in the rebuilt tree — unconditionally for the
+   * message that woke the host, and as a fallback for any other message
+   * whose target the new engine rejects as stale (shortly after a wake).
+   */
+  private resolveUIDispatch(
+    name: string,
+    payload: unknown,
+    retarget: boolean
+  ): { name: string; payload?: unknown } {
+    if (retarget) {
+      const mapped = this.retargetEnvelope(payload);
+      if (mapped !== null) {
+        try {
+          return this.engine.resolveUIAction(name, mapped);
+        } catch (err) {
+          log.warn(`Session ${this.id}: re-targeted dispatch rejected, trying as sent`, err);
+        }
+      }
+    }
+    try {
+      return this.engine.resolveUIAction(name, payload);
+    } catch (err) {
+      const mapped = this.retargetEnvelope(payload);
+      if (mapped === null) throw err;
+      log.info(`Session ${this.id}: re-targeting a dispatch addressed to the previous tree`);
+      return this.engine.resolveUIAction(name, mapped);
+    }
+  }
+
+  /** The envelope with `node` / `fromNode` mapped onto the current tree, or null. */
+  private retargetEnvelope(payload: unknown): Record<string, unknown> | null {
+    const tree = this._previousTree;
+    if (!tree) return null;
+    if (Date.now() > this._previousTreeUntil) {
+      this._previousTree = null;
+      return null;
+    }
+    if (payload === null || typeof payload !== "object") return null;
+    const envelope = payload as Record<string, unknown>;
+    const map = (id: unknown): string | null => {
+      if (typeof id !== "string") return null;
+      const path = snapshotPath(tree, id);
+      return path ? this.shadow.resolvePath(path) : null;
+    };
+    const node = map(envelope.node);
+    if (node === null) return null;
+    const out: Record<string, unknown> = { ...envelope, node };
+    if (envelope.fromNode !== undefined) {
+      const from = map(envelope.fromNode);
+      if (from === null) return null;
+      out.fromNode = from;
+    }
+    return out;
   }
 
   private async initializeSession(
@@ -1252,6 +1557,7 @@ export class RemoteSession {
     let isNew = true;
     let isRestored = false;
     let restoredState: unknown = null;
+    let snapshot: SessionSnapshot | null = null;
 
     const sm = this.host.sessionManager;
 
@@ -1277,6 +1583,7 @@ export class RemoteSession {
       if (resumed) {
         session = resumed.session;
         restoredState = resumed.savedState;
+        snapshot = resumed.snapshot ?? null;
         isNew = false;
         isRestored = true;
       } else {
@@ -1292,12 +1599,34 @@ export class RemoteSession {
         } else if (requestedSessionId === this.recoverySessionId) {
           // A hibernated host has lost its in-memory SessionManager, but the
           // transport still carries the server-issued id. Re-adopt that id so
-          // session-keyed module persistence resolves the same storage key.
+          // session-keyed module persistence resolves the same storage key,
+          // and restore the session snapshot the host persisted before the
+          // eviction (every module's state, the route, the tree shape).
+          snapshot = this.host.loadSnapshot
+            ? await this.loadHostSnapshot(requestedSessionId, true)
+            : null;
+          if (this._destroyed) return;
           session = sm.recoverSession(requestedSessionId, props);
           isNew = false;
           isRestored = true;
         } else {
-          session = sm.createSession(props);
+          // Unknown in memory, but a durable host (an evicted Durable
+          // Object) may still hold its snapshot: a client reconnecting
+          // with a fresh socket resumes it like an in-memory suspended
+          // session (UI-only sessions resume by id, RFC 001 §5; a device
+          // session's snapshot is never restored by id alone).
+          const stored = this.host.loadSnapshot
+            ? await this.loadHostSnapshot(requestedSessionId, false)
+            : null;
+          if (this._destroyed) return;
+          if (stored && sm.getActiveSession(requestedSessionId) === null) {
+            snapshot = stored;
+            session = sm.recoverSession(requestedSessionId, props);
+            isNew = false;
+            isRestored = true;
+          } else {
+            session = sm.createSession(props);
+          }
         }
       }
     } else {
@@ -1330,10 +1659,11 @@ export class RemoteSession {
 
       // Create ModuleInstance HERE (not in constructor) so that onCreated fires
       // right before renderSource. See original server.ts comment for why.
+      if (snapshot) this.adoptSnapshot(snapshot);
       if (!this._moduleInstance) {
         this._moduleInstance = new HypenModuleInstance(
           this.engine,
-          this.host.module,
+          this.seededDefinition(this.host.module, this.host.moduleName.toLowerCase()),
           undefined,
           this._globalContext,
           session.id,
@@ -1346,6 +1676,7 @@ export class RemoteSession {
           this.host.moduleName.toLowerCase(),
           this._moduleInstance
         );
+        this._moduleInstance.onStateChange(() => this.markSnapshotDirty());
       }
     } catch (err) {
       // The built-but-unstarted broker owns WASM memory: release it.
@@ -1356,7 +1687,10 @@ export class RemoteSession {
     if (devicePlane && ackedDevice) this.startDevicePlane(devicePlane, ackedDevice);
 
     if (isRestored) {
-      await this.triggerReconnect(session, restoredState);
+      // With a snapshot the primary was already seeded from it (under the
+      // state-shape rule); the raw `savedState` must not be re-applied on
+      // top — it could re-add keys the reloaded code removed.
+      await this.triggerReconnect(session, snapshot ? null : restoredState);
     }
 
     await this._moduleInstance.waitForReady();
@@ -1374,12 +1708,13 @@ export class RemoteSession {
     // single initialTree array would let a stray prelude over-scope onto
     // patches from other batches — the initial tree never animates anyway.
     const initialPatches: Patch[] = [];
+    this.shadow.reset();
     this.engine.setRenderCallback((patches) => {
-      initialPatches.push(
-        ...this.templateExpander
-          .expand(patches)
-          .filter((p) => p.type !== "batchAnimation")
-      );
+      const expanded = this.templateExpander
+        .expand(patches)
+        .filter((p) => p.type !== "batchAnimation");
+      this.shadow.apply(expanded);
+      initialPatches.push(...expanded);
     });
 
     try {
@@ -1408,6 +1743,9 @@ export class RemoteSession {
     this.host.onSessionReady(this, this.toRemoteClient());
     this._ready = true;
     this._resolveReady();
+    // First durable snapshot: a session that is never touched again must
+    // still be restorable (its session id now lives in the client).
+    this.markSnapshotDirty();
 
     // Activate the primary module so single-screen apps have a live
     // activation authority for device work (RFC 001 §6 Phase 2). Under
@@ -1471,7 +1809,11 @@ export class RemoteSession {
       // each owns its own instance id / activations, swept by its lifecycle.
       onModuleCreated: (instance) => {
         if (this._deviceBroker) instance.attachDevice(this._deviceBroker);
+        instance.onStateChange(() => this.markSnapshotDirty());
       },
+      // A restored session seeds each route module, as it is first
+      // constructed, with the state it had in the previous incarnation.
+      initialStateFor: (moduleId, definition) => this.takeRestoredState(moduleId, definition),
     });
     const primary = this._moduleInstance;
 
@@ -1673,6 +2015,8 @@ export class RemoteSession {
       // Lower template patches ONCE, before the message object is built —
       // the same patchMessage fans out to allow-multiple peers below.
       patches = this.templateExpander.expand(patches);
+      this.shadow.apply(patches);
+      this.markSnapshotDirty();
       this._revision++;
       log.info(
         `Streaming ${patches.length} patches to ${this.id} (rev ${this._revision})`

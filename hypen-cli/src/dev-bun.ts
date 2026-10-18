@@ -203,8 +203,10 @@ export default app;
  *
  * File changes hot-reload by briefly disconnecting every client: each one
  * auto-reconnects (~0.5s), resumes its session against the freshly loaded
- * templates and module code, and gets its saved primary-module state back.
- * Nested (route) module state resets on reload.
+ * templates and module code, and gets every module's state back — the
+ * primary, nested and route modules (`RemoteSession` snapshot). An edited
+ * module `.ts` keeps the saved values of keys that still exist with the
+ * same kind (`mergeRestoredState` in @hypen-space/core/remote).
  *
  * @throws {DevServerError} when the entry component can't be found or the
  * port is taken.
