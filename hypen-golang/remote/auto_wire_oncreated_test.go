@@ -125,10 +125,9 @@ func TestAutoWire_OnCreatedStateReachesClient(t *testing.T) {
 	// autoWireManagedRouter calls at the end of initializeSession.
 	// By the time we asked for initialTree above, the nested OnCreated
 	// has already run — but its state change might still be on the
-	// wire. Poll a short window for either a patch message OR a
-	// stateUpdate reflecting the sentinel.
+	// wire. Poll a short window for a patch message carrying it.
 	deadline := time.Now().Add(3 * time.Second)
-	var patchFound, stateFound bool
+	var patchFound bool
 	for time.Now().Before(deadline) {
 		select {
 		case msg, ok := <-transport.Out():
@@ -149,12 +148,13 @@ func TestAutoWire_OnCreatedStateReachesClient(t *testing.T) {
 				// whether HomePage's state made it into the engine at
 				// all, which we check via sess internals below.
 				_ = m
-				stateFound = true
 			}
 		case <-time.After(50 * time.Millisecond):
 			// Keep polling until deadline.
 		}
-		if patchFound || stateFound {
+		// Keep polling past stateUpdates (e.g. the router's location
+		// mirror): only a patch proves the nested state reached the engine.
+		if patchFound {
 			break
 		}
 	}
