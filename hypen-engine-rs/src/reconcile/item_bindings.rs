@@ -50,7 +50,7 @@ pub(super) fn apply_replacements(s: &str, mut replacements: Vec<Replacement>) ->
     }
 
     // Sort by start position ascending
-    replacements.sort_by(|a, b| a.start.cmp(&b.start));
+    replacements.sort_by_key(|r| r.start);
 
     // Filter invalid replacements and calculate result size
     let valid_replacements: Vec<_> = replacements

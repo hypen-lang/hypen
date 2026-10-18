@@ -35,9 +35,9 @@ describe("Component Discovery", () => {
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].name).toBe("Counter");
-      expect(components[0].hasModule).toBe(true);
-      expect(components[0].template).toBe("Text('Counter')");
+      expect(components[0]!.name).toBe("Counter");
+      expect(components[0]!.hasModule).toBe(true);
+      expect(components[0]!.template).toBe("Text('Counter')");
     });
 
     test("warns when a component name shadows a built-in element", async () => {
@@ -67,8 +67,8 @@ describe("Component Discovery", () => {
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].name).toBe("Button");
-      expect(components[0].hasModule).toBe(true);
+      expect(components[0]!.name).toBe("Button");
+      expect(components[0]!.hasModule).toBe(true);
     });
 
     test("discovers index-based components", async () => {
@@ -83,8 +83,8 @@ describe("Component Discovery", () => {
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].name).toBe("Card");
-      expect(components[0].hasModule).toBe(true);
+      expect(components[0]!.name).toBe("Card");
+      expect(components[0]!.hasModule).toBe(true);
     });
 
     test("discovers stateless components (no .ts file)", async () => {
@@ -98,9 +98,9 @@ describe("Component Discovery", () => {
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].name).toBe("Footer");
-      expect(components[0].hasModule).toBe(false);
-      expect(components[0].modulePath).toBeNull();
+      expect(components[0]!.name).toBe("Footer");
+      expect(components[0]!.hasModule).toBe(false);
+      expect(components[0]!.modulePath).toBeNull();
     });
 
     test("discovers multiple components", async () => {
@@ -139,8 +139,8 @@ Text('Counter')`
       });
 
       // Imports are now preserved — engine processes them via parse_document
-      expect(components[0].template).toContain("import");
-      expect(components[0].template).toContain("Text('Counter')");
+      expect(components[0]!.template).toContain("import");
+      expect(components[0]!.template).toContain("Text('Counter')");
     });
 
     test("returns empty array for empty directory", async () => {
@@ -284,11 +284,11 @@ Text('Counter')`
       expect(component).toHaveProperty("template");
       expect(component).toHaveProperty("hasModule");
 
-      expect(component.name).toBe("Test");
-      expect(component.hypenPath).toContain("component.hypen");
-      expect(component.modulePath).toContain("component.ts");
-      expect(component.template).toBe("Text('Test')");
-      expect(component.hasModule).toBe(true);
+      expect(component!.name).toBe("Test");
+      expect(component!.hypenPath).toContain("component.hypen");
+      expect(component!.modulePath).toContain("component.ts");
+      expect(component!.template).toBe("Text('Test')");
+      expect(component!.hasModule).toBe(true);
     });
 
     test("has correct structure without module", async () => {
@@ -301,9 +301,9 @@ Text('Counter')`
       });
 
       const component = components[0];
-      expect(component.name).toBe("Stateless");
-      expect(component.modulePath).toBeNull();
-      expect(component.hasModule).toBe(false);
+      expect(component!.name).toBe("Stateless");
+      expect(component!.modulePath).toBeNull();
+      expect(component!.hasModule).toBe(false);
     });
   });
 
@@ -320,7 +320,7 @@ Text('Counter')`
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].name).toBe("Login");
+      expect(components[0]!.name).toBe("Login");
     });
 
     test("handles nested directory structures with recursive disabled", async () => {
@@ -348,7 +348,7 @@ Text('Counter')`
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].name).toBe("My-Component_v2");
+      expect(components[0]!.name).toBe("My-Component_v2");
     });
 
     test("handles empty .hypen files", async () => {
@@ -361,7 +361,7 @@ Text('Counter')`
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].template).toBe("");
+      expect(components[0]!.template).toBe("");
     });
 
     test("handles large templates", async () => {
@@ -375,7 +375,7 @@ Text('Counter')`
       });
 
       expect(components).toHaveLength(1);
-      expect(components[0].template.length).toBeGreaterThan(100000);
+      expect(components[0]!.template.length).toBeGreaterThan(100000);
     });
 
     test("handles templates with complex imports", async () => {
@@ -397,8 +397,8 @@ Column {
       });
 
       // Imports are now preserved — engine processes them via parse_document
-      expect(components[0].template).toContain("import");
-      expect(components[0].template).toContain("Column");
+      expect(components[0]!.template).toContain("import");
+      expect(components[0]!.template).toContain("Column");
     });
   });
 

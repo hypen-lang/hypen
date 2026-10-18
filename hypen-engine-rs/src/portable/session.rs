@@ -13,21 +13,16 @@ use serde::{Deserialize, Serialize};
 ///
 /// Matches the `ConcurrentPolicy` / `ConcurrentKickOld` / `.kickOld`
 /// enums in the Go, Swift, Kotlin, Rust SDKs and TypeScript core.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum SessionPolicy {
     /// Newest connection wins; kick all older ones. (Default.)
+    #[default]
     KickOld,
     /// Reject the new connection if any existing one is still attached.
     RejectNew,
     /// Allow unlimited concurrent connections for a single session.
     AllowMultiple,
-}
-
-impl Default for SessionPolicy {
-    fn default() -> Self {
-        SessionPolicy::KickOld
-    }
 }
 
 /// Input event for [`session_step`].

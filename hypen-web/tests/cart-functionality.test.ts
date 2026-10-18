@@ -47,7 +47,7 @@ describe("Cart Functionality", () => {
     updateCartTotals(state);
 
     expect(state.cart.length).toBe(1);
-    expect(state.cart[0].id).toBe(143);
+    expect(state.cart[0]!.id).toBe(143);
     expect(state.cartCount).toBe(1);
     expect(state.cartTotal).toBe(79);
     expect(state.cartTotalFormatted).toBe("$79.00");
@@ -69,7 +69,7 @@ describe("Cart Functionality", () => {
     updateCartTotals(state);
 
     expect(state.cart.length).toBe(1);
-    expect(state.cart[0].quantity).toBe(2);
+    expect(state.cart[0]!.quantity).toBe(2);
     expect(state.cartCount).toBe(2);
     expect(state.cartTotal).toBe(158);
     expect(state.cartTotalFormatted).toBe("$158.00");
@@ -92,7 +92,7 @@ describe("Cart Functionality", () => {
     updateCartTotals(state);
 
     expect(state.cart.length).toBe(1);
-    expect(state.cart[0].id).toBe(141);
+    expect(state.cart[0]!.id).toBe(141);
     expect(state.cartCount).toBe(1);
     expect(state.cartTotal).toBe(69);
     expect(state.cartTotalFormatted).toBe("$69.00");
@@ -153,8 +153,8 @@ describe("Cart Functionality", () => {
     }
     updateCartTotals(state);
 
-    expect(state.cart[0].quantity).toBe(5);
-    expect(state.cart[0].itemTotal).toBe(395);
+    expect(state.cart[0]!.quantity).toBe(5);
+    expect(state.cart[0]!.itemTotal).toBe(395);
     expect(state.cartCount).toBe(5);
     expect(state.cartTotal).toBe(395);
     expect(state.cartTotalFormatted).toBe("$395.00");
@@ -296,7 +296,7 @@ describe("Cart State Reactivity", () => {
     );
 
     // Update quantity
-    state.cart[0].quantity = 5;
+    state.cart[0]!.quantity = 5;
 
     // Wait for microtask
     await new Promise((resolve) => setTimeout(resolve, 0));

@@ -13,7 +13,7 @@ describe("TypedEventEmitter", () => {
     };
 
     const emitter = new TypedEventEmitter<TestEvents>();
-    let received: { userId: string; username: string } | null = null;
+    let received = null as { userId: string; username: string } | null;
 
     emitter.on("userLogin", (payload) => {
       received = payload;
@@ -97,7 +97,7 @@ describe("TypedEventEmitter", () => {
 
   test("works with HypenFrameworkEvents", () => {
     const emitter = new TypedEventEmitter<HypenFrameworkEvents>();
-    let moduleId: string | null = null;
+    let moduleId = null as string | null;
 
     emitter.on("module:created", (payload) => {
       moduleId = payload.moduleId;

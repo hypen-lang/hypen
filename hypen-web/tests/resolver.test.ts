@@ -48,8 +48,8 @@ describe("ComponentResolver", () => {
       const imports = ComponentResolver.parseImports(text);
 
       expect(imports).toHaveLength(2);
-      expect(imports[0].clause).toEqual({ type: "default", name: "HomePage" });
-      expect(imports[1].clause).toEqual({
+      expect(imports[0]!.clause).toEqual({ type: "default", name: "HomePage" });
+      expect(imports[1]!.clause).toEqual({
         type: "named",
         names: ["Button", "Card"],
       });
@@ -59,7 +59,7 @@ describe("ComponentResolver", () => {
       const text = `import {  Button  ,  Card  ,  Badge  } from "./ui"`;
       const imports = ComponentResolver.parseImports(text);
 
-      expect(imports[0].clause).toEqual({
+      expect(imports[0]!.clause).toEqual({
         type: "named",
         names: ["Button", "Card", "Badge"],
       });
@@ -69,7 +69,7 @@ describe("ComponentResolver", () => {
       const text = `import {} from "./ui"`;
       const imports = ComponentResolver.parseImports(text);
 
-      expect(imports[0].clause).toEqual({ type: "named", names: [] });
+      expect(imports[0]!.clause).toEqual({ type: "named", names: [] });
     });
 
     test("returns empty array when no imports found", () => {
@@ -83,7 +83,7 @@ describe("ComponentResolver", () => {
       const text = `import Button from './components/Button'`;
       const imports = ComponentResolver.parseImports(text);
 
-      expect(imports[0].source).toEqual({
+      expect(imports[0]!.source).toEqual({
         type: "local",
         path: "./components/Button",
       });
@@ -96,11 +96,11 @@ describe("ComponentResolver", () => {
       const imports1 = ComponentResolver.parseImports(text1);
       const imports2 = ComponentResolver.parseImports(text2);
 
-      expect(imports1[0].source).toEqual({
+      expect(imports1[0]!.source).toEqual({
         type: "url",
         url: "http://example.com/a",
       });
-      expect(imports2[0].source).toEqual({
+      expect(imports2[0]!.source).toEqual({
         type: "url",
         url: "https://example.com/b",
       });

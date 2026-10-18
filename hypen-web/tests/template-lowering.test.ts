@@ -146,7 +146,7 @@ describe("DOMRenderer canvas-subtree template routing", () => {
     const container = document.createElement("div");
     const renderer = new DOMRenderer(
       container,
-      new StubEngine() as unknown as Engine,
+      new StubEngine() as unknown as ConstructorParameters<typeof DOMRenderer>[1],
     );
     // Inject a recording stand-in for a CanvasRenderer rooted at "cv" —
     // constructing the real one needs a live 2D context the fake DOM

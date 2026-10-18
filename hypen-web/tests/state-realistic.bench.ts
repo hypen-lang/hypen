@@ -276,7 +276,7 @@ describe("Realistic State Size Analysis", () => {
     for (let i = 0; i < iterations; i++) {
       state.counter = i;
       state.ui.isLoading = i % 2 === 0;
-      engine.updateState(state);
+      engine.updateState(null, state);
     }
 
     const elapsed = performance.now() - start;
@@ -309,7 +309,7 @@ describe("Realistic State Size Analysis", () => {
     for (let i = 0; i < iterations; i++) {
       minimalState.counter = i;
       minimalState.isLoading = i % 2 === 0;
-      engine.updateState(minimalState);
+      engine.updateState(null, minimalState);
     }
 
     const elapsed = performance.now() - start;
