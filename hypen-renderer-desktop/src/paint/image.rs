@@ -702,8 +702,29 @@ static IMAGE_LOAD_GEN: AtomicU64 = AtomicU64::new(0);
 /// Read the current image-load generation. The painter compares this
 /// against its last-seen value to decide whether to drop subtree
 /// caches that may have been encoded against an unloaded source.
+#[cfg(not(test))]
 pub fn image_load_generation() -> u64 {
     IMAGE_LOAD_GEN.load(Ordering::Relaxed)
+}
+
+// Under `cargo test` the generation is per test thread. The counter is a
+// process global, and `compute_inner_state` takes its bulk-rebuild branch
+// whenever it moves — so with the default parallel test runner a bump
+// from ANY other test (an explicit `bump_image_load_generation_for_test`
+// or a worker landing an image some other test queued) silently forced an
+// extra rebuild in whichever layout test happened to be mid-fixture,
+// flaking tests that assert on exactly when a rebuild happens (e.g.
+// `wrapped_height_memo_does_not_survive_a_bulk_rebuild`). Tests seed
+// images synchronously (`test_seed_decoded`) and bump explicitly, so
+// none rely on observing a worker thread's bump.
+#[cfg(test)]
+thread_local! {
+    static TEST_IMAGE_LOAD_GEN: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+#[cfg(test)]
+pub fn image_load_generation() -> u64 {
+    TEST_IMAGE_LOAD_GEN.with(|g| g.get())
 }
 
 /// Bump the generation without going near the worker thread.
@@ -712,10 +733,11 @@ pub fn image_load_generation() -> u64 {
 /// branch outside of an explicit `mark_needs_rebuild`, so tests that
 /// need to exercise that branch would otherwise have to queue a real
 /// fetch and poll for the worker to land — slow and flaky. This is the
-/// same store the worker performs.
+/// same signal the worker raises, scoped to the calling test thread
+/// (see the `cfg(test)` `image_load_generation`).
 #[cfg(test)]
 pub(crate) fn bump_image_load_generation_for_test() {
-    IMAGE_LOAD_GEN.fetch_add(1, Ordering::Relaxed);
+    TEST_IMAGE_LOAD_GEN.with(|g| g.set(g.get() + 1));
 }
 
 fn run_image_worker(rx: mpsc::Receiver<String>) {

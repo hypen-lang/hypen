@@ -37,6 +37,39 @@ extra step:
 cargo run --release -p hypen-browser
 ```
 
+### Linux build dependencies
+
+The Browser builds the desktop renderer with its device capabilities on
+(camera, microphone, Bluetooth), and those link system libraries. Without them
+the build stops in a `-sys` crate: `libdbus-sys` (D-Bus not found by
+`pkg-config`), `v4l2-sys-mit` (bindgen: "Unable to find libclang") or
+`alsa-sys`. On Debian / Ubuntu, install these first:
+
+```bash
+sudo apt-get install -y build-essential pkg-config \
+  libdbus-1-dev libclang-dev libasound2-dev
+```
+
+| Package | Needed by |
+| --- | --- |
+| `build-essential` (gcc, g++) | `openh264-sys2`, the bundled OpenH264 encoder used by camera video capture |
+| `pkg-config` | locating the system libraries below |
+| `libdbus-1-dev` | `libdbus-sys`, used by Bluetooth (BlueZ over D-Bus) |
+| `libclang-dev` | `v4l2-sys-mit`, which runs bindgen over the kernel's V4L2 camera headers |
+| `libasound2-dev` | `alsa-sys`, used by microphone capture (ALSA) |
+
+`nasm` is optional. When it is on `PATH`, OpenH264 uses its assembly kernels.
+
+Windowing and GPU libraries are loaded at runtime, so they need no `-dev`
+packages to build. To run the Browser you need an X11 or Wayland session and a
+Vulkan or GL driver. Most desktops already have these. A minimal system needs
+`libx11-6`, `libxkbcommon-x11-0`, `libwayland-client0`, `libvulkan1` and
+`mesa-vulkan-drivers` (or your GPU vendor's driver).
+
+On Fedora, the equivalent packages are `gcc-c++ pkgconf-pkg-config
+dbus-devel clang-devel alsa-lib-devel`. On Arch, they are `base-devel dbus
+clang alsa-lib`.
+
 For a development build with an always-on native frame-time / equivalent FPS / process CPU / resident
 RAM overlay, enable `dev`. The sampler and HUD are completely absent from
 normal builds:

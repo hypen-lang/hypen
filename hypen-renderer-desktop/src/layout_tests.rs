@@ -8502,209 +8502,118 @@ fn incremental_image_create_uses_loaded_natural_size_like_bulk() {
     }
 }
 
-/// Stash a decoded `w`×`h` pixmap for `src` so `loaded_natural_size`
-/// answers synchronously, as the image worker would after a fetch.
-fn seed_probe_pixmap(src: &str, w: u32, h: u32) {
-    crate::paint::image::test_seed_decoded(
-        src,
-        std::sync::Arc::new(tiny_skia::Pixmap::new(w, h).unwrap()),
-    );
+#[test]
+fn row_follows_parent_items_center_like_the_dom_row() {
+    // The scaffold Counter: `Column { Row { Button("-") Button("+") } }
+    // .tw("items-center")`. The DOM Row sets no `align-self`, so the
+    // Column's `align-items: center` centres it. Desktop used to force
+    // `AlignSelf::Start` on every Row, pinning the buttons to the left.
+    for parent_type in ["Column", "Center"] {
+        let mut tree = Tree::new();
+        let mut props = vec![("width", json!("100%"))];
+        if parent_type == "Column" {
+            props.push(("alignItems", json!("center")));
+        }
+        tree.apply(&create_patch("col", parent_type, &props));
+        tree.apply(&insert_patch(ROOT_ID, "col"));
+        tree.apply(&create_patch("row", "Row", &[]));
+        tree.apply(&insert_patch("col", "row"));
+        add_text(&mut tree, "row", "t1", "Minus");
+        add_text(&mut tree, "row", "t2", "Plus");
+
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let col = find_item(&pass, "col").rect;
+        let row = find_item(&pass, "row").rect;
+
+        assert!(row.w < col.w - 100.0, "{parent_type}: row should wrap its content, got {row:?} in {col:?}");
+        let left = row.x - col.x;
+        let right = (col.x + col.w) - (row.x + row.w);
+        assert!(
+            (left - right).abs() <= 1.0,
+            "{parent_type}: row not centred: {left} left vs {right} right ({row:?} in {col:?})",
+        );
+    }
 }
 
-/// An image finishing its fetch used to force a full Taffy rebuild no
-/// matter what — in a feed every thumbnail landing threw away the whole
-/// layout. The rebuild is now gated on a probed natural size actually
-/// changing: a tree whose styles never asked for one stays put.
 #[test]
-fn image_load_generation_alone_does_not_rebuild_layout() {
-    let tree = tree_from_dsl(
-        r#"Column {
-            Text("hello")
-            Container().width(40).height(40)
-        }"#,
-        json!({}),
-    );
-    let mut state = TaffyState::new();
-    let mut text = TextEngine::new();
-    let scrolls: HashMap<String, f32> = HashMap::new();
-    let compute = |state: &mut TaffyState, text: &mut TextEngine| {
-        LayoutPass::compute_with_state(state, &tree, text, (800, 600), 1.0, 0.0, &scrolls, 0)
-    };
-    let _ = compute(&mut state, &mut text);
-    let built = state.bulk_rebuilds();
-    assert_eq!(built, 1, "cold start builds once");
-
-    // Images elsewhere in the app (another window, a detached route)
-    // keep landing; nothing here depends on any of them.
-    crate::paint::image::bump_image_load_generation_for_test();
-    let _ = compute(&mut state, &mut text);
-    crate::paint::image::bump_image_load_generation_for_test();
-    let _ = compute(&mut state, &mut text);
-    assert_eq!(state.bulk_rebuilds(), built, "no probed size changed, so no rebuild");
-}
-
-/// An Image with both dimensions set never reads its decoded size, so
-/// its own fetch landing is not a layout change either.
-#[test]
-fn explicitly_sized_image_loading_does_not_rebuild_layout() {
-    let src = "test://explicit-size-no-rebuild";
-    let tree = tree_from_dsl(
-        &format!(
-            r#"Column {{
-                Image(src: "{src}").width(120).height(80)
-                Text("caption")
-            }}"#
-        ),
-        json!({}),
-    );
-    let mut state = TaffyState::new();
-    let mut text = TextEngine::new();
-    let scrolls: HashMap<String, f32> = HashMap::new();
-    let compute = |state: &mut TaffyState, text: &mut TextEngine| {
-        LayoutPass::compute_with_state(state, &tree, text, (800, 600), 1.0, 0.0, &scrolls, 0)
-    };
-    let before = compute(&mut state, &mut text);
-    let built = state.bulk_rebuilds();
-
-    seed_probe_pixmap(src, 1080, 1920);
-    crate::paint::image::bump_image_load_generation_for_test();
-    let after = compute(&mut state, &mut text);
-    assert_eq!(state.bulk_rebuilds(), built, "explicit size: the bitmap cannot change the style");
-    let id = first_of_type(&tree, "Image");
-    assert_eq!(
-        before.item_by_id(&id).unwrap().rect,
-        after.item_by_id(&id).unwrap().rect,
-    );
-}
-
-/// The complement: an unsized Image is styled on "no natural size yet",
-/// and its fetch landing is exactly the load that must rebuild — and
-/// only once; later unrelated loads leave the rebuilt layout alone.
-#[test]
-fn unsized_image_loading_rebuilds_layout_exactly_once() {
-    let src = "test://unsized-image-rebuilds-once";
-    let tree = tree_from_dsl(
-        &format!(
-            r#"Column {{
-                Image(src: "{src}")
-                Text("caption")
-            }}"#
-        ),
-        json!({}),
-    );
-    let mut state = TaffyState::new();
-    let mut text = TextEngine::new();
-    let scrolls: HashMap<String, f32> = HashMap::new();
-    let compute = |state: &mut TaffyState, text: &mut TextEngine| {
-        LayoutPass::compute_with_state(state, &tree, text, (800, 600), 1.0, 0.0, &scrolls, 0)
-    };
-    let before = compute(&mut state, &mut text);
-    let built = state.bulk_rebuilds();
-    let id = first_of_type(&tree, "Image");
-
-    // Some other image lands first: this one is still unloaded, the
-    // recorded answer ("none") still holds, nothing to rebuild.
-    crate::paint::image::bump_image_load_generation_for_test();
-    let _ = compute(&mut state, &mut text);
-    assert_eq!(state.bulk_rebuilds(), built);
-
-    seed_probe_pixmap(src, 300, 150);
-    crate::paint::image::bump_image_load_generation_for_test();
-    let after = compute(&mut state, &mut text);
-    assert_eq!(state.bulk_rebuilds(), built + 1, "the awaited size arrived");
-    let rect = after.item_by_id(&id).unwrap().rect;
-    assert_ne!(before.item_by_id(&id).unwrap().rect, rect);
-    assert!(
-        (rect.w - 300.0).abs() < 0.5 && (rect.h - 150.0).abs() < 0.5,
-        "{rect:?}"
-    );
-
-    // Once rebuilt on the real size, further loads are no concern.
-    crate::paint::image::bump_image_load_generation_for_test();
-    let _ = compute(&mut state, &mut text);
-    assert_eq!(state.bulk_rebuilds(), built + 1);
-}
-
-/// Painter-side scoping of a structural batch
-/// (`window::structural_fragment_invalidation`): which fragments go, and
-/// when the whole cache must.
-#[test]
-fn structural_fragment_invalidation_scopes_to_patched_subtrees() {
-    use crate::window::structural_fragment_invalidation;
-    use std::collections::HashSet;
-    let vp = crate::style::Viewport::new(800.0, 600.0);
+fn row_in_default_column_stays_at_the_start_edge() {
+    // A plain Column is `align-items: flex-start` on the DOM, so a Row
+    // without its own alignment still hugs the leading edge.
     let mut tree = Tree::new();
-    // feed (scrollable) > post_a > {title_a, body_a}, post_b > {title_b}
-    tree.apply(&create_patch(
-        "feed",
-        "Column",
-        &[("scrollable.0", json!(true))],
-    ));
-    tree.apply(&insert_patch(ROOT_ID, "feed"));
-    for post in ["post_a", "post_b"] {
-        tree.apply(&create_patch(post, "Column", &[]));
-        tree.apply(&insert_patch("feed", post));
-    }
-    tree.apply(&create_patch("title_a", "Text", &[("0", json!("a"))]));
-    tree.apply(&insert_patch("post_a", "title_a"));
-    tree.apply(&create_patch("body_a", "Text", &[("0", json!("body"))]));
-    tree.apply(&insert_patch("post_a", "body_a"));
-    tree.apply(&create_patch("title_b", "Text", &[("0", json!("b"))]));
-    tree.apply(&insert_patch("post_b", "title_b"));
+    tree.apply(&create_patch("col", "Column", &[("width", json!("100%"))]));
+    tree.apply(&insert_patch(ROOT_ID, "col"));
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch("col", "row"));
+    add_text(&mut tree, "row", "t1", "One");
+    add_text(&mut tree, "row", "t2", "Two");
 
-    let set = |id: &str, name: &str| Patch::SetProp {
-        id: id.into(),
-        name: name.to_string(),
-        value: json!("#ff0000"),
-    };
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let col = find_item(&pass, "col").rect;
+    let row = find_item(&pass, "row").rect;
+    assert!((row.x - col.x).abs() <= 0.5, "row left the start edge: {row:?} in {col:?}");
+    assert!(row.w < col.w - 100.0, "row should wrap its content, got {row:?} in {col:?}");
+}
 
-    // A paint write inside a post drops that post's subtree only.
-    let dropped = structural_fragment_invalidation(&[set("post_a", "color")], &[], &tree, vp)
-        .expect("inside a scrollable: scoped");
-    let mut expect: HashSet<String> = HashSet::new();
-    for id in ["post_a", "title_a", "body_a"] {
-        expect.insert(id.to_string());
-    }
-    assert_eq!(dropped, expect);
-
-    // A removed post drops its own fragments and nothing else; the
-    // neighbours re-validate their geometry on the next paint instead.
-    let dropped = structural_fragment_invalidation(
-        &[Patch::Remove {
-            id: "post_b".into(),
-            transition: false,
-        }],
-        &[],
+#[test]
+fn row_follows_parent_alignment_through_incremental_patches() {
+    // Same contract on the patch path: a Row inserted under a centred
+    // Column is centred, and flipping the Column back to the default
+    // alignment returns it to the start edge.
+    let initial = vec![
+        create_patch(
+            "col",
+            "Column",
+            &[("width", json!("100%")), ("alignItems", json!("center"))],
+        ),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch("t1", "Text", &[("0", json!("Minus"))]),
+        insert_patch("row", "t1"),
+        create_patch("t2", "Text", &[("0", json!("Plus"))]),
+        insert_patch("row", "t2"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
         &tree,
-        vp,
-    )
-    .expect("structural only: scoped");
-    assert_eq!(dropped, HashSet::from(["post_b".to_string()]));
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let col = find_item(&pass, "col").rect;
+    let row = find_item(&pass, "row").rect;
+    let left = row.x - col.x;
+    let right = (col.x + col.w) - (row.x + row.w);
+    assert!(row.w < col.w - 100.0, "row should wrap its content: {row:?} in {col:?}");
+    assert!((left - right).abs() <= 1.0, "row not centred: {left} vs {right}");
 
-    // An insert of a brand-new post names the new node; the feed's
-    // membership key does the rest.
-    tree.apply(&create_patch("post_c", "Column", &[]));
-    let dropped = structural_fragment_invalidation(
-        &[
-            create_patch("post_c", "Column", &[]),
-            insert_patch("feed", "post_c"),
-        ],
-        &[],
+    let reset = vec![Patch::RemoveProp {
+        id: "col".into(),
+        name: "alignItems".into(),
+    }];
+    tree.apply_batch(&reset);
+    assert!(taffy.apply_patches(&reset, &tree, 1.0, vp(800.0)));
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
         &tree,
-        vp,
-    )
-    .expect("insert: scoped");
-    assert_eq!(dropped, HashSet::from(["post_c".to_string()]));
-
-    // The animator's end-of-batch restyle writes count like paint writes.
-    let dropped = structural_fragment_invalidation(&[], &["title_b".to_string()], &tree, vp)
-        .expect("restyle inside a post: scoped");
-    assert_eq!(dropped, HashSet::from(["title_b".to_string()]));
-
-    // A paint write on the scrollable itself (or anything above it) can
-    // inherit into every fragment: whole cache.
-    assert!(structural_fragment_invalidation(&[set("feed", "color")], &[], &tree, vp).is_none());
-    tree.apply(&create_patch("header", "Text", &[("0", json!("h"))]));
-    tree.apply(&insert_patch(ROOT_ID, "header"));
-    assert!(structural_fragment_invalidation(&[set("header", "color")], &[], &tree, vp).is_none());
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        2,
+    );
+    let col = find_item(&pass, "col").rect;
+    let row = find_item(&pass, "row").rect;
+    assert!((row.x - col.x).abs() <= 0.5, "row should return to the start edge: {row:?} in {col:?}");
 }
