@@ -23,7 +23,7 @@
  * the browser-target bundler.
  */
 
-import { RemoteEngine } from "@hypen-space/core/remote/client";
+import { RemoteEngine, syncUrlWithRouter } from "@hypen-space/core/remote/client";
 import { DOMRenderer } from "@hypen-space/web/dom";
 import { CanvasRenderer } from "@hypen-space/web/canvas";
 import { WebDeviceHost } from "@hypen-space/device-web";
@@ -57,7 +57,9 @@ const engine = new RemoteEngine(url, {
   reconnectInterval: 3000,
   maxReconnectAttempts: 10,
   session: { props: { platform: renderer === "canvas" ? "web_canvas" : "web" } },
-  navigation: { backAction: "navigateBack", viewStateKey: "location" },
+  // No `navigation` option: `syncUrlWithRouter` below replaces it (that
+  // pushed history entries with an empty URL, so the address bar never
+  // changed and reloads/deep links landed on "/").
 });
 
 const view =
@@ -84,5 +86,12 @@ engine.onInitialTree(() => {
 engine.onPatches((patches) => {
   view.applyPatches(patches);
 });
+
+// URL <-> route sync: navigating pushes the route's path, back/forward and
+// deep links (the worker serves this shell for any page path) move the
+// server's router with `router.replace`. The shell's `data-hypen-base` is
+// the path it is mounted at ("/canvas"), so app location "/x" shows as
+// "/canvas/x".
+syncUrlWithRouter(engine, { container: mount, base: document.body.dataset.hypenBase ?? "" });
 
 engine.connect();

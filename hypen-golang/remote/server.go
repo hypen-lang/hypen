@@ -1045,7 +1045,13 @@ func (s *RemoteServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	s.mu.RLock()
 	webClient := !s.config.DisableWebClient
 	s.mu.RUnlock()
-	if webClient && serveWebClient(w, r) {
+	if webClient {
+		if serveWebClient(w, r) {
+			return
+		}
+		// Assets and non-page requests that matched nothing: a real 404
+		// (page navigations already got the shell above).
+		http.Error(w, "Hypen Remote Server", http.StatusNotFound)
 		return
 	}
 
@@ -1054,6 +1060,16 @@ func (s *RemoteServer) handleHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *RemoteServer) handleHealth(w http.ResponseWriter, r *http.Request) {
+	// A browser navigating to `/health` gets the app, so an app route of
+	// that name still deep-links; probes (curl, load balancers) never ask
+	// for HTML and keep getting "OK".
+	s.mu.RLock()
+	webClient := !s.config.DisableWebClient
+	s.mu.RUnlock()
+	if webClient && isAppNavigation(r) {
+		serveWebClientShell(w, r)
+		return
+	}
 	w.WriteHeader(http.StatusOK)
 	w.Write([]byte("OK"))
 }
