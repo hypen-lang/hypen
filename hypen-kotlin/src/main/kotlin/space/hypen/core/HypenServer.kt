@@ -264,7 +264,13 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
     init {
         val builder = HypenServerBuilder().apply(block)
         modules.putAll(builder.modules)
-        routeDefinitions = builder.routes.toList()
+        // No route table: serve the first registered module at "/", so a
+        // single-module server (`module("Counter", counter)` and nothing
+        // else, as in the docs quick start) renders it instead of sending an
+        // empty initial tree with no module mounted.
+        routeDefinitions = builder.routes.toList().ifEmpty {
+            builder.modules.keys.firstOrNull()?.let { listOf(RouteDefinition(path = "/", component = it)) }.orEmpty()
+        }
         sessionManager = SessionManager(builder.sessionConfig)
         onConnectionCallback = builder.onConnectionCallback
         onDisconnectionCallback = builder.onDisconnectionCallback

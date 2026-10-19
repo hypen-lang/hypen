@@ -55,3 +55,17 @@ dependencies {
     testImplementation("io.ktor:ktor-server-test-host")
     testImplementation("org.jetbrains.kotlin:kotlin-test")
 }
+
+// The SDK loads `libhypen_engine` through JNA (UniFFI). Like the root build,
+// point tests and `run` at the workspace `target/release` (built with
+// `cargo build --release --features uniffi` in hypen-engine-rs) so neither
+// needs LD_LIBRARY_PATH; without this `ApplicationTest` fails with
+// `NoClassDefFoundError` from the generated bindings.
+val hypenNativeDir = file("${rootDir}/../target/release").absolutePath
+tasks.withType<Test> {
+    systemProperty("jna.library.path", hypenNativeDir)
+    environment("LD_LIBRARY_PATH", hypenNativeDir)
+}
+tasks.withType<JavaExec> {
+    systemProperty("jna.library.path", hypenNativeDir)
+}
