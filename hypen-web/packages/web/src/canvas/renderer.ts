@@ -597,7 +597,14 @@ export class CanvasRenderer implements Renderer {
       // The newest echo falls through: it equals the local text, so the
       // edit session treats it as a no-op while the accessibility mirror
       // picks up the confirmed value.
-      if (classifyBindEcho(node, value) === "stale") return;
+      const kind = classifyBindEcho(node, value, (deferred) => {
+        // A held-back answer settling after a quiet period re-enters as a
+        // foreign value (nothing is outstanding any more).
+        if (this.nodes.get(id) !== node) return;
+        this.onSetProp(id, name, deferred);
+        this.scheduleRedraw();
+      });
+      if (kind === "stale" || kind === "deferred") return;
     }
 
     // Applicator base (e.g. `flex.0` → `flex`) — computed up front so the

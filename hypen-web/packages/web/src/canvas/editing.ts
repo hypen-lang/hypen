@@ -32,7 +32,9 @@ import { noteLocalBindWrite } from "../bind-echo.js";
  *   outstanding writes (bind-echo.ts): an echo of an OLDER keystroke is
  *   dropped, the newest one is a no-op, and only a *different* value (an
  *   action clearing the field, engine-side formatting) reaches
- *   onEngineValueEcho, which rewrites the proxy and clamps the selection.
+ *   onEngineValueEcho, which rewrites the proxy and clamps the selection —
+ *   once every write has been answered (a rewrite of an older keystroke is
+ *   held back while newer ones are in flight).
  */
 
 import type { Point, Rectangle, VirtualNode } from "./types.js";
