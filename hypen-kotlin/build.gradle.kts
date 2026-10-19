@@ -133,7 +133,14 @@ if (hypenJvmInstalled || runningJvmVersion < hypenJvmVersion) {
 mavenPublishing {
     coordinates("space.hypen", "hypen-kotlin", project.version.toString())
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    // Sign only when a key is configured (release CI sets
+    // ORG_GRADLE_PROJECT_signingInMemoryKey). Unconditional signing makes
+    // `./gradlew publishToMavenLocal` fail with "no configured signatory"
+    // for everyone building the SDK from a checkout. Maven Central still
+    // rejects unsigned uploads, so a release can't silently skip it.
+    if (listOf("signingInMemoryKey", "signing.keyId", "signing.gnupg.keyName").any { project.findProperty(it) != null }) {
+        signAllPublications()
+    }
 
     pom {
         name.set("Hypen Kotlin SDK")

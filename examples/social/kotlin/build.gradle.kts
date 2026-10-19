@@ -25,8 +25,13 @@ kotlin {
     jvmToolchain(17)
 }
 
-// Resolve the native engine library path (built via: cd hypen-engine-rs && cargo build --features uniffi)
-val engineLibDir = file("../../../target/debug").canonicalPath
+// Resolve the native engine library (built in hypen-engine-rs with
+// `cargo build --release --features uniffi`, or without --release): prefer
+// target/release, fall back to target/debug. HYPEN_NATIVE_LIB_DIR overrides.
+val engineLibDir = (System.getenv("HYPEN_NATIVE_LIB_DIR")?.let { file(it) }
+    ?: listOf("release", "debug").map { file("../../../target/$it") }
+        .firstOrNull { dir -> dir.listFiles()?.any { it.name.contains("hypen_engine") } == true }
+    ?: file("../../../target/release")).canonicalPath
 
 application {
     mainClass.set("space.hypen.instagram.MainKt")
