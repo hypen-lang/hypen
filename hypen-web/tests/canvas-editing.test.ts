@@ -218,6 +218,27 @@ describe("canvas native text editing", () => {
     expect(renderer.getNode("i1")!.props.value).toBe("");
   });
 
+  test("an engine rewrite answering an OLDER keystroke is held until the newest is answered", () => {
+    input.focus();
+    const setValue = (value: string) =>
+      renderer.applyPatches([{ type: "setProp", id: "i1", name: "value", value } as any]);
+    // Engine-side uppercasing while three writes are in flight.
+    type("hi ", 3);
+    type("hi t", 4);
+    type("hi th", 5);
+    setValue("HI ");
+    expect((proxy() as any).value).toBe("hi th");
+    setValue("HI T");
+    type("hi thx", 6);
+    expect((proxy() as any).value).toBe("hi thx");
+    setValue("HI TH");
+    expect((proxy() as any).value).toBe("hi thx");
+    setValue("HI THX");
+    expect((proxy() as any).value).toBe("HI THX");
+    expect((proxy() as any).selectionStart).toBe(6);
+    expect(renderer.getNode("i1")!.props.value).toBe("HI THX");
+  });
+
   test("engine rewrite (formatting) re-seeds the element and clamps selection", () => {
     input.focus();
     type("hi there", 8);
