@@ -9,7 +9,7 @@ Hypen is a declarative UI language and reactive runtime for building cross-platf
 ```toml
 # Cargo.toml
 [dependencies]
-hypen-server = "0.4"
+hypen-server = "0.6"
 serde = { version = "1", features = ["derive"] }
 ```
 

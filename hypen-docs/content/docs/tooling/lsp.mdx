@@ -92,11 +92,13 @@ Column {
 
 ## Installation
 
-<Callout type="warn">
-The extension has **no published release yet**: there is no `.vsix` to download and it is not on the VS Code Marketplace. Until a release is published, build it from a checkout of the repository as shown below.
-</Callout>
+### From the VS Code Marketplace
 
-### Requirements for building
+The extension is published to the VS Code Marketplace as **Hypen Language Support** (publisher `hypen`). In VS Code, open the Extensions view (`Ctrl+Shift+X`), search for "Hypen" and click **Install**. It activates for `.hypen` files.
+
+Editors that install extensions from Open VSX instead of the Marketplace, such as Cursor, don't get it there; build a `.vsix` from source (below) and install that.
+
+### Requirements for building from source
 
 - Node.js and npm (the extension tooling and `vsce` run on Node)
 - Rust and [`wasm-pack`](https://rustwasm.github.io/wasm-pack/installer/), because the extension bundles the Hypen parser and engine compiled to WebAssembly

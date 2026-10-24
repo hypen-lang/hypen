@@ -138,7 +138,7 @@ ForEach(items: @state.categories, as: "category", key: "id") {
 The inner loop reads the outer item through its `as:` name (`@category.products`). Give every loop in a nest its own `as:` name: if both loops use the default `item`, inner `@item.*` references resolve to the *outer* item.
 
 <Callout type="warn">
-A nested `ForEach` whose `items:` reads the outer loop's item needs an engine newer than the published 0.6.6 packages. On 0.6.6 and earlier the inner loop renders nothing; flatten the data into state (for example `state.products` filtered per category) until you upgrade.
+A nested `ForEach` whose `items:` reads the outer loop's item needs Hypen 0.6.7 or newer. On 0.6.6 and earlier the inner loop renders nothing.
 </Callout>
 
 ### Accessing the Whole Item

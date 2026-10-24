@@ -819,7 +819,7 @@ An excluded namespace (`-hypen:state`) is only left out of the extra `debug` out
 Namespaces are `hypen:` plus the lower-cased logger tag (`hypen:remote`, `hypen:engine`, `hypen:router`, `hypen:state`, `hypen:module`, `hypen:loader`, `hypen:renderer`, ...); a namespace also covers its children. In a browser, set `localStorage.debug = "hypen:*"` and reload. From code, call `setDebugNamespaces(spec)` from `@hypen-space/core/logger`. `DEBUG` has no effect when the level is `"none"`. Under the CLI, `DEBUG=hypen:* hypen dev` is the same as `hypen dev --debug`.
 
 <Callout type="warn">
-`DEBUG` namespaces need a `@hypen-space/core` release newer than 0.6.6. On 0.6.6, `DEBUG` is ignored; use `setLogLevel("debug")` instead.
+`DEBUG` namespaces need `@hypen-space/core` 0.6.7 or newer; older versions ignore `DEBUG`.
 </Callout>
 
 ### Loggers

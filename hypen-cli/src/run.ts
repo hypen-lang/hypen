@@ -529,7 +529,7 @@ export async function ensureDesktopRunner(): Promise<boolean> {
   if (!download.ok) {
     const why =
       download.status === 404
-        ? "the prebuilt download isn't published yet (HTTP 404)."
+        ? `no prebuilt runner for ${target} in the latest release (HTTP 404).`
         : download.status !== undefined
           ? `download failed (HTTP ${download.status}).`
           : `download failed (${download.error}).`;

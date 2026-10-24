@@ -19,7 +19,7 @@
 
 ## Why Hypen?
 - **Native UI Streaming and portable (coming soon)** - Hypen supports native UI streaming from different languages - Rust, TS, Go, Kotlin, Swift and more coming soon
-- **Crossplatform native rendering** - Render Hypen on the web (DOM or canvas), Android, desktop and iOS, all native. (iOS is in preview: it runs through the `hypen run ios` Simulator runner, and the Swift renderer package isn't published yet.)
+- **Crossplatform native rendering** - Render Hypen on the web (DOM or canvas), Android, desktop and iOS, all native. (iOS is in preview: try it with the `hypen run ios` Simulator runner, or add the `HypenSwift` package from [hypen-lang/hypen-swiftui](https://github.com/hypen-lang/hypen-swiftui) to your own app.)
 - **Declarative and familiar** — Hypen is a declarative language that will be familiar to both developers and machines.
 - **Highly portable** — Hypen clients are thin layers over native UI, enabling you to automatically support any platform that Hypen supports.
 - **Reactivity, Tailwind, routing, hot reload** — All of your favorite features, out of the box. Develop faster than ever with Hypen.
@@ -50,7 +50,7 @@ bun run dev
 
 Prefer an IDE? Run `bun run studio` instead of `bun run dev`. Hypen Studio starts the dev server for you and opens an editor with a live preview, state inspector and time-travel debugging at `http://localhost:5173`. You don't need both.
 
-To preview on a device, run `bunx hypen run android` or `bunx hypen run ios` (Simulator) while the project is open. You can also install the CLI globally with `bun add -g @hypen-space/cli`; from the next CLI release on, a global `hypen` hands project commands to the project's own CLI, so `hypen dev` and `bun run dev` behave the same.
+To preview on a device, run `bunx hypen run android` or `bunx hypen run ios` (Simulator) while the project is open. You can also install the CLI globally with `bun add -g @hypen-space/cli`; a global `hypen` (0.6.7+) hands project commands to the project's own CLI, so `hypen dev` and `bun run dev` behave the same.
 
 See the [Getting Started guide](https://docs.hypen.space/docs/getting-started/installation) for the full walkthrough.
 
@@ -90,7 +90,7 @@ new RemoteServer().app(myApp).listen(3000);
 
 Open `http://localhost:3000`: the server ships a built-in web client. Native clients connect to `ws://localhost:3000`.
 
-> `new RemoteServer().app(myApp)` (no `.module()` call) and named modules as the entry need a `@hypen-space/server` release newer than 0.6.6. On 0.6.6, define the module with `app.defineState(...)` and serve it with `new RemoteServer().module("Counter", def).ui(template).listen(3000)`.
+> `new RemoteServer().app(myApp)` (no `.module()` call) and named modules as the entry need `@hypen-space/server` 0.6.7 or newer.
 
 To render in your own page instead, write a small client and let Bun bundle it (browsers can't load bare package imports or TypeScript directly):
 
@@ -172,17 +172,21 @@ The canvas renderer fetches its layout engine from `/taffy_wasm_bg.wasm` on the 
 </details>
 
 <details>
-<summary><b>Go</b> — <code>github.com/hypen-space/core</code></summary>
+<summary><b>Go</b> — <code>github.com/hypen-lang/hypen/hypen-golang</code></summary>
 
 Go auto-registers every named module onto the package-level `core.App` singleton. Serve the entry module with `RemoteServer.WithDefinition(...)`; nested modules are discovered from the registry. Requires Go 1.25+ (on older toolchains, `GOTOOLCHAIN=go1.25.0`).
+
+```bash
+go get github.com/hypen-lang/hypen/hypen-golang@v0.6.7
+```
 
 ```go
 // main.go — run with `go run .`
 package main
 
 import (
-	core "github.com/hypen-space/core"
-	"github.com/hypen-space/core/remote"
+	core "github.com/hypen-lang/hypen/hypen-golang"
+	"github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 type CounterState struct {
@@ -213,11 +217,10 @@ func main() {
 }
 ```
 
-> **Not on a Go module proxy yet:** `go get github.com/hypen-space/core` doesn't resolve today, and the snippet above needs the unreleased SDK in `hypen-golang/`. Point the import path at a checkout of this repository:
+> The Go SDK is the `hypen-golang/` subdirectory module, released as tags `hypen-golang/vX.Y.Z` in lockstep with Hypen; its package name is `core`, hence the import alias. To build against a local checkout instead:
 >
 > ```bash
-> go mod edit -require=github.com/hypen-space/core@v0.0.0 \
->             -replace=github.com/hypen-space/core=/path/to/hypen/hypen-golang
+> go mod edit -replace=github.com/hypen-lang/hypen/hypen-golang=/path/to/hypen/hypen-golang
 > go mod tidy
 > ```
 
@@ -226,7 +229,7 @@ func main() {
 <details>
 <summary><b>Rust</b> — crate <code>hypen-server</code></summary>
 
-Rust uses `HypenApp::builder()` with route-based module registration. Add `hypen-server = "0.6"` and `serde = { version = "1", features = ["derive"] }` to `Cargo.toml`.
+Rust uses `HypenApp::builder()` with route-based module registration. Add `hypen-server = "0.6.7"` and `serde = { version = "1", features = ["derive"] }` to `Cargo.toml`.
 
 ```rust
 use hypen_server::prelude::*;
@@ -272,7 +275,7 @@ The crate is transport-agnostic: it doesn't open a socket itself. You plug its `
 <details>
 <summary><b>Swift</b> — <code>HypenServer</code></summary>
 
-> The Swift server SDK isn't published as a Swift package yet. Use the `hypen-server-swift/` directory of this repository as a local package (`.package(path: "../hypen/hypen-server-swift")`).
+> Add the package from its mirror repository: `.package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.6.7")`, product `HypenServer`. It links the native engine (`libhypen_engine`), which you build from a Hypen checkout at the same version; see the [HypenServer README](hypen-server-swift/README.md#installation).
 
 ```swift
 struct CounterState: Codable { var count: Int = 0 }
@@ -306,7 +309,7 @@ try server.listen(3000)
 
 Kotlin uses a `HypenServer { ... }` DSL to register modules. Modules built with `name(...)` also auto-register on the global `HypenApp` singleton.
 
-The SDK is on Maven Central as `space.hypen:hypen-kotlin` (`implementation("space.hypen:hypen-kotlin:0.4.952")`). 0.4.952 is the newest published version and predates the code in this repository (0.6.x), so some recent features are missing from it.
+The SDK is on Maven Central as `space.hypen:hypen-kotlin` (`implementation("space.hypen:hypen-kotlin:0.6.7")`). The jar bundles the native engine for Linux (x86-64, arm64), macOS (Apple Silicon, Intel) and Windows (x86-64), so no Rust toolchain or library path is needed.
 
 ```kotlin
 @Serializable
@@ -387,9 +390,9 @@ Hypen has SDKs for multiple platforms, all driven by the same engine:
 
 ### UI Renderers
 
-- **iOS/macOS** (`hypen-renderer-swift`) — SwiftUI native renderer (preview; not yet published as a Swift package)
-- **Android** (`hypen-renderer-android`) — Jetpack Compose native renderer (`space.hypen:hypen-renderer` on Maven Central)
-- **Desktop** (`hypen-renderer-desktop`, `hypen-browser`) — native desktop renderer and shell (no prebuilt binaries yet; build with `cargo build --release -p hypen-browser`)
+- **iOS/macOS** (`hypen-renderer-swift`) — SwiftUI native renderer (preview; Swift package `HypenSwift` from [hypen-lang/hypen-swiftui](https://github.com/hypen-lang/hypen-swiftui))
+- **Android** (`hypen-renderer-android`) — Jetpack Compose native renderer (`space.hypen:hypen-renderer:0.6.7` on Maven Central)
+- **Desktop** (`hypen-renderer-desktop`, `hypen-browser`) — native desktop renderer and shell (`hypen run desktop` downloads a prebuilt Hypen Browser for macOS, Windows x86-64 and Linux x86-64 from the [GitHub releases](https://github.com/hypen-lang/hypen/releases); the `hypen-renderer-desktop` crate is not on crates.io, use it from a checkout)
 - **Web** (`@hypen-space/web`) — DOM and Canvas renderers for the browser
 
 ### Server SDKs
@@ -397,10 +400,10 @@ Hypen has SDKs for multiple platforms, all driven by the same engine:
 All server SDKs share the same module system (typed state, typed actions, lifecycle hooks, nested modules, session persistence) and speak the same WebSocket patch protocol.
 
 - **Node.js / Bun** (`@hypen-space/server` + `@hypen-space/core`) — [README](hypen-web/packages/server/README.md)
-- **Go** (`github.com/hypen-space/core`, not fetchable with `go get` yet) — [README](hypen-golang/README.md)
+- **Go** (`github.com/hypen-lang/hypen/hypen-golang@v0.6.7`) — [README](hypen-golang/README.md)
 - **Rust** (crate: `hypen-server`) — [README](hypen-sdk-rs/README.md)
-- **Swift** (`HypenServer`, use as a local package for now) — [README](hypen-server-swift/README.md)
-- **Kotlin / JVM** (`space.hypen:hypen-kotlin`, latest published 0.4.952) — [README](hypen-kotlin/README.md)
+- **Swift** (`HypenServer` from [hypen-lang/hypen-server-swift](https://github.com/hypen-lang/hypen-server-swift), 0.6.7) — [README](hypen-server-swift/README.md)
+- **Kotlin / JVM** (`space.hypen:hypen-kotlin:0.6.7` on Maven Central, native engine bundled) — [README](hypen-kotlin/README.md)
 
 ### Browser client
 

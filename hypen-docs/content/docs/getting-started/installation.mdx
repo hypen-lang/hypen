@@ -38,7 +38,7 @@ hypen --version
 A global `hypen` hands project commands (`dev`, `build`, `studio`, `test`, `run`, ...) to the project's own `node_modules/@hypen-space/cli` when there is one, and prints `Using project-local @hypen-space/cli vX` when it does. That makes `bun run dev`, `bunx hypen dev` and a global `hypen dev` equivalent. Set `HYPEN_NO_LOCAL_CLI=1` to turn the hand-off off.
 
 <Callout type="warn">
-The hand-off is new and not in CLI 0.6.6 or earlier. With those versions a global `hypen dev` uses its own copy of the Hypen packages, and actions in nested modules fail with `invalid scoped UI action`. If you see that, run `bun run dev` from the project instead.
+The hand-off needs a global CLI 0.6.7 or newer. An older global `hypen dev` uses its own copy of the Hypen packages, and actions in nested modules fail with `invalid scoped UI action`; update it (`bun add -g @hypen-space/cli`) or run `bun run dev` from the project.
 </Callout>
 
 ## Start the Development Server
@@ -85,7 +85,7 @@ The skill files teach AI coding agents the Hypen syntax. They are listed in `.gi
 
 ### Generated `package.json`
 
-The `@hypen-space/*` packages are pinned to the CLI's own version (for example `^0.6.5`), so a project is reproducible. The scripts are:
+The `@hypen-space/*` packages are pinned to the CLI's own version (for example `^0.6.7`), so a project is reproducible. The scripts are:
 
 | Script | Runs | What it does |
 |--------|------|--------------|
@@ -130,7 +130,7 @@ bunx hypen run android --studio
 
 For Android, the CLI first tries `adb reverse` so the device reaches your dev server at `ws://localhost:<port>`, which works for emulators and USB devices without shared Wi-Fi. With several devices attached, pick one with `ANDROID_SERIAL=<serial>`. The runner APK is only reinstalled when it changed; `--clean` forces a fresh download and install.
 
-`hypen run desktop` opens the app in Hypen Browser, the native desktop runner. Prebuilt desktop runners are **not published yet**, so the download fails and the CLI prints build-from-source steps. In short: build `hypen-browser` from a [hypen checkout](https://github.com/hypen-lang/hypen) with `cargo build --release -p hypen-browser` (Linux needs `libdbus-1-dev libclang-dev libasound2-dev`, see `hypen-browser/README.md`), then point the CLI at the binary with `HYPEN_DESKTOP_RUNNER=/path/to/hypen-browser`.
+`hypen run desktop` opens the app in Hypen Browser, the native desktop runner. The CLI downloads a prebuilt runner from the latest [GitHub release](https://github.com/hypen-lang/hypen/releases) on first run (macOS Apple Silicon and Intel, Windows x86-64, Linux x86-64) and caches it in `~/.hypen/runners/`. On other platforms, build it from source; the CLI prints the steps, and the [CLI reference](/docs/tooling/cli#desktop) has them.
 
 ## CLI Commands
 
@@ -147,7 +147,7 @@ Inside a project, run these as `bunx hypen <command>` (or plain `hypen <command>
 | `hypen test` | Studio Test Mode |
 | `hypen run android` | Install and launch on an Android device or emulator |
 | `hypen run ios` | Install and launch on the iOS Simulator |
-| `hypen run desktop` | Launch in Hypen Browser (runner must be built from source for now) |
+| `hypen run desktop` | Launch in Hypen Browser, the native desktop runner |
 
 `hypen build` writes a self-contained static site to `dist/`: the page, a worker that runs your modules, the engine WASM (nothing is loaded from a CDN at runtime) and a small `server.js`. Run it with `bun run start` (`node dist/server.js`). Any static host works too, as long as the site is served from the domain root and unknown paths fall back to `index.html`.
 
@@ -179,13 +179,13 @@ See the [Android Adapter docs](/docs/adapters/android) for the rest of the setup
 
 ### iOS
 
-The SwiftUI renderer lives in this repository under `hypen-renderer-swift/`. It is not yet published as a public Swift package, so add it to Xcode as a local package from a checkout. The `hypen run ios` Simulator runner works today without it. See the [iOS Adapter docs](/docs/adapters/ios).
+The SwiftUI renderer (preview) is the Swift package `HypenSwift`, published at [hypen-lang/hypen-swiftui](https://github.com/hypen-lang/hypen-swiftui). In Xcode, add `https://github.com/hypen-lang/hypen-swiftui.git` (from `0.6.7`) under **File > Add Package Dependencies...**. The `hypen run ios` Simulator runner works without it. See the [iOS Adapter docs](/docs/adapters/ios).
 
 ## IDE Setup
 
 ### VS Code / Cursor
 
-The Hypen language extension (syntax highlighting, diagnostics and completion through the Hypen language server) has **no published release yet**, so there is no `.vsix` to download. To try it, build it from a checkout of the repository: see "Building VSIX Package" in `hypen-lsp/README.md`. That build needs Rust and `wasm-pack`, because it compiles the parser and engine to WebAssembly.
+Install **Hypen Language Support** (publisher `hypen`) from the VS Code Marketplace: open the Extensions view (`Ctrl+Shift+X`), search for "Hypen" and click **Install**. It adds syntax highlighting, diagnostics and completion through the Hypen language server. Editors that don't use the Marketplace, such as Cursor, can install a `.vsix` built from source.
 
 See the [LSP documentation](/docs/tooling/lsp) for more details.
 
