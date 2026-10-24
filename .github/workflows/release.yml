@@ -387,3 +387,13 @@ jobs:
       dry-run: false
     secrets:
       VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+  # ── Desktop runner (hypen-browser) installers ────────────────────
+  # `hypen run desktop` downloads hypen-browser-<target>.tar.gz from
+  # this repo's latest release.
+  desktop-installers:
+    name: Desktop Installers
+    needs: [resolve, github-release]
+    uses: ./.github/workflows/desktop-installers.yml
+    with:
+      tag: "v${{ needs.resolve.outputs.version }}"
