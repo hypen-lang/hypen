@@ -1,6 +1,6 @@
 {
   "name": "@hypen-space/agent",
-  "version": "0.6.5",
+  "version": "0.6.7",
   "description": "Hypen MCP server - exposes a running Hypen app's declared actions, routes, inputs and state to an AI agent over MCP",
   "type": "module",
   "main": "./dist/index.js",
@@ -38,7 +38,7 @@
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@hypen-space/core": "^0.6.5"
+    "@hypen-space/core": "^0.6.7"
   },
   "devDependencies": {
     "@types/bun": "latest",

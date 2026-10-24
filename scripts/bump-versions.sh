@@ -24,11 +24,11 @@ sed_inplace() {
 }
 
 # Current versions (edit these as the source of truth)
-CURRENT_RUST_VERSION="0.6.5"
-CURRENT_NPM_VERSION="0.6.5"
-CURRENT_LSP_VERSION="0.6.5"
-CURRENT_GRADLE_VERSION="0.6.5"
-CURRENT_SWIFT_SERVER_VERSION="0.6.5"
+CURRENT_RUST_VERSION="0.6.7"
+CURRENT_NPM_VERSION="0.6.7"
+CURRENT_LSP_VERSION="0.6.7"
+CURRENT_GRADLE_VERSION="0.6.7"
+CURRENT_SWIFT_SERVER_VERSION="0.6.7"
 # @hypen-space/ios-streamer is versioned independently (macOS-only, optional
 # CLI dep). Bump it via --ios-streamer <version>; otherwise it's left alone.
 CURRENT_IOS_STREAMER_VERSION="0.1.0"
@@ -321,6 +321,12 @@ echo -e "${GREEN}Updating Swift packages...${NC}"
 sed_inplace "s/public static let version = \"$CURRENT_SWIFT_SERVER_VERSION\"/public static let version = \"$NEW_SWIFT_SERVER_VERSION\"/" \
     "$ROOT_DIR/hypen-server-swift/Sources/HypenServer/HypenServer.swift"
 echo "  ✓ hypen-server-swift/Sources/HypenServer/HypenServer.swift"
+
+# The Kotlin scaffold's fallback SDK version (used only when the CLI can't
+# read its own package.json).
+sed_inplace "s/  return \"$CURRENT_NPM_VERSION\";/  return \"$NEW_NPM_VERSION\";/" \
+    "$ROOT_DIR/hypen-cli/src/init/kotlin.ts"
+echo "  ✓ hypen-cli/src/init/kotlin.ts (Kotlin scaffold fallback version)"
 
 # ── Update this script's versions for next time ─────────────────────────
 

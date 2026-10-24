@@ -44,7 +44,7 @@ function cliVersion(): string {
       dir = dirname(dir);
     }
   } catch {}
-  return "0.6.5";
+  return "0.6.7";
 }
 
 function write(projectDir: string, relPath: string, content: string): void {
