@@ -148,6 +148,22 @@ describe("hypen build (component projects)", () => {
     expect(existsSync(join(root, ".hypen"))).toBe(false);
   });
 
+  test("a template that doesn't parse is a BuildError naming the file", async () => {
+    const broken = join(root, "src/components/Broken");
+    mkdirSync(broken, { recursive: true });
+    writeFileSync(join(broken, "component.hypen"), "Column {{{ (\n");
+    try {
+      const err = await build({
+        components: "./src/components", entry: "App", root, outDir: "dist-broken", log: false,
+      }).catch((e) => e);
+      expect(err).toBeInstanceOf(BuildError);
+      expect(String(err.message)).toContain("src/components/Broken/component.hypen:1:");
+      expect(existsSync(join(root, "dist-broken"))).toBe(false);
+    } finally {
+      rmSync(broken, { recursive: true, force: true });
+    }
+  });
+
   test("a project without @hypen-space/web-engine is a BuildError", async () => {
     const bare = mkdtempSync(join(tmpdir(), "hypen-build-bare-"));
     try {

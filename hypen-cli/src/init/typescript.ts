@@ -110,7 +110,7 @@ export function buildTsPackageJson(
   }
   return JSON.stringify(
     {
-      name: projectName,
+      name: npmPackageName(projectName),
       version: "0.1.0",
       type: "module",
       scripts,
@@ -146,6 +146,19 @@ function write(projectDir: string, relPath: string, content: string): void {
 function ensureDir(projectDir: string, relPath: string): void {
   const full = join(projectDir, relPath);
   mkdirSync(full, { recursive: true });
+}
+
+/**
+ * An npm-valid package name for a project directory name: lowercase, no
+ * spaces or other characters npm rejects (`My App` -> `my-app`).
+ */
+export function npmPackageName(projectName: string): string {
+  const name = projectName
+    .toLowerCase()
+    .replace(/[^a-z0-9._~-]+/g, "-")
+    .replace(/^[._-]+/, "")
+    .replace(/-+$/, "");
+  return name || "hypen-app";
 }
 
 function packageJson(name: string, layout: ModuleLayout): string {

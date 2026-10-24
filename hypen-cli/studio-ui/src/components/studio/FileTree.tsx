@@ -193,6 +193,10 @@ function TreeItem({
             onMouseLeave={() => setHovered(false)}
             onContextMenu={(e) => {
               e.preventDefault();
+              // Stop here: the parent folders' and the panel's own handlers
+              // would otherwise replace this menu with the folder/root one
+              // (no Rename/Delete).
+              e.stopPropagation();
               onContextMenu(e, node.path, true);
             }}
           >
@@ -293,10 +297,14 @@ function TreeItem({
       onClick={(e) => {
         e.stopPropagation();
         onPathSelect(node.path, false);
+        // Open on a single click (like VS Code): selecting a file without
+        // opening it left the previous file in the editor, so typing
+        // edited a file other than the highlighted one.
+        onFileSelect(node.path);
       }}
-      onDoubleClick={() => onFileSelect(node.path)}
       onContextMenu={(e) => {
         e.preventDefault();
+        e.stopPropagation();
         onContextMenu(e, node.path, false);
       }}
     >

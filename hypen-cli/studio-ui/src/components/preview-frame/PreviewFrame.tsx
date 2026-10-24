@@ -63,6 +63,31 @@ function toWsUrl(raw: string): string {
   return `ws://${trimmed}`;
 }
 
+/**
+ * Keep a canvas cell's backing store in step with its box. The canvas
+ * renderer pins the canvas' CSS size to the box it saw at construction,
+ * so a cell that grows (e.g. a sibling cell is closed) would otherwise keep
+ * painting into its old, smaller rectangle.
+ */
+function watchCanvasSize(host: HTMLDivElement, getRenderer: () => any): () => void {
+  if (typeof ResizeObserver === "undefined") return () => {};
+  let last = "";
+  const ro = new ResizeObserver(() => {
+    const canvas = host.querySelector("canvas");
+    const renderer = getRenderer();
+    if (!canvas || typeof renderer?.resize !== "function") return;
+    const { width, height } = host.getBoundingClientRect();
+    const key = `${Math.round(width)}x${Math.round(height)}`;
+    if (key === last || width === 0 || height === 0) return;
+    last = key;
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    renderer.resize(width, height);
+  });
+  ro.observe(host);
+  return () => ro.disconnect();
+}
+
 function mountTarget(host: HTMLDivElement, renderer: RendererKind): HTMLDivElement | HTMLCanvasElement {
   host.innerHTML = "";
   if (renderer === "canvas") {
@@ -123,7 +148,7 @@ export function PreviewFrame() {
 
     const wsUrl = toWsUrl(remoteUrlRaw);
     const host = hostRef.current;
-    const target = mountTarget(host, rendererKind);
+    let target = mountTarget(host, rendererKind);
 
     const remote = new RemoteEngine(wsUrl, { session: { props: { platform: "studio" } } });
 
@@ -150,7 +175,16 @@ export function PreviewFrame() {
         // Each (re)established session streams a full initial tree —
         // reset the renderer so a hot-reload reconnect doesn't append a
         // duplicate tree under the old one.
-        if (target instanceof HTMLDivElement) target.innerHTML = "";
+        if (target instanceof HTMLDivElement) {
+          target.innerHTML = "";
+        } else {
+          // A canvas renderer owns listeners and an accessibility mirror
+          // on its canvas; tear it down so a reconnect doesn't stack a
+          // second renderer (and a second mirror) on the same element.
+          try { rendererInstance.destroy?.(); } catch { /* already gone */ }
+          const fresh = mountTarget(host, rendererKind);
+          target = fresh;
+        }
         rendererInstance = makeRenderer();
         // Clear any error left over from a previous failed connect attempt —
         // otherwise the overlay sticks after a successful reconnect.
@@ -167,7 +201,10 @@ export function PreviewFrame() {
       }
     });
 
+    const stopResize = rendererKind === "canvas" ? watchCanvasSize(host, () => rendererInstance) : () => {};
+
     return () => {
+      stopResize();
       try { remote.dispose(); } catch { /* already disposed */ }
       try { rendererInstance.clear?.(); } catch {}
       host.innerHTML = "";
@@ -233,6 +270,9 @@ export function PreviewFrame() {
     }
 
     render();
+    const stopResize = rendererKind === "canvas" && hostRef.current
+      ? watchCanvasSize(hostRef.current, () => rendererInstance)
+      : () => {};
 
     const ws = new WebSocket(`${location.protocol === "https:" ? "wss:" : "ws:"}//${location.host}/ws`);
     ws.onmessage = (ev) => {
@@ -247,6 +287,7 @@ export function PreviewFrame() {
 
     return () => {
       disposed = true;
+      stopResize();
       try { moduleInstance?.destroy?.(); } catch {}
       try { rendererInstance?.clear?.(); } catch {}
       try { engine?.reset?.(); } catch {}

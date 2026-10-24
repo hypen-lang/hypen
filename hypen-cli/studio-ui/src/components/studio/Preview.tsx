@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { actionLogEntry } from "@/lib/action-log";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -251,7 +252,8 @@ export function Preview({
       new DOMRenderer(rendererContainerRef.current!, {
         dispatchAction: (name: string, payload?: unknown) => {
           remote.dispatchAction(name, payload);
-          onActionLog(name, payload);
+          const entry = actionLogEntry(name, payload);
+          onActionLog(entry.name, entry.payload);
         },
       });
     rendererRef.current = makeRemoteRenderer();

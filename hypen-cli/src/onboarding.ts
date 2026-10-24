@@ -256,8 +256,9 @@ export async function runOnboarding(version: string): Promise<void> {
 
     const key = await readKey();
     if (key === "\x03") {
-      // Ctrl+C — bail out the same way any interrupted CLI would.
-      process.exit(0);
+      // Ctrl+C — bail out the same way any interrupted CLI would (130 =
+      // 128 + SIGINT), without running the command the user interrupted.
+      process.exit(130);
     }
     if (key === "q" || key === "Q" || key === "\x1b") {
       // Skip the remainder of the tour.

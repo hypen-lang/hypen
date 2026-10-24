@@ -59,9 +59,9 @@ hypen studio
 Studio uses Monaco (the engine behind VS Code) for code editing. It supports:
 
 - **Syntax highlighting** for `.hypen`, `.ts`, `.tsx`, `.js`, `.json`, `.css`, and `.md` files
-- **Multi-tab editing** — open as many files as you need
+- **Multi-tab editing** — open as many files as you need. Tabs show the folder too when two open files share a name (`Home/component.hypen`, `App/component.hypen`)
 - **Language Server Protocol (LSP)**: completions, diagnostics, and hover info for `.hypen` files. The CLI installs `@hypen-space/lsp` as a dependency; if it is missing, Studio prints a warning and the editor runs without language features
-- **Auto-save** — changes are saved and hot-reloaded automatically
+- **Auto-save** — changes are saved about 300 ms after you stop typing (`Cmd/Ctrl+S` saves right away) and hot-reloaded. While a `.hypen` file doesn't parse, the editor marks the error and the preview keeps the last version that did
 
 ## Live Preview
 
@@ -77,14 +77,14 @@ see in Studio is exactly what your users will see in the browser.
 
 ## File Browser
 
-The file tree shows your full project structure. You can:
+The file tree shows your full project structure. Click a file to open it. You can:
 
-- **Create** new files and folders
+- **Create** new files and folders (the buttons in the Explorer header create them in the selected folder; right-click a folder for the same)
 - **Rename** files and folders
 - **Copy and paste** files
 - **Delete** files and folders
 
-All changes are immediately saved to disk and trigger hot reload.
+Rename, copy, paste and delete are in the right-click menu of a file or folder. Files created outside Studio show up in the tree on their own. All changes are immediately saved to disk and trigger hot reload.
 
 ## Debugging Tools
 
@@ -153,9 +153,21 @@ DOM or Canvas renderer, next to Android and iOS device mirrors.
 
 Every cell is fully interactive and connected to the same dev server, with
 actions mirrored across surfaces — tap a button in the web cell and every
-other cell (and any connected device) updates too. Inside a project,
-`hypen test` starts the dev server for you; outside one, paste a `ws://`
-URL into the Connect input to attach to any running Hypen server.
+other cell (and any connected device) updates too, including Test Mode open
+in a second browser tab. Inside a project, `hypen test` starts the dev
+server for you; outside one, paste a `ws://` URL into the Connect input to
+attach to any running Hypen server.
+
+The toolbar's **DOM** and **Canvas** buttons add or remove a web cell of
+that renderer; each cell can be popped out into its own window or closed.
+**Logs** opens device logs, **Run** installs the runner on a booted
+device, and **Reset** restarts the engine with fresh state. A cell that
+joins later starts from fresh state and mirrors actions from then on.
+
+The device sidebar lists Android emulators/devices and iOS simulators. With
+none available it says what is missing: the Android SDK with an AVD (or a
+device attached over `adb`), and for iOS, Studio running on macOS with
+Xcode.
 
 ## Preview on Android and iOS
 
@@ -169,7 +181,7 @@ hypen run android --studio
 hypen run ios --studio
 ```
 
-This starts the device runner (WebSocket dev server on port 3000) and opens Studio (on port 5173) side by side. Changes you make in Studio are hot-reloaded on the connected device in real time.
+This starts the device runner (WebSocket dev server on port 3000, or `--port`) and opens Studio (on port 5173, or `--studio-port`) side by side. Changes you make in Studio are hot-reloaded on the connected device in real time.
 
 You can also run all three at once — web preview in Studio, plus a device:
 

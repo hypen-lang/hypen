@@ -437,7 +437,7 @@ describe("CLI", () => {
       // than waiting for clean exit because Studio is designed to run
       // indefinitely.
       const proc = spawn({
-        cmd: ["bun", cliPath, "test"],
+        cmd: ["bun", cliPath, "test", "--studio-port", "5498"],
         cwd: testDir,
         stdout: "pipe",
         stderr: "pipe",

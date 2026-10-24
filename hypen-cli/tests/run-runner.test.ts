@@ -10,6 +10,8 @@ import { tmpdir } from "os";
 import {
   pickLanIP,
   selectAndroidDevice,
+  selectIOSSimulator,
+  launchIOSRunner,
   resolveAndroidUrl,
   parseDumpsysPackage,
   isRunnerInstallCurrent,
@@ -263,7 +265,7 @@ describe("desktop runner", () => {
   });
 
   test("RUN_HELP documents --device and --runner", () => {
-    expect(RUN_HELP).toContain("--device <serial>");
+    expect(RUN_HELP).toContain("--device <id>");
     expect(RUN_HELP).toContain("--runner <path>");
     expect(RUN_HELP).toContain("browser.log");
   });
@@ -333,5 +335,98 @@ describe("runner version", () => {
     expect(isPlausibleVersion("Use /android/latest, /ios/latest, /android/v-1-22-3, /ios/v-1-22-3")).toBe(false);
     expect(isPlausibleVersion("")).toBe(false);
     expect(isPlausibleVersion(null)).toBe(false);
+  });
+});
+
+describe("selectIOSSimulator", () => {
+  const sim = (name: string, state = "Shutdown", runtime = "iOS 18.4", udid = name.replace(/\W/g, "-")) => ({
+    udid,
+    name,
+    runtime,
+    state,
+  });
+  const pro = sim("iPhone 16 Pro");
+  const ipad = sim("iPad Pro 11-inch (M4)");
+  const watch = sim("Apple Watch Series 10", "Shutdown", "watchOS 11.4");
+
+  test("no terminal: picks the first iPhone instead of prompting", () => {
+    const r = selectIOSSimulator([ipad, pro], { interactive: false });
+    expect(r).toEqual({ kind: "device", device: pro });
+  });
+
+  test("a terminal with several candidates prompts", () => {
+    const r = selectIOSSimulator([pro, ipad], { interactive: true });
+    expect(r.kind).toBe("prompt");
+  });
+
+  test("booted simulators win, without prompting when there is one", () => {
+    const booted = sim("iPhone 16", "Booted");
+    const r = selectIOSSimulator([pro, booted, ipad], { interactive: true });
+    expect(r).toEqual({ kind: "device", device: booted });
+  });
+
+  test("explicit name or UDID, case-insensitive", () => {
+    expect(selectIOSSimulator([pro, ipad], { device: "ipad pro 11-inch (m4)", interactive: true })).toEqual({
+      kind: "device",
+      device: ipad,
+    });
+    expect(selectIOSSimulator([pro, ipad], { device: pro.udid, interactive: false })).toEqual({
+      kind: "device",
+      device: pro,
+    });
+  });
+
+  test("unknown explicit simulator is an error listing the available ones", () => {
+    const r = selectIOSSimulator([pro], { device: "iPhone 99", interactive: false });
+    expect(r.kind).toBe("error");
+    if (r.kind === "error") expect(r.message).toContain("iPhone 16 Pro");
+  });
+
+  test("non-iOS runtimes are ignored", () => {
+    const r = selectIOSSimulator([watch, pro], { interactive: false });
+    expect(r).toEqual({ kind: "device", device: pro });
+  });
+});
+
+describe("launchIOSRunner", () => {
+  test("launches with DEVICE_LAB_URL instead of the confirm-gated deep link", async () => {
+    const calls: string[][] = [];
+    const r = await launchIOSRunner("UDID-1", "ws://localhost:3000", async (cmd) => {
+      calls.push(cmd);
+      return { stdout: "space.hypen.gallery.HypenGallery: 42", stderr: "", exitCode: 0 };
+    });
+    expect(r).toEqual({ ok: true, via: "launch" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("SIMCTL_CHILD_DEVICE_LAB_URL=ws://localhost:3000");
+    expect(calls[0]).toContain("launch");
+    expect(calls[0]).toContain("UDID-1");
+  });
+
+  test("falls back to the deep link when launch fails", async () => {
+    const calls: string[][] = [];
+    const r = await launchIOSRunner("UDID-1", "ws://localhost:3000", async (cmd) => {
+      calls.push(cmd);
+      return cmd.includes("launch")
+        ? { stdout: "", stderr: "not installed", exitCode: 1 }
+        : { stdout: "", stderr: "", exitCode: 0 };
+    });
+    expect(r).toEqual({ ok: true, via: "deep-link" });
+    expect(calls[1]).toEqual([
+      "xcrun",
+      "simctl",
+      "openurl",
+      "UDID-1",
+      "hypenpreview://connect?url=ws%3A%2F%2Flocalhost%3A3000",
+    ]);
+  });
+
+  test("reports the error when both fail", async () => {
+    const r = await launchIOSRunner(
+      "UDID-1",
+      "ws://localhost:3000",
+      async () => ({ stdout: "", stderr: "boom", exitCode: 1 }),
+      0
+    );
+    expect(r).toEqual({ ok: false, error: "boom" });
   });
 });

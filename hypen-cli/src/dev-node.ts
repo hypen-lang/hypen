@@ -28,6 +28,7 @@ import { pink, yellow, dim, boldPink } from "./colors.js";
 import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
 import { findPackageRoot, importFromProject, resolveFromProject } from "./dev-resolve.js";
 import { DevServerError } from "./dev-errors.js";
+import { createHypenSourceValidator, formatReloadError } from "./dev-diagnostics.js";
 import { acceptUpgrade, type NodeWebSocket } from "./node-ws.js";
 
 export { DevServerError };
@@ -300,6 +301,14 @@ export async function dev(options: DevOptions): Promise<{
     projectRoot
   );
 
+  if (!existsSync(resolvedComponentsDir)) {
+    throw new DevServerError(
+      `Components directory not found: ${resolvedComponentsDir}\n` +
+        `  Set "components" in hypen.json to the folder that holds your components.`,
+      "ENTRY_NOT_FOUND"
+    );
+  }
+
   const discovered: DiscoveredComponent[] = await discoverComponents(resolvedComponentsDir);
   if (
     typeof globalThis.Bun === "undefined" &&
@@ -327,6 +336,15 @@ export async function dev(options: DevOptions): Promise<{
     // Mirror actions across all connected clients, like the Bun server.
     .syncActions();
   await remoteServer.prepare();
+  if (!debug) configureLogger({ level: "warn" });
+
+  // Parse every .hypen source before a reload (see dev-bun.ts).
+  const validateSources = createHypenSourceValidator({
+    componentsDir: resolvedComponentsDir,
+    projectRoot: resolve("."),
+    loadServer: async () => serverPkg,
+  });
+  let sourcesBroken = false;
 
   let clientBundle: Promise<string | null> | null = null;
   const getClientBundle = () => {
@@ -436,6 +454,18 @@ export async function dev(options: DevOptions): Promise<{
           return;
         }
         log("Components changed, reloading clients...");
+        const problems = await validateSources();
+        if (problems.length > 0) {
+          sourcesBroken = true;
+          console.error(`\n  ${yellow("Not reloaded:")} fix the error below; open pages keep the last good version.`);
+          for (const line of problems) console.error(`  ${line}`);
+          console.error("");
+          return;
+        }
+        if (sourcesBroken) {
+          sourcesBroken = false;
+          console.log(`  ${dim("Template error fixed.")}`);
+        }
         try {
           const clients = remoteServer.getClientCount();
           await remoteServer.reload();
@@ -443,7 +473,10 @@ export async function dev(options: DevOptions): Promise<{
             `  ${yellow("Reloaded")} ${dim(`(${clients} client(s) reconnecting)`)}`
           );
         } catch (e: any) {
-          console.error(`  Hot reload failed: ${e?.message ?? e}`);
+          const [first, ...rest] = formatReloadError(e);
+          console.error(`  Hot reload failed: ${first}`);
+          for (const line of rest) console.error(`  ${line}`);
+          console.error(`  ${dim("Open pages keep the last good version.")}`);
         }
         await runA11y?.();
         onComponentsChange?.(components);
@@ -461,6 +494,13 @@ export async function dev(options: DevOptions): Promise<{
 
   onStart?.(serverUrl);
   void runA11y?.();
+  void validateSources().then((problems) => {
+    if (problems.length === 0) return;
+    sourcesBroken = true;
+    console.error(`  ${yellow("Template error:")} the app won't render until this is fixed.`);
+    for (const line of problems) console.error(`  ${line}`);
+    console.error("");
+  });
 
   return {
     url: serverUrl,
