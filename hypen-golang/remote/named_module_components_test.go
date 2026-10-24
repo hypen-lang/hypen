@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 const namedAppTemplate = `module App {

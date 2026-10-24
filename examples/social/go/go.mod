@@ -1,4 +1,4 @@
-module github.com/hypen-space/examples/social
+module github.com/hypen-lang/hypen/examples/social/go
 
 go 1.25.0
 

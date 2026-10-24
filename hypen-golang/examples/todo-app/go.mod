@@ -1,4 +1,4 @@
-module github.com/hypen-space/examples/todo-app
+module github.com/hypen-lang/hypen/hypen-golang/examples/todo-app
 
 go 1.25.0
 

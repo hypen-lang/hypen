@@ -1,4 +1,4 @@
-module github.com/hypen-space/examples/router-app
+module github.com/hypen-lang/hypen/hypen-golang/examples/router-app
 
 go 1.25.0
 

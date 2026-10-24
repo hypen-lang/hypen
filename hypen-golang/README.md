@@ -5,21 +5,28 @@ A complete Go implementation of the Hypen reactive UI framework SDK.
 ## Installation
 
 ```bash
-go get github.com/hypen-lang/hypen/hypen-golang
+go get github.com/hypen-lang/hypen/hypen-golang@v0.6.7
 ```
 
 Requires **Go 1.25+** (wazero v1.12.0, whose own floor is Go 1.25). On an
 older toolchain, run with `GOTOOLCHAIN=go1.25.0` and Go downloads it.
 
-> **Not fetchable yet?** If `go get` cannot resolve
-> `github.com/hypen-space/core`, point the import path at a local checkout
-> of this directory instead:
->
-> ```bash
-> go mod edit -require=github.com/hypen-space/core@v0.0.0 \
->             -replace=github.com/hypen-space/core=/path/to/hypen/hypen-golang
-> go mod tidy
-> ```
+This directory is a subdirectory module of
+[github.com/hypen-lang/hypen](https://github.com/hypen-lang/hypen). Releases
+are tagged `hypen-golang/vX.Y.Z` (in lockstep with the Hypen release), which is
+what `go get ...@vX.Y.Z` resolves. The package name is `core`, so import it as
+`core "github.com/hypen-lang/hypen/hypen-golang"`. The engine WASM
+(`hypen_engine.wasm`) is embedded via `go:embed`, so nothing else is downloaded.
+
+### From source
+
+To build an app against a local checkout of this directory instead of a
+published version:
+
+```bash
+go mod edit -replace=github.com/hypen-lang/hypen/hypen-golang=/path/to/hypen/hypen-golang
+go mod tidy
+```
 
 ## Quick Start
 
@@ -32,8 +39,8 @@ package main
 import (
     "fmt"
 
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // State is a plain Go struct. json tags match the names referenced from

@@ -1,4 +1,4 @@
-module github.com/hypen-space/examples/counter
+module github.com/hypen-lang/hypen/hypen-golang/examples/counter
 
 go 1.25.0
 

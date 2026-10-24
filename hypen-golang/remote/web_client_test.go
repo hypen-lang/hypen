@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 const browserAccept = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
