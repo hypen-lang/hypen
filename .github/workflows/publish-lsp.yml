@@ -32,40 +32,52 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
+      - name: Check version
+        run: |
+          ver=$(node -p "require('./hypen-lsp/package.json').version")
+          if [ "$ver" != "${{ inputs.version }}" ]; then
+            echo "::error::hypen-lsp/package.json is $ver, expected ${{ inputs.version }} (run scripts/bump-versions.sh)"
+            exit 1
+          fi
 
+      # hypen-lsp is a bun package (bun.lock, no package-lock.json). Node is
+      # still needed: vsce and the packaged-server smoke test run on it.
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: latest
 
-      # The LSP imports both parser and engine WASM through checked-in symlinks.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The extension ships the parser WASM (syntax diagnostics) and the
+      # engine WASM (accessibility diagnostics).
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
 
       - uses: Swatinem/rust-cache@v2
         with:
-          workspaces: parser
+          workspaces: |
+            parser
+            hypen-engine-rs
 
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build parser WASM
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features wasm
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features wasm --no-default-features
         working-directory: parser
 
       - name: Build engine WASM
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js
         working-directory: hypen-engine-rs
 
-      # VSCE does not follow the checked-in wasm and wasm-engine symlinks.
-      - name: Copy WASM into extension package
-        run: |
-          rm hypen-lsp/wasm hypen-lsp/wasm-engine
-          cp -R parser/pkg/nodejs hypen-lsp/wasm
-          cp -R hypen-engine-rs/pkg/nodejs hypen-lsp/wasm-engine
+      # wasm/ and wasm-engine/ are checked-in symlinks into the pkg dirs
+      # above; recreate them in case the checkout materialised them as files.
+      - name: Link WASM
+        run: bun run setup:wasm
+        working-directory: hypen-lsp
 
       - name: Install dependencies
         run: bun install --frozen-lockfile
@@ -79,32 +91,63 @@ jobs:
         run: bunx eslint ./src --ext .ts
         working-directory: hypen-lsp
 
-      # VSIX uses .vscodeignore; npm publication uses package.json files.
-      - name: Prepare marketplace manifest
-        run: |
-          npm pkg set name=hypen-lsp
-          npm pkg delete files
-          cp ../LICENSE ./LICENSE
+      - name: Test
+        run: bun run test
         working-directory: hypen-lsp
 
+      # Bundles out/extension.js + out/server.js, copies both WASMs in and
+      # runs `vsce package` from dist/vsix/ (scripts/package-vsix.ts).
       - name: Package VSIX
-        run: bunx vsce package
+        run: bun run package:vsix --out "hypen-lsp-${{ inputs.version }}.vsix"
         working-directory: hypen-lsp
+
+      # Install-time check without VS Code: unpack the VSIX somewhere with no
+      # node_modules, start the bundled server over stdio and require that it
+      # loads both WASMs and answers `initialize`.
+      - name: Smoke-test packaged server
+        run: |
+          set -euo pipefail
+          dir=$(mktemp -d)
+          unzip -q "hypen-lsp/hypen-lsp-${{ inputs.version }}.vsix" -d "$dir"
+          cd "$dir"
+          node - <<'EOF'
+          const { spawn } = require("child_process");
+          const srv = spawn(process.execPath, ["extension/out/server.js", "--stdio"]);
+          const send = (m) => {
+            const b = Buffer.from(JSON.stringify({ jsonrpc: "2.0", ...m }));
+            srv.stdin.write(`Content-Length: ${b.length}\r\n\r\n`);
+            srv.stdin.write(b);
+          };
+          let out = "";
+          srv.stdout.on("data", (d) => {
+            out += d;
+            if (/WASM parser loaded successfully/.test(out) && /a11y diagnostics active/.test(out)) {
+              console.log("packaged server loaded the parser and engine WASM");
+              srv.kill();
+              process.exit(0);
+            }
+          });
+          srv.stderr.pipe(process.stderr);
+          setTimeout(() => { console.error("timed out:\n" + out); process.exit(1); }, 30000);
+          send({ id: 1, method: "initialize", params: { processId: null, rootUri: null, capabilities: {} } });
+          send({ method: "initialized", params: {} });
+          EOF
 
       - name: Upload VSIX
         uses: actions/upload-artifact@v4
         with:
           name: hypen-lsp-vsix
-          path: hypen-lsp/*.vsix
+          path: hypen-lsp/hypen-lsp-${{ inputs.version }}.vsix
+          if-no-files-found: error
 
   publish:
     name: Publish to VS Code Marketplace
     runs-on: ubuntu-latest
     needs: [build-and-test]
     if: ${{ !inputs.dry-run }}
+    permissions:
+      contents: write
     steps:
-      - uses: actions/checkout@v4
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
@@ -116,18 +159,23 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           name: hypen-lsp-vsix
-          path: hypen-lsp
 
-      - name: Install publishing tool
-        run: bun install --frozen-lockfile
-        working-directory: hypen-lsp
-
-      - name: Set marketplace extension name
-        run: npm pkg set name=hypen-lsp
-        working-directory: hypen-lsp
-
+      # --skip-duplicate: a re-run after a partial release succeeds instead
+      # of failing on the already-published version.
       - name: Publish
-        run: bunx vsce publish --packagePath *.vsix
-        working-directory: hypen-lsp
+        run: npx --yes @vscode/vsce@2.32.0 publish --skip-duplicate --packagePath "hypen-lsp-${{ inputs.version }}.vsix"
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+      # Editors without Marketplace access (Cursor, VSCodium) install the
+      # .vsix by hand, so attach it to the vX.Y.Z release when one exists.
+      - name: Attach VSIX to GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: v${{ inputs.version }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            gh release upload "$TAG" "hypen-lsp-${{ inputs.version }}.vsix" --repo "$GITHUB_REPOSITORY" --clobber
+          else
+            echo "::notice::No release $TAG; the VSIX is only in this run's artifacts"
+          fi
