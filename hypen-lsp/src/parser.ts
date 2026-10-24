@@ -8,7 +8,7 @@
 import { Range, Position } from "vscode-languageserver/node";
 import {
   convertWasmValue,
-  offsetToPosition,
+  byteOffsetToPosition,
   isInString as isInStringUtil,
 } from "./parser-utils";
 import type { WasmValue } from "./parser-utils";
@@ -155,8 +155,8 @@ export function isWasmParserAvailable(): boolean {
  * Convert WASM component to our ComponentNode type
  */
 function convertWasmComponent(text: string, comp: WasmComponent): ComponentNode {
-  const startPos = offsetToPosition(text, comp.metadata.name_range.start);
-  const endPos = offsetToPosition(text, comp.metadata.name_range.end);
+  const startPos = byteOffsetToPosition(text, comp.metadata.name_range.start);
+  const endPos = byteOffsetToPosition(text, comp.metadata.name_range.end);
 
   const node: ComponentNode = {
     name: comp.name,
@@ -170,10 +170,10 @@ function convertWasmComponent(text: string, comp: WasmComponent): ComponentNode 
   if (comp.applicators.length > 0) {
     // Use block_range for applicator ranges when available, otherwise fall back
     const blockStart = comp.metadata.block_range
-      ? offsetToPosition(text, comp.metadata.block_range.start)
+      ? byteOffsetToPosition(text, comp.metadata.block_range.start)
       : startPos;
     const blockEnd = comp.metadata.block_range
-      ? offsetToPosition(text, comp.metadata.block_range.end)
+      ? byteOffsetToPosition(text, comp.metadata.block_range.end)
       : endPos;
 
     node.applicators = comp.applicators.map(app => {
@@ -214,9 +214,12 @@ function parseWithWasm(text: string): ParseResult | null {
     const result = wasmParser.parse_document_wasm(text);
 
     const errors: ParseError[] = result.errors.map(e => ({
+      // `start`/`end` are UTF-8 byte offsets; convert both here rather than
+      // trusting `line`/`column` (older parser builds counted those in
+      // characters from a byte offset).
       range: {
-        start: { line: e.line, character: e.column },
-        end: offsetToPosition(text, e.end),
+        start: byteOffsetToPosition(text, e.start),
+        end: byteOffsetToPosition(text, Math.max(e.end, e.start)),
       },
       message: e.message,
       severity: "error" as const,

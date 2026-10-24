@@ -188,7 +188,8 @@ describe("template diagnostics", () => {
     mkdirSync(join(dir, "Bad"), { recursive: true });
     writeFileSync(join(dir, "Bad/component.hypen"), "module Bad {\n  Column {{{ (\n}\n");
     const problems = await createHypenSourceValidator({ componentsDir: dir, projectRoot: dir })();
-    expect(problems[0]).toMatch(/^Bad\/component\.hypen:\d+:\d+: parse error: unexpected/);
+    // The error is at the stray '{' (2:11), not at the module's '{' (1:12).
+    expect(problems[0]).toBe("Bad/component.hypen:2:11: parse error: expected component or '}', found '{'");
   });
 });
 

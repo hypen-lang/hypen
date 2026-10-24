@@ -14,7 +14,12 @@ pub fn init() {
     console_error_panic_hook::set_once();
 }
 
-/// A parse error with location information
+/// A parse error with location information.
+///
+/// `start`/`end` are UTF-8 **byte** offsets into the source (the same unit as
+/// every AST span). `line` and `column` are the 0-based LSP position of
+/// `start`, with `column` in UTF-16 code units (JavaScript string indices),
+/// so non-ASCII text before the error does not shift it.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ParseError {
     pub message: String,
@@ -33,22 +38,22 @@ pub struct ParseResult {
     pub errors: Vec<ParseError>,
 }
 
-/// Convert byte offset to line and column
-fn offset_to_line_col(source: &str, offset: usize) -> (usize, usize) {
-    let mut line = 0;
-    let mut col = 0;
-    for (i, c) in source.chars().enumerate() {
-        if i >= offset {
-            break;
-        }
-        if c == '\n' {
-            line += 1;
-            col = 0;
-        } else {
-            col += 1;
-        }
-    }
-    (line, col)
+/// Convert parser errors (byte spans) into serializable [`ParseError`]s.
+fn to_parse_errors(source: &str, errors: &[chumsky::error::Rich<'_, char>]) -> Vec<ParseError> {
+    errors
+        .iter()
+        .map(|e| {
+            let span = e.span();
+            let (line, column) = crate::diagnostic::lsp_position(source, span.start);
+            ParseError {
+                message: crate::diagnostic::describe_error(e),
+                start: span.start,
+                end: span.end,
+                line,
+                column,
+            }
+        })
+        .collect()
 }
 
 /// Parse a Hypen document and return JSON result
@@ -62,20 +67,7 @@ pub fn parse_document_wasm(source: &str) -> JsValue {
             errors: vec![],
         },
         Err(errors) => {
-            let parse_errors: Vec<ParseError> = errors
-                .iter()
-                .map(|e| {
-                    let span = e.span();
-                    let (line, column) = offset_to_line_col(source, span.start);
-                    ParseError {
-                        message: format!("{}", e),
-                        start: span.start,
-                        end: span.end,
-                        line,
-                        column,
-                    }
-                })
-                .collect();
+            let parse_errors = to_parse_errors(source, &errors);
             ParseResult {
                 success: false,
                 document: None,
@@ -99,20 +91,7 @@ pub fn parse_components_wasm(source: &str) -> JsValue {
             errors: vec![],
         },
         Err(errors) => {
-            let parse_errors: Vec<ParseError> = errors
-                .iter()
-                .map(|e| {
-                    let span = e.span();
-                    let (line, column) = offset_to_line_col(source, span.start);
-                    ParseError {
-                        message: format!("{}", e),
-                        start: span.start,
-                        end: span.end,
-                        line,
-                        column,
-                    }
-                })
-                .collect();
+            let parse_errors = to_parse_errors(source, &errors);
             ParseResult {
                 success: false,
                 document: None,
@@ -136,20 +115,7 @@ pub fn parse_component_wasm(source: &str) -> JsValue {
             errors: vec![],
         },
         Err(errors) => {
-            let parse_errors: Vec<ParseError> = errors
-                .iter()
-                .map(|e| {
-                    let span = e.span();
-                    let (line, column) = offset_to_line_col(source, span.start);
-                    ParseError {
-                        message: format!("{}", e),
-                        start: span.start,
-                        end: span.end,
-                        line,
-                        column,
-                    }
-                })
-                .collect();
+            let parse_errors = to_parse_errors(source, &errors);
             ParseResult {
                 success: false,
                 document: None,
