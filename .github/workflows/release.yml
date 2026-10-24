@@ -284,6 +284,14 @@ jobs:
           rm -rf wasm && ln -sf ../parser/pkg/nodejs wasm
           bun install --frozen-lockfile
           bunx tsc -b
+          # npm pack drops symlinks, so ship the parser and engine WASM as
+          # real files; otherwise the published server (used by Studio)
+          # silently falls back to the regex parser with no a11y checks.
+          rm -rf wasm wasm-engine
+          cp -r ../parser/pkg/nodejs wasm
+          cp -r ../hypen-engine-rs/pkg/nodejs wasm-engine
+          rm -f wasm/.gitignore wasm-engine/.gitignore
+          npm pack --dry-run 2>&1 | grep -E 'wasm(-engine)?/.*\.wasm' || { echo "::error::@hypen-space/lsp tarball has no WASM"; exit 1; }
         working-directory: hypen-lsp
 
       # The CLI depends on this release's @hypen-space/* versions, which are

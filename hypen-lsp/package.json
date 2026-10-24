@@ -5,7 +5,12 @@
   "version": "0.6.7",
   "publisher": "hypen",
   "license": "MIT",
-  "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/hypen-lang/hypen",
+    "directory": "hypen-lsp"
+  },
+  "icon": "icons/hypen.png",
   "engines": {
     "vscode": "^1.75.0"
   },
@@ -43,8 +48,8 @@
         ],
         "configuration": "./language-configuration.json",
         "icon": {
-          "light": "./icons/hypen-light.png",
-          "dark": "./icons/hypen-dark.png"
+          "light": "./icons/hypen.png",
+          "dark": "./icons/hypen.png"
         }
       }
     ],
@@ -89,14 +94,15 @@
     "onLanguage:hypen"
   ],
   "scripts": {
-    "vscode:prepublish": "npm run build:wasm && npm run compile",
+    "vscode:prepublish": "bun run compile",
     "compile": "tsc -b",
     "watch": "tsc -b -w",
     "lint": "eslint ./src --ext .ts",
-    "test": "node ./out/test/runTest.js",
-    "package": "vsce package",
-    "build:wasm": "cd ../parser && ./build-wasm.sh && cd ../hypen-engine-rs && HYPEN_SKIP_BINDINGS=1 wasm-pack build --target nodejs --out-dir pkg/nodejs --features js",
-    "setup:wasm": "rm -rf wasm wasm-engine && ln -sf ../parser/pkg/nodejs wasm && ln -sf ../hypen-engine-rs/pkg/nodejs wasm-engine"
+    "test": "for f in src/test/*.test.ts; do bun \"$f\" || exit 1; done",
+    "package": "bun run package:vsix",
+    "build:wasm": "cd ../parser && wasm-pack build --target nodejs --out-dir pkg/nodejs --features wasm --no-default-features && cd ../hypen-engine-rs && wasm-pack build --target nodejs --out-dir pkg/nodejs --features js",
+    "setup:wasm": "rm -rf wasm wasm-engine && ln -sf ../parser/pkg/nodejs wasm && ln -sf ../hypen-engine-rs/pkg/nodejs wasm-engine",
+    "package:vsix": "bun scripts/package-vsix.ts"
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1",

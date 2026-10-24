@@ -21,31 +21,46 @@ A Language Server Protocol implementation for the [Hypen](https://github.com/hyp
 
 ## Installation
 
-### From VSIX (Recommended)
+### From the VS Code Marketplace (Recommended)
 
-1. Download the latest `.vsix` file from releases
-2. In VSCode/Cursor: Extensions → Install from VSIX
-3. Select the downloaded file
-4. Reload the window
+Install **Hypen Language Support** (publisher `hypen`): open the Extensions
+view (`Ctrl+Shift+X`), search for "Hypen" and click **Install**. Editors that
+use Open VSX instead of the Marketplace (such as Cursor) can install a `.vsix`
+built from source (below) with **Extensions → ... → Install from VSIX...**.
 
 ### From Source
 
+Needs [Bun](https://bun.sh), Node.js, Rust (with the `wasm32-unknown-unknown`
+target) and `wasm-pack` — the extension ships the parser and engine compiled
+to WebAssembly:
+
 ```bash
 cd hypen-lsp
-npm install
-npm run compile
+bun install
+bun run build:wasm   # parser + engine WASM (nodejs target)
+bun run setup:wasm   # link wasm/ and wasm-engine/ to the build output
+bun run compile
 ```
 
 Then press F5 in VSCode to launch the extension in development mode.
 
 ### Building VSIX Package
 
+After the steps above:
+
 ```bash
-npm install -g @vscode/vsce
-npm run package
+bun run package:vsix   # -> hypen-lsp-<version>.vsix
+code --install-extension hypen-lsp-<version>.vsix
 ```
 
-This creates a `.vsix` file you can install or distribute.
+`scripts/package-vsix.ts` bundles `out/extension.js` and `out/server.js`
+with their dependencies (the VSIX carries no `node_modules`), copies the
+parser and engine WASM in as real files, and runs `vsce package` from a
+staging directory (`dist/vsix/`) with a VSIX manifest named `hypen-lsp`
+(extension id `hypen.hypen-lsp`) — `package.json` itself stays the npm
+manifest of `@hypen-space/lsp`. It does not rebuild the WASM; it stops with a
+hint if `wasm/` or `wasm-engine/` is missing. CI builds and publishes the same
+VSIX in `.github/workflows/publish-lsp.yml`.
 
 ## Usage
 
@@ -199,7 +214,7 @@ hypen-lsp/
 ### Running Tests
 
 ```bash
-npm test
+bun run test
 ```
 
 ### Debugging
@@ -214,7 +229,7 @@ npm test
 For continuous compilation during development:
 
 ```bash
-npm run watch
+bun run watch
 ```
 
 ## Contributing
