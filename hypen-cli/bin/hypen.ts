@@ -478,8 +478,9 @@ async function initProject(name?: string) {
       console.error(`\n  Failed to resolve modules. Run ${dim("go mod tidy")} manually.\n`);
     }
   }
-  // Kotlin resolves space.hypen:hypen-kotlin (pinned to this CLI's version)
-  // from Maven Local, then Maven Central, on the first `./gradlew build`/`run`. The scaffold ships no
+  // Kotlin resolves space.hypen:hypen-kotlin (pinned to this CLI's version,
+  // native engine bundled) from Maven Central on the first `./gradlew
+  // build`/`run`. The scaffold ships no
   // wrapper jar, so generate `./gradlew` with a local Gradle when there is
   // one; otherwise the hint below says `gradle run`.
   let kotlinRun = "gradle run";

@@ -261,11 +261,9 @@ In your Android project, add the renderer from Maven Central:
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("space.hypen:hypen-renderer:0.4.952")
+    implementation("space.hypen:hypen-renderer:0.6.7")
 }
 ```
-
-0.4.952 is the newest published renderer. It is older than the current Hypen packages (0.6.x), so recent renderer fixes are not in it yet.
 
 In your Composable:
 
@@ -388,12 +386,15 @@ fun HypenApp(
     modifier: Modifier = Modifier,
     config: RemoteEngineConfig = RemoteEngineConfig.DEFAULT,
     navigation: NavigationOptions? = null,
+    safeAreaInsets: HypenSafeAreaInsets? = null,
+    deviceHost: DeviceHost? = null,
+    disposeDeviceHost: Boolean = false,
     loadingContent: @Composable () -> Unit = { DefaultLoadingContent() },
-    errorContent: @Composable (String) -> Unit = { DefaultErrorContent(it) }
+    errorContent: @Composable (String) -> Unit = { DefaultErrorContent(it) },
 )
 ```
 
-Newer renderer builds (not yet published) add `safeAreaInsets` and `deviceHost` parameters.
+See the [Android adapter](/docs/adapters/android#parameters) for what each parameter does.
 
 ### RemoteEngine (Programmatic)
 

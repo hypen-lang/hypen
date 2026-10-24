@@ -18,7 +18,7 @@ The renderer is published to Maven Central as **`space.hypen:hypen-renderer`**. 
 ```kotlin
 // build.gradle.kts (app module)
 dependencies {
-    implementation("space.hypen:hypen-renderer:0.4.952")
+    implementation("space.hypen:hypen-renderer:0.6.7")
 }
 ```
 
@@ -32,14 +32,7 @@ dependencyResolutionManagement {
 }
 ```
 
-> **Version status.** `0.4.952` is the newest release on Maven Central, and it is older than the renderer in the repository (`0.6.5`). Fixes made since then, such as whole numbers rendering as `2` instead of `2.0`, are only in the repository. To use the current code, build it from a checkout of the [Hypen repository](https://github.com/hypen-lang/hypen):
->
-> ```bash
-> cd hypen/hypen-renderer-android
-> ./gradlew :renderer:publishToMavenLocal   # space.hypen:hypen-renderer:0.6.5
-> ```
->
-> then add `mavenLocal()` to your repositories and depend on `space.hypen:hypen-renderer:0.6.5`.
+To work on the renderer itself (contributors), build it from `hypen-renderer-android/` in a checkout of the [Hypen repository](https://github.com/hypen-lang/hypen); its README covers the build and the gallery app.
 
 Your app needs the `INTERNET` permission. During development, a plain `ws://` server also needs cleartext traffic allowed (for example `android:usesCleartextTraffic="true"` on a debug build):
 
@@ -78,12 +71,12 @@ Any Hypen server works: `hypen dev` (port 3000 by default), a TypeScript `Remote
 | `modifier` | `Modifier` | Modifier for the root container |
 | `config` | `RemoteEngineConfig.DEFAULT` | Reconnect and timeout settings (`autoReconnect`, `reconnectIntervalMs`, `maxReconnectAttempts`, `connectTimeoutMs`, ...) |
 | `navigation` | `null` | `NavigationOptions(backAction = "...")` to send an action when the system back button is pressed |
-| `safeAreaInsets` | `null` | Override the insets `SafeArea` elements pad by (repository build only, not in 0.4.952) |
-| `deviceHost` | `null` | Device Capability host (camera, files, microphone, ...), e.g. `AndroidDeviceHost.create(activity, url)` (repository build only, not in 0.4.952) |
+| `safeAreaInsets` | `null` | Override the insets `SafeArea` elements pad by |
+| `deviceHost` | `null` | Device Capability host (camera, files, microphone, ...), e.g. `AndroidDeviceHost.create(activity, url)` |
 | `loadingContent` | built-in | Composable shown while connecting |
 | `errorContent` | built-in | Composable shown on error, receives the message |
 
-In the repository build, the connection also survives Activity recreation (rotation, the system destroying the Activity behind a picker): the new Activity's `HypenApp` re-attaches to the same session.
+The connection also survives Activity recreation (rotation, the system destroying the Activity behind a picker): the new Activity's `HypenApp` re-attaches to the same session.
 
 ### Layout tip
 

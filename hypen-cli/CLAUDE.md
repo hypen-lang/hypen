@@ -76,10 +76,12 @@ non-TTY runs (CI, pipes, teleport web sessions), when `CI` or
 (`promptModuleLayout`), then dispatches to `typescript.ts` / `go.ts` /
 `kotlin.ts` to scaffold a Counter starter (Router + Home + Counter). TS and
 Kotlin pin the SDK to the CLI's own version (TS: `^<version>` for
-`@hypen-space/*`, then `bun install`; Kotlin: `space.hypen:hypen-kotlin:<version>`,
-resolved from Maven Local before Maven Central, or built from a checkout via
-`HYPEN_KOTLIN_SDK`, with the native engine from `HYPEN_NATIVE_LIB_DIR`). Go
-ships a `go.mod` without the hypen require and runs `go mod tidy`.
+`@hypen-space/*`, then `bun install`; Kotlin: `space.hypen:hypen-kotlin:<version>`
+from Maven Central, whose jar bundles the native engine; contributors can
+build the SDK from a checkout via `HYPEN_KOTLIN_SDK` and override the engine
+with `HYPEN_NATIVE_LIB_DIR`). Go's `go.mod` requires
+`github.com/hypen-lang/hypen/hypen-golang v<version>` (with a commented
+`replace` for SDK contributors), then runs `go mod tidy`.
 
 ### Dev Server
 Two implementations with intentionally different architectures:
