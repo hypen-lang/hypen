@@ -31,6 +31,55 @@ dependencies {
     testImplementation("io.netty:netty-codec-http:4.1.110.Final")
 }
 
+// ---------------------------------------------------------------------------
+// Bundled native engine (JNA classpath resources)
+// ---------------------------------------------------------------------------
+// The UniFFI bindings load `hypen_engine` through JNA. When it is not on
+// `jna.library.path` or the system search path, JNA extracts it from the
+// classpath at `<os-arch>/<file>` (`com.sun.jna.Platform.RESOURCE_PREFIX`),
+// so the published jar carries one library per supported platform and
+// consumers need no Rust toolchain or library path.
+//
+// The libraries are copied in from `build/natives` (override with
+// `-Phypen.nativesDir=<dir>`), laid out as JNA expects:
+//
+//   linux-x86-64/libhypen_engine.so      darwin-aarch64/libhypen_engine.dylib
+//   linux-aarch64/libhypen_engine.so     darwin-x86-64/libhypen_engine.dylib
+//   win32-x86-64/hypen_engine.dll
+//
+// Release CI (.github/workflows/publish-kotlin.yml) builds all five and
+// passes `-Phypen.requireNatives=true`, which fails the jar when any is
+// missing. A local build without the directory simply ships no natives and
+// local runs keep using `jna.library.path` (see the Test config below).
+val hypenNativeResources: Map<String, String> = linkedMapOf(
+    "linux-x86-64" to "libhypen_engine.so",
+    "linux-aarch64" to "libhypen_engine.so",
+    "darwin-aarch64" to "libhypen_engine.dylib",
+    "darwin-x86-64" to "libhypen_engine.dylib",
+    "win32-x86-64" to "hypen_engine.dll",
+)
+val hypenNativesDir: File =
+    (findProperty("hypen.nativesDir") as String?)?.let { file(it) }
+        ?: layout.buildDirectory.dir("natives").get().asFile
+val hypenRequireNatives: Boolean = (findProperty("hypen.requireNatives") as String?)?.toBoolean() ?: false
+
+tasks.named<ProcessResources>("processResources") {
+    from(hypenNativesDir) {
+        hypenNativeResources.forEach { (prefix, lib) -> include("$prefix/$lib") }
+    }
+    doFirst {
+        val missing = hypenNativeResources.filter { (prefix, lib) -> !hypenNativesDir.resolve("$prefix/$lib").isFile }
+        if (hypenRequireNatives && missing.isNotEmpty()) {
+            throw GradleException(
+                "hypen.requireNatives: missing native libraries in $hypenNativesDir: " +
+                    missing.map { (prefix, lib) -> "$prefix/$lib" },
+            )
+        }
+        val bundled = hypenNativeResources.size - missing.size
+        if (bundled > 0) logger.lifecycle("hypen-kotlin: bundling $bundled native engine librar${if (bundled == 1) "y" else "ies"} from $hypenNativesDir")
+    }
+}
+
 tasks.withType<Test> {
     useJUnitPlatform()
 
@@ -40,6 +89,10 @@ tasks.withType<Test> {
     // or use `../scripts/build-native.sh` if available). Point JNA at
     // the workspace `target/release` directory so the .so is found
     // without requiring the user to set LD_LIBRARY_PATH manually.
+    // `jna.library.path` wins over the classpath, so a local build tests
+    // the freshly built library; when target/release has none, JNA falls
+    // back to the copy bundled from `build/natives` (that is how release
+    // CI tests the exact library it publishes).
     //
     // A STALE library fails confusingly, not obviously: the generated
     // `Patch` record is read POSITIONALLY, so a library built before a
@@ -145,7 +198,7 @@ mavenPublishing {
     pom {
         name.set("Hypen Kotlin SDK")
         description.set("Kotlin/JVM SDK for building Hypen server-driven applications.")
-        url.set("https://github.com/hypenlang/hypen-rs")
+        url.set("https://github.com/hypen-lang/hypen")
 
         licenses {
             license {
@@ -162,9 +215,9 @@ mavenPublishing {
             }
         }
         scm {
-            url.set("https://github.com/hypenlang/hypen-rs")
-            connection.set("scm:git:git://github.com/hypenlang/hypen-rs.git")
-            developerConnection.set("scm:git:ssh://git@github.com:hypenlang/hypen-rs.git")
+            url.set("https://github.com/hypen-lang/hypen")
+            connection.set("scm:git:git://github.com/hypen-lang/hypen.git")
+            developerConnection.set("scm:git:ssh://git@github.com:hypen-lang/hypen.git")
         }
     }
 }

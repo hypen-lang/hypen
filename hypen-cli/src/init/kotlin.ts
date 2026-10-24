@@ -29,8 +29,8 @@ interface Options {
 /**
  * The CLI and `space.hypen:hypen-kotlin` are versioned in lockstep, so the
  * scaffold pins the SDK to the CLI's own version. (`latest.release` would
- * silently resolve whatever Maven Central has last published, which can be
- * an older SDK whose bindings don't match the engine you build.)
+ * silently resolve whatever Maven Central has last published, which may not
+ * match the docs and templates this CLI generates.)
  */
 function cliVersion(): string {
   try {
@@ -188,15 +188,13 @@ group = "app.hypen.starter"
 version = "0.1.0"
 
 repositories {
-    // \`./gradlew publishToMavenLocal\` in hypen/hypen-kotlin installs the SDK
-    // here; settings.gradle.kts can also build it from source (HYPEN_KOTLIN_SDK).
-    mavenLocal()
     mavenCentral()
 }
 
 dependencies {
     // Pinned to the hypen CLI version that generated this project (the CLI
-    // and the SDK are released together).
+    // and the SDK are released together). The jar bundles the native Hypen
+    // engine for Linux, macOS and Windows; nothing else to install.
     implementation("space.hypen:hypen-kotlin:${sdkVersion}")
     implementation("io.ktor:ktor-server-core:3.1.1")
     implementation("io.ktor:ktor-server-netty:3.1.1")
@@ -223,24 +221,16 @@ application {
     mainClass.set("app.hypen.starter.MainKt")
 }
 
-// The SDK drives the native Hypen engine (libhypen_engine.so / .dylib /
-// hypen_engine.dll) through JNA; it is not bundled in the jar. Point
-// HYPEN_NATIVE_LIB_DIR (or -Phypen.nativeLibDir=...) at the directory that
-// holds it, e.g. hypen/target/release after
-// \`cargo build --release --features uniffi\` in hypen/hypen-engine-rs.
+// Engine developers only: load libhypen_engine from a local build instead of
+// the copy bundled in the SDK jar, e.g.
+//   HYPEN_NATIVE_LIB_DIR=/path/to/hypen/target/release ./gradlew run
+// (or -Phypen.nativeLibDir=...). Leave it unset to use the bundled engine.
 val hypenNativeLibDir: String? =
     System.getenv("HYPEN_NATIVE_LIB_DIR") ?: (findProperty("hypen.nativeLibDir") as String?)
 
 tasks.named<JavaExec>("run") {
     if (hypenNativeLibDir != null) {
         systemProperty("jna.library.path", file(hypenNativeLibDir).absolutePath)
-    } else {
-        doFirst {
-            logger.warn(
-                "HYPEN_NATIVE_LIB_DIR is not set: clients will fail to connect unless libhypen_engine " +
-                    "is on the JNA search path (see README.md)."
-            )
-        }
     }
 }
 `;
@@ -250,8 +240,9 @@ function settingsGradle(projectName: string): string {
   const safe = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
   return `rootProject.name = "${safe}"
 
-// Build space.hypen:hypen-kotlin from a Hypen checkout instead of a published
-// artifact: export HYPEN_KOTLIN_SDK=/path/to/hypen/hypen-kotlin
+// For contributors: build space.hypen:hypen-kotlin from a Hypen checkout
+// instead of the Maven Central artifact:
+//   export HYPEN_KOTLIN_SDK=/path/to/hypen/hypen-kotlin
 System.getenv("HYPEN_KOTLIN_SDK")?.let { includeBuild(it) }
 `;
 }
@@ -432,8 +423,8 @@ ${routes}${watchCall}    }
                     )
                 } catch (e: Throwable) {
                     // Ktor logs nothing here without an SLF4J backend, so
-                    // report setup failures (e.g. the native engine library
-                    // not found on jna.library.path) instead of a silent close.
+                    // report setup failures (e.g. the native engine failing to
+                    // load) instead of a silent close.
                     System.err.println("Hypen: failed to start a session: $e")
                     close(CloseReason(CloseReason.Codes.INTERNAL_ERROR, "session setup failed"))
                     return@webSocket
@@ -479,33 +470,11 @@ Hypen project scaffolded with \`hypen init\` (Kotlin, ${layout}).
 - JDK 17+
 - Gradle 8+ (\`hypen init\` generates a \`./gradlew\` wrapper when Gradle is
   installed; otherwise run \`gradle wrapper\` once, or use \`gradle run\`)
-- A Rust toolchain and a checkout of the Hypen repository
-  (\`git clone https://github.com/hypen-lang/hypen\`), for the SDK and the
-  native engine below.
 
-## Setup
-
-The project depends on \`space.hypen:hypen-kotlin:${sdkVersion}\` (the version of
-the CLI that generated it). If Maven Central does not have that version yet,
-use the SDK from your Hypen checkout, either installed once into Maven Local:
-
-\`\`\`bash
-(cd /path/to/hypen/hypen-kotlin && ./gradlew publishToMavenLocal)
-\`\`\`
-
-or built from source on every build (no publish step):
-
-\`\`\`bash
-export HYPEN_KOTLIN_SDK=/path/to/hypen/hypen-kotlin
-\`\`\`
-
-The SDK drives the native Hypen engine through JNA, and the library is not
-in the jar. Build it and tell \`./gradlew run\` where it is:
-
-\`\`\`bash
-(cd /path/to/hypen/hypen-engine-rs && cargo build --release --features uniffi)
-export HYPEN_NATIVE_LIB_DIR=/path/to/hypen/target/release
-\`\`\`
+The project depends on \`space.hypen:hypen-kotlin:${sdkVersion}\` from Maven
+Central (the version of the CLI that generated it). The SDK jar bundles the
+native Hypen engine for Linux (x86-64, arm64), macOS (Apple Silicon, Intel)
+and Windows (x86-64), so no Rust toolchain or library path is needed.
 
 ## Getting started
 
@@ -519,6 +488,23 @@ Hypen client to it, for example the Android gallery app
 from an emulator).
 
 ${layoutNote}
+
+## For contributors: building the SDK from source
+
+To run against a Hypen checkout instead of the published SDK:
+
+\`\`\`bash
+# Build space.hypen:hypen-kotlin from source (see settings.gradle.kts)
+export HYPEN_KOTLIN_SDK=/path/to/hypen/hypen-kotlin
+
+# Build the engine and load it instead of a bundled one
+(cd /path/to/hypen && cargo build --release -p hypen-engine --features uniffi)
+export HYPEN_NATIVE_LIB_DIR=/path/to/hypen/target/release
+\`\`\`
+
+A source build of the SDK carries no bundled engine, so set
+\`HYPEN_NATIVE_LIB_DIR\` with it. On its own, \`HYPEN_NATIVE_LIB_DIR\` also
+swaps the engine under the published SDK (useful when working on the engine).
 `;
 }
 

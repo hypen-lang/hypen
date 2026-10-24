@@ -13,8 +13,12 @@ The SDK is published to Maven Central as **`space.hypen:hypen-kotlin`**:
 
 ```kotlin
 // build.gradle.kts
+repositories {
+    mavenCentral()
+}
+
 dependencies {
-    implementation("space.hypen:hypen-kotlin:<version>")
+    implementation("space.hypen:hypen-kotlin:0.6.7")
 }
 ```
 
@@ -22,34 +26,33 @@ dependencies {
 <dependency>
     <groupId>space.hypen</groupId>
     <artifactId>hypen-kotlin</artifactId>
-    <version><!-- version --></version>
+    <version>0.6.7</version>
 </dependency>
 ```
 
-> **Version status.** The newest release on Maven Central is currently
-> `0.4.952`, which predates the API on this page (the repository is at
-> `0.6.5`). Until a current version is published, build the SDK from a
-> checkout of the [Hypen repository](https://github.com/hypen-lang/hypen)
-> and install it into your local Maven repository:
->
-> ```bash
-> cd hypen/hypen-kotlin
-> ./gradlew publishToMavenLocal   # installs space.hypen:hypen-kotlin:0.6.5
-> ```
->
-> Then add `mavenLocal()` to your `repositories { }` and depend on
-> `space.hypen:hypen-kotlin:0.6.5`.
-
 ### Native engine library
 
-The SDK drives the Rust engine through UniFFI/JNA, so the native library (`libhypen_engine.so`, `.dylib` or `hypen_engine.dll`) must be on the JNA search path at runtime. It is not bundled in the jar. Build it from the same checkout (needs a Rust toolchain):
+The SDK drives the Rust engine through UniFFI/JNA. The jar bundles the native library for Linux (x86-64 and arm64, glibc), macOS (Apple Silicon and Intel) and Windows (x86-64), and JNA loads the right one from the classpath at runtime. There is nothing else to install: no Rust toolchain, no `jna.library.path`.
+
+To use a different build of the engine (for example while working on it), point JNA at its directory. `-Djna.library.path` is searched before the bundled copy:
 
 ```bash
-cd hypen/hypen-engine-rs
-cargo build --release --features uniffi   # -> hypen/target/release/libhypen_engine.so
+cargo build --release -p hypen-engine --features uniffi   # from a Hypen checkout
+java -Djna.library.path=/path/to/hypen/target/release ...
 ```
 
-and start the JVM with `-Djna.library.path=/path/to/hypen/target/release` (or set `LD_LIBRARY_PATH` / `DYLD_LIBRARY_PATH`).
+### Building from source (contributors)
+
+To work on the SDK itself, build it from a checkout of the [Hypen repository](https://github.com/hypen-lang/hypen). A source build bundles no engine, so build that too and point the tests and your app at it:
+
+```bash
+cd hypen
+cargo build --release -p hypen-engine --features uniffi   # -> target/release/libhypen_engine.so
+cd hypen-kotlin
+./gradlew test                                            # uses ../target/release
+```
+
+To use the checkout from another Gradle project, add `includeBuild("/path/to/hypen/hypen-kotlin")` to its `settings.gradle.kts` (projects from `hypen init` do this when `HYPEN_KOTLIN_SDK` is set) and run it with `-Djna.library.path=/path/to/hypen/target/release`.
 
 ## Quick Start
 
@@ -64,12 +67,11 @@ plugins {
 }
 
 repositories {
-    mavenLocal()     // while you use a locally published SDK (see above)
     mavenCentral()
 }
 
 dependencies {
-    implementation("space.hypen:hypen-kotlin:0.6.5")
+    implementation("space.hypen:hypen-kotlin:0.6.7")
     implementation("io.ktor:ktor-server-core:3.1.1")
     implementation("io.ktor:ktor-server-netty:3.1.1")
     implementation("io.ktor:ktor-server-websockets:3.1.1")
@@ -79,7 +81,6 @@ dependencies {
 
 application {
     mainClass.set("MainKt")
-    applicationDefaultJvmArgs = listOf("-Djna.library.path=/path/to/hypen/target/release")
 }
 ```
 
@@ -165,7 +166,7 @@ fun main() {
 }
 ```
 
-Run it with `./gradlew run`, then point a Hypen client (Android, desktop, a web `RemoteEngine`) at `ws://localhost:3000`. Unlike the TypeScript and Go servers, the Kotlin server does not serve a built-in browser page. `hypen init` can generate this project for you (choose Kotlin); its `Main.kt` uses the same wiring, and its `./gradlew run` reads the native library directory from `HYPEN_NATIVE_LIB_DIR` (and, if set, builds the SDK from a checkout named by `HYPEN_KOTLIN_SDK`) — see the generated `README.md`.
+Run it with `./gradlew run`, then point a Hypen client (Android, desktop, a web `RemoteEngine`) at `ws://localhost:3000`. Unlike the TypeScript and Go servers, the Kotlin server does not serve a built-in browser page. `hypen init` can generate this project for you (choose Kotlin); its `Main.kt` uses the same wiring, and it depends on the same Maven Central artifact, so `./gradlew run` works right away. For contributors, `HYPEN_KOTLIN_SDK` builds the SDK from a checkout and `HYPEN_NATIVE_LIB_DIR` loads a locally built engine — see the generated `README.md`.
 
 For production wiring (upgrade admission, compression that keeps the device plane working, binary device frames), see [Integrating with Ktor](#integrating-with-ktor) and `hypen-kotlin/example-server/src/main/kotlin/Sockets.kt` in the repository.
 
@@ -938,7 +939,7 @@ watcher.stop()
 
 ## WASM Engine
 
-The `NativeEngine` uses UniFFI bindings to run the Rust Hypen engine via WASI:
+The `NativeEngine` uses UniFFI bindings to run the Rust Hypen engine natively (through JNA, from the library bundled in the jar):
 
 ```kotlin
 val engine = NativeEngine()
@@ -1166,7 +1167,8 @@ WORKDIR /app
 COPY . .
 RUN gradle shadowJar --no-daemon
 
-FROM eclipse-temurin:17-jre-alpine
+# glibc-based image: the bundled Linux engine does not load on musl (Alpine)
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /app/build/libs/*-all.jar app.jar
 COPY --from=build /app/components ./components
@@ -1176,7 +1178,7 @@ CMD ["java", "-jar", "app.jar"]
 
 ### Production Checklist
 
-- Bundle the native engine library (`libhypen_engine.so`) with your deployment and set `-Djna.library.path`
+- The engine ships inside the SDK jar (keep it in your fat jar / image). The Linux builds need glibc, so use a glibc-based JRE image (for example `eclipse-temurin:17-jre`), not Alpine
 - Each client gets its own module instance — plan memory accordingly
 - Use `server.shutdown()` for graceful shutdown
 - Monitor sessions via `server.getStats()`
@@ -1190,7 +1192,7 @@ CMD ["java", "-jar", "app.jar"]
 - Kotlin 2.0+ with JVM target 17+
 - `kotlinx-coroutines-core` 1.9+
 - `kotlinx-serialization-json` 1.7+
-- JNA 5.14+ and the native `hypen_engine` library (see [Native engine library](#native-engine-library))
+- JNA 5.14+ (a dependency of the SDK). The native `hypen_engine` library is bundled in the jar for Linux x86-64/arm64, macOS arm64/x86-64 and Windows x86-64 (see [Native engine library](#native-engine-library))
 - Ktor (recommended for WebSocket serving)
 
 ## See Also
