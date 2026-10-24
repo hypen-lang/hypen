@@ -21,6 +21,9 @@ export async function localWasmInitOptions(): Promise<WasmInitOptions | null> {
   if (cached !== undefined) return cached;
   try {
     const res = await fetch("/wasm/hypen_engine.js", { method: "HEAD" });
+    // Drain the (empty) body: Chromium reports an unconsumed fetch as an
+    // aborted request (net::ERR_ABORTED) in the console/devtools.
+    await res.text().catch(() => {});
     cached = res.ok
       ? { jsUrl: "/wasm/hypen_engine.js", wasmUrl: "/wasm/hypen_engine_bg.wasm" }
       : null;

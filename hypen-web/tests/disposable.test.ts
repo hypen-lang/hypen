@@ -178,18 +178,19 @@ describe("Disposable Pattern", () => {
 
     test("works with DOM elements", () => {
       // Create a mock DOM element
+      type MockElement = { listeners: Map<string, Set<EventListener>> };
       const element = {
         listeners: new Map<string, Set<EventListener>>(),
-        addEventListener(type: string, listener: EventListener) {
+        addEventListener(this: MockElement, type: string, listener: EventListener) {
           if (!this.listeners.has(type)) {
             this.listeners.set(type, new Set());
           }
           this.listeners.get(type)!.add(listener);
         },
-        removeEventListener(type: string, listener: EventListener) {
+        removeEventListener(this: MockElement, type: string, listener: EventListener) {
           this.listeners.get(type)?.delete(listener);
         },
-        dispatchEvent(event: { type: string }) {
+        dispatchEvent(this: MockElement, event: { type: string }) {
           this.listeners.get(event.type)?.forEach((l) => l(event as Event));
         },
       } as unknown as EventTarget;

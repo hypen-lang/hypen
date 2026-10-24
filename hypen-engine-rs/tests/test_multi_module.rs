@@ -59,10 +59,10 @@ fn extract_create_texts(patches: &[Patch]) -> Vec<String> {
             if let Patch::Create { props, .. } = p {
                 // Try "text" key first, then "0" (positional argument)
                 let val = props.get("text").or_else(|| props.get("0"));
-                val.and_then(|v| match v {
-                    serde_json::Value::String(s) => Some(s.clone()),
-                    serde_json::Value::Number(n) => Some(n.to_string()),
-                    other => Some(other.to_string()),
+                val.map(|v| match v {
+                    serde_json::Value::String(s) => s.clone(),
+                    serde_json::Value::Number(n) => n.to_string(),
+                    other => other.to_string(),
                 })
             } else {
                 None
@@ -790,7 +790,7 @@ fn test_double_state_update_doesnt_null_module_state() {
         .filter(|p| matches!(p, Patch::Create { element_type, .. } if element_type == "Image"))
         .collect();
     println!("After first update: {} images", images1.len());
-    assert!(images1.len() >= 1, "Should have images after navigate");
+    assert!(!images1.is_empty(), "Should have images after navigate");
 
     // Check for value=null SetProp
     let null_setprops: Vec<_> = first_patches.iter().filter(|p| {

@@ -15,13 +15,16 @@
 import { join, resolve, normalize, relative, isAbsolute } from "path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import {
-  discoverComponents,
-  watchComponents,
   generateComponentsCode,
   type DiscoveredComponent,
 } from "@hypen-space/server";
 import { pink, yellow, dim, boldPink, boldYellow } from "./colors.js";
 import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
+import { importFromProject } from "./dev-resolve.js";
+import { DevServerError } from "./dev-errors.js";
+import { createHypenSourceValidator, formatReloadError } from "./dev-diagnostics.js";
+
+export { DevServerError };
 
 export interface DevOptions {
   /**
@@ -55,15 +58,14 @@ export interface DevOptions {
   /**
    * @deprecated No effect under Bun: the dev server streams patches to the
    * built-in web client instead of bundling a browser SPA, so there is no
-   * HTML template to swap. Passing it logs a warning. (Still honored by the
-   * Node fallback dev server.)
+   * HTML template to swap. Passing it logs a warning.
    */
   htmlTemplate?: string;
 
   /**
    * @deprecated No effect under Bun: the dev server no longer generates
    * `.hypen/` files (use `hypen generate` for that). Passing it logs a
-   * warning. (Still honored by the Node fallback dev server.)
+   * warning.
    */
   outDir?: string;
 
@@ -126,6 +128,7 @@ function getDefaultHtmlTemplate(entry: string): string {
        env(safe-area-inset-*) reports real values for the SafeArea component. -->
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
   <title>Hypen App</title>
+  <link rel="icon" href="data:,">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; }
@@ -179,21 +182,6 @@ export default app;
 }
 
 /**
- * Error thrown by `dev()` for expected failure modes, so programmatic
- * callers can catch and handle them. The CLI catches it, prints the
- * message, and exits — `dev()` itself never kills the host process.
- */
-export class DevServerError extends Error {
-  constructor(
-    message: string,
-    readonly code: "ENTRY_NOT_FOUND" | "PORT_IN_USE"
-  ) {
-    super(message);
-    this.name = "DevServerError";
-  }
-}
-
-/**
  * Start a development server.
  *
  * Runs the project through a `RemoteServer`: components are discovered from
@@ -214,8 +202,10 @@ export class DevServerError extends Error {
  *
  * File changes hot-reload by briefly disconnecting every client: each one
  * auto-reconnects (~0.5s), resumes its session against the freshly loaded
- * templates and module code, and gets its saved primary-module state back.
- * Nested (route) module state resets on reload.
+ * templates and module code, and gets every module's state back — the
+ * primary, nested and route modules (`RemoteSession` snapshot). An edited
+ * module `.ts` keeps the saved values of keys that still exist with the
+ * same kind (`mergeRestoredState` in @hypen-space/core/remote).
  *
  * @throws {DevServerError} when the entry component can't be found or the
  * port is taken.
@@ -253,11 +243,32 @@ export async function dev(options: DevOptions): Promise<{
   const resolvedComponentsDir = resolve(componentsDir);
   log("Components directory:", resolvedComponentsDir);
 
-  const { RemoteServer } = await import("@hypen-space/server/remote");
-  const { discoverComponents, loadDiscoveredComponents } = await import(
-    "@hypen-space/server"
+  // Runtime packages come from the project when it has them, so the
+  // RemoteServer, the component loader, and the project's component.ts
+  // files all share ONE @hypen-space/core (see dev-resolve.ts).
+  const { RemoteServer } = await importFromProject(
+    "@hypen-space/server/remote",
+    () => import("@hypen-space/server/remote")
   );
-  const { configureLogger } = await import("@hypen-space/core");
+  // The watcher comes from the project's @hypen-space/server too: its
+  // rescan and `remoteServer.reload()` then share one discovery module (one
+  // built-in-name warning per reload, not one per copy).
+  const { discoverComponents, loadDiscoveredComponents, watchComponents } = await importFromProject(
+    "@hypen-space/server",
+    () => import("@hypen-space/server")
+  );
+  const { configureLogger } = await importFromProject(
+    "@hypen-space/core",
+    () => import("@hypen-space/core")
+  );
+
+  if (!existsSync(resolvedComponentsDir)) {
+    throw new DevServerError(
+      `Components directory not found: ${resolvedComponentsDir}\n` +
+        `  Set "components" in hypen.json to the folder that holds your components.`,
+      "ENTRY_NOT_FOUND"
+    );
+  }
 
   const discovered = await discoverComponents(resolvedComponentsDir);
   const loaded = await loadDiscoveredComponents(discovered);
@@ -294,6 +305,20 @@ export async function dev(options: DevOptions): Promise<{
     }
     throw err;
   }
+  // Startup noise is suppressed above; from here on, warnings (e.g. a
+  // component added mid-session that shadows a built-in) should reach the
+  // terminal.
+  if (!debug) configureLogger({ level: "warn" });
+
+  // Parse every .hypen source before a reload: a template with a syntax
+  // error must not take connected clients down to a blank page.
+  const validateSources = createHypenSourceValidator({
+    componentsDir: resolvedComponentsDir,
+    projectRoot: resolve("."),
+    loadServer: () =>
+      importFromProject("@hypen-space/server", () => import("@hypen-space/server")),
+  });
+  let sourcesBroken = false;
 
   // Opt-in accessibility pass over the .hypen sources; runs after the
   // initial build and after every rebuild. Never throws.
@@ -317,6 +342,18 @@ export async function dev(options: DevOptions): Promise<{
           return;
         }
         log("Components changed, reloading clients...");
+        const problems = await validateSources();
+        if (problems.length > 0) {
+          sourcesBroken = true;
+          console.error(`\n  ${yellow("Not reloaded:")} fix the error below; open pages keep the last good version.`);
+          for (const line of problems) console.error(`  ${line}`);
+          console.error("");
+          return;
+        }
+        if (sourcesBroken) {
+          sourcesBroken = false;
+          console.log(`  ${dim("Template error fixed.")}`);
+        }
         try {
           const clients = remoteServer.getClientCount();
           await remoteServer.reload();
@@ -324,7 +361,10 @@ export async function dev(options: DevOptions): Promise<{
             `  ${yellow("Reloaded")} ${dim(`(${clients} client(s) reconnecting)`)}`
           );
         } catch (e: any) {
-          console.error(`  Hot reload failed: ${e?.message ?? e}`);
+          const [first, ...rest] = formatReloadError(e);
+          console.error(`  Hot reload failed: ${first}`);
+          for (const line of rest) console.error(`  ${line}`);
+          console.error(`  ${dim("Open pages keep the last good version.")}`);
         }
         await runA11y?.();
         onComponentsChange?.(components);
@@ -345,6 +385,13 @@ export async function dev(options: DevOptions): Promise<{
   // Initial-build findings print under the banner; fire-and-forget so the
   // WASM engine boot never delays the server coming up.
   void runA11y?.();
+  void validateSources().then((problems) => {
+    if (problems.length === 0) return;
+    sourcesBroken = true;
+    console.error(`  ${yellow("Template error:")} the app won't render until this is fixed.`);
+    for (const line of problems) console.error(`  ${line}`);
+    console.error("");
+  });
 
   return {
     url: serverUrl,
@@ -356,9 +403,17 @@ export async function dev(options: DevOptions): Promise<{
 }
 
 /**
- * Build for production
+ * Build for production — legacy browser-SPA build.
+ *
+ * @deprecated `hypen build` no longer uses this. Use `build` from
+ * `@hypen-space/cli` (the static site `hypen build` emits; see
+ * `src/build.ts`). Kept only for existing programmatic callers.
  */
 export async function build(options: BuildOptions): Promise<void> {
+  console.warn(
+    "[hypen] The runtime-specific `build` export is deprecated and differs from `hypen build`. " +
+      "Use `import { build } from \"@hypen-space/cli\"` instead."
+  );
   const {
     components: componentsDir,
     entry,

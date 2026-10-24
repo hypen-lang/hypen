@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/hypen-space/core/device"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
 )
 
 var logModule = LogModule
@@ -1422,4 +1422,12 @@ func (m *ModuleInstance) DispatchAction(name string, payload any) {
 	if err := m.engine.DispatchAction(name, payload); err != nil {
 		logModule.Debug("DispatchAction %q failed: %v", name, err)
 	}
+}
+
+// Build returns the definition unchanged. UI()/UIFile() already finalize
+// the module; this no-op only lets the chain
+// `core.NewApp(...).Name(...).UI(...).Build()` compile, so code written
+// either way (with or without the trailing Build()) works.
+func (d *ModuleDefinition) Build() *ModuleDefinition {
+	return d
 }

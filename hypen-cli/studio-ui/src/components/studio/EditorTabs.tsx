@@ -500,7 +500,15 @@ export function EditorTabs({
       {/* Tabs */}
       <div className="h-10 border-b border-border flex items-center overflow-x-auto bg-card/30">
         {files.map((file) => {
-          const name = file.path.split("/").pop();
+          const parts = file.path.split("/");
+          const base = parts[parts.length - 1];
+          // Every component is `<Name>/component.hypen`: prefix the folder
+          // when another open tab shares the file name, so tabs are
+          // distinguishable.
+          const ambiguous = files.some(
+            (other) => other.path !== file.path && other.path.split("/").pop() === base
+          );
+          const name = ambiguous && parts.length > 1 ? `${parts[parts.length - 2]}/${base}` : base;
           const isActive = file.path === activeFile;
 
           return (
@@ -512,6 +520,7 @@ export function EditorTabs({
                 isActive && "bg-background border-b-2 border-b-pink-500"
               )}
               onClick={() => onSelect(file.path)}
+              title={file.path}
             >
               <FileCode className="w-4 h-4 text-pink-400" />
               <span className={cn(file.modified && "italic")}>

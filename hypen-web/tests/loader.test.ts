@@ -11,12 +11,12 @@ describe("ComponentLoader", () => {
 
   describe("register", () => {
     test("registers a component with name, module, and template", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: { count: 0 },
         name: "Counter",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
       const template = "Text('Hello')";
 
       loader.register("Counter", module, template);
@@ -31,12 +31,12 @@ describe("ComponentLoader", () => {
     });
 
     test("registers component with custom path", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Button",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
       const template = "Text('Click')";
 
       loader.register("Button", module, template, "./components/Button");
@@ -46,18 +46,18 @@ describe("ComponentLoader", () => {
     });
 
     test("overwrites existing component with same name", () => {
-      const module1: HypenModuleDefinition = {
+      const module1 = {
         initialState: { version: 1 },
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
-      const module2: HypenModuleDefinition = {
+      } as unknown as HypenModuleDefinition;
+      const module2 = {
         initialState: { version: 2 },
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Test", module1, "Version 1");
       loader.register("Test", module2, "Version 2");
@@ -68,12 +68,12 @@ describe("ComponentLoader", () => {
     });
 
     test("defaults path to component name when not provided", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Card",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Card", module, "Card template");
 
@@ -87,12 +87,12 @@ describe("ComponentLoader", () => {
     });
 
     test("returns registered component", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Test", module, "Template");
 
@@ -108,12 +108,12 @@ describe("ComponentLoader", () => {
     });
 
     test("returns true for registered component", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Test", module, "Template");
 
@@ -121,12 +121,12 @@ describe("ComponentLoader", () => {
     });
 
     test("returns false after component is overwritten and then checked", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Test", module, "Template");
       expect(loader.has("Test")).toBe(true);
@@ -143,12 +143,12 @@ describe("ComponentLoader", () => {
     });
 
     test("returns array of registered component names", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Button", module, "Button template");
       loader.register("Card", module, "Card template");
@@ -162,12 +162,12 @@ describe("ComponentLoader", () => {
     });
 
     test("returns names in insertion order", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("A", module, "A");
       loader.register("B", module, "B");
@@ -216,6 +216,35 @@ describe("ComponentLoader", () => {
     });
   });
 
+  describe("loadFromComponentsDir patterns", () => {
+    test("loads folder, index, sibling and single-file components", async () => {
+      const { mkdtempSync, mkdirSync, writeFileSync, rmSync } = await import("fs");
+      const { join, resolve } = await import("path");
+      const { tmpdir } = await import("os");
+      const dir = mkdtempSync(join(tmpdir(), "hypen-loader-"));
+      const core = JSON.stringify(resolve(import.meta.dir, "../packages/core/src/index.ts"));
+      try {
+        mkdirSync(join(dir, "App"));
+        writeFileSync(join(dir, "App", "component.hypen"), "module App { Text('app') }");
+        writeFileSync(join(dir, "App", "component.ts"), `import { app } from ${core};\nexport default app.defineState({}).build();`);
+        mkdirSync(join(dir, "Footer"));
+        writeFileSync(join(dir, "Footer", "index.hypen"), "Text('footer')");
+        writeFileSync(join(dir, "Pill.hypen"), "Text('pill')");
+        writeFileSync(
+          join(dir, "Clicker.ts"),
+          `import { app, hypen } from ${core};\nexport default app.defineState({ count: 0 }).ui(hypen\`Text("c")\`);`
+        );
+        const fresh = new ComponentLoader();
+        await fresh.loadFromComponentsDir(dir);
+        expect(fresh.getNames().sort()).toEqual(["App", "Clicker", "Footer", "Pill"]);
+        expect(fresh.get("Clicker")!.template).toContain('Text("c")');
+        expect(fresh.get("App")!.path).toBe(join(dir, "App"));
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  });
+
   describe("integration", () => {
     test("multiple components can be registered and retrieved", () => {
       const modules = [
@@ -226,7 +255,7 @@ describe("ComponentLoader", () => {
             name: "Button",
             actions: [],
             lifecycle: {},
-          } as HypenModuleDefinition,
+          } as unknown as HypenModuleDefinition,
           template: "Text('Click me')",
         },
         {
@@ -236,7 +265,7 @@ describe("ComponentLoader", () => {
             name: "Card",
             actions: [],
             lifecycle: {},
-          } as HypenModuleDefinition,
+          } as unknown as HypenModuleDefinition,
           template: "Column { }",
         },
         {
@@ -246,7 +275,7 @@ describe("ComponentLoader", () => {
             name: "Avatar",
             actions: [],
             lifecycle: {},
-          } as HypenModuleDefinition,
+          } as unknown as HypenModuleDefinition,
           template: "Image(src: @state.url)",
         },
       ];
@@ -262,18 +291,18 @@ describe("ComponentLoader", () => {
     });
 
     test("components maintain separate state", () => {
-      const module1: HypenModuleDefinition = {
+      const module1 = {
         initialState: { value: 1 },
         name: "Component1",
         actions: [],
         lifecycle: {},
-      };
-      const module2: HypenModuleDefinition = {
+      } as unknown as HypenModuleDefinition;
+      const module2 = {
         initialState: { value: 2 },
         name: "Component2",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Component1", module1, "Template1");
       loader.register("Component2", module2, "Template2");
@@ -288,12 +317,12 @@ describe("ComponentLoader", () => {
 
   describe("edge cases", () => {
     test("handles components with empty templates", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Empty",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Empty", module, "");
 
@@ -301,7 +330,7 @@ describe("ComponentLoader", () => {
     });
 
     test("handles components with complex module definitions", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {
           nested: {
             deeply: {
@@ -316,7 +345,7 @@ describe("ComponentLoader", () => {
           onCreated: () => {},
           onDestroyed: () => {},
         },
-      };
+      } as unknown as HypenModuleDefinition;
 
       loader.register("Complex", module, "Complex template");
 
@@ -337,12 +366,12 @@ describe("ComponentLoader", () => {
     });
 
     test("handles component names with special characters", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       const specialNames = [
         "Button-Primary",
@@ -360,12 +389,12 @@ describe("ComponentLoader", () => {
     });
 
     test("handles very long component names", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       const longName = "A".repeat(1000);
       loader.register(longName, module, "Template");
@@ -375,12 +404,12 @@ describe("ComponentLoader", () => {
     });
 
     test("handles very long templates", () => {
-      const module: HypenModuleDefinition = {
+      const module = {
         initialState: {},
         name: "Test",
         actions: [],
         lifecycle: {},
-      };
+      } as unknown as HypenModuleDefinition;
 
       const longTemplate = "Text('Hello')".repeat(10000);
       loader.register("Test", module, longTemplate);

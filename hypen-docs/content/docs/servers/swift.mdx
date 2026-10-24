@@ -9,38 +9,24 @@ The Swift SDK (`HypenServer`) provides a server-side Hypen implementation for Sw
 
 ## Installation
 
-> **Note:** Swift Package Manager requires `Package.swift` at the repository root. Since `hypen-server-swift` lives inside the `hypen-engine-rs` monorepo, you cannot reference it directly via the monorepo URL. Use one of these approaches:
-
-### Local dependency (monorepo)
+The SDK is published to the mirror repository [hypen-lang/hypen-server-swift](https://github.com/hypen-lang/hypen-server-swift), tagged with each Hypen release.
 
 ```swift
-// Package.swift
+// Package.swift (swift-tools-version: 6.0)
 dependencies: [
-    .package(path: "../hypen-engine-rs/hypen-server-swift"),
+    .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.6.7"),
+],
+targets: [
+    .executableTarget(
+        name: "MyApp",
+        dependencies: [
+            .product(name: "HypenServer", package: "hypen-server-swift"),
+        ]
+    ),
 ]
 ```
 
-### Separate published package (coming soon)
-
-> **Note:** The standalone `hypen-server-swift` package is not yet published. For now, use the local dependency approach above.
-
-```swift
-// Package.swift
-dependencies: [
-    .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.4.27"),
-]
-```
-
-Then add to your target:
-
-```swift
-.target(
-    name: "MyApp",
-    dependencies: [
-        .product(name: "HypenServer", package: "hypen-server-swift"),
-    ]
-)
-```
+The package declares macOS 13+, iOS 16+, tvOS 16+ and watchOS 9+. The server also links the native engine library, which is not part of the Swift package: build it from a Hypen checkout at the same version (`git clone --branch v0.6.7 https://github.com/hypen-lang/hypen.git`); see [Building the Native Library](#building-the-native-library).
 
 ## Quick Start
 
@@ -53,12 +39,8 @@ struct CounterState: Codable {
     var count: Int = 0
 }
 
-// 1. Create a HypenApp registry and attach the module with .name(...).app(myApp).
-let myApp = HypenApp()
-
-let _ = hypen(CounterState())
+let counter = hypen(CounterState())
     .name("Counter")
-    .app(myApp)
     .onAction("increment") { state in state.count += 1 }
     .onAction("decrement") { state in state.count -= 1 }
     .ui("""
@@ -67,15 +49,25 @@ let _ = hypen(CounterState())
             Button("@actions.increment") { Text("+") }
             Button("@actions.decrement") { Text("-") }
         }
-    """)
-    .build()
+    """)   // .ui(...) is terminal: it builds the definition
 
-// 2. Serve the whole app — every registered module is streamed.
-let server = RemoteServer().app(myApp)
-try server.listen(3000)
+// Serve it. The module given to .module(...) is the root of every session,
+// and its .ui template is the screen. listenAndWait blocks until the server
+// shuts down; listen(_:) starts the server and returns immediately.
+try RemoteServer()
+    .module("Counter", counter)
+    .listenAndWait(3000)
 ```
 
-> **Single-module demo?** `RemoteServer(moduleDefinition: counter, config: ServerConfig(port: 3000))` is a shortcut that skips the registry — fine for one-off experiments.
+Build and run it with the engine library on the linker and loader paths (see [Building the Native Library](#building-the-native-library)):
+
+```bash
+LIBRARY_PATH=/path/to/hypen/target/release \
+DYLD_LIBRARY_PATH=/path/to/hypen/target/release \
+swift run          # Linux: LD_LIBRARY_PATH instead of DYLD_LIBRARY_PATH
+```
+
+> **More than one module?** `RemoteServer` always needs a root module from `.module(name, definition)`; `.app(myApp)` on its own fails at startup with "Module not set". Register the other modules on a `HypenApp` (`.name("Search").app(myApp)`), pass it with `.app(myApp)`, put their templates in a components directory loaded with `try server.componentsDir("./components")` (`Search/component.hypen`, starting with `module Search {`), and mount them from the root template's `Router { Route(path: "/search") { Search() } }`. Route-mounted modules get their own state and action handlers. `examples/social/swift` in the repository is a complete app built this way.
 
 The UI template uses Hypen DSL:
 
@@ -366,11 +358,11 @@ router.replace("/login")
 router.back()
 
 // Query current state
-router.currentPath     // "/users/123"
-router.state           // RouteState(currentPath, params, query, previousPath)
+router.getCurrentPath()  // "/users/123"
+router.getState()        // RouteState(currentPath, params, query, previousPath)
 
 // Pattern matching
-let match = router.matchPath("/users/:id", against: "/users/42")
+let match = router.matchPath(pattern: "/users/:id", path: "/users/42")
 // match?.params = ["id": "42"]
 
 router.isActive("/users/:id")   // true
@@ -409,8 +401,8 @@ params:
 ```swift
 hypen(UserProfileState(), name: "UserProfile", app: app)
     .onActivated { (state: inout UserProfileState, ctx: GlobalContext?) in
-        guard let r = ctx?.router,
-              let m = r.matchPath("/users/:id", r.getCurrentPath()),
+        guard let r = ctx?.getRouter(),
+              let m = r.matchPath(pattern: "/users/:id", path: r.getCurrentPath()),
               let id = m.params["id"] else { return }
         state.user = loadUser(id: id)
     }
@@ -442,8 +434,8 @@ let managed = ManagedRouter(router: router, registry: app, globalContext: ctx)
 managed.start()
 router.push("/counter")  // auto-mounts Counter, unmounts HomePage
 
-managed.activeModule      // current ModuleInstance?
-managed.activeRoute       // current RouteDefinition?
+managed.getActiveModule()  // current ModuleInstance?
+managed.getActiveRoute()   // current RouteDefinition?
 managed.stop()
 ```
 
@@ -544,7 +536,7 @@ let module = hypen(AppState())
     .onReconnect { session, restore in
         // Client reconnected with existing session ID
         print("Session \(session.id) reconnected")
-        restore(["count": 42])
+        restore(AppState(count: 42))  // typed: pass a value of your state type
     }
     .onExpire { session in
         // Session TTL expired — no reconnection happened
@@ -668,14 +660,32 @@ The Rust engine must be compiled before running the Swift server:
 cd hypen-engine-rs
 cargo build --release --features uniffi
 
-# Run Swift tests (Linux)
-cd ../hypen-server-swift
-LD_LIBRARY_PATH=../hypen-engine-rs/target/release swift test
+# The library lands in the workspace target dir at the repository root:
+# hypen/target/release/libhypen_engine.{so,dylib}
 
-# Run Swift tests (macOS)
+# Run Swift tests (Linux). LIBRARY_PATH is for the linker,
+# LD_LIBRARY_PATH for loading the library at run time.
 cd ../hypen-server-swift
-DYLD_LIBRARY_PATH=../hypen-engine-rs/target/release swift test
+LD_LIBRARY_PATH=../target/release LIBRARY_PATH=../target/release swift test
+
+# Run Swift tests (macOS). Without LIBRARY_PATH the link fails with
+# "library 'hypen_engine' not found".
+cd ../hypen-server-swift
+DYLD_LIBRARY_PATH=../target/release LIBRARY_PATH=../target/release swift test
 ```
+
+Your own package that depends on `HypenServer` links the same library, so build
+and run it the same way, pointing both variables at the checkout's
+`target/release` (an absolute path, or one relative to your package):
+
+```bash
+# macOS
+export LIBRARY_PATH=/path/to/hypen/target/release
+export DYLD_LIBRARY_PATH=/path/to/hypen/target/release
+swift run
+```
+
+> **macOS: rebuild after other cargo builds.** The dylib's install name is the absolute `target/release/deps/libhypen_engine.dylib` path, and that is the file loaded at run time (`DYLD_LIBRARY_PATH` does not reach processes started through `/usr/bin/swift`, because SIP strips `DYLD_*` variables). A later `cargo build` in the workspace that builds `hypen-engine` without the `uniffi` feature, such as `cargo build -p hypen-browser`, overwrites that file, and Swift then aborts with `Symbol not found: _ffi_hypen_engine_…`. Run `./build-engine.sh` again after such builds.
 
 Or use the provided build script:
 

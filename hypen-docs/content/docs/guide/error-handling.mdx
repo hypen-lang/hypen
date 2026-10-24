@@ -23,7 +23,8 @@ export default app
   .onError(({ error, actionName, lifecycle, state }) => {
     console.error(`Error in ${actionName ?? lifecycle}:`, error.message);
     return { handled: true }; // suppress the error
-  });
+  })
+  .build();
 ```
 
 Without `.onError()`, the default behavior is to log the error and emit a global `"error"` event. With it, you decide what happens.
@@ -37,7 +38,7 @@ The error handler receives an `ErrorContext` object:
 | `error` | `HypenError` | The error that occurred |
 | `state` | `T` | Current state (for inspection) |
 | `actionName` | `string?` | Set if the error came from an action handler |
-| `lifecycle` | `string?` | Set if the error came from a lifecycle hook (`"created"` or `"destroyed"`) |
+| `lifecycle` | `string?` | Set if the error came from a lifecycle hook: `"created"`, `"activated"`, `"deactivated"`, `"destroyed"`, `"disconnect"`, `"reconnect"` or `"expire"` |
 
 `actionName` and `lifecycle` are mutually exclusive — one will be set depending on where the error originated.
 
@@ -74,15 +75,16 @@ Return a result object to control what happens next:
 
 ```typescript
 export default app
-  .defineState({ data: null, error: null })
+  .defineState<{ data: unknown; error: string | null }>({ data: null, error: null })
   .onCreated(async (state) => {
-    // If this throws, onError catches it with lifecycle: "created"
-    const res = await fetch("/api/init");
+    // If this throws, onError catches it with lifecycle: "created".
+    // Module code runs on the server, so fetch absolute URLs.
+    const res = await fetch("https://api.example.com/init");
     state.data = await res.json();
   })
   .onAction("refresh", async ({ state }) => {
     // If this throws, onError catches it with actionName: "refresh"
-    const res = await fetch("/api/data");
+    const res = await fetch("https://api.example.com/data");
     state.data = await res.json();
   })
   .onError(({ error, actionName, lifecycle, state }) => {
@@ -92,7 +94,8 @@ export default app
       state.error = `Action "${actionName}" failed: ${error.message}`;
     }
     return { handled: true };
-  });
+  })
+  .build();
 ```
 
 ## Error Types
@@ -197,7 +200,7 @@ export default app
   .onAction("load", async ({ state }) => {
     state.isLoading = true;
     state.error = null;
-    const res = await fetch("/api/items");
+    const res = await fetch("https://api.example.com/items");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     state.data = await res.json();
     state.isLoading = false;
@@ -206,7 +209,8 @@ export default app
     state.error = error.message;
     state.isLoading = false;
     return { handled: true };
-  });
+  })
+  .build();
 ```
 
 ```hypen

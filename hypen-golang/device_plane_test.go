@@ -13,7 +13,7 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/hypen-space/core/device"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
 )
 
 // recordingPlane is a device.Plane that records owner lifecycle calls and

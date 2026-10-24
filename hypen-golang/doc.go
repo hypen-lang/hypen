@@ -62,5 +62,5 @@
 // # Remote UI
 //
 // The remote subpackage provides WebSocket client/server for streaming UI.
-// See github.com/hypen-space/core/remote for details.
+// See github.com/hypen-lang/hypen/hypen-golang/remote for details.
 package core

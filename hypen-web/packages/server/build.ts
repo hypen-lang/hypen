@@ -50,6 +50,28 @@ await Bun.build({
   ],
 });
 
+// `../wasm-node/*` stays external verbatim, which is right for top-level
+// entries (dist/x.js → <pkg>/wasm-node) but one level short for nested ones
+// (dist/remote/server.js would look in dist/wasm-node). Re-point nested
+// outputs at the package-root wasm-node and fail if any still dangles.
+const { Glob } = await import("bun");
+const { dirname, relative, resolve } = await import("path");
+const wasmNodeDir = resolve("wasm-node");
+for await (const file of new Glob("**/*.js").scan("./dist")) {
+  const path = `dist/${file}`;
+  const text = await Bun.file(path).text();
+  if (!text.includes("../wasm-node/")) continue;
+  const rel = relative(resolve(dirname(path)), wasmNodeDir).replaceAll("\\", "/");
+  const fixed = text.replaceAll(/(["'])\.\.\/wasm-node\//g, `$1${rel}/`);
+  await Bun.write(path, fixed);
+  for (const m of fixed.matchAll(/["']((?:\.\.\/)+wasm-node\/[^"']+)["']/g)) {
+    if (!(await Bun.file(resolve(dirname(path), m[1])).exists())) {
+      throw new Error(`${path}: ${m[1]} does not resolve`);
+    }
+  }
+}
+console.log("✓ wasm-node imports resolve from nested entries");
+
 // Pre-bundle the default browser client (RemoteEngine + DOMRenderer, no
 // WASM) so RemoteServer can serve it at `/` without needing Bun.build or a
 // resolvable @hypen-space/web at runtime. Best-effort: the runtime falls

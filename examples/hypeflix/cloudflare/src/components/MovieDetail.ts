@@ -147,7 +147,7 @@ export default app
             .tw("text-sm md:text-[15px] mt-2.5 leading-6")
             .color("#A6A6B3")
 
-          Text("Streamed as a direct MP4 from archive.org — the server resolves and validates the stream URL, the player streams it with HTTP range requests.")
+          Text("Streamed directly from its host (the Internet Archive, or Wikimedia Commons for the Blender open movies) — the server resolves and validates the stream URL, the player streams it with HTTP range requests.")
             .tw("text-xs mt-8 mb-10 leading-5")
             .color("#4A4A55")
         }

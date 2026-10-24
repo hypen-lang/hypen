@@ -8,9 +8,9 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@hypen-space/core": "0.6.5",
-    "@hypen-space/cf": "0.6.5",
-    "hypen-engine": "0.6.5"
+    "@hypen-space/core": "0.6.7",
+    "@hypen-space/cf": "0.6.7",
+    "hypen-engine": "0.6.7"
   },
   "devDependencies": {
     "@cloudflare/workers-types": "^4.20250101.0",

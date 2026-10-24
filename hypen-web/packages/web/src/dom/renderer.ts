@@ -215,6 +215,7 @@ import { createSafeAreaHandler } from "./components/safearea.js";
 import { createImageHandler } from "./components/image.js";
 import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
 import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
+import { classifyBindEcho, noteEngineValuedField } from "../bind-echo.js";
 
 // Interface for the engine that renderer needs
 interface IEngine {
@@ -1321,6 +1322,13 @@ export class DOMRenderer {
       this.scrubber.registerCreate(id, element, animProps);
     }
 
+    // A text field whose `value` the engine supplies is controlled: its
+    // `.onInput` / `.onChange` edits are reconciled against the engine's
+    // answers like `.bind` writes (bind-echo.ts).
+    if (isTextFieldType(element.dataset.hypenType) && (propsObj.value !== undefined || propsObj["0"] !== undefined)) {
+      noteEngineValuedField(element);
+    }
+
     this.applicators.applyAll(element, propsObj);
 
     // Actionable components: wire "action" prop as onClick, and make
@@ -1429,6 +1437,44 @@ export class DOMRenderer {
 
     this.debugTracker.trackRerender(id, element, `setProp:${name}`);
 
+    // `.bind()` and controlled (`value:` + `.onInput`/`.onChange`) text
+    // fields: an engine echo of an OLDER keystroke must not overwrite newer
+    // text the user already typed (remote round trips put several writes in
+    // flight). See bind-echo.ts.
+    if ((name === "value" || name === "0") && isTextFieldType(element.dataset.hypenType)) {
+      const field = element as HTMLInputElement | HTMLTextAreaElement;
+      if (value !== undefined) noteEngineValuedField(field);
+      const kind = classifyBindEcho(field, value, (deferred) => {
+        // A held-back answer settling after a quiet period: re-enter the
+        // normal path (it now classifies as foreign) if the field survived.
+        if (this.nodes.get(id) === element) this.onSetProp(id, name, deferred);
+      });
+      if (kind === "stale" || kind === "deferred") return;
+      if (kind === "latest" && field.value === String(value ?? "")) return;
+      if (kind === "foreign" && isFocusedTextField(field) && field.value !== String(value ?? "")) {
+        // Programmatic change while the user is in the field (an action
+        // reformatting or clearing it): apply, keeping the caret where it
+        // was (clamped) instead of letting the value write jump it.
+        const start = field.selectionStart;
+        const end = field.selectionEnd;
+        this.setPropValue(id, element, name, value);
+        if (start !== null && end !== null) {
+          const len = field.value.length;
+          try {
+            field.setSelectionRange(Math.min(start, len), Math.min(end, len));
+          } catch {
+            // input types without selection support (number, email…)
+          }
+        }
+        return;
+      }
+    }
+
+    this.setPropValue(id, element, name, value);
+  }
+
+  /** The prop write proper, after channel routing and bind-echo filtering. */
+  private setPropValue(id: string, element: HTMLElement, name: string, value: any): void {
     if (name === "slot.0" || name === "slot") {
       if (typeof value === "string" && value) {
         element.dataset.hypenSlot = value;
@@ -2145,4 +2191,15 @@ export class DOMRenderer {
   getDebugStats(): { totalRerenders: number; elementCount: number; avgRerenders: number } {
     return this.debugTracker.getStats();
   }
+}
+
+/** Whether `field` currently holds focus in its document. */
+function isFocusedTextField(field: HTMLElement): boolean {
+  const doc = field.ownerDocument ?? (typeof document !== "undefined" ? document : null);
+  return !!doc && doc.activeElement === field;
+}
+
+/** Whether a `data-hypen-type` names a text field (Input / Textarea). */
+function isTextFieldType(type: string | undefined): boolean {
+  return type === "input" || type === "textarea";
 }

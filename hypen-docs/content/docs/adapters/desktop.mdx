@@ -21,17 +21,48 @@ The stack:
 
 ## Installation
 
-```bash
-cargo add hypen-renderer-desktop
-```
+> **Not on crates.io yet.** `hypen-renderer-desktop` is not published, so `cargo add hypen-renderer-desktop` fails. Use it from a checkout of the [Hypen repository](https://github.com/hypen-lang/hypen), and take `hypen-server` from the same checkout: the renderer depends on that exact copy, and mixing it with the crates.io `hypen-server` gives two incompatible versions of its types.
 
-Or in `Cargo.toml`:
+```bash
+git clone https://github.com/hypen-lang/hypen.git
+```
 
 ```toml
+# Cargo.toml
 [dependencies]
-hypen-renderer-desktop = "0.6.2"
-hypen-server = "0.6.2"
+hypen-renderer-desktop = { path = "../hypen/hypen-renderer-desktop" }
+hypen-server = { path = "../hypen/hypen-sdk-rs" }
+serde = { version = "1", features = ["derive"] }
 ```
+
+The default features (`camera`, `mic`, `bluetooth`) link system libraries. On Debian/Ubuntu install them first:
+
+```bash
+sudo apt-get install -y build-essential pkg-config \
+  libdbus-1-dev libclang-dev libasound2-dev
+```
+
+or turn the device capabilities off with `default-features = false`. See `hypen-browser/README.md` in the repository for what each package is for.
+
+## Running a project with `hypen run desktop`
+
+For a `hypen init` project you don't need to write Rust: `hypen run desktop` starts the dev server and opens it in **Hypen Browser**, a prebuilt desktop runner built on this renderer. The CLI downloads it from the latest [GitHub release](https://github.com/hypen-lang/hypen/releases) on first run (macOS Apple Silicon and Intel, Windows x86-64, Linux x86-64). On other platforms, or to run your own build, build the runner from the checkout (the CLI prints these steps when it has no download):
+
+```bash
+cd hypen
+cargo build --release -p hypen-browser       # Linux: install the packages above first; macOS needs no extra packages
+```
+
+then either copy it to the cache the CLI looks in, or point the CLI at it:
+
+```bash
+mkdir -p ~/.hypen/runners
+cp target/release/hypen-browser ~/.hypen/runners/hypen-browser
+# or
+HYPEN_DESKTOP_RUNNER=$PWD/target/release/hypen-browser hypen run desktop
+```
+
+The runner's output goes to `~/.hypen/runners/browser.log`. If it exits within about 1.5 s of launch, the CLI prints the exit code and the end of that log and exits 1.
 
 ## Quick Start
 
@@ -138,6 +169,8 @@ one. `wss://` URLs are supported via rustls.
 | `.module(Arc<dyn HypenModule>)` | Drive a local SDK module instance |
 | `.connect(url, module_name)` | Drive a remote server over WebSocket |
 | `.source(template)` | Render a bare template with no module |
+| `.icon_png(bytes)` / `.icon_rgba(..)` | Window icon |
+| `.safe_area_insets(insets)` | Override the insets `SafeArea` pads by |
 | `.shortcut(..)` | Register a keyboard shortcut |
 | `.reduced_motion(bool)` | Disable animation (also honours the OS setting) |
 | `.run()` | Open the window and enter the event loop |
@@ -147,9 +180,12 @@ one. `wss://` URLs are supported via rustls.
 **Layout & styling** — Taffy flexbox across `Column`, `Row`, `Container`,
 `Text`, `Button`, `Input`, `Image`, `Icon`. Style applicators for padding,
 margin, gap, font size, colours, borders, and radii. Colours accept CSS hex
-(`#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`) and named colours. Tailwind
-breakpoints (`padding@md`, `backgroundColor@lg`) resolve against the live
-window width, largest-active-breakpoint-wins.
+(`#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`) and named colours. Responsive
+values (`.padding({default: 8, md: 16})`) resolve against the live window width,
+largest-active-breakpoint-wins. A `Row` with no width or `alignSelf` of its
+own, and a `Button` / `Link` / `Card` without `alignSelf`, follows its
+parent's `alignItems`, as on the web, so a Row or Button inside `Center {}` or
+`Column {}.tw("items-center")` is centred.
 
 **Text input** — `Input` with two-way binding via `.bind(@state.x)`, caret
 movement, selection (click, drag, Shift+arrows, Home/End), system clipboard
@@ -180,7 +216,7 @@ Enable the `mimalloc` feature and wire the allocator in your binary for a
 typical 20–40 MB RSS reduction:
 
 ```toml
-hypen-renderer-desktop = { version = "0.6.2", features = ["mimalloc"] }
+hypen-renderer-desktop = { path = "../hypen/hypen-renderer-desktop", features = ["mimalloc"] }
 ```
 
 ```rust
@@ -190,7 +226,10 @@ static GLOBAL: hypen_renderer_desktop::MiMalloc = hypen_renderer_desktop::MiMall
 
 On macOS the renderer sets `presentsWithTransaction` on the `CAMetalLayer`,
 which eliminates the live-resize flash that comes from a fire-and-forget
-`present`.
+`present`. With that flag a present only reaches the screen when a Core
+Animation transaction commits, so the renderer flushes the transaction after
+every frame; frames painted for server patches therefore show immediately
+rather than on the next mouse or key event.
 
 The compiled wgpu pipeline cache is stored in the platform cache directory
 (`~/Library/Caches` on macOS, `$XDG_CACHE_HOME` on Linux, `%LOCALAPPDATA%` on
@@ -198,7 +237,7 @@ Windows) so subsequent launches skip shader compilation.
 
 ## Examples
 
-The crate ships runnable examples:
+The crate ships runnable examples (run them from the repository root):
 
 ```bash
 cargo run -p hypen-renderer-desktop --example hello

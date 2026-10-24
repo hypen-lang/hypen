@@ -193,6 +193,52 @@ describe("canvas native text editing", () => {
     expect((input as any).value).toBe("hi!");
   });
 
+  test("echoes of older keystrokes (remote round trip) never overwrite newer text", () => {
+    input.focus();
+    const setValue = (value: string) =>
+      renderer.applyPatches([{ type: "setProp", id: "i1", name: "value", value } as any]);
+    type("hi ", 3);
+    type("hi t", 4);
+    type("hi th", 5);
+    // Server catches up one write at a time while newer ones are in flight.
+    setValue("hi ");
+    expect((proxy() as any).value).toBe("hi th");
+    expect(renderer.getNode("i1")!.props.value).toBe("hi th");
+    setValue("hi t");
+    type("hi the", 6);
+    expect((proxy() as any).value).toBe("hi the");
+    expect((proxy() as any).selectionStart).toBe(6);
+    setValue("hi th");
+    setValue("hi the");
+    expect((proxy() as any).value).toBe("hi the");
+    expect(editor().getStateFor(renderer.getNode("i1")).value).toBe("hi the");
+    // An action clearing the draft afterwards still lands.
+    setValue("");
+    expect((proxy() as any).value).toBe("");
+    expect(renderer.getNode("i1")!.props.value).toBe("");
+  });
+
+  test("an engine rewrite answering an OLDER keystroke is held until the newest is answered", () => {
+    input.focus();
+    const setValue = (value: string) =>
+      renderer.applyPatches([{ type: "setProp", id: "i1", name: "value", value } as any]);
+    // Engine-side uppercasing while three writes are in flight.
+    type("hi ", 3);
+    type("hi t", 4);
+    type("hi th", 5);
+    setValue("HI ");
+    expect((proxy() as any).value).toBe("hi th");
+    setValue("HI T");
+    type("hi thx", 6);
+    expect((proxy() as any).value).toBe("hi thx");
+    setValue("HI TH");
+    expect((proxy() as any).value).toBe("hi thx");
+    setValue("HI THX");
+    expect((proxy() as any).value).toBe("HI THX");
+    expect((proxy() as any).selectionStart).toBe(6);
+    expect(renderer.getNode("i1")!.props.value).toBe("HI THX");
+  });
+
   test("engine rewrite (formatting) re-seeds the element and clamps selection", () => {
     input.focus();
     type("hi there", 8);

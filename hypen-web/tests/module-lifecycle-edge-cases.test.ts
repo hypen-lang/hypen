@@ -57,12 +57,13 @@ class FakeEngine {
     const parts = path.split('.');
     let current = obj;
     for (let i = 0; i < parts.length - 1; i++) {
-      if (!(parts[i] in current)) {
-        current[parts[i]] = {};
+      const part = parts[i]!;
+      if (!(part in current)) {
+        current[part] = {};
       }
-      current = current[parts[i]];
+      current = current[part];
     }
-    current[parts[parts.length - 1]] = value;
+    current[parts[parts.length - 1]!] = value;
   }
 
   // Get reconstructed current state for testing
@@ -343,7 +344,7 @@ describe("Module Lifecycle Edge Cases", () => {
       let receivedPayload: any = "not-set";
 
       const definition = app
-        .defineState({ value: null })
+        .defineState({ value: null as unknown })
         .onAction("setNull", ({ action, state }) => {
           receivedPayload = action.payload;
           state.value = action.payload;

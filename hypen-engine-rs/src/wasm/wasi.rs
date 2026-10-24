@@ -41,20 +41,20 @@ use super::ffi::{ActionPayload, ModuleConfig, SparseStateUpdate};
 // Global engine instance for WASI (single-threaded).
 // WASI runtimes are typically single-threaded, so we use thread-local storage.
 thread_local! {
-    static ENGINE: RefCell<Option<WasiEngine>> = RefCell::new(None);
-    static PATCH_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-    static ACTION_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
-    static IMPORT_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static ENGINE: RefCell<Option<WasiEngine>> = const { RefCell::new(None) };
+    static PATCH_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static ACTION_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+    static IMPORT_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// Stores a UTF-8 error message from the last failed operation.
     /// Populated whenever a function returns a non-zero error code.
-    static ERROR_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static ERROR_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// Stores the JSON result of the last successful `hypen_portable_*`
     /// call. Read with [`hypen_get_portable_result`] / _len.
-    static PORTABLE_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static PORTABLE_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
     /// Stores the JSON result of the last successful external-surface call
     /// (`hypen_list_*`, `hypen_get_state_at`). Read with
     /// [`hypen_get_external_result`] / _len.
-    static EXTERNAL_BUFFER: RefCell<Vec<u8>> = RefCell::new(Vec::new());
+    static EXTERNAL_BUFFER: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
 }
 
 /// Internal engine state for WASI.
@@ -1250,30 +1250,10 @@ pub extern "C" fn hypen_register_component(
 
         match hypen_parser::parse_component(source) {
             Ok(component_spec) => {
-                let ir_node = ast_to_ir_node(&component_spec);
-                let ir_element = match ir_node {
-                    IRNode::Element(e) => e,
-                    _ => {
-                        return fail(
-                            3,
-                            "hypen_register_component: component root must be an element",
-                        )
-                    }
-                };
-                let is_module =
-                    component_spec.declaration_type == hypen_parser::DeclarationType::Module;
-                let module_name = if is_module {
-                    Some(component_spec.name.to_lowercase())
-                } else {
-                    None
-                };
-                let mut component =
-                    crate::ir::Component::new(name, move |_props| ir_element.clone())
-                        .with_source_path(&path);
-                if is_module {
-                    component.is_module = true;
-                    component.module_name = module_name;
-                }
+                // Any root shape is registrable: control-flow roots
+                // (`module App { Router { ... } }`) expand in place.
+                let component =
+                    crate::ir::Component::from_spec(name, &component_spec).with_source_path(&path);
                 engine.core.component_registry.register(component);
                 0
             }

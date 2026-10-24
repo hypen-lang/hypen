@@ -101,6 +101,13 @@ pub struct Component {
 
     /// Lowercased name used as the module scope key (e.g., "search").
     pub module_name: Option<String>,
+
+    /// Template root when it is a control-flow node (Router / ForEach /
+    /// Conditional) rather than an Element — e.g. `module App { Router { ... } }`.
+    /// Such a component expands *in place* to that node (control flow is
+    /// transparent, so there is no wrapper element). `None` for the usual
+    /// Element-rooted template produced by [`template`](Self::template).
+    pub root_node: Option<Arc<super::IRNode>>,
 }
 
 impl Component {
@@ -117,7 +124,52 @@ impl Component {
             lazy: false,
             is_module: false,
             module_name: None,
+            root_node: None,
         }
+    }
+
+    /// Build a component from an already-lowered template root of any shape.
+    ///
+    /// An Element root behaves exactly like [`Component::new`]; a control-flow
+    /// root (Router / ForEach / If / When) is kept as [`root_node`](Self::root_node)
+    /// and expands in place wherever the component is used.
+    pub fn from_ir_node(name: impl Into<String>, root: super::IRNode) -> Self {
+        let name = name.into();
+        match root {
+            super::IRNode::Element(element) => Self::new(name, move |_props| element.clone()),
+            other => {
+                // `template` must still produce an Element for the
+                // Element-returning API (`ComponentRegistry::expand`); it is
+                // never used to render a control-flow-rooted component.
+                let placeholder = Element::new(&name);
+                let mut component = Self::new(name, move |_props| placeholder.clone());
+                component.root_node = Some(Arc::new(other));
+                component
+            }
+        }
+    }
+
+    /// Build a component from a parsed specification, recording module
+    /// metadata when the source declared `module X { ... }`.
+    pub fn from_spec(name: impl Into<String>, spec: &hypen_parser::ComponentSpecification) -> Self {
+        let mut component = Self::from_ir_node(name, super::expand::ast_to_ir_node(spec));
+        if spec.declaration_type == hypen_parser::DeclarationType::Module {
+            component.is_module = true;
+            component.module_name = Some(spec.name.to_lowercase());
+        }
+        component
+    }
+
+    /// Parse `source` and build the component (see [`from_spec`](Self::from_spec)).
+    /// The error is the parser's diagnostics joined into one line.
+    pub fn from_source(name: impl Into<String>, source: &str) -> Result<Self, String> {
+        let spec = hypen_parser::parse_component(source).map_err(|errs| {
+            errs.iter()
+                .map(hypen_parser::error::format_error_simple)
+                .collect::<Vec<_>>()
+                .join("; ")
+        })?;
+        Ok(Self::from_spec(name, &spec))
     }
 
     pub fn with_defaults(mut self, defaults: IndexMap<String, serde_json::Value>) -> Self {
@@ -297,38 +349,14 @@ impl ComponentRegistry {
                 // Parse the component source for non-passthrough components
                 match hypen_parser::parse_component(&resolved.source) {
                     Ok(component_spec) => {
-                        // Detect if the source declares a module (e.g., `module Search { ... }`)
-                        let spec_is_module = component_spec.declaration_type
-                            == hypen_parser::DeclarationType::Module;
-                        let spec_module_name = if spec_is_module {
-                            Some(component_spec.name.to_lowercase())
-                        } else {
-                            None
-                        };
-
-                        // Convert to IR, preserving control-flow children
-                        let ir_node = super::expand::ast_to_ir_node(&component_spec);
-                        let element = match ir_node {
-                            super::IRNode::Element(e) => e,
-                            _ => {
-                                #[cfg(all(target_arch = "wasm32", feature = "js"))]
-                                web_sys::console::error_1(
-                                    &format!("Component {} root must be an element", name).into(),
-                                );
-                                return false;
-                            }
-                        };
-
-                        // Create a component that returns the parsed element
-                        let mut component = Component::new(name, move |_props| element.clone())
+                        // Any root shape is accepted: an Element root is the
+                        // usual template, a control-flow root (e.g.
+                        // `module App { Router { ... } }`) expands in place.
+                        // Module sources are tagged so expansion propagates
+                        // module_scope.
+                        let component = Component::from_spec(name, &component_spec)
                             .with_source_path(resolved.path.clone())
                             .with_passthrough(false);
-
-                        // Tag module components so expansion propagates module_scope
-                        if spec_is_module {
-                            component.is_module = true;
-                            component.module_name = spec_module_name;
-                        }
 
                         self.register(component);
                         self.resolved_cache.insert(cache_key, true);
@@ -477,6 +505,23 @@ impl ComponentRegistry {
 
                 let mut expanded = component.instantiate(props);
 
+                // Control-flow-rooted component reached through the
+                // Element-returning API (`expand`): there is no Element to
+                // return, so hang the expanded root under the placeholder.
+                // The IRNode path (`expand_ir_node`) expands it in place.
+                if let Some(root) = component.root_node.clone() {
+                    let child_context = component.source_path.clone();
+                    let mut node =
+                        self.expand_ir_node_with_context(&root, child_context.as_deref());
+                    if comp_is_module {
+                        if let Some(ref scope) = comp_module_name {
+                            super::expand::propagate_module_scope_ir_node(&mut node, scope);
+                        }
+                    }
+                    expanded.ir_children = vec![node];
+                    return expanded;
+                }
+
                 // Preserve bindings and actions from the original element
                 for (k, v) in &element.props {
                     match v {
@@ -529,6 +574,36 @@ impl ComponentRegistry {
         }
     }
 
+    /// If `element` references a (non-lazy, non-passthrough) component whose
+    /// template root is a control-flow node, return that node expanded with
+    /// the component's source path as context and its module scope applied.
+    fn expand_control_flow_root(
+        &mut self,
+        element: &Element,
+        context_path: Option<&str>,
+    ) -> Option<super::IRNode> {
+        if self.get(&element.element_type, context_path).is_none() {
+            self.try_resolve(&element.element_type, context_path);
+        }
+        let component = self.get(&element.element_type, context_path)?;
+        if component.lazy || component.passthrough {
+            return None;
+        }
+        let root = component.root_node.clone()?;
+        let child_context = component.source_path.clone();
+        let module_scope = if component.is_module {
+            component.module_name.clone()
+        } else {
+            None
+        };
+
+        let mut node = self.expand_ir_node_with_context(&root, child_context.as_deref());
+        if let Some(scope) = module_scope {
+            super::expand::propagate_module_scope_ir_node(&mut node, &scope);
+        }
+        Some(node)
+    }
+
     /// Expand an IRNode recursively, expanding any Element nodes via the component registry
     pub fn expand_ir_node(&mut self, node: &super::IRNode) -> super::IRNode {
         self.expand_ir_node_with_context(node, None)
@@ -542,6 +617,11 @@ impl ComponentRegistry {
     ) -> super::IRNode {
         match node {
             super::IRNode::Element(element) => {
+                // A component whose template root is control flow expands in
+                // place to that node (no wrapper element).
+                if let Some(node) = self.expand_control_flow_root(element, context_path) {
+                    return node;
+                }
                 // expand_with_context already recurses into ir_children
                 // through every non-lazy branch. Recursing here again would
                 // do 2x the work at every level (O(2^depth) blowup).

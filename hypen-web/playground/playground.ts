@@ -33,6 +33,30 @@ let currentState: any = null; // Preserve state across DSL edits
 let isLoadingSample = false; // Flag to prevent auto-render during sample load
 
 /**
+ * Minimal GlobalContext / DataSourceAccessor stand-ins for the playground's
+ * single-module sandbox. Handlers that touch cross-module features get a clear
+ * error instead of "reading 'x' of undefined".
+ */
+function playgroundUnsupported(feature: string): never {
+  throw new Error(`${feature} is not available in the playground (single-module sandbox)`);
+}
+const playgroundContext: any = {
+  getModule: () => playgroundUnsupported("context.getModule"),
+  hasModule: () => false,
+  getModuleIds: () => [],
+  getGlobalState: () => ({}),
+  emit: () => {},
+  on: () => () => {},
+  router: null,
+  get device() {
+    return playgroundUnsupported("context.device");
+  },
+};
+const playgroundDataSources: any = new Proxy({}, {
+  get: (_t, name) => playgroundUnsupported(`dataSources.${String(name)}`),
+});
+
+/**
  * Recursively convert Maps to plain objects
  */
 function convertMapsToObjects(value: any): any {
@@ -219,7 +243,12 @@ async function renderPreview(forceFullRebuild = false) {
     // Initialize engine if needed
     if (!engine) {
       engine = new Engine();
-      await engine.init();
+      // Use the engine build served by playground/server.ts (local repo WASM),
+      // not the published one on the CDN.
+      await engine.init({
+        jsUrl: new URL("/wasm/hypen_engine.js", location.href).href,
+        wasmUrl: new URL("/wasm/hypen_engine_bg.wasm", location.href).href,
+      });
     }
 
     // Initialize renderer if needed
@@ -302,8 +331,15 @@ async function renderPreview(forceFullRebuild = false) {
             console.log(`🔄 [Action ${actionName}] Converted payload to plain object:`, payload);
           }
           
-          // Pass action with plain object payload to handler
-          await handler({ ...action, payload }, observableState);
+          // Handlers take a single ActionHandlerContext ({ action, state, context,
+          // dataSources }), same as HypenModuleInstance. The playground has no
+          // router / sibling modules, so context is a minimal stand-in.
+          await handler({
+            action: { name: actionName, payload, sender: action.sender },
+            state: observableState,
+            context: playgroundContext,
+            dataSources: playgroundDataSources,
+          });
 
           // Force state sync immediately after handler completes (to avoid microtask timing issues)
           const snapshot = convertMapsToObjects(getStateSnapshot(observableState));
@@ -333,7 +369,7 @@ async function renderPreview(forceFullRebuild = false) {
     // because the DSL has already been rendered and the engine knows the correct UI structure
     if (moduleDef.handlers?.onCreated) {
       console.log("🌱 Calling onCreated lifecycle...");
-      await moduleDef.handlers.onCreated(observableState);
+      await moduleDef.handlers.onCreated(observableState, playgroundContext);
       console.log("✅ onCreated completed, state:", getStateSnapshot(observableState));
     }
     

@@ -48,6 +48,12 @@ export type {
   HypenModule,
 } from "./app.js";
 
+// `hypen` tagged template for single-file components (`.ui(hypen\`...\`)`).
+// Pure string helpers, so `hypen build` can bundle such components for the
+// browser worker exactly as `hypen dev` runs them under Bun/Node.
+export { hypen, state, item, index } from "./hypen.js";
+export type { StateProxy, ItemProxy } from "./hypen.js";
+
 // ============================================================================
 // STATE MANAGEMENT
 // ============================================================================

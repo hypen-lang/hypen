@@ -11,7 +11,7 @@ Hypen Studio is a full-featured, in-browser IDE for building Hypen applications.
 hypen studio
 ```
 
-Studio opens at `http://localhost:5173` by default.
+Studio opens at `http://localhost:5173` by default, or on the next free port if 5173 is taken. Pass `--no-open` if you don't want a browser tab opened for you.
 
 <img src="/tooling/studio.png" alt="Hypen Studio: file explorer, editor, and live preview connected to a running app" />
 
@@ -59,9 +59,9 @@ hypen studio
 Studio uses Monaco (the engine behind VS Code) for code editing. It supports:
 
 - **Syntax highlighting** for `.hypen`, `.ts`, `.tsx`, `.js`, `.json`, `.css`, and `.md` files
-- **Multi-tab editing** — open as many files as you need
-- **Language Server Protocol (LSP)** — if `@hypen-space/lsp` is installed, you get completions, diagnostics, and hover info for `.hypen` files
-- **Auto-save** — changes are saved and hot-reloaded automatically
+- **Multi-tab editing** — open as many files as you need. Tabs show the folder too when two open files share a name (`Home/component.hypen`, `App/component.hypen`)
+- **Language Server Protocol (LSP)**: completions, diagnostics, and hover info for `.hypen` files. The CLI installs `@hypen-space/lsp` as a dependency; if it is missing, Studio prints a warning and the editor runs without language features
+- **Auto-save** — changes are saved about 300 ms after you stop typing (`Cmd/Ctrl+S` saves right away) and hot-reloaded. While a `.hypen` file doesn't parse, the editor marks the error and the preview keeps the last version that did
 
 ## Live Preview
 
@@ -77,14 +77,14 @@ see in Studio is exactly what your users will see in the browser.
 
 ## File Browser
 
-The file tree shows your full project structure. You can:
+The file tree shows your full project structure. Click a file to open it. You can:
 
-- **Create** new files and folders
+- **Create** new files and folders (the buttons in the Explorer header create them in the selected folder; right-click a folder for the same)
 - **Rename** files and folders
 - **Copy and paste** files
 - **Delete** files and folders
 
-All changes are immediately saved to disk and trigger hot reload.
+Rename, copy, paste and delete are in the right-click menu of a file or folder. Files created outside Studio show up in the tree on their own. All changes are immediately saved to disk and trigger hot reload.
 
 ## Debugging Tools
 
@@ -92,7 +92,9 @@ Studio's bottom panel provides four debugging views, accessible via tabs or keyb
 
 ### State Inspector
 
-Shows the current state of your active module as a live JSON tree. Every time state changes — from an action, lifecycle hook, or two-way binding — the inspector updates instantly.
+Shows the state of every module in the session as a live tree, one per module: the entry module, modules mounted in a template, and route modules — the active one and any cached ones you navigated away from (e.g. `home.taps` in the scaffold). Every time state changes — from an action, lifecycle hook, or two-way binding — the inspector updates instantly.
+
+If a template references a component that doesn't exist (for example you just deleted its folder), it renders as nothing — the engine's behavior for unknown components. Studio reports it in the console and terminal and badges the preview with an **Unknown component** notice; re-adding the component renders it again on the next reload.
 
 ### Action Log
 
@@ -110,19 +112,15 @@ Captures `console.log`, `console.warn`, and `console.error` output from your mod
 
 ### Timeline (Time-Travel Debugging)
 
-The timeline records every state snapshot as your app runs. You can:
+The timeline records a snapshot of every module's state each time any of them changes, labelled with the action that caused it and what changed (e.g. `tap  home.taps 1 → 2`). You can:
 
 - **Scrub through history** using a slider to see the state at any point in time
-- **Preview past states** — the live preview updates to show the UI as it appeared at that moment
+- **Preview past states** — every module is restored to that snapshot (including the route, so stepping back across a navigation returns to the earlier screen), and the live preview updates to show the UI as it appeared at that moment
 - **Go Live** — click the "Go Live" button to return to the current state and resume normal operation
 
 This is especially powerful for debugging complex state flows — you can step through exactly how state evolved across a sequence of actions.
 
 <img src="/tooling/studio-timeline.png" alt="The State and Timeline panels with time travel active" />
-
-Note: the State panel and Timeline currently track the **primary module's**
-state. State owned by nested route modules (for example a counter mounted
-via a `Route`) is not yet captured in snapshots or restored by time travel.
 
 ## Integrated Terminal
 
@@ -153,9 +151,21 @@ DOM or Canvas renderer, next to Android and iOS device mirrors.
 
 Every cell is fully interactive and connected to the same dev server, with
 actions mirrored across surfaces — tap a button in the web cell and every
-other cell (and any connected device) updates too. Inside a project,
-`hypen test` starts the dev server for you; outside one, paste a `ws://`
-URL into the Connect input to attach to any running Hypen server.
+other cell (and any connected device) updates too, including Test Mode open
+in a second browser tab. Inside a project, `hypen test` starts the dev
+server for you; outside one, paste a `ws://` URL into the Connect input to
+attach to any running Hypen server.
+
+The toolbar's **DOM** and **Canvas** buttons add or remove a web cell of
+that renderer; each cell can be popped out into its own window or closed.
+**Logs** opens device logs, **Run** installs the runner on a booted
+device, and **Reset** restarts the engine with fresh state. A cell that
+joins later starts from fresh state and mirrors actions from then on.
+
+The device sidebar lists Android emulators/devices and iOS simulators. With
+none available it says what is missing: the Android SDK with an AVD (or a
+device attached over `adb`), and for iOS, Studio running on macOS with
+Xcode.
 
 ## Preview on Android and iOS
 
@@ -169,7 +179,7 @@ hypen run android --studio
 hypen run ios --studio
 ```
 
-This starts the device runner (WebSocket dev server on port 3000) and opens Studio (on port 5173) side by side. Changes you make in Studio are hot-reloaded on the connected device in real time.
+This starts the device runner (WebSocket dev server on port 3000, or `--port`) and opens Studio (on port 5173, or `--studio-port`) side by side. Changes you make in Studio are hot-reloaded on the connected device in real time.
 
 You can also run all three at once — web preview in Studio, plus a device:
 
@@ -192,13 +202,16 @@ hypen studio [options]
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `--port <number>`, `-p` | `5173` | Port to run Studio on |
-| `--open` | `true` | Open browser automatically |
+| `-p, --port <port>` | `5173` | Port to run Studio on. If it is taken, the next free port is used |
+| `--no-open` | | Don't open a browser tab (by default one is opened) |
+| `--session <id>` | | Load a session teleported from hypen.space into a new `./hypen-<id>` project and open it |
+
+`hypen studio --help` prints the same list. For Test Mode options, see [`hypen test`](/docs/tooling/cli#hypen-test).
 
 ## Requirements
 
 - **Bun** runtime (Studio's server is built with Bun)
-- A Hypen project with `hypen.json` and a `src/components/` directory
+- A Hypen project: run `hypen studio` in the directory that holds `hypen.json`. Both the file-based (`src/components/`) and server-based (script `entry`) layouts work
 
 ## See Also
 

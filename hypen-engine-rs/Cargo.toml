@@ -20,10 +20,10 @@ serde = { workspace = true, features = ["rc"] }
 serde_json = { workspace = true }
 indexmap = { version = "2.0", features = ["serde"] }
 slotmap = "1.0"
-hypen-parser = { version = "0.6.5", path = "../parser" }
+hypen-parser = { version = "0.6.7", path = "../parser" }
 exprimo = "0.6.1"
 im = { version = "15.1", features = ["serde"] }  # Persistent/immutable data structures for O(1) clone
-hypen-tailwind-parse = { version = "0.6.5", path = "../tailwind-parse" }
+hypen-tailwind-parse = { version = "0.6.7", path = "../tailwind-parse" }
 # Device broker (RFC 001 §2.4): SHA-256 over received upload bytes and of
 # download announcements. Pure Rust, no platform code (wasm32-safe).
 sha2 = "0.10"

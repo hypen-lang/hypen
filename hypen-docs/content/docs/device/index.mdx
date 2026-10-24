@@ -44,10 +44,13 @@ export default app
       return;
     }
     const photo = res.value.items[0]; // photo.bytes is a hash-verified Uint8Array
+    // `storage` stands for your own upload helper (S3, R2, a database, ...)
     state.avatarUrl = await storage.upload(photo.bytes, photo.contentType);
   })
   .build();
 ```
+
+`res.error` exists only when `res.ok` is false. The `if (!res.ok)` check narrows the type when `tsconfig.json` has `"strict": true`, as the `hypen init` scaffold does (see [The result](/docs/device/requests-and-streams#the-result)).
 
 You don't write an upload endpoint, presigned URLs or client-side code. When
 the user taps the button, the native photo picker opens on their phone (or a

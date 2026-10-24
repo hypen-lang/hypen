@@ -3,6 +3,12 @@
  *
  * Provides environment-aware logging that can be disabled in production.
  * Supports log levels, tagged output, and performance timing.
+ *
+ * Default level: "info", "warn" under a test runner (NODE_ENV=test), "error"
+ * when NODE_ENV=production. `DEBUG=hypen:*` (all loggers) or
+ * `DEBUG=hypen:<tag>` (e.g. `hypen:remote`, `hypen:engine,hypen:router`)
+ * turns on every level for the matching loggers; in browsers the same spec
+ * is read from `localStorage.debug`. See setDebugNamespaces().
  */
 
 // ============================================================================
@@ -54,24 +60,134 @@ const RESET_COLOR = "\x1b[0m";
 // Global Configuration
 // ============================================================================
 
+function readEnv(name: string): string | undefined {
+  try {
+    if (typeof process !== "undefined" && process.env) {
+      return process.env[name];
+    }
+  } catch {
+    // process.env can throw in some sandboxed runtimes
+  }
+  return undefined;
+}
+
 /**
  * Detect if running in production environment
  */
 function isProduction(): boolean {
-  if (typeof process !== "undefined" && process.env) {
-    return process.env.NODE_ENV === "production";
-  }
-  return false;
+  return readEnv("NODE_ENV") === "production";
+}
+
+/**
+ * Detect a test runner (`bun test` sets NODE_ENV=test, as do jest/vitest).
+ * Info-level chatter is suppressed there so test output stays readable;
+ * `DEBUG=hypen:*` or `setLogLevel()` brings it back.
+ */
+function isTest(): boolean {
+  return readEnv("NODE_ENV") === "test";
+}
+
+/**
+ * The NO_COLOR convention (https://no-color.org): a non-empty `NO_COLOR`
+ * disables ANSI colors whatever `colors` is configured to. Read per log
+ * line so a value set after import still applies.
+ */
+function colorsAllowed(): boolean {
+  const noColor = readEnv("NO_COLOR");
+  return noColor === undefined || noColor === "";
+}
+
+function defaultLevel(): LogLevel {
+  if (isProduction()) return "error";
+  if (isTest()) return "warn";
+  return "info";
 }
 
 /**
  * Default configuration
  */
 let config: LoggerConfig = {
-  level: isProduction() ? "error" : "info",
+  level: defaultLevel(),
   colors: true,
   timestamps: false,
 };
+
+// ============================================================================
+// DEBUG namespaces (debug-module style)
+// ============================================================================
+
+/**
+ * Compiled `DEBUG` patterns. A logger tagged "Remote" (or a child
+ * "Remote:Session") has namespace "hypen:remote" ("hypen:remote:session").
+ * Matching namespaces log at every level regardless of the global level
+ * (except when logging is disabled with level "none").
+ */
+let debugInclude: RegExp[] = [];
+let debugExclude: RegExp[] = [];
+const namespaceCache = new Map<string, boolean>();
+
+function compileNamespacePattern(pattern: string): RegExp {
+  const escaped = pattern
+    .toLowerCase()
+    .replace(/[.+?^${}()|[\]\\]/g, "\\$&")
+    .replace(/\*/g, ".*?");
+  return new RegExp(`^${escaped}$`);
+}
+
+/**
+ * Enable debug output for namespaces, using the same syntax as the `DEBUG`
+ * environment variable: comma/space-separated patterns, `*` wildcards and
+ * `-` prefixed exclusions. Hypen namespaces are `hypen:<tag>` in lower case,
+ * e.g. `hypen:*`, `hypen:remote`, `hypen:engine,hypen:router`,
+ * `hypen:*,-hypen:state`. Patterns outside `hypen:` (e.g. `express:*`) are
+ * ignored unless they also match (a bare `*` enables everything).
+ * Pass an empty string or null to clear.
+ */
+export function setDebugNamespaces(spec: string | null | undefined): void {
+  debugInclude = [];
+  debugExclude = [];
+  namespaceCache.clear();
+  if (!spec) return;
+  for (const raw of spec.split(/[\s,]+/)) {
+    if (!raw) continue;
+    if (raw.startsWith("-")) {
+      debugExclude.push(compileNamespacePattern(raw.slice(1)));
+    } else {
+      debugInclude.push(compileNamespacePattern(raw));
+    }
+  }
+}
+
+/**
+ * Whether a logger tag is enabled by the `DEBUG` namespaces.
+ */
+export function isNamespaceEnabled(tag: string): boolean {
+  if (debugInclude.length === 0) return false;
+  const cached = namespaceCache.get(tag);
+  if (cached !== undefined) return cached;
+  const ns = `hypen:${tag.toLowerCase()}`;
+  let enabled = false;
+  if (!debugExclude.some((re) => re.test(ns))) {
+    // `hypen:remote` also enables children such as `hypen:remote:session`.
+    enabled = debugInclude.some((re) => re.test(ns) || re.test(ns.split(":").slice(0, 2).join(":")));
+  }
+  namespaceCache.set(tag, enabled);
+  return enabled;
+}
+
+function readDebugSpec(): string | undefined {
+  const fromEnv = readEnv("DEBUG");
+  if (fromEnv) return fromEnv;
+  // Browsers: honour localStorage.debug, as the `debug` package does.
+  try {
+    const storage = (globalThis as { localStorage?: Storage }).localStorage;
+    return storage?.getItem("debug") ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+setDebugNamespaces(readDebugSpec());
 
 // ============================================================================
 // Configuration API
@@ -127,24 +243,27 @@ export function setDebugMode(enabled: boolean): void {
 }
 
 /**
- * Check if debug mode is enabled
+ * Check if debug mode is enabled. With a logger tag, also true when that
+ * tag's namespace is enabled via `DEBUG` / `setDebugNamespaces()`.
  */
-export function isDebugMode(): boolean {
-  return config.level === "debug";
+export function isDebugMode(tag?: string): boolean {
+  if (config.level === "debug") return true;
+  return tag !== undefined && config.level !== "none" && isNamespaceEnabled(tag);
 }
 
 // ============================================================================
 // Utility Functions
 // ============================================================================
 
-function shouldLog(level: LogLevel): boolean {
-  return LOG_LEVEL_ORDER[level] >= LOG_LEVEL_ORDER[config.level];
+function shouldLog(level: LogLevel, tag?: string): boolean {
+  if (LOG_LEVEL_ORDER[level] >= LOG_LEVEL_ORDER[config.level]) return true;
+  return config.level !== "none" && tag !== undefined && isNamespaceEnabled(tag);
 }
 
 function formatTag(tag: string, level: LogLevel): string {
   const timestamp = config.timestamps ? `${new Date().toISOString()} ` : "";
 
-  if (config.colors && level !== "none") {
+  if (config.colors && colorsAllowed() && level !== "none") {
     const color = LOG_LEVEL_COLORS[level as Exclude<LogLevel, "none">];
     return `${timestamp}${color}[${tag}]${RESET_COLOR}`;
   }
@@ -174,7 +293,7 @@ export class Logger {
   }
 
   debug(...args: unknown[]): void {
-    if (!shouldLog("debug")) return;
+    if (!shouldLog("debug", this.tag)) return;
 
     if (config.handler) {
       config.handler.debug(this.tag, ...args);
@@ -184,7 +303,7 @@ export class Logger {
   }
 
   info(...args: unknown[]): void {
-    if (!shouldLog("info")) return;
+    if (!shouldLog("info", this.tag)) return;
 
     if (config.handler) {
       config.handler.info(this.tag, ...args);
@@ -194,7 +313,7 @@ export class Logger {
   }
 
   warn(...args: unknown[]): void {
-    if (!shouldLog("warn")) return;
+    if (!shouldLog("warn", this.tag)) return;
 
     if (config.handler) {
       config.handler.warn(this.tag, ...args);
@@ -204,7 +323,7 @@ export class Logger {
   }
 
   error(...args: unknown[]): void {
-    if (!shouldLog("error")) return;
+    if (!shouldLog("error", this.tag)) return;
 
     if (config.handler) {
       config.handler.error(this.tag, ...args);
@@ -217,7 +336,7 @@ export class Logger {
    * Time a function execution
    */
   time<T>(label: string, fn: () => T): T {
-    if (!shouldLog("debug")) {
+    if (!shouldLog("debug", this.tag)) {
       return fn();
     }
 
@@ -234,7 +353,7 @@ export class Logger {
    * Time an async function execution
    */
   async timeAsync<T>(label: string, fn: () => Promise<T>): Promise<T> {
-    if (!shouldLog("debug")) {
+    if (!shouldLog("debug", this.tag)) {
       return fn();
     }
 
@@ -323,22 +442,22 @@ export const logger = createLogger("Hypen");
  */
 export const log = {
   debug: (tag: string, ...args: unknown[]): void => {
-    if (!shouldLog("debug")) return;
+    if (!shouldLog("debug", tag)) return;
     console.log(formatTag(tag, "debug"), ...args);
   },
 
   info: (tag: string, ...args: unknown[]): void => {
-    if (!shouldLog("info")) return;
+    if (!shouldLog("info", tag)) return;
     console.info(formatTag(tag, "info"), ...args);
   },
 
   warn: (tag: string, ...args: unknown[]): void => {
-    if (!shouldLog("warn")) return;
+    if (!shouldLog("warn", tag)) return;
     console.warn(formatTag(tag, "warn"), ...args);
   },
 
   error: (tag: string, ...args: unknown[]): void => {
-    if (!shouldLog("error")) return;
+    if (!shouldLog("error", tag)) return;
     console.error(formatTag(tag, "error"), ...args);
   },
 };

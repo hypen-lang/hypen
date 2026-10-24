@@ -9,7 +9,7 @@ Every Hypen project uses a `hypen.json` file in the project root to configure th
 
 ## Config File
 
-Create a `hypen.json` in your project root:
+`hypen init` writes a `hypen.json` in the project root. For a component (file-based) project it looks like this:
 
 ```json
 {
@@ -25,13 +25,28 @@ All fields:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `components` | `string` | `"./src/components"` | Path to the components directory |
-| `entry` | `string` | `"App"` | Name of the entry component |
-| `port` | `number` | `3000` | Dev server port |
-| `outDir` | `string` | `"dist"` | Production build output directory |
+| `entry` | `string` | `"App"` | Name of the entry component, or the path of an entry script (see below) |
+| `port` | `number` | `3000` | Dev server port (`--port` overrides it) |
+| `outDir` | `string` | `"dist"` | Production build output directory (`--outDir` overrides it) |
+| `a11y` | `object` | none | `{ "ignoreRules": ["rule-id"], "dev": true }`. `ignoreRules` suppresses those rules in `hypen check` and `hypen dev --a11y`; `dev: true` prints findings on every `hypen dev` rebuild without the flag |
+
+### Server-based projects
+
+When `entry` is a `.ts` or `.js` path, the project is server-based: its modules are registered in that script with `RemoteServer`, and `components` is not used. The server-based scaffold writes:
+
+```json
+{
+  "entry": "./src/app.ts",
+  "port": 3000,
+  "outDir": "dist"
+}
+```
+
+`hypen dev` runs the script with `bun --hot` and passes the port as `PORT`; `hypen build` bundles it to `dist/main.js` (run it with `bun dist/main.js`).
 
 ### Resolution
 
-The CLI looks for `hypen.json` in the project root. If not present, it falls back to built-in defaults. 
+The CLI reads `hypen.json` from the directory you run it in, so run commands from the project root. Without a `hypen.json` it uses the defaults above.
 
 ## Component Discovery
 
@@ -92,12 +107,15 @@ export default app
   .onAction("increment", ({ state }) => { state.count++; })
   .ui(hypen`
     module Counter {
-      Text("Count: @{state.count}")
-      Button { Text("+") }.onClick(@actions.increment)
+      Column {
+        Text("Count: @{state.count}")
+        Button { Text("+") }.onClick(@actions.increment)
+      }
     }
-  `)
-  .build();
+  `);
 ```
+
+`.ui()` finishes the definition, so it is the last call. (A trailing `.build()` after `.ui()` is accepted and does nothing.) Modules whose template lives in a `.hypen` file end with `.build()` instead.
 
 ### Nested Components
 
@@ -135,12 +153,12 @@ Once discovered, components are available by name in any `.hypen` template:
 
 ```hypen
 Column {
-  Header
+  Header()
   Router {
-    Route(path: "/") { Home }
-    Route(path: "/settings") { Settings }
+    Route(path: "/") { Home() }
+    Route(path: "/settings") { Settings() }
   }
-  Footer
+  Footer()
 }
 ```
 
@@ -220,9 +238,11 @@ module Chat {
 
 All components under `./apps/chat` are discovered recursively and wired into the engine's component resolver. No manual registration needed.
 
+`.module()` picks the entry. With `.source(dir)` (or `.app(myApp)`) it is optional: the server uses the module named `App` if there is one, otherwise the only module. Here there are three modules and none is called `App`, so `.module("Chat", chatModule)` names the entry; without it the server throws `Module not set and the entry is ambiguous (...)`.
+
 ### Inline UI (Single Component)
 
-For simple single-component apps, you can skip `.source()` and pass the template directly. This is the single-module shortcut — for multi-module apps prefer `new RemoteServer().app(myApp)` with modules registered on a `HypenApp`.
+For simple single-component apps, you can skip `.source()` and pass the template directly. This is the single-module shortcut. For multi-module apps prefer `.source(dir)` or `new RemoteServer().app(myApp)` with modules registered on a `HypenApp`.
 
 ```typescript
 import { RemoteServer } from "@hypen-space/server/remote";
@@ -235,26 +255,39 @@ new RemoteServer()
   .listen(3001);
 ```
 
-Note: with inline `.ui()`, any imports or component references in the template will **not** be resolved since the server has no source directory to discover from.
+`counterModule` here ends with `.build()` (its template is in the `.hypen` file), so the server needs `.ui()`. If the module carries its own template, as single-file modules written with ``.ui(hypen`...`)`` do, you can leave `.ui()` off: `new RemoteServer().module("Counter", counter).listen(3001)`.
+
+With inline UI, imports and references to other components in the template are **not** resolved, because the server has no source directory to discover them from.
 
 ### Remote Client
 
-On the browser side, connect to the remote server:
+`RemoteServer` serves a ready-made browser client on the same port: open `http://localhost:3001` and the app is running, with the browser URL kept in sync with the root module's `location` and deep links falling back to the app. Pass `webClient: false` in `.config()` to turn it off.
+
+To build your own client page instead, connect a `RemoteEngine` to the server and give the DOM renderer something to send actions back through:
 
 ```typescript
 import { RemoteEngine } from "@hypen-space/core/remote";
 import { DOMRenderer } from "@hypen-space/web";
 
+const container = document.getElementById("app")!;
 const engine = new RemoteEngine("ws://localhost:3001", {
   autoReconnect: true,
 });
 
-const renderer = new DOMRenderer(document.getElementById("app"));
+// The second argument is where clicks and other UI events go.
+const renderer = new DOMRenderer(container, {
+  dispatchAction: (name, payload) => engine.dispatchAction(name, payload),
+});
+
 engine.onPatches((patches) => renderer.applyPatches(patches));
 await engine.connect();
 ```
 
-The remote protocol supports session persistence, reconnection with state restoration, and works with any renderer (DOM, Canvas, Android, iOS).
+Without that second argument the page renders but clicks do nothing. Bundle this file for the browser (for example with `bun build client.ts --outdir public`); a plain `<script>` tag can't resolve the `@hypen-space/*` imports.
+
+Every new or restored session starts with a complete tree. If your client can reconnect, clear the container and create a fresh renderer in `engine.onSessionEstablished(...)`, as the built-in client does, so a reconnect doesn't render a second copy.
+
+The remote protocol supports session persistence and reconnection, and works with any renderer (DOM, Canvas, Android, iOS).
 
 ### Programmatic Discovery (No CLI)
 

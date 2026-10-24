@@ -95,7 +95,6 @@ const DEFAULT_WATCHLIST = ["tt1375666", "tt0816692", "tt0482571"];
 const watchlist = new Set(DEFAULT_WATCHLIST);
 const detailCache = new Map<string, Movie>();
 const searchCache = new Map<string, OmdbSearchItem[]>();
-const DEMO_OMDB_API_KEY = "2ab6e349";
 
 export const GENRES = ["All", "Sci-Fi", "Drama", "Thriller", "Adventure", "Action", "Mystery", "Comedy"];
 
@@ -161,7 +160,7 @@ function apiKey(): string | null {
   const runtime = globalThis as typeof globalThis & {
     process?: { env?: Record<string, string | undefined> };
   };
-  return runtime.process?.env?.OMDB_API_KEY || runtime.process?.env?.OMDB_KEY || DEMO_OMDB_API_KEY || null;
+  return runtime.process?.env?.OMDB_API_KEY || runtime.process?.env?.OMDB_KEY || null;
 }
 
 async function omdb(params: Record<string, string>): Promise<any | null> {
@@ -172,9 +171,33 @@ async function omdb(params: Record<string, string>): Promise<any | null> {
   for (const [name, value] of Object.entries(params)) {
     url.searchParams.set(name, value);
   }
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`OMDb request failed: ${response.status}`);
-  return response.json();
+  // Any failure (bad/expired key -> 401, rate limit, network error, non-JSON
+  // body) degrades to the bundled fallback catalog instead of throwing, so a
+  // broken key never blanks the page.
+  try {
+    const response = await fetch(url);
+    if (!response.ok) {
+      warnOmdbUnavailable(`HTTP ${response.status}`);
+      return null;
+    }
+    const body = await response.json() as any;
+    if (body?.Response === "False" && typeof body.Error === "string" && /api key|limit/i.test(body.Error)) {
+      warnOmdbUnavailable(body.Error);
+      return null;
+    }
+    return body;
+  } catch (err) {
+    warnOmdbUnavailable(err instanceof Error ? err.message : String(err));
+    return null;
+  }
+}
+
+let omdbUnavailable = false;
+function warnOmdbUnavailable(reason: string) {
+  if (!omdbUnavailable) {
+    console.warn(`[movie-discovery] OMDb unavailable (${reason}); using bundled fallback titles.`);
+  }
+  omdbUnavailable = true;
 }
 
 function posterFallbackSvg(title: string): string {
@@ -326,18 +349,23 @@ export async function getRecommendedMovies(_userId: string, limit = 8): Promise<
   return getMoviesById(RECOMMENDED_IDS.slice(0, limit), false);
 }
 
-async function searchOmdb(query: string): Promise<OmdbSearchItem[]> {
+async function searchOmdb(query: string): Promise<OmdbSearchItem[] | null> {
   const normalized = query.trim().toLowerCase();
   if (searchCache.has(normalized)) return searchCache.get(normalized)!;
 
   const data = await omdb({ s: query.trim(), type: "movie", page: "1" }) as { Search?: OmdbSearchItem[]; Response: "True" | "False" } | null;
-  const rows = data?.Response === "True" ? data.Search ?? [] : [];
+  // null = OMDb unreachable / key rejected; the caller searches the bundled
+  // catalog instead (and nothing is cached, so a later good key still works).
+  if (data === null) return null;
+  const rows = data.Response === "True" ? data.Search ?? [] : [];
   searchCache.set(normalized, rows);
   return rows;
 }
 
 export async function searchMovies(_userId: string, query: string, genre: string): Promise<Movie[]> {
-  if (!apiKey()) {
+  const searchQuery = query.trim() || (genre === "All" ? "star" : genre);
+  const rows = apiKey() ? await searchOmdb(searchQuery) : null;
+  if (rows === null) {
     const needle = query.trim().toLowerCase();
     const all = await getMoviesById([...TRENDING_IDS, ...RECOMMENDED_IDS], false);
     return all.filter((movie) => {
@@ -350,8 +378,6 @@ export async function searchMovies(_userId: string, query: string, genre: string
     }).slice(0, 10);
   }
 
-  const searchQuery = query.trim() || (genre === "All" ? "star" : genre);
-  const rows = await searchOmdb(searchQuery);
   const details = await Promise.all(rows.slice(0, 10).map((row, index) => getMovieById(row.imdbID, index + 1)));
   const filtered = genre === "All"
     ? details

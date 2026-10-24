@@ -521,13 +521,13 @@ impl RemoteSession {
                     .and_then(|v| v.as_str())
                     .map(|s| s.to_string());
                 let new_path = match name {
-                    "router.push" => to.and_then(|t| {
+                    "router.push" => to.map(|t| {
                         router.push(&t);
-                        Some(router.current_path())
+                        router.current_path()
                     }),
-                    "router.replace" => to.and_then(|t| {
+                    "router.replace" => to.map(|t| {
                         router.replace(&t);
-                        Some(router.current_path())
+                        router.current_path()
                     }),
                     "router.back" => {
                         router.back();

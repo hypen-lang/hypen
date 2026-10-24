@@ -12,6 +12,7 @@ import {
   ensureIOSRunner,
   exec,
   getServerUrl,
+  installAndroidRunnerIfNeeded,
   listAndroidDevices as listAdbDevices,
   listIOSSimulators,
   RUNNER_PATHS,
@@ -97,10 +98,9 @@ export async function installAndLaunchAndroid(deviceId: string, overrideUrl?: st
   const hasRunner = await ensureAndroidRunner();
   if (!hasRunner) return { ok: false, error: "Could not download Android runner APK." };
 
-  const { exitCode: installCode, stderr: installErr } = await exec([
-    "adb", "-s", device.id, "install", "-r", RUNNER_PATHS.android,
-  ]);
-  if (installCode !== 0) return { ok: false, error: `Install failed: ${installErr.trim()}` };
+  // Skips the ~40 MB reinstall when this exact APK is already on the device.
+  const install = await installAndroidRunnerIfNeeded(device.id);
+  if (!install.ok) return { ok: false, error: `Install failed: ${install.error}` };
 
   const deepLink = `hypenpreview://connect?url=${encodeURIComponent(wsUrl)}`;
   const { exitCode: launchCode, stderr: launchErr } = await exec([

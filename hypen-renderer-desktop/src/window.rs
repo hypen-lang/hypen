@@ -2173,6 +2173,11 @@ impl App {
         let present_result = self.gpu.as_mut().expect("gpu set").present(scene);
         let retry_surface = match present_result {
             Ok(PresentStatus::Presented) => {
+                // The layer presents with its CATransaction; commit it now
+                // so a frame painted from a background wake shows without
+                // waiting for the next input event.
+                #[cfg(target_os = "macos")]
+                crate::macos::flush_presented_frame();
                 self.surface_recovery.recovered();
                 #[cfg(feature = "dev-overlay")]
                 self.dev_overlay

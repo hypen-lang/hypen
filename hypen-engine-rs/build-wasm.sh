@@ -1,12 +1,43 @@
 #!/bin/bash
 set -e
 
+# Usage: ./build-wasm.sh [--install-tools]
+#   --install-tools  install missing build tools (wasm-pack via `cargo install`,
+#                    the wasm32-wasip1 rustup target) instead of failing.
+#                    Same as HYPEN_INSTALL_TOOLS=1.
+#
+# Besides pkg/, this script WRITES COMMITTED FILES in other packages: it copies
+# the builds into hypen-web/ and hypen-golang/ (copy-wasm-artifacts.sh) and
+# regenerates the UniFFI bindings in hypen-kotlin/ and hypen-server-swift/
+# (skip those with HYPEN_SKIP_BINDINGS=1). Review `git status` afterwards.
+INSTALL_TOOLS="${HYPEN_INSTALL_TOOLS:-0}"
+for arg in "$@"; do
+    case "$arg" in
+        --install-tools) INSTALL_TOOLS=1 ;;
+        -h|--help) sed -n '/^# Usage:/,/^# (skip those/p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        *) echo "error: unknown argument: $arg (try --help)" >&2; exit 2 ;;
+    esac
+done
+
+# All paths below (pkg/, wit/, ../target) are relative to the engine crate,
+# so the script works no matter which directory it is invoked from.
+cd "$(dirname "${BASH_SOURCE[0]}")"
+
 echo "Building Hypen Engine for WASM..."
 
-# Check if wasm-pack is installed
+# Check if wasm-pack is installed. Never install toolchain binaries silently.
 if ! command -v wasm-pack &> /dev/null; then
-    echo "wasm-pack not found. Installing..."
-    cargo install wasm-pack
+    if [ "$INSTALL_TOOLS" = "1" ]; then
+        echo "wasm-pack not found. Installing (cargo install wasm-pack)..."
+        cargo install wasm-pack
+    else
+        echo "error: wasm-pack is not installed." >&2
+        echo "  Install it with one of:" >&2
+        echo "    cargo install wasm-pack" >&2
+        echo "    curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh" >&2
+        echo "  or re-run with --install-tools to let this script run 'cargo install wasm-pack'." >&2
+        exit 1
+    fi
 fi
 
 # ==============================================================================
@@ -55,8 +86,14 @@ echo ""
 
 # Check if wasm32-wasip1 target is installed (was wasm32-wasi before Rust 1.78)
 if ! rustup target list --installed | grep -q wasm32-wasip1; then
-    echo "Installing wasm32-wasip1 target..."
-    rustup target add wasm32-wasip1
+    if [ "$INSTALL_TOOLS" = "1" ]; then
+        echo "Installing wasm32-wasip1 target..."
+        rustup target add wasm32-wasip1
+    else
+        echo "error: the wasm32-wasip1 Rust target is not installed." >&2
+        echo "  Run: rustup target add wasm32-wasip1   (or re-run with --install-tools)" >&2
+        exit 1
+    fi
 fi
 
 # Build for WASI

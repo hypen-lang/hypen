@@ -58,7 +58,7 @@ Column {
                 }
                 .tw("items-center bg-orange-50 border border-gray-100 rounded-full px-3 py-1 ml-2")
 
-                Text("$@{state.restaurant.deliveryFee} fee")
+                Text("$@{state.restaurant.deliveryFeeLabel} fee")
                     .tw("text-sm text-gray-700 bg-stone-100 border border-stone-200 rounded-full px-3 py-1 ml-2")
             }
             .tw("mt-4 items-center flex-wrap")
@@ -102,10 +102,10 @@ Column {
                     }
                     .tw("flex-1")
 
-                    Text("$@{state.cartSubtotal}")
+                    Text("$@{state.cartSubtotalLabel}")
                         .tw("text-base font-bold text-white")
                 }
-                .tw("items-center")
+                .tw("w-full items-center gap-4")
             }
             .tw("py-3 px-5 bg-orange-500 rounded-full shadow-xl")
             .width("100%")

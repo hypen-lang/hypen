@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
+  type Result,
   Ok,
   Err,
   isOk,
@@ -103,7 +104,7 @@ describe("Result Type", () => {
       const result = await fromPromise(Promise.reject("string error"));
       expect(result.ok).toBe(false);
       if (!result.ok) {
-        expect(result.error).toBe("string error");
+        expect(result.error as unknown).toBe("string error");
       }
     });
   });
@@ -240,7 +241,7 @@ describe("Result Type", () => {
 
   describe("match", () => {
     test("calls ok handler for Ok", () => {
-      const result = match(Ok(42), {
+      const result = match(Ok(42) as Result<number>, {
         ok: (v) => `value: ${v}`,
         err: (e) => `error: ${e.message}`,
       });

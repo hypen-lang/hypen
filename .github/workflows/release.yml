@@ -257,40 +257,92 @@ jobs:
           name: wasm-all
           path: hypen-engine-rs/pkg
 
-      - name: Install & build
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: parser
+
+      - name: Install wasm-pack
+        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+
+      # Put the freshly built engine where each package loads it.
+      - name: Setup WASM
+        run: bash hypen-engine-rs/copy-wasm-artifacts.sh
+
+      - name: Build hypen-web packages
+        run: bun install && bun run build
+        working-directory: hypen-web
+
+      # @hypen-space/lsp compiles against the parser WASM (src imports
+      # ../wasm/...), which the build-wasm job doesn't produce.
+      - name: Build @hypen-space/lsp
         run: |
-          cd hypen-web && bun install && bun run build
-          cd ../hypen-cli && bun install && bun run build
+          (cd ../parser && wasm-pack build --target nodejs --out-dir pkg/nodejs --features wasm)
+          rm -rf wasm && ln -sf ../parser/pkg/nodejs wasm
+          bun install --frozen-lockfile
+          bunx tsc -b
+          # npm pack drops symlinks, so ship the parser and engine WASM as
+          # real files; otherwise the published server (used by Studio)
+          # silently falls back to the regex parser with no a11y checks.
+          rm -rf wasm wasm-engine
+          cp -r ../parser/pkg/nodejs wasm
+          cp -r ../hypen-engine-rs/pkg/nodejs wasm-engine
+          rm -f wasm/.gitignore wasm-engine/.gitignore
+          npm pack --dry-run 2>&1 | grep -E 'wasm(-engine)?/.*\.wasm' || { echo "::error::@hypen-space/lsp tarball has no WASM"; exit 1; }
+        working-directory: hypen-lsp
 
-      - name: Publish @hypen-space/core
-        run: npm publish --access public
-        working-directory: hypen-web/packages/core
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @hypen-space/web
-        run: npm publish --access public
-        working-directory: hypen-web/packages/web
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @hypen-space/server
-        run: npm publish --access public
-        working-directory: hypen-web/packages/server
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @hypen-space/web-engine
-        run: npm publish --access public
-        working-directory: hypen-web/packages/web-engine
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @hypen-space/cli
-        run: npm publish --access public
+      # The CLI depends on this release's @hypen-space/* versions, which are
+      # not on npm until the publish step below. Build it against the
+      # checkout's packages, then restore the manifest so the published
+      # package.json keeps the ^X.Y.Z ranges.
+      - name: Build @hypen-space/cli
+        run: |
+          cp package.json package.json.release && cp bun.lock bun.lock.release
+          bun scripts/ci-link-local-packages.ts
+          bun install
+          bun run build
+          mv package.json.release package.json && mv bun.lock.release bun.lock
         working-directory: hypen-cli
+
+      # Same packages and order as scripts/publish-all.sh: dependencies
+      # first, the CLI last. `hypen-engine` is the web-target build with the
+      # device broker (Cloudflare imports it); the browser build ships
+      # inside @hypen-space/web-engine. Already-published versions are
+      # skipped so a failed run can be retried.
+      - name: Publish npm packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          set -euo pipefail
+          publish() {
+            local dir=$1 name ver
+            name=$(node -p "require('./$dir/package.json').name")
+            ver=$(node -p "require('./$dir/package.json').version")
+            if [ "$ver" != "$VERSION" ]; then
+              echo "::error::$name in $dir is $ver, expected $VERSION (run scripts/bump-versions.sh)"
+              exit 1
+            fi
+            if npm view "$name@$ver" version >/dev/null 2>&1; then
+              echo "$name@$ver is already on npm, skipping"
+            else
+              (cd "$dir" && npm publish --access public)
+            fi
+          }
+          publish hypen-engine-rs/pkg/web
+          publish hypen-web/packages/core
+          publish hypen-web/packages/web
+          publish hypen-web/packages/server
+          publish hypen-web/packages/web-engine
+          publish hypen-web/packages/device-web
+          publish hypen-web/packages/device-fake
+          publish hypen-web/packages/agent
+          publish hypen-web/packages/cf
+          publish hypen-lsp
+          publish hypen-cli
 
   # ── Core: crates.io ──────────────────────────────────────────────
   publish-crates:
@@ -333,6 +385,8 @@ jobs:
     if: ${{ needs.resolve.outputs.publish-go == 'true' }}
     uses: ./.github/workflows/publish-go.yml
     with:
+      # Bare X.Y.Z; publish-go.yml normalises it to the Go subdirectory-module
+      # tag hypen-golang/vX.Y.Z on the same commit as the vX.Y.Z release tag.
       version: ${{ needs.resolve.outputs.version }}
       dry-run: false
 
@@ -375,6 +429,8 @@ jobs:
     with:
       version: ${{ needs.resolve.outputs.version }}
       dry-run: false
+    secrets:
+      SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
 
   # ── Platform: LSP ────────────────────────────────────────────────
   publish-lsp:
@@ -387,3 +443,13 @@ jobs:
       dry-run: false
     secrets:
       VSCE_PAT: ${{ secrets.VSCE_PAT }}
+
+  # ── Desktop runner (hypen-browser) installers ────────────────────
+  # `hypen run desktop` downloads hypen-browser-<target>.tar.gz from
+  # this repo's latest release.
+  desktop-installers:
+    name: Desktop Installers
+    needs: [resolve, github-release]
+    uses: ./.github/workflows/desktop-installers.yml
+    with:
+      tag: "v${{ needs.resolve.outputs.version }}"

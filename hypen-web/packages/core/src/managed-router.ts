@@ -97,7 +97,15 @@ export interface ManagedRouterOptions {
    * so the host can bind it to the connection's device broker (RFC 001
    * §2.7) — `RemoteSession` uses this to give routed modules device access.
    */
-  onModuleCreated?: (instance: HypenModuleInstance) => void;
+  onModuleCreated?: (instance: HypenModuleInstance, moduleId: string) => void;
+  /**
+   * Seed state for a route module about to be constructed: return a state
+   * object to use as its initial state (the module's `onCreated` then runs on
+   * top of it), or `undefined` for the definition's own `initialState`.
+   * `RemoteSession` uses this to restore route-module state after a
+   * hibernation wake or a hot-reload resume.
+   */
+  initialStateFor?: (moduleId: string, definition: HypenModuleDefinition) => unknown;
 }
 
 export class ManagedRouter {
@@ -134,7 +142,8 @@ export class ManagedRouter {
   private createdInstances = new Set<HypenModuleInstance>();
   private readonly maxPersistedModules: number;
   private readonly maxPinnedModules: number;
-  private readonly onModuleCreated?: (instance: HypenModuleInstance) => void;
+  private readonly onModuleCreated?: (instance: HypenModuleInstance, moduleId: string) => void;
+  private readonly initialStateFor?: (moduleId: string, definition: HypenModuleDefinition) => unknown;
   /**
    * Serialized chain of in-flight route transitions. Because mount /
    * unmount are now async (they await `onActivated` / `onDeactivated`),
@@ -162,6 +171,7 @@ export class ManagedRouter {
     const pinCap = options.maxPinnedModules ?? MAX_BACKGROUND_PINNED_MODULES;
     this.maxPinnedModules = pinCap >= 0 ? pinCap : MAX_BACKGROUND_PINNED_MODULES;
     this.onModuleCreated = options.onModuleCreated;
+    this.initialStateFor = options.initialStateFor;
   }
 
   /**
@@ -384,6 +394,13 @@ export class ManagedRouter {
 
     log.debug(`Mounting module: ${namedDef.name} for route: ${route.path}`);
 
+    try {
+      const seeded = this.initialStateFor?.(moduleId, namedDef as HypenModuleDefinition);
+      if (seeded !== undefined) namedDef.initialState = seeded;
+    } catch (e) {
+      log.error(`initialStateFor hook failed for ${moduleId}:`, e);
+    }
+
     const instance = new HypenModuleInstance(
       this.engine,
       namedDef as HypenModuleDefinition<object>,
@@ -397,7 +414,7 @@ export class ManagedRouter {
     }
     this.createdInstances.add(instance);
     try {
-      this.onModuleCreated?.(instance);
+      this.onModuleCreated?.(instance, moduleId);
     } catch (e) {
       log.error(`onModuleCreated hook failed for ${moduleId}:`, e);
     }

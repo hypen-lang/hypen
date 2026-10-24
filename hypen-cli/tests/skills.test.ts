@@ -54,6 +54,26 @@ describe("installSkills", () => {
     expect(SKILL_CONTENT).toContain("## Built-in Components");
     expect(SKILL_CONTENT.length).toBeGreaterThan(10000);
   });
+
+  test("routing section matches the real Router syntax and navigation actions", () => {
+    // Route takes a named `path:` and screens are called with `()`, as in
+    // the scaffold. The old `Route("/") { HomePage }` form was wrong.
+    expect(SKILL_CONTENT).toContain('Route(path: "/") {');
+    expect(SKILL_CONTENT).not.toMatch(/Route\("\//);
+    expect(SKILL_CONTENT).not.toMatch(/^\s+[A-Z]\w*Page\s*$/m);
+    for (const action of ["@router.push, to:", "@router.back", "@router.replace"]) {
+      expect(SKILL_CONTENT).toContain(action);
+    }
+    // The Router reads @{state.location}; the skill must say so.
+    expect(SKILL_CONTENT).toContain("@{state.location}");
+    // And it must warn off the broken child → parent navigate pattern.
+    expect(SKILL_CONTENT).toContain("Actions are scoped to the module");
+  });
+
+  test("documents .build() / .ui() terminal rules", () => {
+    expect(SKILL_CONTENT).toContain("### `.build()` rules");
+    expect(SKILL_CONTENT).toContain("Do NOT call `.build()` after it");
+  });
 });
 
 describe("ensureGitignoreSkillEntries", () => {

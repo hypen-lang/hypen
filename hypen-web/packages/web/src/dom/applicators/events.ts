@@ -1,4 +1,5 @@
 import { dispatchUIAction } from "@hypen-space/core";
+import { isEngineValuedField, noteLocalBindWrite } from "../../bind-echo.js";
 /**
  * Event Applicators
  *
@@ -252,6 +253,32 @@ function capitalize(str: string): string {
 
 
 /**
+ * A controlled text field — `Input(value: "@{state.x}").onInput(@actions.setX)`
+ * — round-trips each edit exactly like `.bind`: the handler writes state and
+ * the engine answers with `SetProp(value)`. Over a remote engine several
+ * edits are in flight, and the answer to an older one must not overwrite
+ * newer text. Record the value this dispatch carries as an outstanding write
+ * (before dispatch: a local engine may answer synchronously) so the renderer
+ * can classify the answers (bind-echo.ts). Only when the payload really
+ * carries the field's text — a custom payload (`.onInput(@actions.x, k: 1)`)
+ * tells the engine nothing it could echo — and only for fields whose `value`
+ * the engine supplies; an uncontrolled field gets no echo to reconcile.
+ */
+function noteControlledFieldWrite(
+  element: HTMLElement,
+  eventType: string,
+  payload: Record<string, unknown>
+): void {
+  if (eventType !== "input" && eventType !== "change") return;
+  const type = element.dataset.hypenType;
+  if (type !== "input" && type !== "textarea") return;
+  if (!(element instanceof HTMLInputElement || element instanceof HTMLTextAreaElement)) return;
+  if (!isEngineValuedField(element)) return;
+  if (payload.value !== element.value) return;
+  noteLocalBindWrite(element, element.value);
+}
+
+/**
  * Create an event handler applicator with common boilerplate
  */
 function createEventHandler(
@@ -332,6 +359,7 @@ function createEventHandler(
       // Dispatch to engine, catching any async rejections
       const engine = getEngine(element);
       if (engine) {
+        noteControlledFieldWrite(element, eventType, payload);
         try {
           dispatchUIAction(engine, element.dataset.hypenId,
             current.actionName,
@@ -944,10 +972,14 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
       element instanceof HTMLInputElement ||
       element instanceof HTMLTextAreaElement
     ) {
-      // Input/Textarea: listen to input event, read .value
+      // Input/Textarea: listen to input event, read .value. The write is
+      // recorded BEFORE dispatch (a local engine may echo synchronously) so
+      // the renderer can tell this keystroke's echo from a programmatic
+      // change and drop echoes older than the text in the field.
       const listener = () => {
         const engine = getEngine(element);
         if (engine) {
+          noteLocalBindWrite(element, element.value);
           dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
             path: bindPath,
             value: element.value,

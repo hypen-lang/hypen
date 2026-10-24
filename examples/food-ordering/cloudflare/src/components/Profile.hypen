@@ -38,7 +38,7 @@ Column {
                 .tw("w-px h-8 bg-gray-200")
 
             Column {
-                Text("$@{state.totalSpent}")
+                Text("$@{state.totalSpentLabel}")
                     .tw("text-lg font-bold text-center")
                 Text("Total spent")
                     .tw("text-xs text-gray-500 text-center")

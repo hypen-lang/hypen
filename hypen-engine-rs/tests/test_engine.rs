@@ -160,7 +160,7 @@ fn test_render_simple_text_element() {
     // THEN: Emits patches (Create + Insert)
     let captured = patches.lock().unwrap();
     assert_has_create(&captured);
-    assert!(captured.len() >= 1);
+    assert!(!captured.is_empty());
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn test_render_empty_element_tree() {
 
     // THEN: No crash, creates Column node
     let captured = patches.lock().unwrap();
-    assert!(captured.len() >= 1);
+    assert!(!captured.is_empty());
 }
 
 #[test]

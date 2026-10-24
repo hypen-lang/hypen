@@ -7,6 +7,8 @@
     "sharp": "^0.34.5"
   },
   "scripts": {
+    "build:wasm": "hypen-engine-rs/build-wasm.sh",
+    "build:wasm:js": "HYPEN_SKIP_BINDINGS=1 hypen-engine-rs/build-wasm.sh",
     "bench": "scripts/bench.sh",
     "bench:quick": "scripts/bench.sh --quick",
     "bench:parity": "scripts/bench.sh --parity",

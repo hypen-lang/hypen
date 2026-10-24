@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (quick-start fixes)
+- **`RemoteServer.Listen` now blocks** until `Stop()` (like
+  `http.ListenAndServe`), so a `main` that ends with `.Listen(3000)` keeps
+  serving. A bind/serve error is logged and `Listen` returns. Use the new
+  `ListenAndServe(port) error` to get the error, or `ListenAsync` (now
+  genuinely non-blocking, port bound before it returns) plus the new
+  `Wait()` to run in the background. `remote.Serve` keeps its
+  non-blocking contract (it now calls `ListenAsync`).
+- **`WithDefinition` uses the module's template** (`core.NewApp(...).UI(...)`)
+  as the server UI, so `.UI()` on the server is no longer required (an
+  explicit `.UI()` still wins, in any order). Fixes `remote: UI not set`.
+- **Inline UIs render without `.Source(dir)`.** The engine is built whenever
+  a UI is set; `.Source()` only adds component discovery. Previously the
+  initialTree carried `patches: []`.
+- Map-style `WithState(...).OnAction(...)` / `remote.Serve` servers now render
+  through the engine too, re-render on every action (patches + stateUpdate),
+  and unwrap the DOM renderer's `__hypen_dispatch` envelope for the handler.
+  `Attach` still returns `ErrNoEngine` for them (no guarded action surface).
+
+### Added
+- `ModuleDefinition.Build()`: no-op, so `core.NewApp(...).UI(...).Build()`
+  compiles.
+- Built-in web client: `Listen` serves an HTML shell at `/` and the
+  remote client + DOM renderer bundle at `/__hypen__/client.js` (same as the
+  TypeScript server; embedded, regenerate with `go generate ./remote`).
+  Opt out with `DisableWebClient()` / `ServerConfig.DisableWebClient`.
+
 ### Removed
 - **The Go duplicate of the device protocol.** The Rust engine is the only
   device protocol decoder, validator and negotiator. `remote/device` drops the

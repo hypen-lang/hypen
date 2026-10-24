@@ -68,4 +68,15 @@ describe("built-in primitive lists agree", () => {
     expect(webBuiltIns().has("ScrollView")).toBe(false);
     expect(enginePrimitives().has("ScrollView")).toBe(false);
   });
+
+  test("server discovery's shadowing list matches the engine primitives", () => {
+    const src = readFileSync(
+      join(REPO, "hypen-web/packages/server/src/discovery.ts"),
+      "utf8"
+    );
+    const start = src.indexOf("export const BUILT_IN_PRIMITIVES");
+    expect(start).toBeGreaterThan(-1);
+    const listed = namesIn(src.slice(start, src.indexOf("]);", start)));
+    expect([...listed].sort()).toEqual([...enginePrimitives()].sort());
+  });
 });

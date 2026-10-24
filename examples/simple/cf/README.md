@@ -15,6 +15,22 @@ Open `http://localhost:8787` in a browser — the worker serves a DOM-renderer
 client at `/` that connects back to its own `/ws`. (Or point any other Hypen
 client — Canvas, desktop, iOS — at `ws://localhost:8787/ws`.)
 
+Click **About** to navigate to `/about`, **Home** (or **Back to the
+counter**) to return. Navigation is wired with
+`Button { … }.onClick(@router.push, to: "/about")` — the `to:` argument is sent
+as the action payload. (Writing it positionally as
+`Button("@router.push", to: "/about")` drops `to`, so nothing navigates.)
+
+`wrangler dev` logs two warnings on the first connection; both are expected
+locally:
+
+- `no allowedOrigins/authenticate configured — any client can connect` — set
+  `allowedOrigins` / `authenticate` in `defineHypenWorker` before deploying.
+- `Device plane off: no device broker … — sessions stay UI-only` — the device
+  plane only backs `context.device.request(...)` (file pickers, camera, …),
+  which this app doesn't use. It appears when the installed `hypen-engine` web
+  build was compiled without the `device-broker` feature.
+
 ## What's where
 
 The whole app is `src/worker.ts`:

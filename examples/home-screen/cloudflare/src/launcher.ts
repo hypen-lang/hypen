@@ -8,6 +8,7 @@ import {
   type UnsplashPhoto,
 } from "./unsplash";
 import { fetchWeather, getGeo } from "./geo";
+import { appEndpoint } from "./endpoints";
 import {
   cancelRename,
   clearSelection,
@@ -75,7 +76,9 @@ export interface LauncherApp {
   /** Translucent brand colour for the splash's breathing glow. */
   glow: string;
   /**
-   * WebSocket endpoint of the deployed example.
+   * WebSocket endpoint of the example: its local `wrangler dev` port by
+   * default, its workers.dev URL when HYPEN_WORKERS_SUBDOMAIN is set
+   * (see endpoints.ts).
    */
   url: string;
 }
@@ -88,7 +91,7 @@ export const APPS: LauncherApp[] = [
     iconColor: "#EFF6FF",
     tile: "radial-gradient(circle at 24% 14%, rgba(255,255,255,0.48), transparent 29%), linear-gradient(145deg, #38BDF8 0%, #4F46E5 52%, #312E81 100%)",
     glow: "rgba(79, 70, 229, 0.48)",
-    url: "wss://hypen-todo.ian-dae.workers.dev/ws",
+    url: appEndpoint("hypen-todo", 8789),
   },
   {
     slug: "calculator",
@@ -97,7 +100,7 @@ export const APPS: LauncherApp[] = [
     iconColor: "#CFFAFE",
     tile: "radial-gradient(circle at 72% 12%, rgba(34,211,238,0.38), transparent 32%), linear-gradient(145deg, #334155 0%, #172554 54%, #020617 100%)",
     glow: "rgba(34, 211, 238, 0.30)",
-    url: "wss://hypen-calculator.ian-dae.workers.dev/ws",
+    url: appEndpoint("hypen-calculator", 8794),
   },
   {
     slug: "calories",
@@ -106,7 +109,7 @@ export const APPS: LauncherApp[] = [
     iconColor: "#FFF7ED",
     tile: "radial-gradient(circle at 28% 12%, rgba(255,255,255,0.42), transparent 28%), linear-gradient(145deg, #FB7185 0%, #F43F5E 45%, #BE123C 100%)",
     glow: "rgba(244, 63, 94, 0.48)",
-    url: "wss://hypen-calorie-counter.ian-dae.workers.dev/ws",
+    url: appEndpoint("hypen-calorie-counter", 8790),
   },
   {
     slug: "movies",
@@ -115,7 +118,7 @@ export const APPS: LauncherApp[] = [
     iconColor: "#FFFBEB",
     tile: "radial-gradient(circle at 28% 14%, rgba(255,255,255,0.46), transparent 27%), linear-gradient(145deg, #FDE047 0%, #F59E0B 46%, #C2410C 100%)",
     glow: "rgba(245, 158, 11, 0.46)",
-    url: "wss://hypen-movie-discovery.ian-dae.workers.dev/ws",
+    url: appEndpoint("hypen-movie-discovery", 8791),
   },
   {
     slug: "food",
@@ -124,7 +127,7 @@ export const APPS: LauncherApp[] = [
     iconColor: "#ECFDF5",
     tile: "radial-gradient(circle at 27% 13%, rgba(255,255,255,0.44), transparent 28%), linear-gradient(145deg, #6EE7B7 0%, #10B981 45%, #047857 100%)",
     glow: "rgba(16, 185, 129, 0.44)",
-    url: "wss://hypen-food-ordering.ian-dae.workers.dev/ws",
+    url: appEndpoint("hypen-food-ordering", 8792),
   },
   {
     slug: "social",
@@ -133,7 +136,7 @@ export const APPS: LauncherApp[] = [
     iconColor: "#F5F3FF",
     tile: "radial-gradient(circle at 26% 13%, rgba(255,255,255,0.46), transparent 29%), linear-gradient(145deg, #818CF8 0%, #7C3AED 48%, #581C87 100%)",
     glow: "rgba(124, 58, 237, 0.46)",
-    url: "wss://hypen-social.ian-dae.workers.dev/ws",
+    url: appEndpoint("hypen-social", 8793),
   },
   {
     slug: "hypeflix",
@@ -142,7 +145,7 @@ export const APPS: LauncherApp[] = [
     iconColor: "#FFF1F2",
     tile: "radial-gradient(circle at 28% 14%, rgba(255,255,255,0.44), transparent 28%), linear-gradient(145deg, #FB7185 0%, #E11D48 48%, #881337 100%)",
     glow: "rgba(225, 29, 72, 0.48)",
-    url: "wss://hypen-hypeflix.ian-dae.workers.dev/ws",
+    url: appEndpoint("hypen-hypeflix", 8795),
   },
 ];
 

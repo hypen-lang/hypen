@@ -4,7 +4,7 @@ This file provides guidance to Claude Code when working with the Hypen Go SDK.
 
 ## Project Overview
 
-The Go SDK (`github.com/hypen-space/core`) provides the module system for building Hypen applications in Go. It includes state management, action handling, lifecycle hooks, routing, and a remote UI server — parallel to the TypeScript, Kotlin, and Rust SDKs.
+The Go SDK (`github.com/hypen-lang/hypen/hypen-golang`) provides the module system for building Hypen applications in Go. It includes state management, action handling, lifecycle hooks, routing, and a remote UI server — parallel to the TypeScript, Kotlin, and Rust SDKs.
 
 ## Module Structure
 
@@ -175,3 +175,13 @@ cargo build --target wasm32-wasip1 --release --features wasi
 cp ../target/wasm32-wasip1/release/hypen_engine.wasm ../hypen-golang/hypen_engine.wasm
 # (./build-wasm.sh does this plus the JS and UniFFI artifacts)
 ```
+
+## Module path and releases
+
+The module path is `github.com/hypen-lang/hypen/hypen-golang` (package name `core`; import it as
+`core "github.com/hypen-lang/hypen/hypen-golang"`). Because it is a subdirectory module, a release is
+the git tag `hypen-golang/vX.Y.Z` (the `v` is required). `.github/workflows/publish-go.yml` creates it
+(it accepts `X.Y.Z` or `vX.Y.Z`) on the same commit as the repo's `vX.Y.Z` release tag. The module zip
+contains the COMMITTED `hypen_engine.wasm` (embedded via `embed.go`), so commit a rebuilt engine before
+tagging. In-repo consumers (`examples/*`, `../examples/social/go`, the compatibility runner) use
+`require ... v0.0.0` + `replace` to the local directory.

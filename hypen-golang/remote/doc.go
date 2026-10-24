@@ -15,10 +15,13 @@
 //	        }
 //	        return state
 //	    }).
-//	    UI(`Column { Text("Count: @{state.count}") }`).
-//	    Listen(3000)
+//	    UI(`Column { Text("Count: @{state.count}") }`)
 //
-//	defer server.Stop()
+//	server.Listen(3000) // blocks until server.Stop(); see ListenAsync
+//
+// Listen also serves a built-in browser client at http://localhost:3000/
+// (disable with DisableWebClient). With a typed module, the definition's
+// own template is the UI: NewRemoteServer().WithDefinition(def).Listen(3000).
 //
 // # Client
 //

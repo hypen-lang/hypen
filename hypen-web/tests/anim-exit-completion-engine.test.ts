@@ -63,7 +63,7 @@ describe("exit completion through the engine", () => {
 
     const rows = patches.filter((p) => p.type === "create" && p.elementType === "Row");
     expect(rows).toHaveLength(2);
-    const alphaRow = rows[0]!.id;
+    const alphaRow = rows[0]!.id!;
     const rowEl = renderer.getNode(alphaRow) as unknown as FakeElement;
     expect(rowEl).toBeDefined();
 

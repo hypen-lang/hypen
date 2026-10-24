@@ -5,7 +5,7 @@ description: Build a cross-platform counter app that runs on a server and stream
 
 # Building a Remote App
 
-In this tutorial, you'll build a cross-platform counter app that runs on a server and streams to Web and Android clients. This is the recommended approach for production Hypen apps.
+In this tutorial, you'll build a counter app that runs on your own server and streams its UI to Web and Android clients. This is the recommended approach for production Hypen apps.
 
 ## Why Remote Apps?
 
@@ -13,7 +13,7 @@ With remote apps, your server runs the WASM engine and streams UI patches to cli
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  Your Server (Bun/Node.js)                          │
+│  Your Server (Bun)                                  │
 │  • Runs Hypen WASM engine                           │
 │  • Manages state and business logic                 │
 │  • Streams UI patches over WebSocket                │
@@ -42,26 +42,47 @@ The same counter from the [first app tutorial](/docs/getting-started/first-app),
 │                         │
 │       Count: 0          │
 │                         │
-│    [ - ]     [ + ]      │
+│  [ - ]  [Reset]  [ + ]  │
 │                         │
 └─────────────────────────┘
 ```
 
 ## Step 1: Create the Server
 
-Create a new project:
+You need [Bun](https://bun.sh) 1.2 or newer. Create a new project:
 
 ```bash
 mkdir counter-server
 cd counter-server
-bun init -y
+echo '{ "name": "counter-server", "private": true, "type": "module" }' > package.json
 bun add @hypen-space/core @hypen-space/server
+bun add -d @types/bun
+```
+
+Create the folder somewhere that is **not inside another JavaScript project**. `bun add` works on the nearest `package.json`, so writing one first keeps it from changing a parent project or workspace instead. (This writes `package.json` by hand rather than with `bun init -y`, because Bun 1.4's `bun init -y` puts its files in an `init/` subfolder.)
+
+For editor autocomplete and `bunx tsc` type checks, add a `tsconfig.json`. The `DOM` libs are only needed for the browser client in Step 2, Option B, but they do no harm on the server:
+
+```json
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "moduleDetection": "force",
+    "types": ["bun"],
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true
+  }
+}
 ```
 
 Create `server.ts`:
 
 ```typescript
-import { HypenApp } from "@hypen-space/core";
+import { app } from "@hypen-space/core";
 import { RemoteServer } from "@hypen-space/server";
 
 // 1. Define the state
@@ -69,66 +90,49 @@ interface CounterState {
   count: number;
 }
 
-// 2. Create an app registry and attach the Counter module.
-const myApp = new HypenApp();
-
-myApp.module("Counter")
+// 2. Define the module: state, actions and its UI template.
+//    `.ui(...)` finishes the definition (no `.build()` needed after it).
+const counter = app
   .defineState<CounterState>({ count: 0 })
-  .onAction("increment", async ({ state }) => { state.count++; })
-  .onAction("decrement", async ({ state }) => { state.count--; })
-  .onAction("reset", async ({ state }) => { state.count = 0; })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .onAction("decrement", ({ state }) => { state.count--; })
+  .onAction("reset", ({ state }) => { state.count = 0; })
   .ui(`
-  Column {
-    Text("Count: @{state.count}")
-      .fontSize(48)
-      .fontWeight("bold")
-      .color("#1F2937")
+    Column {
+      Text("Count: @{state.count}")
+        .fontSize(48)
+        .fontWeight("bold")
+        .color("#1F2937")
 
-    Row {
-      Button {
-        Text("-")
-          .fontSize(24)
-          .color("#FFFFFF")
+      Row {
+        Button { Text("-").fontSize(24).color("#FFFFFF") }
+          .onClick(@actions.decrement)
+          .backgroundColor("#EF4444")
+          .padding(16)
+          .borderRadius(8)
+
+        Button { Text("Reset").color("#FFFFFF") }
+          .onClick(@actions.reset)
+          .backgroundColor("#6B7280")
+          .padding(16)
+          .borderRadius(8)
+
+        Button { Text("+").fontSize(24).color("#FFFFFF") }
+          .onClick(@actions.increment)
+          .backgroundColor("#22C55E")
+          .padding(16)
+          .borderRadius(8)
       }
-      .onClick(@actions.decrement)
-      .backgroundColor("#EF4444")
-      .padding(16)
-      .borderRadius(8)
-
-      Spacer()
-        .width(24)
-
-      Button {
-        Text("Reset")
-          .color("#FFFFFF")
-      }
-      .onClick(@actions.reset)
-      .backgroundColor("#6B7280")
-      .padding(16)
-      .borderRadius(8)
-
-      Spacer()
-        .width(24)
-
-      Button {
-        Text("+")
-          .fontSize(24)
-          .color("#FFFFFF")
-      }
-      .onClick(@actions.increment)
-      .backgroundColor("#22C55E")
-      .padding(16)
-      .borderRadius(8)
+      .gap(24)
     }
-  }
-  .padding(32)
+    .padding(32)
     .gap(24)
-  `)
-  .build();
+    .horizontalAlignment("center")
+  `);
 
-// 3. Serve the whole app — every registered module is streamed.
+// 3. Serve it. Every connected client gets its own Counter instance.
 new RemoteServer()
-  .app(myApp)
+  .module("Counter", counter)
   .onConnection((client) => {
     console.log(`Client connected: ${client.id}`);
   })
@@ -137,7 +141,7 @@ new RemoteServer()
   })
   .listen(3000);
 
-console.log("Counter server running on ws://localhost:3000");
+console.log("Counter server running on http://localhost:3000 (ws://localhost:3000)");
 ```
 
 Run the server:
@@ -146,11 +150,100 @@ Run the server:
 bun run server.ts
 ```
 
+The server logs a warning that no `allowedOrigins`/`authenticate` is configured. That's expected during development; see [Security](#security) below.
+
+<Callout type="warn">
+`.module(name, def)` picking up the template from `def` needs `@hypen-space/server` 0.6.7 or newer. Older versions stop with `UI not set`.
+</Callout>
+
 ## Step 2: Connect a Web Client
 
-### Option A: Using the HypenApp Component
+### Option A: The built-in web client
 
-The easiest way is to use the `HypenApp` component directly in your Hypen DSL:
+Open `http://localhost:3000` in a browser. `RemoteServer` serves a small web client at its own address that connects back over WebSocket and renders the app with the DOM renderer. Nothing else is needed.
+
+If the root module's state has a string `location` and its template uses a `Router`, the built-in client also keeps the browser URL in sync: navigation pushes history entries, back/forward work, and deep links like `/counter` open on that route. Turn the built-in client off with `.config({ webClient: false })`.
+
+### Option B: Your own page
+
+For more control, connect with `RemoteEngine` and render with `DOMRenderer` yourself. Install the web renderer next to the server packages:
+
+```bash
+bun add @hypen-space/web
+```
+
+Create `client.ts`:
+
+```typescript
+import { RemoteEngine } from "@hypen-space/core";
+import { DOMRenderer } from "@hypen-space/web";
+
+const container = document.getElementById("app")!;
+const engine = new RemoteEngine("ws://localhost:3000");
+
+// Pass the engine so the renderer can send clicks back to the server.
+const renderer = new DOMRenderer(container, engine);
+
+// Each (re)connection streams a complete tree, so start from a clean slate.
+engine.onSessionEstablished(() => renderer.clear());
+engine.onPatches((patches) => renderer.applyPatches(patches));
+
+await engine.connect();
+```
+
+`client.ts` uses `document`, so TypeScript needs the browser types. The `tsconfig.json` from Step 1 already has them. If you made the project with `bun init` instead, its `tsconfig.json` has `"lib": ["ESNext"]` and your editor (or `bunx tsc`) reports `TS2584: Cannot find name 'document'`; change that line to `"lib": ["ESNext", "DOM", "DOM.Iterable"]`. Bun runs and bundles the file either way.
+
+And `index.html`, which loads it as a module script. The `<style>` gives the page the same base styles as the built-in client (system font, no default margins):
+
+```html
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { font-family: system-ui, -apple-system, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./client.ts"></script>
+  </body>
+</html>
+```
+
+Browsers can't load bare package imports or TypeScript directly, so let Bun bundle the page. With the server still running, in a second terminal:
+
+```bash
+bun --port=8080 ./index.html
+```
+
+Open `http://localhost:8080`. (For a static deployment, `bun build ./index.html --outdir dist` writes the bundled page to `dist/`.)
+
+To draw on a `<canvas>` instead, use `CanvasRenderer` from `@hypen-space/web/canvas` the same way: `new CanvasRenderer(canvasElement, engine)`.
+
+The canvas renderer loads its layout engine from `/taffy_wasm_bg.wasm` on the page's origin. `bun ./canvas.html` answers that path with the HTML page, so the browser logs a warning that `WebAssembly.instantiateStreaming` failed because the server does not serve Wasm with the `application/wasm` MIME type, and the renderer falls back to a CDN copy. To serve the file yourself, run the page from a small `Bun.serve` script instead (here `canvas.html` holds `<canvas id="app" width="800" height="600"></canvas>` and the module script):
+
+```typescript
+// dev.ts: run with `bun dev.ts`
+import page from "./canvas.html";
+
+Bun.serve({
+  port: 8080,
+  routes: {
+    "/": page,
+    // Installed with @hypen-space/web; Bun.file serves it as application/wasm.
+    "/taffy_wasm_bg.wasm": Bun.file("node_modules/taffy-layout/pkg/taffy_wasm_bg.wasm"),
+  },
+  development: true,
+});
+console.log("Open http://localhost:8080");
+```
+
+### Option C: Embed it in another Hypen app
+
+A Hypen app rendered in the browser can embed a remote app with the `HypenApp` component:
 
 ```hypen
 Column {
@@ -161,72 +254,14 @@ Column {
 }
 ```
 
-### Option B: Programmatic Connection
-
-For more control, use `RemoteEngine` directly:
-
-Create `client.html`:
-
-```html
-<!DOCTYPE html>
-<html>
-<head>
-  <title>Counter Client</title>
-  <script type="module">
-    import { RemoteEngine } from "https://unpkg.com/@hypen-space/core/dist/remote/client.js";
-
-    const container = document.getElementById("app");
-    const engine = new RemoteEngine("ws://localhost:3000");
-
-    // Simple patch renderer
-    const nodes = new Map();
-
-    engine.onPatches((patches) => {
-      for (const patch of patches) {
-        // Handle each patch type...
-        console.log("Patch:", patch);
-      }
-    });
-
-    engine.connect();
-  </script>
-</head>
-<body>
-  <div id="app"></div>
-</body>
-</html>
-```
-
-Or with the full DOM renderer:
-
-```typescript
-import { RemoteEngine } from "@hypen-space/core";
-import { DOMRenderer } from "@hypen-space/web";
-
-async function main() {
-  const container = document.getElementById("app")!;
-  const renderer = new DOMRenderer(container);
-  const engine = new RemoteEngine("ws://localhost:3000");
-
-  engine.onPatches((patches) => {
-    renderer.applyPatches(patches);
-  });
-
-  await engine.connect();
-  console.log("Connected to server!");
-}
-
-main();
-```
-
 ## Step 3: Connect an Android Client
 
-In your Android project, add the Hypen dependency:
+In your Android project, add the renderer from Maven Central:
 
 ```kotlin
 // build.gradle.kts
 dependencies {
-    implementation("space.hypen:hypen-renderer:0.4.80")
+    implementation("space.hypen:hypen-renderer:0.6.7")
 }
 ```
 
@@ -237,8 +272,9 @@ import space.hypen.renderer.HypenApp
 
 @Composable
 fun CounterScreen() {
-    // For emulator, use 10.0.2.2 to reach host machine
-    // For physical device, use your machine's IP address
+    // On the emulator, 10.0.2.2 reaches the host machine.
+    // On a physical device, use your machine's LAN IP, or run
+    // `adb reverse tcp:3000 tcp:3000` and use ws://localhost:3000.
     HypenApp(
         url = "ws://10.0.2.2:3000",
         modifier = Modifier.fillMaxSize()
@@ -246,7 +282,9 @@ fun CounterScreen() {
 }
 ```
 
-That's it! The Android app will connect to your server and render the counter.
+The app needs the `android.permission.INTERNET` permission, and a plain `ws://` URL needs cleartext traffic allowed (for example `android:usesCleartextTraffic="true"` in a debug manifest). The Android app then connects to your server and renders the counter.
+
+To try a server on a device without building an app, `hypen run android --url ws://localhost:3000` installs the Hypen runner app and points it at your server.
 
 ## How It Works
 
@@ -265,32 +303,63 @@ That's it! The Android app will connect to your server and render the counter.
 
 ```typescript
 new RemoteServer()
-  .app(hypenApp)            // Serve every module registered on a HypenApp (preferred)
-  // or .module(name, def).ui(dslString)   // Single-module shortcut
+  .module(name, definition)  // The entry module; its .ui() template is used
+  // or .app(hypenApp)       // Serve modules registered on a HypenApp
+  // or .source(dir)         // Discover .hypen/.ts components from a folder
+  .ui(dslString)            // Optional: override the entry template
   .config({                 // Optional configuration
     port: 3000,
-    hostname: "0.0.0.0"
+    hostname: "0.0.0.0",
   })
-  .onConnection(callback)   // Called when client connects
-  .onDisconnection(callback)// Called when client disconnects
-  .listen(port?)            // Start the server
+  .onConnection(callback)    // Called when a client connects
+  .onDisconnection(callback) // Called when a client disconnects
+  .listen(port?)             // Start the server
 ```
+
+`.module()` is optional with `.app()` or `.source()`. Without it, the entry is the module named `App` if there is one, otherwise the only module. With several modules and none named `App`, the server throws "entry is ambiguous"; name one `App` or call `.module(name, def)`.
+
+Named modules work as the entry too, with or without a `module Counter { ... }` wrapper in the template:
+
+```typescript
+import { HypenApp } from "@hypen-space/core";
+import { RemoteServer } from "@hypen-space/server";
+
+const myApp = new HypenApp();
+
+myApp.module("Counter")
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .ui(`Column { Text("Count: @{state.count}") Button { Text("+") }.onClick(@actions.increment) }`);
+
+new RemoteServer().app(myApp).listen(3000);
+```
+
+The server also answers `GET /__hypen__/health` (`{"status":"ok","server":"hypen-remote"}`) and, for loopback requests only, `GET /__hypen__/stats`.
 
 ### serve() Helper
 
-For simpler cases:
+For simpler cases, `serve()` configures and starts a `RemoteServer` in one call and resolves to it:
 
 ```typescript
 import { app } from "@hypen-space/core";
 import { serve } from "@hypen-space/server";
 
-serve({
-  module: myModule,
-  ui: myUI,
+const counter = app
+  .defineState({ count: 0 })
+  .onAction("increment", ({ state }) => { state.count++; })
+  .build();
+
+const server = await serve({
+  module: counter,
+  moduleName: "Counter",
+  ui: `Column { Text("Count: @{state.count}") Button { Text("+") }.onClick(@actions.increment) }`,
   port: 3000,
   onConnection: (client) => console.log("Connected:", client.id),
 });
+console.log(`Listening on ${server.url}`);
 ```
+
+`module` takes a module finished with `.build()` or `.ui(...)`. If the module carries its own template from `.ui(...)`, leave out the `ui` option. An unfinished builder (no `.build()`) is also accepted and built for you. `moduleName` defaults to `"App"`, and `source: dir` discovers components from a folder.
 
 ## Client API Reference
 
@@ -316,23 +385,30 @@ fun HypenApp(
     url: String,
     modifier: Modifier = Modifier,
     config: RemoteEngineConfig = RemoteEngineConfig.DEFAULT,
-    loadingContent: @Composable () -> Unit = { DefaultLoading() },
-    errorContent: @Composable (String) -> Unit = { DefaultError(it) }
+    navigation: NavigationOptions? = null,
+    safeAreaInsets: HypenSafeAreaInsets? = null,
+    deviceHost: DeviceHost? = null,
+    disposeDeviceHost: Boolean = false,
+    loadingContent: @Composable () -> Unit = { DefaultLoadingContent() },
+    errorContent: @Composable (String) -> Unit = { DefaultErrorContent(it) },
 )
 ```
+
+See the [Android adapter](/docs/adapters/android#parameters) for what each parameter does.
 
 ### RemoteEngine (Programmatic)
 
 ```typescript
 const engine = new RemoteEngine(url, {
-  autoReconnect: true,        // Auto-reconnect on disconnect
+  autoReconnect: true,        // Auto-reconnect on disconnect (default: true)
   reconnectInterval: 3000,    // Wait 3s before reconnecting
   maxReconnectAttempts: 10    // Give up after 10 attempts
 });
 
 engine.onPatches((patches) => { /* handle patches */ });
-engine.onStateUpdate((state) => { /* handle state */ });
+engine.onStateUpdate((state) => { /* handle state (after subscribeState()) */ });
 engine.onConnect(() => { /* connected */ });
+engine.onSessionEstablished((info) => { /* a session started or resumed */ });
 engine.onDisconnect(() => { /* disconnected */ });
 engine.onError((error) => { /* handle error */ });
 
@@ -345,53 +421,49 @@ engine.disconnect();
 
 ### Scaling
 
-Each client gets its own module instance. For shared state across clients:
+Each client gets its own module instance. For state shared across clients, keep it outside the module. Lifecycle handlers receive `(state, context)`:
 
 ```typescript
-// Shared state outside module
+// Shared state outside the module
 const globalState = { viewers: 0 };
 
-const module = app
+const counter = app
   .defineState({ count: 0 })
-  .onCreated(async ({ state }) => {
+  .onCreated((state, context) => {
     globalState.viewers++;
-    // Broadcast to other clients...
+  })
+  .onDestroyed(() => {
+    globalState.viewers--;
   })
   .build();
 ```
 
 ### Security
 
-Add authentication before the WebSocket upgrade:
+By default any client can connect. In production, restrict browser origins and authenticate connections before the WebSocket upgrade:
 
 ```typescript
-// Custom server with auth
-Bun.serve({
-  port: 3000,
-  fetch(req, server) {
-    const token = req.headers.get("Authorization");
-    if (!validateToken(token)) {
-      return new Response("Unauthorized", { status: 401 });
-    }
-    server.upgrade(req);
-  },
-  websocket: {
-    perMessageDeflate: true, // what `.listen()` does by default
-    // ... RemoteServer handlers
-  }
-});
+new RemoteServer()
+  .module("Counter", counter)
+  .config({
+    // Browsers must send one of these Origins.
+    allowedOrigins: ["https://app.example.com"],
+    // Runs for every upgrade; native clients (no Origin) are admitted
+    // only by this check. Return true to admit.
+    authenticate: (request) => validateToken(request.headers.get("Authorization")),
+  })
+  .listen(3000);
 ```
+
+`validateToken` stands for your own check (a bearer token, cookie or signed query parameter).
 
 ### Compression
 
-`RemoteServer.listen()` enables WebSocket `permessage-deflate` by default —
-patch streams are JSON and compress well. It's negotiated per-connection, so
-clients that don't offer the extension fall back to uncompressed frames. Opt
-out with `.config({ compression: false })` when you need to read the raw wire.
+`RemoteServer.listen()` enables WebSocket `permessage-deflate` by default, because patch streams are JSON and compress well. It's negotiated per connection, so clients that don't offer the extension fall back to uncompressed frames. Opt out with `.config({ compression: false })` when you need to read the raw wire.
 
 ### Deployment
 
-Deploy your server to any platform that supports WebSockets:
+Deploy your server to any platform that supports WebSockets and Bun:
 - Fly.io
 - Railway
 - Render

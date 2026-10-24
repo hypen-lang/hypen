@@ -353,37 +353,69 @@ public final class TypedModuleBuilder<S: Codable>: @unchecked Sendable {
         let decode: @Sendable (ObservableState) -> S = { Self.decodeState($0) }
 
         var createdHandler: LifecycleHandler? = nil
+        var createdContextHandler: ContextLifecycleHandler? = nil
         if let typedCreated = _typedCreated {
             createdHandler = { state in
                 var typed = decode(state)
                 typedCreated(&typed, nil)
                 encode(typed, state)
             }
+            // What ModuleInstance actually calls: same handler, with the
+            // instance's GlobalContext (router, sibling modules).
+            createdContextHandler = { state, context in
+                var typed = decode(state)
+                typedCreated(&typed, context)
+                encode(typed, state)
+            }
         }
 
         var activatedHandler: LifecycleHandler? = nil
+        var activatedContextHandler: ContextLifecycleHandler? = nil
         if let typedActivated = _typedActivated {
             activatedHandler = { state in
                 var typed = decode(state)
                 typedActivated(&typed, nil)
                 encode(typed, state)
             }
+            // What ModuleInstance actually calls: same handler, with the
+            // instance's GlobalContext (router, sibling modules).
+            activatedContextHandler = { state, context in
+                var typed = decode(state)
+                typedActivated(&typed, context)
+                encode(typed, state)
+            }
         }
 
         var deactivatedHandler: LifecycleHandler? = nil
+        var deactivatedContextHandler: ContextLifecycleHandler? = nil
         if let typedDeactivated = _typedDeactivated {
             deactivatedHandler = { state in
                 var typed = decode(state)
                 typedDeactivated(&typed, nil)
                 encode(typed, state)
             }
+            // What ModuleInstance actually calls: same handler, with the
+            // instance's GlobalContext (router, sibling modules).
+            deactivatedContextHandler = { state, context in
+                var typed = decode(state)
+                typedDeactivated(&typed, context)
+                encode(typed, state)
+            }
         }
 
         var destroyedHandler: LifecycleHandler? = nil
+        var destroyedContextHandler: ContextLifecycleHandler? = nil
         if let typedDestroyed = _typedDestroyed {
             destroyedHandler = { state in
                 var typed = decode(state)
                 typedDestroyed(&typed, nil)
+                encode(typed, state)
+            }
+            // What ModuleInstance actually calls: same handler, with the
+            // instance's GlobalContext (router, sibling modules).
+            destroyedContextHandler = { state, context in
+                var typed = decode(state)
+                typedDestroyed(&typed, context)
                 encode(typed, state)
             }
         }
@@ -408,7 +440,11 @@ public final class TypedModuleBuilder<S: Codable>: @unchecked Sendable {
             onDisconnect: disconnectHandler,
             onReconnect: reconnectHandler,
             onExpire: expireHandler,
-            preservesReservedKeysOnRestore: reconnectPreservesReservedKeys
+            preservesReservedKeysOnRestore: reconnectPreservesReservedKeys,
+            onCreatedWithContext: createdContextHandler,
+            onActivatedWithContext: activatedContextHandler,
+            onDeactivatedWithContext: deactivatedContextHandler,
+            onDestroyedWithContext: destroyedContextHandler
         )
 
         let resolvedApp = app ?? _app

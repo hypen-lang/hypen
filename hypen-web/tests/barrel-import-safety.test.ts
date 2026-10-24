@@ -228,4 +228,15 @@ describe("@hypen-space/web imports are WASM-free", () => {
       }
     }
   });
+
+  test("browser barrel exports the hypen tag used by single-file components", async () => {
+    // `hypen build` bundles components with the browser condition; a
+    // single-file `import { app, hypen } from "@hypen-space/core"` must resolve.
+    const browser = await import("../packages/core/src/index.browser");
+    const node = await import("../packages/core/src/index");
+    for (const name of ["hypen", "state", "item", "index"] as const) {
+      expect(typeof (browser as any)[name]).toBe(typeof (node as any)[name]);
+    }
+    expect((browser as any).hypen`Text("@{state.count}")`).toBe('Text("@{state.count}")');
+  });
 });

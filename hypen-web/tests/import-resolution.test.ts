@@ -40,7 +40,7 @@ describe("Import Resolution", () => {
       const result = await resolver.resolve(importStmt);
 
       expect(result.Button).toBeDefined();
-      expect(result.Button.template).toBe(`Text("Hello Button")`);
+      expect(result.Button!.template).toBe(`Text("Hello Button")`);
     });
 
     test("resolves with explicit .hypen extension", async () => {
@@ -69,7 +69,7 @@ describe("Import Resolution", () => {
 
       expect(result.Button).toBeDefined();
       expect(result.Card).toBeDefined();
-      expect(result.Button.template).toBe(`Column { Text("UI") }`);
+      expect(result.Button!.template).toBe(`Column { Text("UI") }`);
     });
 
     test("resolves from nested directory", async () => {
@@ -85,7 +85,7 @@ describe("Import Resolution", () => {
 
       const result = await resolver.resolve(importStmt);
       expect(result.Badge).toBeDefined();
-      expect(result.Badge.template).toBe(`Text("Badge")`);
+      expect(result.Badge!.template).toBe(`Text("Badge")`);
     });
 
     test("throws for missing file", async () => {
@@ -131,13 +131,13 @@ describe("Import Resolution", () => {
       };
 
       const v1 = await resolver.resolve(importStmt);
-      expect(v1.Fresh.template).toBe(`Text("v1")`);
+      expect(v1.Fresh!.template).toBe(`Text("v1")`);
 
       // Update file
       writeFileSync(join(testDir, "Fresh.hypen"), `Text("v2")`);
 
       const v2 = await resolver.resolve(importStmt);
-      expect(v2.Fresh.template).toBe(`Text("v2")`);
+      expect(v2.Fresh!.template).toBe(`Text("v2")`);
     });
 
     test("resolves stateless component (no .ts sibling)", async () => {
@@ -154,8 +154,8 @@ describe("Import Resolution", () => {
 
       const result = await resolver.resolve(importStmt);
       expect(result.Stateless).toBeDefined();
-      expect(result.Stateless.module).toBeDefined(); // empty module object
-      expect(result.Stateless.template).toBe(`Text("No module")`);
+      expect(result.Stateless!.module).toBeDefined(); // empty module object
+      expect(result.Stateless!.template).toBe(`Text("No module")`);
     });
   });
 
@@ -214,15 +214,15 @@ describe("Import Resolution", () => {
       const imports = ComponentResolver.parseImports(source);
 
       expect(imports).toHaveLength(3);
-      expect(imports[0].clause).toEqual({
+      expect(imports[0]!.clause).toEqual({
         type: "default",
         name: "HomePage",
       });
-      expect(imports[1].clause).toEqual({
+      expect(imports[1]!.clause).toEqual({
         type: "default",
         name: "AboutPage",
       });
-      expect(imports[2].clause).toEqual({
+      expect(imports[2]!.clause).toEqual({
         type: "named",
         names: ["NotFoundPage"],
       });
@@ -238,15 +238,15 @@ describe("Import Resolution", () => {
       const imports = ComponentResolver.parseImports(source);
 
       expect(imports).toHaveLength(3);
-      expect(imports[0].source).toEqual({
+      expect(imports[0]!.source).toEqual({
         type: "local",
         path: "./components/ui",
       });
-      expect(imports[1].source).toEqual({
+      expect(imports[1]!.source).toEqual({
         type: "url",
         url: "https://cdn.example.com/widget",
       });
-      expect(imports[2].source).toEqual({
+      expect(imports[2]!.source).toEqual({
         type: "local",
         path: "../shared/theme",
       });
@@ -282,9 +282,9 @@ describe("Import Resolution", () => {
       const result = await resolver.resolve(importStmt);
 
       // Template should still contain import statements (not stripped)
-      expect(result.App.template).toContain("import");
-      expect(result.App.template).toContain("Button");
-      expect(result.App.template).toContain("./ui");
+      expect(result.App!.template).toContain("import");
+      expect(result.App!.template).toContain("Button");
+      expect(result.App!.template).toContain("./ui");
     });
   });
 });

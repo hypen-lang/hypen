@@ -32,7 +32,6 @@ impl Default for SessionManagerConfig {
 pub struct PendingSession {
     pub info: SessionInfo,
     pub saved_state: serde_json::Value,
-    cancel: Arc<Mutex<bool>>,
 }
 
 /// Manages session lifecycle: create, suspend, resume, expire.
@@ -211,7 +210,6 @@ impl SessionManager {
         Some(PendingSession {
             info,
             saved_state: entry.saved_state,
-            cancel: entry.cancel,
         })
     }
 

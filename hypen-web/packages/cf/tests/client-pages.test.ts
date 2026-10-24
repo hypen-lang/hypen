@@ -21,6 +21,14 @@ describe("buildClientPages", () => {
     expect(pages["/client.js"]!.contentType).toContain("javascript");
   });
 
+  it("declares an inline icon so browsers never request /favicon.ico (a 426 from the WS handler)", () => {
+    const pages = buildClientPages({
+      routes: { "/": { js: "D" }, "/canvas": { js: "C", renderer: "canvas" } },
+    });
+    expect(pages["/"]!.body).toContain('<link rel="icon" href="data:,">');
+    expect(pages["/canvas"]!.body).toContain('<link rel="icon" href="data:,">');
+  });
+
   it("uses the Canvas shell for a canvas bundle, and a nested bundle URL", () => {
     const pages = buildClientPages({
       routes: { "/canvas": { js: "CJS", renderer: "canvas" } },
@@ -74,5 +82,49 @@ describe("servePage", () => {
       ),
     ).toBeNull();
     expect(servePage(pages, new Request("http://x/", { method: "POST" }))).toBeNull();
+  });
+});
+
+describe("servePage deep links (SPA fallback)", () => {
+  const nav = (path: string) =>
+    new Request(`http://x${path}`, {
+      headers: { accept: "text/html,application/xhtml+xml,*/*;q=0.8" },
+    });
+
+  it("tags each shell with the path it is mounted at", () => {
+    const pages = buildClientPages({
+      routes: { "/": { js: "D" }, "/canvas": { js: "C", renderer: "canvas" } },
+    });
+    expect(pages["/"]!.body).toContain('data-hypen-base=""');
+    expect(pages["/canvas"]!.body).toContain('data-hypen-base="/canvas"');
+  });
+
+  it("serves the shell mounted at the longest matching prefix", async () => {
+    const pages = buildClientPages({
+      routes: { "/": { js: "D" }, "/canvas": { js: "C", renderer: "canvas" } },
+    });
+    expect(await servePage(pages, nav("/about"))!.text()).toContain('data-hypen-renderer="dom"');
+    expect(await servePage(pages, nav("/canvas/about"))!.text()).toContain(
+      'data-hypen-renderer="canvas"',
+    );
+    // A sibling that merely shares the prefix text is not under /canvas.
+    expect(await servePage(pages, nav("/canvasx"))!.text()).toContain('data-hypen-renderer="dom"');
+  });
+
+  it("never answers a file-like path or a path outside every mount with HTML", () => {
+    const pages = buildClientPages({ routes: { "/app": { js: "D" } } });
+    expect(servePage(pages, nav("/app/users/1"))).not.toBeNull();
+    expect(servePage(pages, nav("/elsewhere"))).toBeNull();
+    expect(servePage(pages, nav("/app/logo.png"))).toBeNull();
+  });
+
+  it("answers HEAD navigations without a body", async () => {
+    const pages = buildClientPages({ routes: { "/": { js: "D" } } });
+    const res = servePage(
+      pages,
+      new Request("http://x/about", { method: "HEAD", headers: { accept: "text/html" } }),
+    )!;
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe("");
   });
 });

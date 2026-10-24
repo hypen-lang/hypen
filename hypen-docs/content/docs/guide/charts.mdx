@@ -65,7 +65,9 @@ tick-friendly bounds. `Bars` always include zero so bar heights stay honest.
 Pin either axis explicitly when you want a stable frame:
 
 ```hypen
-Chart(x: [0, 12], y: [0, 100]) { ... }
+Chart(x: [0, 12], y: [0, 100]) {
+    Line(data: @state.series, x: "month", y: "value")
+}
 ```
 
 Room for axis labels is reserved automatically. A chart with no `Axis`

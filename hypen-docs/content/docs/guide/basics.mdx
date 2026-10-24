@@ -202,7 +202,7 @@ Actions trigger handlers in your module using `@actions.actionName` syntax via e
 Button { Text("Save") }
     .onClick(@actions.save)
 
-// Action with additional data
+// Action with additional data: the named arguments become action.payload ({ id: ... })
 Button { Text("Delete") }
     .onClick(@actions.deleteItem, id: @state.currentId)
 
@@ -259,7 +259,7 @@ Column {
         Row {
             Checkbox {}
                 .checked(@item.completed)
-                .onChange(@actions.toggleTodo)
+                .onChange(@actions.toggleTodo, id: @item.id)
 
             Text(@item.title)
                 .color("@{item.completed ? '#9CA3AF' : '#111827'}")
@@ -354,7 +354,7 @@ module Counter {
 }
 ```
 
-The module name must match the TypeScript file that defines its state and actions.
+The module name must match the folder and the TypeScript definition that holds its state and actions: `src/components/Counter/component.hypen` next to `src/components/Counter/component.ts`, which starts with `app.module("Counter")`. See [State & Modules](/docs/guide/state).
 
 ## Complete Example
 

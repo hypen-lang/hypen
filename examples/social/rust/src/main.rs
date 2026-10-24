@@ -12,7 +12,7 @@ mod db;
 mod queries;
 mod types;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 
 use futures_util::{SinkExt, StreamExt};
 use hypen_server::app::HypenApp;
@@ -26,14 +26,22 @@ use tokio_tungstenite::tungstenite::Message;
 
 use db::init_database;
 use queries::{
-    get_comments, get_explore_posts, get_feed_posts, get_other_users, get_stories, get_user,
-    get_user_post_thumbnails, get_user_posts,
+    get_comments, get_explore_posts, get_feed_posts, get_other_users, get_stories, get_story,
+    get_user, get_user_post_thumbnails, get_user_posts,
 };
 use types::{
     AppState, CommentIdPayload, CommentsState, Comment, Conversation, HomePageState,
     InputValuePayload, MessagesState, Notification, NotificationsState, PostIdPayload, PostThumbnail, ProfileState,
-    SearchState, StoryState, User, UserProfileState, ViewedStory, ViewedUser,
+    SearchState, StoryState, User, UserProfileState, ViewedUser,
 };
+
+/// Lock the shared connection, recovering from poisoning. Every session
+/// shares this one mutex, so a panic in any handler must not turn into
+/// "PoisonError" for every later connection: the SQLite connection itself
+/// is still valid after a panicked handler, so we just take it back.
+fn lock_db(db: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
+    db.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 // ---------------------------------------------------------------------------
 // Module builders
@@ -63,7 +71,7 @@ fn build_home_page_module(
     current_user: User,
 ) -> Arc<hypen_server::module::ModuleDefinition<HomePageState>> {
     let initial = {
-        let conn = db.lock().unwrap();
+        let conn = lock_db(&db);
         HomePageState {
             current_user: current_user.clone(),
             posts: get_feed_posts(&conn, &current_user.id),
@@ -84,7 +92,7 @@ fn build_home_page_module(
                     };
                     post.is_liked = !post.is_liked;
                     post.likes_count += if post.is_liked { 1 } else { -1 };
-                    let conn = db.lock().unwrap();
+                    let conn = lock_db(&db);
                     if post.is_liked {
                         conn.execute(
                             "INSERT OR IGNORE INTO likes (post_id, user_id) VALUES (?1, ?2)",
@@ -114,7 +122,7 @@ fn build_home_page_module(
                         return;
                     };
                     post.is_saved = !post.is_saved;
-                    let conn = db.lock().unwrap();
+                    let conn = lock_db(&db);
                     if post.is_saved {
                         conn.execute(
                             "INSERT OR IGNORE INTO saves (post_id, user_id) VALUES (?1, ?2)",
@@ -191,7 +199,7 @@ fn build_profile_module(
     current_user: User,
 ) -> Arc<hypen_server::module::ModuleDefinition<ProfileState>> {
     let initial = {
-        let conn = db.lock().unwrap();
+        let conn = lock_db(&db);
         ProfileState {
             current_user: current_user.clone(),
             user_posts: get_user_posts(&conn, &current_user.id),
@@ -243,7 +251,7 @@ fn build_comments_module(
                     }
                     let id = format!("c{}", chrono_millis());
                     {
-                        let conn = db.lock().unwrap();
+                        let conn = lock_db(&db);
                         conn.execute(
                             "INSERT INTO comments (id, post_id, user_id, text) VALUES (?1, ?2, ?3, ?4)",
                             params![id, state.post_id, actor.id, text],
@@ -268,7 +276,7 @@ fn build_comments_module(
                 let db = db.clone();
                 let user_id = current_user.id.clone();
                 move |_state, payload, _| {
-                    let conn = db.lock().unwrap();
+                    let conn = lock_db(&db);
                     let exists: bool = conn
                         .query_row(
                             "SELECT COUNT(*) FROM comment_likes WHERE comment_id = ?1 AND user_id = ?2",
@@ -455,7 +463,7 @@ fn build_session(
         let db = db.clone();
         let user_id = current_user.id.clone();
         move |_params, state, _ctx| {
-            let conn = db.lock().unwrap();
+            let conn = lock_db(&db);
             let mut notifs = mock_notifications(&conn, &user_id);
             for n in &mut notifs {
                 n.is_read = true;
@@ -475,7 +483,7 @@ fn build_session(
         let db = db.clone();
         let user_id = current_user.id.clone();
         move |_params, state, _ctx| {
-            let conn = db.lock().unwrap();
+            let conn = lock_db(&db);
             let msgs = mock_messages(&conn, &user_id);
             if let Some(slot) = state.get_mut("messages") {
                 if let Some(obj) = slot.as_object_mut() {
@@ -495,8 +503,11 @@ fn build_session(
             if id.is_empty() {
                 return;
             }
-            let conn = db.lock().unwrap();
-            let u = get_user(&conn, &id);
+            let conn = lock_db(&db);
+            let Some(u) = get_user(&conn, &id) else {
+                eprintln!("/user-profile/{id}: unknown user");
+                return;
+            };
             let posts = get_user_post_thumbnails(&conn, &id);
             let viewed = ViewedUser {
                 user: u,
@@ -518,7 +529,7 @@ fn build_session(
         let db = db.clone();
         move |params, state, _ctx| {
             let post_id = params.get("postId").cloned().unwrap_or_default();
-            let conn = db.lock().unwrap();
+            let conn = lock_db(&db);
             let comments = get_comments(&conn, &post_id);
             if let Some(slot) = state.get_mut("comments") {
                 if let Some(obj) = slot.as_object_mut() {
@@ -540,13 +551,12 @@ fn build_session(
             if id.is_empty() {
                 return;
             }
-            let conn = db.lock().unwrap();
-            let u = get_user(&conn, &id);
-            let viewed = ViewedStory {
-                id: id.clone(),
-                image_url: u.avatar_url.clone(),
-                user: u,
-            };
+            // `id` is a story id (see StoryItem); `get_story` falls back to
+            // a user id for deep links and yields `None` for anything else.
+            let viewed = get_story(&lock_db(&db), &id);
+            if viewed.is_none() {
+                eprintln!("/story/{id}: unknown story");
+            }
             if let Some(slot) = state.get_mut("story") {
                 if let Some(obj) = slot.as_object_mut() {
                     obj.insert(
@@ -565,7 +575,7 @@ fn build_session(
 async fn main() {
     let db = Arc::new(Mutex::new(init_database()));
     let all_explore_posts: Arc<Vec<PostThumbnail>> = {
-        let conn = db.lock().unwrap();
+        let conn = lock_db(&db);
         Arc::new(get_explore_posts(&conn))
     };
 
@@ -610,9 +620,12 @@ async fn main() {
                 }
             };
 
-            let current_user = {
-                let conn = db.lock().unwrap();
-                get_user(&conn, "u1")
+            let current_user = match get_user(&lock_db(&db), "u1") {
+                Some(u) => u,
+                None => {
+                    eprintln!("Seed user u1 missing; dropping client {peer}");
+                    return;
+                }
             };
 
             let mut components = ComponentRegistry::new();

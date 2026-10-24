@@ -2,7 +2,7 @@ import { describe, expect, test, beforeEach, mock, spyOn } from "bun:test";
 import { HypenGlobalContext } from "../packages/core/src/context";
 import { app } from "../packages/core/src/app";
 import type { HypenModuleInstance } from "../packages/core/src/app";
-import { setLogLevel } from "../packages/core/src/logger";
+import { getLogLevel, setLogLevel } from "../packages/core/src/logger";
 
 // Mock engine for testing
 class FakeEngine {
@@ -52,7 +52,7 @@ describe("HypenGlobalContext", () => {
         updateState: () => {},
       } as any;
 
-      const warnSpy = spyOn(console, "warn");
+      const warnSpy = spyOn(console, "warn").mockImplementation(() => {});
 
       context.registerModule("test", instance1);
       context.registerModule("test", instance2);
@@ -231,9 +231,9 @@ describe("HypenGlobalContext", () => {
       });
 
       test("handles event with no listeners", () => {
-        const previousLevel = "info";
+        const previousLevel = getLogLevel();
         setLogLevel("debug");
-        const logSpy = spyOn(console, "log");
+        const logSpy = spyOn(console, "log").mockImplementation(() => {});
 
         try {
           context.emit("nonexistent-event");
@@ -254,7 +254,7 @@ describe("HypenGlobalContext", () => {
         });
         const handler2 = mock(() => {});
 
-        const errorSpy = spyOn(console, "error");
+        const errorSpy = spyOn(console, "error").mockImplementation(() => {});
 
         context.on("test-event", handler1);
         context.on("test-event", handler2);
@@ -490,7 +490,7 @@ describe("HypenGlobalContext", () => {
 
       // Logger listens for increment events
       context.on("increment", (payload) => {
-        const logger = context.getModule("logger");
+        const logger = context.getModule<{ messages: string[] }>("logger");
         const state = logger.getState();
         state.messages.push(`Incremented by ${payload}`);
       });
@@ -500,7 +500,7 @@ describe("HypenGlobalContext", () => {
       counterRef.setState({ count: 5 });
       context.emit("increment", 5);
 
-      const loggerState = context.getModule("logger").getState();
+      const loggerState = context.getModule<{ messages: string[] }>("logger").getState();
       expect(loggerState.messages).toContain("Incremented by 5");
     });
 
@@ -520,8 +520,8 @@ describe("HypenGlobalContext", () => {
       context.registerModule("module1", instance1);
       context.registerModule("module2", instance2);
 
-      const state1 = context.getModule("module1").getState();
-      const state2 = context.getModule("module2").getState();
+      const state1 = context.getModule<{ value: number }>("module1").getState();
+      const state2 = context.getModule<{ value: number }>("module2").getState();
 
       expect(state1.value).toBe(1);
       expect(state2.value).toBe(2);

@@ -13,12 +13,22 @@ GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 NC='\033[0m' # No Color
 
+# In-place sed that works with both GNU sed (Linux) and BSD sed (macOS).
+# GNU rejects BSD's `-i ''` and BSD requires an argument to -i, but both
+# accept an attached backup suffix (`-i.bak`); we then drop the backup.
+# Usage: sed_inplace [sed args...] <file>   (the file must be last)
+sed_inplace() {
+    local file="${@: -1}"
+    sed -i.bak "$@"
+    rm -f "$file.bak"
+}
+
 # Current versions (edit these as the source of truth)
-CURRENT_RUST_VERSION="0.6.5"
-CURRENT_NPM_VERSION="0.6.5"
-CURRENT_LSP_VERSION="0.6.5"
-CURRENT_GRADLE_VERSION="0.6.5"
-CURRENT_SWIFT_SERVER_VERSION="0.6.5"
+CURRENT_RUST_VERSION="0.6.7"
+CURRENT_NPM_VERSION="0.6.7"
+CURRENT_LSP_VERSION="0.6.7"
+CURRENT_GRADLE_VERSION="0.6.7"
+CURRENT_SWIFT_SERVER_VERSION="0.6.7"
 # @hypen-space/ios-streamer is versioned independently (macOS-only, optional
 # CLI dep). Bump it via --ios-streamer <version>; otherwise it's left alone.
 CURRENT_IOS_STREAMER_VERSION="0.1.0"
@@ -50,7 +60,7 @@ get_next_version() {
 update_dep() {
     local file=$1 pkg=$2 old=$3 new=$4
     if [ -f "$file" ]; then
-        sed -i '' "s/\"$pkg\": \"\^$old\"/\"$pkg\": \"^$new\"/" "$file"
+        sed_inplace "s/\"$pkg\": \"\^$old\"/\"$pkg\": \"^$new\"/" "$file"
     fi
 }
 
@@ -59,7 +69,7 @@ update_dep() {
 update_dep_exact() {
     local file=$1 pkg=$2 old=$3 new=$4
     if [ -f "$file" ]; then
-        sed -i '' "s/\"$pkg\": \"$old\"/\"$pkg\": \"$new\"/" "$file"
+        sed_inplace "s/\"$pkg\": \"$old\"/\"$pkg\": \"$new\"/" "$file"
     fi
 }
 
@@ -68,7 +78,7 @@ update_dep_exact() {
 update_version() {
     local file=$1 old=$2 new=$3
     if [ -f "$file" ]; then
-        sed -i '' "s/\"version\": \"$old\"/\"version\": \"$new\"/" "$file"
+        sed_inplace "s/\"version\": \"$old\"/\"version\": \"$new\"/" "$file"
     fi
 }
 
@@ -135,25 +145,25 @@ echo ""
 echo -e "${GREEN}Updating Rust crates...${NC}"
 
 # Workspace root (parser, tailwind-parse, engine all inherit version from here)
-sed -i '' "s/^version = \"$CURRENT_RUST_VERSION\"/version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/Cargo.toml"
+sed_inplace "s/^version = \"$CURRENT_RUST_VERSION\"/version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/Cargo.toml"
 echo "  ✓ Cargo.toml (workspace version)"
 
 # hypen-engine (dependency versions need updating for crates.io)
-sed -i '' "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-engine-rs/Cargo.toml"
-sed -i '' "s/hypen-tailwind-parse = { version = \"$CURRENT_RUST_VERSION\"/hypen-tailwind-parse = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-engine-rs/Cargo.toml"
+sed_inplace "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-engine-rs/Cargo.toml"
+sed_inplace "s/hypen-tailwind-parse = { version = \"$CURRENT_RUST_VERSION\"/hypen-tailwind-parse = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-engine-rs/Cargo.toml"
 echo "  ✓ hypen-engine-rs/Cargo.toml"
 
 # hypen-sdk-rs (dependency versions need updating for crates.io)
-sed -i '' "s/hypen-engine = { version = \"$CURRENT_RUST_VERSION\"/hypen-engine = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-sdk-rs/Cargo.toml"
-sed -i '' "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-sdk-rs/Cargo.toml"
+sed_inplace "s/hypen-engine = { version = \"$CURRENT_RUST_VERSION\"/hypen-engine = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-sdk-rs/Cargo.toml"
+sed_inplace "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/hypen-sdk-rs/Cargo.toml"
 echo "  ✓ hypen-sdk-rs/Cargo.toml"
 
 # hypen-renderer-desktop + hypen-browser (path deps with crates.io version pins)
 for crate in hypen-renderer-desktop hypen-browser; do
-    sed -i '' "s/hypen-engine = { version = \"$CURRENT_RUST_VERSION\"/hypen-engine = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
-    sed -i '' "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
-    sed -i '' "s/hypen-server = { version = \"$CURRENT_RUST_VERSION\"/hypen-server = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
-    sed -i '' "s/hypen-renderer-desktop = { version = \"$CURRENT_RUST_VERSION\"/hypen-renderer-desktop = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
+    sed_inplace "s/hypen-engine = { version = \"$CURRENT_RUST_VERSION\"/hypen-engine = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
+    sed_inplace "s/hypen-parser = { version = \"$CURRENT_RUST_VERSION\"/hypen-parser = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
+    sed_inplace "s/hypen-server = { version = \"$CURRENT_RUST_VERSION\"/hypen-server = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
+    sed_inplace "s/hypen-renderer-desktop = { version = \"$CURRENT_RUST_VERSION\"/hypen-renderer-desktop = { version = \"$NEW_RUST_VERSION\"/" "$ROOT_DIR/$crate/Cargo.toml"
     echo "  ✓ $crate/Cargo.toml"
 done
 
@@ -295,11 +305,11 @@ NEW_GRADLE="$NEW_GRADLE_VERSION"
 GRADLE_VERSION_SED='s/^([[:space:]]*)version[[:space:]]*=[[:space:]]*"[^"]*"/\1version = "'"$NEW_GRADLE"'"/'
 
 # hypen-renderer-android (root build.gradle.kts sets version for all subprojects)
-sed -i '' -E "$GRADLE_VERSION_SED" "$ROOT_DIR/hypen-renderer-android/build.gradle.kts"
+sed_inplace -E "$GRADLE_VERSION_SED" "$ROOT_DIR/hypen-renderer-android/build.gradle.kts"
 echo "  ✓ hypen-renderer-android/build.gradle.kts"
 
 # hypen-kotlin
-sed -i '' -E "$GRADLE_VERSION_SED" "$ROOT_DIR/hypen-kotlin/build.gradle.kts"
+sed_inplace -E "$GRADLE_VERSION_SED" "$ROOT_DIR/hypen-kotlin/build.gradle.kts"
 echo "  ✓ hypen-kotlin/build.gradle.kts"
 
 # ── Swift packages ──────────────────────────────────────────────────────
@@ -308,19 +318,25 @@ echo -e "${GREEN}Updating Swift packages...${NC}"
 
 # hypen-server-swift exposes its version as a static constant in
 # HypenServerVersion — bump the literal to keep it in sync with the release.
-sed -i '' "s/public static let version = \"$CURRENT_SWIFT_SERVER_VERSION\"/public static let version = \"$NEW_SWIFT_SERVER_VERSION\"/" \
+sed_inplace "s/public static let version = \"$CURRENT_SWIFT_SERVER_VERSION\"/public static let version = \"$NEW_SWIFT_SERVER_VERSION\"/" \
     "$ROOT_DIR/hypen-server-swift/Sources/HypenServer/HypenServer.swift"
 echo "  ✓ hypen-server-swift/Sources/HypenServer/HypenServer.swift"
 
+# The Kotlin scaffold's fallback SDK version (used only when the CLI can't
+# read its own package.json).
+sed_inplace "s/  return \"$CURRENT_NPM_VERSION\";/  return \"$NEW_NPM_VERSION\";/" \
+    "$ROOT_DIR/hypen-cli/src/init/kotlin.ts"
+echo "  ✓ hypen-cli/src/init/kotlin.ts (Kotlin scaffold fallback version)"
+
 # ── Update this script's versions for next time ─────────────────────────
 
-sed -i '' "s/CURRENT_RUST_VERSION=\"$CURRENT_RUST_VERSION\"/CURRENT_RUST_VERSION=\"$NEW_RUST_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
-sed -i '' "s/CURRENT_NPM_VERSION=\"$CURRENT_NPM_VERSION\"/CURRENT_NPM_VERSION=\"$NEW_NPM_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
-sed -i '' "s/CURRENT_LSP_VERSION=\"$CURRENT_LSP_VERSION\"/CURRENT_LSP_VERSION=\"$NEW_LSP_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
-sed -i '' "s/CURRENT_GRADLE_VERSION=\"$CURRENT_GRADLE_VERSION\"/CURRENT_GRADLE_VERSION=\"$NEW_GRADLE_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
-sed -i '' "s/CURRENT_SWIFT_SERVER_VERSION=\"$CURRENT_SWIFT_SERVER_VERSION\"/CURRENT_SWIFT_SERVER_VERSION=\"$NEW_SWIFT_SERVER_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
+sed_inplace "s/CURRENT_RUST_VERSION=\"$CURRENT_RUST_VERSION\"/CURRENT_RUST_VERSION=\"$NEW_RUST_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
+sed_inplace "s/CURRENT_NPM_VERSION=\"$CURRENT_NPM_VERSION\"/CURRENT_NPM_VERSION=\"$NEW_NPM_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
+sed_inplace "s/CURRENT_LSP_VERSION=\"$CURRENT_LSP_VERSION\"/CURRENT_LSP_VERSION=\"$NEW_LSP_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
+sed_inplace "s/CURRENT_GRADLE_VERSION=\"$CURRENT_GRADLE_VERSION\"/CURRENT_GRADLE_VERSION=\"$NEW_GRADLE_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
+sed_inplace "s/CURRENT_SWIFT_SERVER_VERSION=\"$CURRENT_SWIFT_SERVER_VERSION\"/CURRENT_SWIFT_SERVER_VERSION=\"$NEW_SWIFT_SERVER_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
 if [ -n "$NEW_IOS_STREAMER_VERSION" ]; then
-    sed -i '' "s/CURRENT_IOS_STREAMER_VERSION=\"$CURRENT_IOS_STREAMER_VERSION\"/CURRENT_IOS_STREAMER_VERSION=\"$NEW_IOS_STREAMER_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
+    sed_inplace "s/CURRENT_IOS_STREAMER_VERSION=\"$CURRENT_IOS_STREAMER_VERSION\"/CURRENT_IOS_STREAMER_VERSION=\"$NEW_IOS_STREAMER_VERSION\"/" "$SCRIPT_DIR/bump-versions.sh"
 fi
 
 # ── Refresh bun lockfiles ───────────────────────────────────────────────

@@ -110,7 +110,7 @@ describe("Error Handling", () => {
 
       // Verify onError was called with correct context
       expect(errorHandler).toHaveBeenCalled();
-      const [ctx] = errorHandler.mock.calls[0];
+      const [ctx] = errorHandler.mock.calls[0]!;
       expect(ctx.actionName).toBe("increment");
       expect(ctx.error.message).toContain("Action failed");
       expect(ctx.state).toEqual({ count: 0 });
@@ -132,7 +132,7 @@ describe("Error Handling", () => {
         })
         .build();
 
-      let registeredHandler: Function | null = null;
+      let registeredHandler = null as Function | null;
 
       const fakeEngine = {
         setModule: () => {},
@@ -464,7 +464,7 @@ describe("Error Handling", () => {
       }).not.toThrow();
 
       // And the mutation works
-      expect(state.count).toBe(1);
+      expect(state.count as number).toBe(1);
     });
 
     test("handles deeply nested state mutations", () => {
@@ -705,7 +705,7 @@ describe("Error Handling", () => {
         (state as any).count = "not a number";
       }).not.toThrow();
 
-      expect(state.count).toBe("not a number");
+      expect(state.count as unknown).toBe("not a number");
     });
 
     test("handles type mismatches in action payloads", () => {

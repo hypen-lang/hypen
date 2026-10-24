@@ -28,19 +28,19 @@ type RemoteEngine struct {
 
 	reconnectStopped bool
 	url              string
-	options EngineOptions
-	conn    *websocket.Conn
-	state   ConnectionState
+	options          EngineOptions
+	conn             *websocket.Conn
+	state            ConnectionState
 
 	reconnectAttempts int
 	stopReconnect     chan struct{}
 
 	// Callbacks
-	patchCallbacks       []PatchCallback
-	stateCallbacks       []StateCallback
-	connectionCallbacks  []ConnectionCallback
-	disconnectCallbacks  []ConnectionCallback
-	errorCallbacks       []ErrorCallback
+	patchCallbacks      []PatchCallback
+	stateCallbacks      []StateCallback
+	connectionCallbacks []ConnectionCallback
+	disconnectCallbacks []ConnectionCallback
+	errorCallbacks      []ErrorCallback
 
 	// State
 	currentState    any
