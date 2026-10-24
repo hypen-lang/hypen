@@ -8594,3 +8594,158 @@ fn row_follows_parent_alignment_through_incremental_patches() {
     let row = find_item(&pass, "row").rect;
     assert!((row.x - col.x).abs() <= 0.5, "row should return to the start edge: {row:?} in {col:?}");
 }
+
+/// The scaffold's Counter screen (`hypen init`), trimmed to what drives
+/// its geometry.
+fn scaffold_counter_source() -> &'static str {
+    r#"Column {
+    Text("Counter")
+      .tw("text-3xl font-bold text-gray-900")
+    Text("42")
+      .tw("text-6xl font-bold text-blue-600")
+    Row {
+      Button {
+        Text("-")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-red-600 rounded-lg px-6 py-3 active:bg-red-700")
+      Button {
+        Text("+")
+          .tw("text-white text-xl font-bold")
+      }
+      .tw("bg-green-600 rounded-lg px-6 py-3 active:bg-green-700")
+    }
+    .tw("flex-row gap-4")
+    Button {
+      Text("← Back to Home")
+        .tw("text-blue-600 font-semibold")
+    }
+    .tw("mt-8 bg-transparent p-3")
+  }
+  .tw("flex-1 w-full items-center justify-center p-8 bg-white gap-3")"#
+}
+
+fn assert_centred_in(child: Rect, parent: Rect, what: &str) {
+    let left = child.x - parent.x;
+    let right = (parent.x + parent.w) - (child.x + child.w);
+    assert!(
+        child.w < parent.w - 100.0,
+        "{what} should wrap its content, got {child:?} in {parent:?}"
+    );
+    assert!(
+        (left - right).abs() <= 1.0,
+        "{what} not centred: {left} left vs {right} right ({child:?} in {parent:?})"
+    );
+}
+
+#[test]
+fn scaffold_counter_back_button_is_centred_like_the_dom_button() {
+    // `Button {..}.tw("mt-8 bg-transparent p-3")` inside the Counter's
+    // `items-center` Column. The DOM Button sets no `align-self`, so the
+    // Column centres it (web and iOS agree). Desktop forced
+    // `AlignSelf::Start` on every Button and pinned it to the left edge.
+    let tree = tree_from_dsl(scaffold_counter_source(), json!({}));
+    let col_id = tree.children_of(ROOT_ID)[0].clone();
+    let kids = tree.children_of(&col_id).to_vec();
+    assert_eq!(kids.len(), 4);
+    let (row_id, back_id) = (kids[2].clone(), kids[3].clone());
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let col = find_item(&pass, &col_id).rect;
+    assert_centred_in(find_item(&pass, &back_id).rect, col, "Back to Home button");
+    assert_centred_in(find_item(&pass, &row_id).rect, col, "+/- row");
+}
+
+#[test]
+fn button_follows_parent_alignment_through_incremental_patches() {
+    // Patch path: a Button inserted under a centred Column is centred;
+    // dropping the Column's alignment returns it to the start edge, and an
+    // explicit `alignSelf` still wins over the parent.
+    let initial = vec![
+        create_patch(
+            "col",
+            "Column",
+            &[("width", json!("100%")), ("alignItems", json!("center"))],
+        ),
+        insert_patch("root", "col"),
+        create_patch("btn", "Button", &[("marginTop", json!(32))]),
+        insert_patch("col", "btn"),
+        create_patch("t1", "Text", &[("0", json!("Back to Home"))]),
+        insert_patch("btn", "t1"),
+        create_patch("pin", "Button", &[("alignSelf", json!("start"))]),
+        insert_patch("col", "pin"),
+        create_patch("t2", "Text", &[("0", json!("Pinned"))]),
+        insert_patch("pin", "t2"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        1,
+    );
+    let col = find_item(&pass, "col").rect;
+    assert_centred_in(find_item(&pass, "btn").rect, col, "button");
+    let pin = find_item(&pass, "pin").rect;
+    assert!(
+        (pin.x - col.x).abs() <= 0.5,
+        "alignSelf(start) must win: {pin:?} in {col:?}"
+    );
+
+    let reset = vec![Patch::RemoveProp {
+        id: "col".into(),
+        name: "alignItems".into(),
+    }];
+    tree.apply_batch(&reset);
+    assert!(taffy.apply_patches(&reset, &tree, 1.0, vp(800.0)));
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy,
+        &tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        2,
+    );
+    let col = find_item(&pass, "col").rect;
+    let btn = find_item(&pass, "btn").rect;
+    assert!(
+        (btn.x - col.x).abs() <= 0.5,
+        "button should return to the start edge: {btn:?} in {col:?}"
+    );
+    assert!(
+        btn.w < col.w - 100.0,
+        "button should stay content-width: {btn:?} in {col:?}"
+    );
+}
+
+#[test]
+fn button_under_stretching_parent_stays_content_width() {
+    // A parent with no `align_items` (Stack: Taffy default stretch) must
+    // not stretch a Button across it.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("stack", "Stack", &[("width", json!("100%"))]));
+    tree.apply(&insert_patch(ROOT_ID, "stack"));
+    tree.apply(&create_patch("btn", "Button", &[]));
+    tree.apply(&insert_patch("stack", "btn"));
+    add_text(&mut tree, "btn", "t1", "Tap");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let stack = find_item(&pass, "stack").rect;
+    let btn = find_item(&pass, "btn").rect;
+    assert!(
+        btn.w < stack.w - 100.0,
+        "button stretched: {btn:?} in {stack:?}"
+    );
+}

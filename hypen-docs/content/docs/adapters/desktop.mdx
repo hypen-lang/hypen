@@ -183,8 +183,9 @@ margin, gap, font size, colours, borders, and radii. Colours accept CSS hex
 (`#rgb` / `#rgba` / `#rrggbb` / `#rrggbbaa`) and named colours. Responsive
 values (`.padding({default: 8, md: 16})`) resolve against the live window width,
 largest-active-breakpoint-wins. A `Row` with no width or `alignSelf` of its
-own follows its parent's `alignItems`, as on the web, so a Row inside
-`Center {}` or `Column {}.tw("items-center")` is centred.
+own, and a `Button` / `Link` / `Card` without `alignSelf`, follows its
+parent's `alignItems`, as on the web, so a Row or Button inside `Center {}` or
+`Column {}.tw("items-center")` is centred.
 
 **Text input** — `Input` with two-way binding via `.bind(@state.x)`, caret
 movement, selection (click, drag, Shift+arrows, Home/End), system clipboard
