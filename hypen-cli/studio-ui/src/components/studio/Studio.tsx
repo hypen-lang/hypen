@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from "react";
+import { entryFilePath } from "@/lib/entry-path";
 import { FileTree } from "./FileTree";
 import { EditorTabs } from "./EditorTabs";
 import { Preview } from "./Preview";
@@ -67,6 +68,10 @@ export function Studio() {
   const [testMode, setTestMode] = useState(false);
   const [fileTree, setFileTree] = useState<FileNode[]>([]);
   const [openFiles, setOpenFiles] = useState<OpenFile[]>([]);
+  // Latest open-file contents for timers and callbacks that outlive the
+  // render that created them (autosave, Cmd+S).
+  const openFilesRef = useRef<OpenFile[]>(openFiles);
+  openFilesRef.current = openFiles;
   const [activeFile, setActiveFile] = useState<string | null>(null);
   const [selectedPath, setSelectedPath] = useState<string | null>(null);
   const [newItem, setNewItem] = useState<{
@@ -215,12 +220,10 @@ export function Studio() {
     if (existing) clearTimeout(existing);
     const timer = setTimeout(async () => {
       autoSaveTimers.current.delete(path);
-      let latest: string | null = null;
-      setOpenFiles((prev) => {
-        const f = prev.find((x) => x.path === path);
-        latest = f?.content ?? null;
-        return prev;
-      });
+      // Read through the ref: a setState updater is not guaranteed to run
+      // synchronously (React batches it), so reading the content from one
+      // left `latest` null and the autosave silently never happened.
+      const latest = openFilesRef.current.find((x) => x.path === path)?.content ?? null;
       if (latest === null) return;
       try {
         const res = await fetch(`/api/files/${encodeURIComponent(path)}`, {
@@ -263,7 +266,7 @@ export function Studio() {
       clearTimeout(pending);
       autoSaveTimers.current.delete(path);
     }
-    const file = openFiles.find((f) => f.path === path);
+    const file = openFilesRef.current.find((f) => f.path === path);
     if (!file) return;
 
     try {
@@ -564,8 +567,7 @@ export function Studio() {
           setRemoteUrl(project.remoteUrl);
         }
 
-        const entryPath = `src/components/${project.entry}/component.hypen`;
-        openFile(entryPath);
+        openFile(entryFilePath(project));
       } catch (e) {
         // ignore
       }

@@ -38,6 +38,7 @@ import {
   findArrayPaths,
   type TemplateReferences,
 } from "./mock-state.ts";
+import { createHypenSourceValidator } from "../../../src/dev-diagnostics.ts";
 
 interface EngineTransport {
   send: (msg: unknown) => void;
@@ -85,6 +86,10 @@ export class StudioEngineHost {
   private readonly pendingSockets: ServerWebSocket<any>[] = [];
 
   private mock: MockBinding | null = null;
+  /** Parse-checks the .hypen sources before a reload (lazy engine boot). */
+  private validateSources: (() => Promise<string[]>) | null = null;
+  /** Last parse errors reported, so an unchanged error isn't re-printed. */
+  private lastProblems = "";
 
   constructor(options: StudioEngineHostOptions) {
     this.options = options;
@@ -283,6 +288,23 @@ export class StudioEngineHost {
 
   async reload(): Promise<void> {
     if (!this.remoteServer) return;
+    // Autosave writes half-typed templates to disk. Reloading one with a
+    // syntax error would blank every preview; keep the last good render
+    // instead (the editor already squiggles the error).
+    this.validateSources ??= createHypenSourceValidator({
+      componentsDir: resolve(this.options.projectDir, this.options.componentsDir),
+      projectRoot: this.options.projectDir,
+    });
+    const problems = await this.validateSources();
+    if (problems.length > 0) {
+      const text = problems.join("\n");
+      if (text !== this.lastProblems) {
+        console.warn(`[engine] not reloading the preview until this parses:\n${text}`);
+      }
+      this.lastProblems = text;
+      return;
+    }
+    this.lastProblems = "";
     // If we're in mock mode, re-scan the template in case the user added or
     // removed `@{state.*}` references; merge new paths into existing state
     // so previously-edited values survive the re-render.

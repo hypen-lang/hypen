@@ -20,68 +20,37 @@ bunx @hypen-space/cli init my-app
 
 ## Commands
 
-### `hypen init [name]`
+Run `hypen --help` for the overview and `hypen <command> --help` for a command's own flags. Inside a project, a global `hypen` hands off to the project's own `node_modules/@hypen-space/cli` (set `HYPEN_NO_LOCAL_CLI=1` to turn that off). The full reference is in the docs: [CLI](https://hypen.space/docs/tooling/cli).
 
-Create a new Hypen project.
+| Command | What it does |
+|---------|--------------|
+| `hypen init [name]` | Scaffold a TypeScript, Go or Kotlin starter (file- or server-based) into a new or empty directory and install dependencies |
+| `hypen dev` | Dev server: web client at `http://localhost:3000` plus a `ws://` endpoint for native runners, with hot reload |
+| `hypen build` | Static production site in `dist/` (`node dist/server.js` serves it) |
+| `hypen generate` | Write `.hypen/components.generated.ts` (imports for every discovered component) |
+| `hypen check [path...]` | Accessibility checks over `.hypen` files (alias `hypen a11y`; exit 0 clean, 1 findings, 2 couldn't check) |
+| `hypen studio` | Hypen Studio, the in-browser IDE |
+| `hypen test` | Studio Test Mode: live DOM/Canvas previews and device mirrors |
+| `hypen run <android\|ios\|desktop>` | Launch the app in the native runner on a device, simulator or desktop |
 
-```bash
-# With project name
-hypen init my-app
-```
+Common options:
 
-### `hypen dev`
+- `dev`: `-p, --port <port>`, `-d, --debug`, `--a11y`
+- `build`: `-o, --outDir <dir>`, `-m, --minify` / `--no-minify`, `-s, --sourcemap`
+- `studio`: `-p, --port <port>` (Studio, default 5173), `--no-open`, `--session <id>`
+- `test`: `-p, --port <port>` (preview server), `--studio-port <port>` (Studio, default 5173), `--no-open`
+- `run`: `-p, --port`, `--url <ws://...>`, `--clean`, `--studio`, `--studio-port`, `--device <id>`, `--runner <path>`
 
-Start the development server with hot reload.
+In `hypen dev`, `hypen test` and `hypen run`, a `.hypen` file that doesn't parse is reported as `file:line:col` and connected clients keep the last good version until it is fixed; `hypen build` fails on it.
 
-```bash
-hypen dev
-```
+### Hypen Studio
 
-This will:
-- Discover all components in `src/components/`
-- Generate `components.generated.ts`
-- Start a server at `http://localhost:3000`
-- Watch for file changes and hot reload
-
-Options:
-- `--port <number>` - Server port (default: 3000)
-- `--debug` - Enable debug logging
-
-### `hypen build`
-
-Build for production.
+`hypen studio` opens a local IDE with a file explorer, Monaco editor (with the Hypen language server), live preview, state inspector, action log, timeline and terminal. Edits are auto-saved and hot-reloaded. It requires the [Bun](https://bun.sh) runtime.
 
 ```bash
-hypen build
+hypen studio --port 5180 --no-open
+hypen test --studio-port 5180
 ```
-
-Options:
-- `--outDir <path>` - Output directory (default: dist)
-- `--minify` - Enable minification
-- `--sourcemap` - Generate source maps
-
-### `hypen generate`
-
-Generate component imports from discovered components.
-
-```bash
-hypen generate
-```
-
-### `hypen studio`
-
-Open the Hypen Studio IDE — a local development environment with file browser, code editor, live preview, state inspector, and time-travel debugging.
-
-> **Note:** Requires the [Bun](https://bun.sh) runtime.
-
-```bash
-hypen studio
-```
-
-Options:
-- `--port <number>` - Studio server port (default: 5173)
-- `--open` - Open browser automatically (default: true)
-- `--session <id>` - Load a teleported session from hypen.space
 
 ## Project Structure
 

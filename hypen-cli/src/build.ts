@@ -29,6 +29,7 @@
  */
 
 import { join, resolve, relative } from "path";
+import { createHypenSourceValidator } from "./dev-diagnostics.js";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { generateComponentsCode } from "@hypen-space/server";
 import { pink, yellow, dim, boldPink } from "./colors.js";
@@ -253,6 +254,18 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
     throw new BuildError(`Components directory not found: ${resolvedComponentsDir}`);
   }
 
+  // A template that doesn't parse would bundle fine and then render a blank
+  // page in production; fail the build instead.
+  const templateErrors = await createHypenSourceValidator({
+    componentsDir: resolvedComponentsDir,
+    projectRoot,
+  })();
+  if (templateErrors.length > 0) {
+    throw new BuildError(
+      "a template does not parse:\n" + templateErrors.map((l) => `    ${l}`).join("\n")
+    );
+  }
+
   // The engine WASM ships inside @hypen-space/web-engine; copy the
   // project's own copy so the build never depends on a CDN.
   const webEngineRoot = projectPackageRoot("@hypen-space/web-engine", projectRoot);
@@ -348,8 +361,14 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
     say(`  ${pink("Build complete!")}\n`);
     say(`  ${dim("Files:")}`);
-    for (const f of files) say(`    ${yellow(relative(projectRoot, f) || f)}`);
-    say(`\n  ${dim("Serve it:")} node ${relative(projectRoot, join(resolvedOutDir, "server.js"))}\n`);
+    // Paths inside the project print relative; an outDir elsewhere prints
+    // absolute rather than as a ../../.. chain.
+    const show = (f: string) => {
+      const rel = relative(projectRoot, f);
+      return !rel || rel.startsWith("..") ? f : rel;
+    };
+    for (const f of files) say(`    ${yellow(show(f))}`);
+    say(`\n  ${dim("Serve it:")} node ${show(join(resolvedOutDir, "server.js"))}\n`);
 
     return { outDir: resolvedOutDir, files };
   } finally {

@@ -640,6 +640,28 @@ export async function launchDetached(
 /**
  * Parse `adb devices -l` into a structured list
  */
+/**
+ * `adb devices` entries that are attached but can't be used yet
+ * (`unauthorized`, `offline`, ...), with what to do about each — so "no
+ * devices" isn't reported while a phone is plugged in waiting for the USB
+ * debugging prompt.
+ */
+export function unreadyAdbDevices(stdout: string): { id: string; status: string; hint: string }[] {
+  const out: { id: string; status: string; hint: string }[] = [];
+  for (const line of stdout.trim().split("\n").slice(1)) {
+    const [id, status] = line.trim().split(/\s+/);
+    if (!id || !status || status === "device") continue;
+    const hint =
+      status === "unauthorized"
+        ? "accept the \"Allow USB debugging\" prompt on the device"
+        : status === "offline"
+          ? "reconnect it, or run: adb kill-server && adb start-server"
+          : "wait for it to finish booting or reconnect it";
+    out.push({ id, status, hint });
+  }
+  return out;
+}
+
 export async function listAndroidDevices(): Promise<AndroidDevice[]> {
   const { stdout, exitCode } = await exec(["adb", "devices", "-l"]);
   if (exitCode !== 0) return [];
@@ -934,7 +956,9 @@ export async function runAndroid(
   const hasAdb = await commandExists("adb");
   if (!hasAdb) {
     console.error(
-      "\n  Error: adb not found.\n  Install Android SDK platform-tools and make sure adb is on your PATH.\n"
+      "\n  Error: adb not found.\n" +
+        "  Install Android SDK platform-tools (https://developer.android.com/tools/releases/platform-tools)\n" +
+        "  and make sure adb is on your PATH (e.g. $ANDROID_HOME/platform-tools).\n"
     );
     process.exit(1);
   }
@@ -942,9 +966,18 @@ export async function runAndroid(
   // Discover devices
   const devices = await listAndroidDevices();
   if (devices.length === 0) {
-    console.error(
-      "\n  Error: No Android devices/emulators connected.\n  Start an emulator or connect a device via USB.\n"
-    );
+    const unready = unreadyAdbDevices((await exec(["adb", "devices"])).stdout);
+    if (unready.length > 0) {
+      console.error("\n  Error: no Android device is ready:");
+      for (const d of unready) console.error(`    ${d.id} is ${d.status}: ${d.hint}`);
+      console.error("");
+    } else {
+      console.error(
+        "\n  Error: No Android devices/emulators connected.\n" +
+          "  Start an emulator (emulator -avd <name>) or connect a device with USB debugging on,\n" +
+          "  then check it shows up in: adb devices\n"
+      );
+    }
     process.exit(1);
   }
 
@@ -1015,7 +1048,97 @@ export async function runAndroid(
 
 // ─── iOS ──────────────────────────────────────────────────
 
-export async function runIOS(port: number, overrideUrl?: string): Promise<void> {
+/** Env var naming the simulator `hypen run ios` should use (name or UDID). */
+export const IOS_SIMULATOR_ENV = "HYPEN_IOS_SIMULATOR";
+
+/**
+ * Decide which iOS Simulator to use. An explicit choice (name or UDID, from
+ * `options.device` or $HYPEN_IOS_SIMULATOR) must match an available
+ * simulator. Otherwise booted simulators win; with one candidate, or with no
+ * terminal to ask (CI, piped stdin, a background `hypen run ios`), we take
+ * the first one (booted first, then the first iPhone) instead of waiting
+ * forever on a prompt nobody can answer.
+ */
+export function selectIOSSimulator(
+  simulators: IOSSimulator[],
+  opts: { device?: string; interactive: boolean }
+): DeviceSelection<IOSSimulator> {
+  const ios = simulators.filter((s) => s.runtime.startsWith("iOS"));
+  const pool = ios.length > 0 ? ios : simulators;
+  const list = () =>
+    pool.map((s) => `    ${s.name} - ${s.runtime}  ${dim(s.udid)}`).join("\n");
+  const wanted = opts.device?.trim();
+  if (wanted) {
+    const byUdid = pool.find((s) => s.udid.toLowerCase() === wanted.toLowerCase());
+    const byName = pool.filter((s) => s.name.toLowerCase() === wanted.toLowerCase());
+    const match =
+      byUdid ?? byName.find((s) => s.state === "Booted") ?? byName[0];
+    if (match) return { kind: "device", device: match };
+    return {
+      kind: "error",
+      message:
+        `iOS Simulator "${wanted}" not found.` +
+        (pool.length ? `\n  Available simulators:\n${list()}` : ""),
+    };
+  }
+  const booted = pool.filter((s) => s.state === "Booted");
+  const candidates = booted.length > 0 ? booted : pool;
+  if (candidates.length === 1) return { kind: "device", device: candidates[0]! };
+  if (!opts.interactive) {
+    const iphone = candidates.find((s) => /^iPhone/.test(s.name));
+    return { kind: "device", device: iphone ?? candidates[0]! };
+  }
+  return { kind: "prompt", devices: candidates };
+}
+
+/**
+ * Start the runner on a booted simulator, connected to `wsUrl`.
+ *
+ * The runner reads `DEVICE_LAB_URL` from its environment at launch, which
+ * `simctl launch` sets from `SIMCTL_CHILD_*`. That connects straight away;
+ * the `hypenpreview://connect` deep link instead makes iOS show an
+ * "Open in HypenGallery?" confirmation that blocks until someone clicks it.
+ * The deep link stays as the fallback (retried while the simulator settles).
+ */
+export async function launchIOSRunner(
+  udid: string,
+  wsUrl: string,
+  run: ExecFn = exec,
+  retryDelayMs = 3000
+): Promise<{ ok: boolean; via?: "launch" | "deep-link"; error?: string }> {
+  const launched = await run([
+    "env",
+    `SIMCTL_CHILD_DEVICE_LAB_URL=${wsUrl}`,
+    "xcrun",
+    "simctl",
+    "launch",
+    "--terminate-running-process",
+    udid,
+    IOS_BUNDLE_ID,
+  ]);
+  if (launched.exitCode === 0) return { ok: true, via: "launch" };
+
+  const deepLink = `hypenpreview://connect?url=${encodeURIComponent(wsUrl)}`;
+  let lastError = (launched.stderr || launched.stdout).trim();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { exitCode, stderr } = await run(["xcrun", "simctl", "openurl", udid, deepLink]);
+    if (exitCode === 0) return { ok: true, via: "deep-link" };
+    lastError = stderr.trim();
+    if (attempt < 2 && stderr.includes("timed out")) {
+      console.log(`  ${dim("Simulator not ready, retrying...")}`);
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    } else {
+      break;
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
+export async function runIOS(
+  port: number,
+  overrideUrl?: string,
+  options: RunOptions = {}
+): Promise<void> {
   const hasXcrun = await commandExists("xcrun");
   if (!hasXcrun) {
     console.error(
@@ -1033,18 +1156,31 @@ export async function runIOS(port: number, overrideUrl?: string): Promise<void> 
     process.exit(1);
   }
 
-  // Prefer booted simulators, but show all
-  const booted = allSimulators.filter((s) => s.state === "Booted");
-  const candidates = booted.length > 0 ? booted : allSimulators;
-
-  const sim = await promptChoice(
-    candidates,
-    (s) => {
-      const state = s.state === "Booted" ? "booted" : "shutdown";
-      return `${s.name} - ${s.runtime} [${state}]`;
-    },
-    "Select a simulator"
-  );
+  // Pick: --device / $HYPEN_IOS_SIMULATOR, then booted ones, then ask
+  // (on a TTY) or take the first iPhone (no TTY).
+  const interactive = !!process.stdin.isTTY;
+  const selection = selectIOSSimulator(allSimulators, {
+    device: options.device || process.env[IOS_SIMULATOR_ENV],
+    interactive,
+  });
+  if (selection.kind === "error") {
+    console.error(`\n  Error: ${selection.message}\n`);
+    process.exit(1);
+  }
+  const sim =
+    selection.kind === "device"
+      ? selection.device
+      : await promptChoice(
+          selection.devices,
+          (s) => {
+            const state = s.state === "Booted" ? "booted" : "shutdown";
+            return `${s.name} - ${s.runtime} [${state}]`;
+          },
+          "Select a simulator"
+        );
+  if (selection.kind === "device" && !interactive && !options.device && !process.env[IOS_SIMULATOR_ENV]) {
+    console.log(`  ${dim(`No terminal to ask; picked a simulator. Choose one with ${IOS_SIMULATOR_ENV}=<name|udid>.`)}`);
+  }
 
   console.log(`  ${pink("Using:")} ${sim.name} ${dim(`(${sim.udid})`)}\n`);
 
@@ -1114,31 +1250,15 @@ export async function runIOS(port: number, overrideUrl?: string): Promise<void> 
   }
   console.log(`  ${pink("Installed.")}${versionSuffix(getCachedVersion())}`);
 
-  // Launch via deep link (retry a few times if simulator isn't ready yet)
   const wsUrl = overrideUrl || getServerUrl("ios", port, "simulator");
-  const deepLink = `hypenpreview://connect?url=${encodeURIComponent(wsUrl)}`;
   console.log(`  ${dim("Launching with server:")} ${yellow(wsUrl)}`);
-
-  let launchOk = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { exitCode: launchCode, stderr: launchErr } = await exec([
-      "xcrun",
-      "simctl",
-      "openurl",
-      sim.udid,
-      deepLink,
-    ]);
-    if (launchCode === 0) {
-      launchOk = true;
-      break;
-    }
-    if (attempt < 2 && launchErr.includes("timed out")) {
-      console.log(`  ${dim("Simulator not ready, retrying...")}`);
-      await new Promise((r) => setTimeout(r, 3000));
-    } else {
-      console.error(`  Launch failed: ${launchErr}`);
-      process.exit(1);
-    }
+  const launch = await launchIOSRunner(sim.udid, wsUrl);
+  if (!launch.ok) {
+    console.error(`  Launch failed: ${launch.error}`);
+    process.exit(1);
+  }
+  if (launch.via === "deep-link") {
+    console.log(`  ${dim('If the simulator asks "Open in HypenGallery?", click Open.')}`);
   }
 
   console.log(`  ${pink("Runner launched on")} ${yellow(sim.name)}\n`);
@@ -1180,7 +1300,10 @@ export async function runDesktop(
   const logPath = RUNNER_PATHS.desktopLog;
   const result = await launchDetached(runner, [wsUrl], { logPath });
   if (result.state === "error") {
-    console.error(`\n  Error: could not start ${runner}: ${result.message}\n`);
+    const hint = /EACCES/.test(result.message)
+      ? `\n  It is not executable. Make it so with: chmod +x ${runner}`
+      : "";
+    console.error(`\n  Error: could not start ${runner}: ${result.message}${hint}\n`);
     process.exit(1);
   }
   if (result.state === "exited") {
@@ -1220,7 +1343,9 @@ export const RUN_HELP = `
     --clean               Delete cached runner and download a fresh copy
                           (Android: also forces a reinstall)
     --studio              Launch Studio IDE alongside the runner
-    --device <serial>     Android: adb serial to use (default: $ANDROID_SERIAL)
+    --studio-port <port>  With --studio: Studio's port (default: 5173)
+    --device <id>         Android: adb serial (default: $ANDROID_SERIAL)
+                          iOS: simulator name or UDID (default: $${IOS_SIMULATOR_ENV})
     --runner <path>       Desktop: use this hypen-browser binary
                           (default: $${DESKTOP_RUNNER_ENV}, else ~/.hypen/runners/)
 
@@ -1234,6 +1359,10 @@ export const RUN_HELP = `
   else via 10.0.2.2 (emulator) or this machine's LAN IP (physical device).
   The APK is only reinstalled when it changed.
 
+  iOS picks a booted simulator, else asks in a terminal; without a terminal
+  it takes the first iPhone. Pass --device (or set $${IOS_SIMULATOR_ENV}) to
+  choose one by name or UDID.
+
   Desktop runner output goes to ~/.hypen/runners/browser.log. If no prebuilt
   runner can be downloaded, build it with ${dim("cargo build --release -p hypen-browser")}
   and copy it to ~/.hypen/runners/hypen-browser, or pass --runner.
@@ -1246,5 +1375,6 @@ export const RUN_HELP = `
     ${dim("$")} hypen run desktop --url ws://localhost:3000
     ${dim("$")} hypen run ios --clean
     ${dim("$")} hypen run android --device emulator-5554
+    ${dim("$")} hypen run ios --device "iPhone 16 Pro"
     ${dim("$")} hypen run desktop --runner ./target/release/hypen-browser
 `;

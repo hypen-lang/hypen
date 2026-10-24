@@ -30,6 +30,7 @@
  * engine.
  */
 
+import { formatHypenParseError } from "./dev-diagnostics.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, relative, resolve } from "path";
 import type { A11yDiagnostic } from "@hypen-space/core";
@@ -413,7 +414,10 @@ export async function runCheck(opts: {
     try {
       diags = engine.checkAccessibility(source);
     } catch (e: any) {
-      console.error(`  ${display}: failed to check — ${e?.message ?? e}`);
+      // Parse errors carry a byte offset; show file:line:col + a frame.
+      const [head, ...frame] = formatHypenParseError(display, source, e);
+      console.error(`  ${head}`);
+      for (const line of frame) console.error(`  ${line}`);
       failedFiles.push(display);
       continue;
     }

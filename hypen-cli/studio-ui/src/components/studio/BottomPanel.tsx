@@ -202,10 +202,10 @@ function ActionsPanel({
             key={i}
             className="flex items-center gap-2 px-3 py-2 border-b border-border/50 text-sm"
           >
-            <span className="text-muted-foreground text-xs font-mono">{action.time}</span>
-            <span className="text-pink-400 font-medium">{action.name}</span>
+            <span className="text-muted-foreground text-xs font-mono shrink-0">{action.time}</span>
+            <span className="text-pink-400 font-medium shrink-0">{action.name}</span>
             {action.payload && (
-              <span className="text-muted-foreground font-mono text-xs truncate">
+              <span className="text-muted-foreground font-mono text-xs truncate min-w-0">
                 {JSON.stringify(action.payload)}
               </span>
             )}
@@ -360,9 +360,9 @@ export function BottomPanel({
   ].filter(Boolean);
 
   return (
-    <div className="border-t border-border bg-card/50 flex" style={style}>
+    <div className="border-t border-border bg-card/50 flex overflow-hidden" style={style}>
       {panels.state && (
-        <div className="flex-1 border-r border-border flex flex-col">
+        <div className="flex-1 min-w-0 border-r border-border flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               State
@@ -375,7 +375,7 @@ export function BottomPanel({
       )}
 
       {panels.actions && (
-        <div className="flex-1 border-r border-border flex flex-col">
+        <div className="flex-1 min-w-0 border-r border-border flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Actions
@@ -388,7 +388,7 @@ export function BottomPanel({
       )}
 
       {panels.console && (
-        <div className="flex-1 border-r border-border flex flex-col">
+        <div className="flex-1 min-w-0 border-r border-border flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Console
@@ -401,7 +401,7 @@ export function BottomPanel({
       )}
 
       {panels.timeline && (
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 min-w-0 flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Timeline

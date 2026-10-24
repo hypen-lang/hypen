@@ -41,7 +41,7 @@ function goMod(projectName: string): string {
   // published version from the import in main.go.
   return `module ${modName}
 
-go 1.21
+go 1.25
 `;
 }
 
@@ -408,6 +408,8 @@ function readme(projectName: string, layout: ModuleLayout): string {
 A Hypen project scaffolded with \`hypen init\` (Go, ${layout}).
 
 ## Getting started
+
+Requires Go 1.25 or newer (the Hypen Go SDK's minimum).
 
 \`\`\`bash
 go mod tidy
