@@ -289,14 +289,22 @@ public final class ManagedRouter: @unchecked Sendable {
                 initialPatchCallback: patchSink
             )
         } else {
-            guard let fresh = try? ModuleInstance(definition: def) else {
+            // Own engine per route module, but the same context as the
+            // shared-engine path: lifecycle and action handlers see the
+            // router and sibling modules through it.
+            guard let engine = try? NativeEngine() else {
                 log.error("Failed to mount module '%@': native engine init failed", moduleId)
                 lock.lock()
                 activeRoute = matched
                 lock.unlock()
                 return
             }
-            instance = fresh
+            instance = ModuleInstance(
+                definition: def,
+                engine: engine,
+                globalContext: globalContext,
+                router: router
+            )
         }
         globalContext.registerModule(moduleId, instance: instance)
 

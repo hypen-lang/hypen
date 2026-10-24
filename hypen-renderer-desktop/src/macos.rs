@@ -34,7 +34,7 @@
 
 use objc2::msg_send;
 use objc2::runtime::AnyObject;
-use objc2_quartz_core::{kCAGravityTopLeft, CAMetalLayer};
+use objc2_quartz_core::{kCAGravityTopLeft, CAMetalLayer, CATransaction};
 use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use winit::window::Window;
 
@@ -62,6 +62,23 @@ pub fn configure_window_layer(window: &Window) {
         }
         apply_flags_recursive(root_layer);
     }
+}
+
+/// Commit the Core Animation transaction that now holds this frame's
+/// drawable.
+///
+/// With `presentsWithTransaction = YES` (see [`configure_window_layer`])
+/// `[drawable present]` does not reach the screen on its own: it rides the
+/// next CATransaction commit. AppKit commits one while it handles input, so
+/// frames painted from a mouse or key event appeared at once, but a frame
+/// painted from a background wake (`AppEvent::Wake`: server patches, image
+/// fetches) stayed invisible until the next input event. Clicking `+` in a
+/// remote app left the old count on screen until the mouse moved. Flushing
+/// here commits the pending implicit transaction right after the present,
+/// whatever woke the loop. Call it on the main thread, after a successful
+/// present.
+pub fn flush_presented_frame() {
+    CATransaction::flush();
 }
 
 /// Walk a CALayer + sublayers, set the present-with-transaction flag

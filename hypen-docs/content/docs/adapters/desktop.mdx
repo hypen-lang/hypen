@@ -50,7 +50,7 @@ For a `hypen init` project you don't need to write Rust: `hypen run desktop` sta
 
 ```bash
 cd hypen
-cargo build --release -p hypen-browser       # Linux: install the packages above first
+cargo build --release -p hypen-browser       # Linux: install the packages above first; macOS needs no extra packages
 ```
 
 then either copy it to the cache the CLI looks in, or point the CLI at it:
@@ -225,7 +225,10 @@ static GLOBAL: hypen_renderer_desktop::MiMalloc = hypen_renderer_desktop::MiMall
 
 On macOS the renderer sets `presentsWithTransaction` on the `CAMetalLayer`,
 which eliminates the live-resize flash that comes from a fire-and-forget
-`present`.
+`present`. With that flag a present only reaches the screen when a Core
+Animation transaction commits, so the renderer flushes the transaction after
+every frame; frames painted for server patches therefore show immediately
+rather than on the next mouse or key event.
 
 The compiled wgpu pipeline cache is stored in the platform cache directory
 (`~/Library/Caches` on macOS, `$XDG_CACHE_HOME` on Linux, `%LOCALAPPDATA%` on
