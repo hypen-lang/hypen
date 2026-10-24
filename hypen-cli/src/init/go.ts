@@ -1,8 +1,9 @@
 /**
  * Go project generator for `hypen init`.
  *
- * Produces a minimal Hypen Go project using the `github.com/hypen-space/core`
- * SDK. Layouts are analogous to the TypeScript generator:
+ * Produces a minimal Hypen Go project using the Go SDK, module
+ * `github.com/hypen-lang/hypen/hypen-golang` (package name `core`, imported
+ * as `core "github.com/hypen-lang/hypen/hypen-golang"`). Layouts are analogous to the TypeScript generator:
  *
  *   - `file-based`: `main.go` plus a `components/<Name>/component.hypen`
  *     directory tree that is passed to `Source(...)` on the server.
@@ -13,8 +14,9 @@
  * and demonstrate typed actions + state mutation + Tailwind classes.
  */
 
-import { mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { dim } from "../colors.js";
 import type { ModuleLayout } from "./prompts.js";
 
@@ -22,6 +24,31 @@ interface Options {
   projectDir: string;
   projectName: string;
   layout: ModuleLayout;
+  /** SDK version to require; defaults to this CLI's own version. */
+  sdkVersion?: string;
+}
+
+/** Go module path of the Hypen Go SDK (a subdirectory module of the monorepo). */
+export const GO_SDK_MODULE = "github.com/hypen-lang/hypen/hypen-golang";
+
+/**
+ * The CLI and the Go SDK are versioned in lockstep (the SDK is tagged
+ * `hypen-golang/vX.Y.Z` on every release), so the scaffold pins the SDK to
+ * the CLI's own version.
+ */
+function cliVersion(): string {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 6 && dir !== "/" && dir !== "."; i++) {
+      const pkgPath = resolve(dir, "package.json");
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+        if (pkg?.name === "@hypen-space/cli" && pkg.version) return pkg.version;
+      }
+      dir = dirname(dir);
+    }
+  } catch {}
+  return "0.6.7";
 }
 
 function write(projectDir: string, relPath: string, content: string): void {
@@ -33,15 +60,22 @@ function ensureDir(projectDir: string, relPath: string): void {
   mkdirSync(join(projectDir, relPath), { recursive: true });
 }
 
-function goMod(projectName: string): string {
+function goMod(projectName: string, sdkVersion: string): string {
   // Go module paths must be lowercase and cannot contain spaces.
   const modName = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
-  // The `github.com/hypen-space/core` require is intentionally omitted —
-  // `go mod tidy` (run during `hypen init`) resolves it to the latest
-  // published version from the import in main.go.
+  // Pinned to the SDK release matching this CLI. `go mod tidy` (run during
+  // `hypen init`) fetches it and fills in go.sum and the indirect deps.
   return `module ${modName}
 
-go 1.25
+go 1.25.0
+
+require ${GO_SDK_MODULE} v${sdkVersion}
+
+// Working on the SDK itself? Point this project at a local checkout of
+// github.com/hypen-lang/hypen instead of the published module, then run
+// \`go mod tidy\`:
+//
+// replace ${GO_SDK_MODULE} => /path/to/hypen/hypen-golang
 `;
 }
 
@@ -204,8 +238,8 @@ import (
 \t"os"
 \t"path/filepath"
 
-\tcore "github.com/hypen-space/core"
-\t"github.com/hypen-space/core/remote"
+\tcore "github.com/hypen-lang/hypen/hypen-golang"
+\t"github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // loadTemplate reads \`components/<Name>/component.hypen\` from disk. Go's
@@ -313,8 +347,8 @@ import (
 \t"fmt"
 \t"os"
 
-\tcore "github.com/hypen-space/core"
-\t"github.com/hypen-space/core/remote"
+\tcore "github.com/hypen-lang/hypen/hypen-golang"
+\t"github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // Location is the current route path. The template's Router matches its
@@ -397,7 +431,7 @@ func main() {
 `;
 }
 
-function readme(projectName: string, layout: ModuleLayout): string {
+function readme(projectName: string, layout: ModuleLayout, sdkVersion: string): string {
   const layoutNote =
     layout === "file-based"
       ? "Modules live in `components/<Name>/component.hypen`. Edit those files and restart the server."
@@ -420,6 +454,25 @@ ${layoutNote}
 
 The server is reachable at \`ws://localhost:3000\` and speaks the Hypen remote
 protocol. Connect a web or native client pointed at that URL.
+
+## The Hypen Go SDK
+
+The project depends on \`${GO_SDK_MODULE}\` v${sdkVersion} (the version of
+the \`hypen\` CLI that generated it). The package is named \`core\`, so it is
+imported as:
+
+\`\`\`go
+import (
+\tcore "${GO_SDK_MODULE}"
+\t"${GO_SDK_MODULE}/remote"
+)
+\`\`\`
+
+To upgrade: \`go get ${GO_SDK_MODULE}@latest\`.
+
+To build against a local checkout of the SDK instead (SDK contributors),
+uncomment the \`replace\` line at the bottom of \`go.mod\`, point it at your
+\`hypen/hypen-golang\` directory and run \`go mod tidy\`.
 `;
 }
 
@@ -428,11 +481,12 @@ protocol. Connect a web or native client pointed at that URL.
  */
 export function generateGoProject(opts: Options): void {
   const { projectDir, projectName, layout } = opts;
+  const sdkVersion = (opts.sdkVersion ?? cliVersion()).replace(/^v/, "");
 
-  write(projectDir, "go.mod", goMod(projectName));
+  write(projectDir, "go.mod", goMod(projectName, sdkVersion));
   write(projectDir, ".gitignore", gitignore());
   write(projectDir, "hypen.json", hypenConfig());
-  write(projectDir, "README.md", readme(projectName, layout));
+  write(projectDir, "README.md", readme(projectName, layout, sdkVersion));
 
   if (layout === "file-based") {
     for (const rel of [

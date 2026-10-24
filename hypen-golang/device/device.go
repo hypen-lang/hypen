@@ -53,7 +53,7 @@ import (
 	"sync"
 	"time"
 
-	wire "github.com/hypen-space/core/remote/device"
+	wire "github.com/hypen-lang/hypen/hypen-golang/remote/device"
 )
 
 // Code is the closed device error taxonomy (RFC 001 §3).

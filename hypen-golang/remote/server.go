@@ -12,7 +12,7 @@ import (
 	"weak"
 
 	"github.com/gorilla/websocket"
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // ActionHandler handles an action dispatched from a client

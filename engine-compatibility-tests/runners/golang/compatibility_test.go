@@ -13,7 +13,7 @@ import (
 	"strings"
 	"testing"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // TestCase represents a compatibility test case loaded from JSON

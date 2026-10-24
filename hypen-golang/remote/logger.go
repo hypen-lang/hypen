@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // LogLevel represents the severity level for logging.

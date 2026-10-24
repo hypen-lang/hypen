@@ -5,23 +5,39 @@ description: Complete guide to building Hypen servers with Go
 
 # Go SDK
 
-The Go SDK (`github.com/hypen-space/core`) provides a server-side Hypen implementation for Go applications with reactive state management, routing, cross-module communication, and Remote UI streaming over WebSocket.
+The Go SDK (`github.com/hypen-lang/hypen/hypen-golang`, package `core`) provides a server-side Hypen implementation for Go applications with reactive state management, routing, cross-module communication, and Remote UI streaming over WebSocket.
 
 ## Installation
 
 Requires **Go 1.25 or newer** (the WASM runtime, wazero v1.12, needs it). On an older toolchain, prefix commands with `GOTOOLCHAIN=go1.25.0` and Go downloads 1.25 for you.
 
-The module path is `github.com/hypen-space/core`, but **the module is not published yet**: nothing is hosted at that path, so `go get github.com/hypen-space/core` fails. Until it is, use the SDK from a checkout of the Hypen repository (it lives in `hypen-golang/`) with a `replace` directive:
+```bash
+go get github.com/hypen-lang/hypen/hypen-golang@v0.6.7
+```
+
+The SDK is the `hypen-golang/` directory of the [Hypen repository](https://github.com/hypen-lang/hypen), published as a Go module with tags `hypen-golang/vX.Y.Z` that match the Hypen release (`hypen init` pins the version of the CLI that created the project). The package is named `core`, so import it with that alias:
+
+```go
+import (
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
+)
+```
+
+The engine WASM is embedded in the module, so there is nothing else to download or copy.
+
+### From source (SDK contributors)
+
+To build against a checkout of the SDK instead of the published module, add a `replace` directive:
 
 ```bash
 git clone https://github.com/hypen-lang/hypen.git
-mkdir counter && cd counter
-go mod init example.com/counter
-go mod edit -require=github.com/hypen-space/core@v0.0.0 \
-            -replace=github.com/hypen-space/core=../hypen/hypen-golang
+cd my-app
+go mod edit -replace=github.com/hypen-lang/hypen/hypen-golang=../hypen/hypen-golang
+go mod tidy
 ```
 
-Run `go mod tidy` once your `main.go` exists. The engine WASM is embedded in the module, so there is nothing else to download or copy.
+Remove it (`go mod edit -dropreplace=github.com/hypen-lang/hypen/hypen-golang`) to go back to the published version.
 
 ## Quick Start
 
@@ -35,8 +51,8 @@ package main
 import (
     "fmt"
 
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // Module state as a Go struct. json tags match the @{state.xxx}
@@ -1257,7 +1273,7 @@ EXPOSE 3000
 CMD ["./server"]
 ```
 
-The engine WASM is embedded in the binary. While the module is unpublished (see [Installation](#installation)), the `replace` directive points outside the build context, so vendor the SDK (`go mod vendor`) or copy `hypen-golang/` into the image and adjust the `replace` path.
+The engine WASM is embedded in the binary, so the runtime image needs nothing besides the server (and your `components/` directory if you use `.Source(...)`). If your `go.mod` has a local `replace` for the SDK, drop it before building the image (or vendor with `go mod vendor`): the replaced path is outside the build context.
 
 ### Production Checklist
 

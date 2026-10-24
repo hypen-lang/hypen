@@ -7,7 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/hypen-space/core/device"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
 )
 
 var logModule = LogModule

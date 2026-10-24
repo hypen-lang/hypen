@@ -469,8 +469,8 @@ async function initProject(name?: string) {
       console.error(`\n  Failed to install dependencies. Run ${dim(`${pm} install`)} manually.\n`);
     }
   } else if (language === "go") {
-    // go.mod ships without a hypen require; `go mod tidy` reads the import
-    // in main.go and pins the latest published github.com/hypen-space/core.
+    // go.mod requires github.com/hypen-lang/hypen/hypen-golang at this CLI's
+    // version; `go mod tidy` fetches it and writes go.sum + indirect deps.
     console.log(`\n  ${dim("Resolving Go modules...")}`);
     try {
       execSync("go mod tidy", { cwd: projectDir, stdio: "inherit" });

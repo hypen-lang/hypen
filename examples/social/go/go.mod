@@ -1,9 +1,9 @@
-module github.com/hypen-space/examples/social
+module github.com/hypen-lang/hypen/examples/social/go
 
 go 1.25.0
 
 require (
-	github.com/hypen-space/core v0.0.0
+	github.com/hypen-lang/hypen/hypen-golang v0.0.0
 	modernc.org/sqlite v1.28.0
 )
 
@@ -30,4 +30,4 @@ require (
 	modernc.org/token v1.0.1 // indirect
 )
 
-replace github.com/hypen-space/core => ../../../hypen-golang
+replace github.com/hypen-lang/hypen/hypen-golang => ../../../hypen-golang
