@@ -49,6 +49,13 @@ interface StudioEngineHostOptions {
   projectDir: string;
   componentsDir: string;
   entryName: string;
+  /**
+   * Called after each preview session renders with the components its
+   * template references that resolve to nothing (deleted / misspelled /
+   * never created) — `[]` once everything resolves again. Studio shows them
+   * in the console and as a banner over the preview.
+   */
+  onUnresolvedComponents?: (names: string[]) => void;
 }
 
 interface WsSessionHandle {
@@ -90,6 +97,8 @@ export class StudioEngineHost {
   private validateSources: (() => Promise<string[]>) | null = null;
   /** Last parse errors reported, so an unchanged error isn't re-printed. */
   private lastProblems = "";
+  /** Unresolved component names already reported since the last reload. */
+  private reportedUnresolved = new Set<string>();
 
   constructor(options: StudioEngineHostOptions) {
     this.options = options;
@@ -191,6 +200,9 @@ export class StudioEngineHost {
       .onSessionCreate((session: any) => {
         // Track sessions so mock-state pushes can reach every engine.
         this.liveSessions.add(session);
+        Promise.resolve(session.ready)
+          .then(() => this.reportUnresolved(session))
+          .catch(() => { /* session closed before it rendered */ });
       });
 
     await this.remoteServer.prepare();
@@ -199,6 +211,33 @@ export class StudioEngineHost {
     for (const ws of this.pendingSockets.splice(0)) {
       this.attachSession(ws);
     }
+  }
+
+  /**
+   * A component the template references but that resolves to nothing
+   * (e.g. its folder was just deleted) renders as nothing — the engine's
+   * unknown-component behaviour. The engine's own warning is muted here
+   * (framework logs are at "error"), so say it once per reload in the
+   * studio terminal and hand the list to the UI.
+   */
+  reportUnresolved(session: { engine?: { getUnresolvedComponents?: () => string[] } }): void {
+    let names: string[] = [];
+    try {
+      names = [...(session.engine?.getUnresolvedComponents?.() ?? [])].sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (this.reportedUnresolved.has(name)) continue;
+      this.reportedUnresolved.add(name);
+      console.warn(
+        `  [engine] Component "${name}" is referenced but not defined in ` +
+          `${this.options.componentsDir} (deleted or misspelled?) — it renders nothing until it exists.`
+      );
+    }
+    // Every session render reports (a Studio tab opened later learns the
+    // current list from its own preview session).
+    this.options.onUnresolvedComponents?.(names);
   }
 
   private synthesiseMock(template: string): MockBinding {
@@ -312,6 +351,8 @@ export class StudioEngineHost {
       try { await this.rescanMockFromSource(); } catch { /* keep going */ }
     }
     try {
+      // Fresh code: report still-missing components again (once).
+      this.reportedUnresolved.clear();
       await this.remoteServer.reload();
       // Re-push because `reload()` re-renders but won't reset state to the
       // mock's current values — especially important when new paths were

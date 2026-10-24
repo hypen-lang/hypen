@@ -15,8 +15,6 @@
 import { join, resolve, normalize, relative, isAbsolute } from "path";
 import { existsSync, readFileSync, writeFileSync, mkdirSync } from "fs";
 import {
-  discoverComponents,
-  watchComponents,
   generateComponentsCode,
   type DiscoveredComponent,
 } from "@hypen-space/server";
@@ -252,7 +250,10 @@ export async function dev(options: DevOptions): Promise<{
     "@hypen-space/server/remote",
     () => import("@hypen-space/server/remote")
   );
-  const { discoverComponents, loadDiscoveredComponents } = await importFromProject(
+  // The watcher comes from the project's @hypen-space/server too: its
+  // rescan and `remoteServer.reload()` then share one discovery module (one
+  // built-in-name warning per reload, not one per copy).
+  const { discoverComponents, loadDiscoveredComponents, watchComponents } = await importFromProject(
     "@hypen-space/server",
     () => import("@hypen-space/server")
   );

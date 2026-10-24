@@ -34,6 +34,7 @@ import type {
   DispatchActionMessage,
   UpdateStateMessage,
   SubscribeStateMessage,
+  StateUpdateMessage,
   HelloMessage,
   SessionAckMessage,
   SessionExpiredMessage,
@@ -208,7 +209,9 @@ export class RemoteEngine implements Disposable {
   // Callbacks
   private readonly patchCallbacks: Array<(patches: Patch[]) => void> = [];
   private readonly initialTreeCallbacks: Array<() => void> = [];
-  private readonly stateCallbacks: Array<(state: unknown) => void> = [];
+  private readonly stateCallbacks: Array<
+    (state: unknown, modules?: Record<string, unknown>) => void
+  > = [];
   private readonly connectionCallbacks: Array<() => void> = [];
   private readonly disconnectionCallbacks: Array<() => void> = [];
   private readonly errorCallbacks: Array<(error: Error) => void> = [];
@@ -217,6 +220,7 @@ export class RemoteEngine implements Disposable {
 
   // State
   private currentState: unknown = null;
+  private currentModules: Record<string, unknown> | undefined = undefined;
   private currentRevision = 0;
   private moduleName: string = "";
 
@@ -591,13 +595,17 @@ export class RemoteEngine implements Disposable {
    * Subscribe to state updates after each render.
    * Only subscribed clients receive stateUpdate messages (avoids overhead for native clients).
    */
-  subscribeState(): void {
+  subscribeState(options: { modules?: boolean } = {}): void {
     if (this.state !== "connected" || !this.ws) {
       log.warn("Cannot subscribe to state: not connected");
       return;
     }
 
-    const message: SubscribeStateMessage = { type: "subscribeState" };
+    // `modules: true` also streams every module's state (nested and route
+    // modules too) as `stateUpdate.modules`; older servers ignore the flag.
+    const message: SubscribeStateMessage = options.modules
+      ? { type: "subscribeState", modules: true }
+      : { type: "subscribeState" };
     this.ws.send(JSON.stringify(message));
   }
 
@@ -605,16 +613,20 @@ export class RemoteEngine implements Disposable {
    * Override the remote module's state (e.g. for time-travel).
    * The server will update state, re-render, and send back patches.
    */
-  updateState(state: unknown): void {
+  updateState(state: unknown, modules?: Record<string, unknown>): void {
     if (this.state !== "connected" || !this.ws) {
       log.warn("Cannot update state: not connected");
       return;
     }
 
+    // `modules` (lowercase module id → state) restores every listed module
+    // on servers that understand it; `state` stays the primary's patch for
+    // older servers.
     const message: UpdateStateMessage = {
       type: "updateState",
       module: this.moduleName,
       state,
+      ...(modules ? { modules } : {}),
     };
 
     this.ws.send(JSON.stringify(message));
@@ -645,7 +657,9 @@ export class RemoteEngine implements Disposable {
   /**
    * Register callback for state updates
    */
-  onStateUpdate(callback: (state: unknown) => void): this {
+  onStateUpdate(
+    callback: (state: unknown, modules?: Record<string, unknown>) => void
+  ): this {
     this.stateCallbacks.push(callback);
     return this;
   }
@@ -707,6 +721,15 @@ export class RemoteEngine implements Disposable {
   }
 
   /**
+   * Every module's last streamed state (lowercase module id → state), or
+   * `undefined` until a `subscribeState({ modules: true })` update arrived
+   * (or when the server predates per-module streaming).
+   */
+  getModuleStates(): Record<string, unknown> | undefined {
+    return this.currentModules;
+  }
+
+  /**
    * Get current revision
    */
   getRevision(): number {
@@ -749,11 +772,16 @@ export class RemoteEngine implements Disposable {
           this.handlePatch(message as PatchMessage);
           break;
 
-        case "stateUpdate":
-          this.currentState = (message as { state: unknown }).state;
+        case "stateUpdate": {
+          const update = message as StateUpdateMessage;
+          this.currentState = update.state;
+          if (update.modules && typeof update.modules === "object") {
+            this.currentModules = update.modules;
+          }
           this.trackViewChange(this.currentState);
-          this.stateCallbacks.forEach((cb) => cb(this.currentState));
+          this.stateCallbacks.forEach((cb) => cb(this.currentState, update.modules));
           break;
+        }
 
         case "deviceRequest":
         case "deviceEvent":

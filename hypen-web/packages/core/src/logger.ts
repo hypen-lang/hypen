@@ -87,6 +87,16 @@ function isTest(): boolean {
   return readEnv("NODE_ENV") === "test";
 }
 
+/**
+ * The NO_COLOR convention (https://no-color.org): a non-empty `NO_COLOR`
+ * disables ANSI colors whatever `colors` is configured to. Read per log
+ * line so a value set after import still applies.
+ */
+function colorsAllowed(): boolean {
+  const noColor = readEnv("NO_COLOR");
+  return noColor === undefined || noColor === "";
+}
+
 function defaultLevel(): LogLevel {
   if (isProduction()) return "error";
   if (isTest()) return "warn";
@@ -253,7 +263,7 @@ function shouldLog(level: LogLevel, tag?: string): boolean {
 function formatTag(tag: string, level: LogLevel): string {
   const timestamp = config.timestamps ? `${new Date().toISOString()} ` : "";
 
-  if (config.colors && level !== "none") {
+  if (config.colors && colorsAllowed() && level !== "none") {
     const color = LOG_LEVEL_COLORS[level as Exclude<LogLevel, "none">];
     return `${timestamp}${color}[${tag}]${RESET_COLOR}`;
   }

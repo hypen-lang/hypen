@@ -45,6 +45,7 @@ import type {
   SessionAckMessage,
   SessionExpiredMessage,
   StateUpdateMessage,
+  SubscribeStateMessage,
   UpdateStateMessage,
 } from "./types.js";
 import { SessionManager } from "./session.js";
@@ -378,6 +379,15 @@ export class RemoteSession {
   /** `isNew` of the acknowledged session, repeated by a late device re-ack. */
   private _ackIsNew = true;
   private _stateSubscribed = false;
+  /**
+   * The state subscription asked for every module's state
+   * (`subscribeState { modules: true }`): stateUpdates then carry `modules`
+   * and are also sent on module state changes that render nothing.
+   */
+  private _stateModules = false;
+  /** JSON of the last `modules` map streamed, to skip duplicate updates. */
+  private _lastModulesJson: string | null = null;
+  private _stateStreamTimer: ReturnType<typeof setTimeout> | null = null;
   private _revision = 0;
   private _destroyed = false;
   /**
@@ -993,12 +1003,12 @@ export class RemoteSession {
             break;
           }
           const stateMsg = msg as UpdateStateMessage;
-          this._moduleInstance?.updateState(stateMsg.state);
+          this.applyStateOverride(stateMsg);
 
           if (this.host.syncActions) {
             for (const other of this.host.otherSessions(this)) {
               if (!other._helloReceived || !other._moduleInstance) continue;
-              other._moduleInstance.updateState(stateMsg.state);
+              other.applyStateOverride(stateMsg);
             }
           }
           break;
@@ -1006,7 +1016,17 @@ export class RemoteSession {
 
         case "subscribeState": {
           this._stateSubscribed = true;
-          log.info(`Session ${this.id} subscribed to state updates`);
+          const wantsModules = (msg as SubscribeStateMessage).modules === true;
+          if (wantsModules && !this._stateModules) {
+            this._stateModules = true;
+            this._lastModulesJson = null;
+            // Hand the subscriber the current picture right away (the
+            // initial tree predates the subscription).
+            if (this._ready) this.flushModulesStream();
+          }
+          log.info(
+            `Session ${this.id} subscribed to state updates${wantsModules ? " (all modules)" : ""}`
+          );
           break;
         }
 
@@ -1083,6 +1103,10 @@ export class RemoteSession {
     // commit it to the host's durable store (if any) so a reconnect within
     // the TTL — even into a fresh process — restores every module.
     const snapshot = this._ready ? this.takeSnapshot() : null;
+    if (this._stateStreamTimer) {
+      clearTimeout(this._stateStreamTimer);
+      this._stateStreamTimer = null;
+    }
     if (this._snapshotTimer) {
       clearTimeout(this._snapshotTimer);
       this._snapshotTimer = null;
@@ -1242,7 +1266,7 @@ export class RemoteSession {
       );
       if (this._deviceBroker) instance.attachDevice(this._deviceBroker);
       this._globalContext.registerModule(name.toLowerCase(), instance);
-      instance.onStateChange(() => this.markSnapshotDirty());
+      instance.onStateChange(() => this.noteModuleStateChange());
       this._nestedInstances.push(instance);
       return true;
     };
@@ -1371,6 +1395,89 @@ export class RemoteSession {
       this._snapshotTimer = null;
       void this.flushSnapshot();
     }, 0);
+  }
+
+  /** A module instance's state changed: snapshot it, stream it to subscribers. */
+  private noteModuleStateChange(): void {
+    this.markSnapshotDirty();
+    if (!this._stateSubscribed || !this._stateModules || this._destroyed || !this._ready) return;
+    if (this._stateStreamTimer) return;
+    // Coalesced a macrotask later: the observable-state flush (a microtask)
+    // and the render it triggers land first, so a change that rendered was
+    // already streamed with its patch and is skipped as a duplicate here.
+    this._stateStreamTimer = setTimeout(() => {
+      this._stateStreamTimer = null;
+      this.flushModulesStream();
+    }, 0);
+  }
+
+  /** Lowercase module id → state for every module on this connection. */
+  moduleStates(): Record<string, unknown> {
+    try {
+      return this._globalContext.getGlobalState();
+    } catch (err) {
+      log.error(`Session ${this.id}: module state read failed:`, err);
+      return {};
+    }
+  }
+
+  /**
+   * The `stateUpdate` for the current state. `withModules` adds every
+   * module's state (clients that subscribed with `{ modules: true }`).
+   */
+  private buildStateUpdate(withModules: boolean): StateUpdateMessage {
+    const message: StateUpdateMessage = {
+      type: "stateUpdate",
+      module: this.host.moduleName,
+      state: this._moduleInstance?.getState() ?? {},
+      revision: this._revision,
+    };
+    if (withModules) message.modules = this.moduleStates();
+    return message;
+  }
+
+  /** Send a modules stateUpdate unless nothing changed since the last one. */
+  private flushModulesStream(): void {
+    if (!this._stateSubscribed || !this._stateModules || this._destroyed) return;
+    const modules = this.moduleStates();
+    const json = safeJson(modules);
+    if (json !== null && json === this._lastModulesJson) return;
+    this._lastModulesJson = json;
+    this.send({
+      type: "stateUpdate",
+      module: this.host.moduleName,
+      state: this._moduleInstance?.getState() ?? {},
+      revision: this._revision,
+      modules,
+    });
+  }
+
+  /**
+   * Apply a client `updateState` (e.g. Studio time-travel). `modules`, when
+   * present, overrides each listed module (lowercase id) — every live module
+   * on the connection, the primary included; `state` patches the primary
+   * unless `modules` already carries it (legacy clients send `state` only).
+   */
+  private applyStateOverride(message: UpdateStateMessage): void {
+    const modules = isPlainObject(message.modules) ? message.modules : null;
+    const primaryId = this.host.moduleName.toLowerCase();
+    if (!modules || !Object.prototype.hasOwnProperty.call(modules, primaryId)) {
+      if (isPlainObject(message.state)) this._moduleInstance?.updateState(message.state);
+    }
+    if (!modules) return;
+    for (const [id, state] of Object.entries(modules)) {
+      if (!isPlainObject(state)) continue;
+      if (this._globalContext.hasModule(id)) {
+        try {
+          this._globalContext.getModule(id).setState(state);
+        } catch (err) {
+          log.error(`Session ${this.id}: updateState for module "${id}" failed:`, err);
+        }
+      } else if (this._restoreModules.has(id)) {
+        // A restored route module not constructed yet: seed it instead.
+        this._restoreModules.set(id, state);
+      }
+    }
   }
 
   /**
@@ -1676,7 +1783,7 @@ export class RemoteSession {
           this.host.moduleName.toLowerCase(),
           this._moduleInstance
         );
-        this._moduleInstance.onStateChange(() => this.markSnapshotDirty());
+        this._moduleInstance.onStateChange(() => this.noteModuleStateChange());
       }
     } catch (err) {
       // The built-but-unstarted broker owns WASM memory: release it.
@@ -1743,6 +1850,9 @@ export class RemoteSession {
     this.host.onSessionReady(this, this.toRemoteClient());
     this._ready = true;
     this._resolveReady();
+    // A modules subscription that arrived before the initial tree gets its
+    // first picture now.
+    if (this._stateModules) this.flushModulesStream();
     // First durable snapshot: a session that is never touched again must
     // still be restorable (its session id now lives in the client).
     this.markSnapshotDirty();
@@ -1809,7 +1919,10 @@ export class RemoteSession {
       // each owns its own instance id / activations, swept by its lifecycle.
       onModuleCreated: (instance) => {
         if (this._deviceBroker) instance.attachDevice(this._deviceBroker);
-        instance.onStateChange(() => this.markSnapshotDirty());
+        instance.onStateChange(() => this.noteModuleStateChange());
+        // A route module joining the session is news for module-state
+        // subscribers too (Studio's State panel), even before it changes.
+        this.noteModuleStateChange();
       },
       // A restored session seeds each route module, as it is first
       // constructed, with the state it had in the previous incarnation.
@@ -2031,12 +2144,8 @@ export class RemoteSession {
       this.send(patchMessage);
 
       if (this._stateSubscribed && this._moduleInstance) {
-        const stateMessage: StateUpdateMessage = {
-          type: "stateUpdate",
-          module: this.host.moduleName,
-          state: this._moduleInstance.getState(),
-          revision: this._revision,
-        };
+        const stateMessage = this.buildStateUpdate(this._stateModules);
+        if (stateMessage.modules) this._lastModulesJson = safeJson(stateMessage.modules);
         this.send(stateMessage);
       }
 
@@ -2049,13 +2158,7 @@ export class RemoteSession {
           if (peer === this) continue;
           peer.send(patchMessage);
           if (peer._stateSubscribed && this._moduleInstance) {
-            const stateMessage: StateUpdateMessage = {
-              type: "stateUpdate",
-              module: this.host.moduleName,
-              state: this._moduleInstance.getState(),
-              revision: this._revision,
-            };
-            peer.send(stateMessage);
+            peer.send(this.buildStateUpdate(peer._stateModules));
           }
         }
       }
@@ -2255,5 +2358,17 @@ export class AsyncQueueTransport implements SessionTransport {
       },
     };
     return iter;
+  }
+}
+
+function isPlainObject(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function safeJson(value: unknown): string | null {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
   }
 }
