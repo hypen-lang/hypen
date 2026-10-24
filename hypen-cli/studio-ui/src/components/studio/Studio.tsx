@@ -9,6 +9,15 @@ import { CommandPalette } from "./CommandPalette";
 import { ResizeHandle } from "./ResizeHandle";
 import { TestMode } from "./TestMode";
 import { cn } from "@/lib/utils";
+import {
+  appendHistory,
+  timeTravelPayload,
+  type ModuleStates,
+  type StateOverride,
+  type StateHistoryEntry,
+} from "@/lib/state-history";
+
+export type { StateHistoryEntry } from "@/lib/state-history";
 
 export type PanelState = {
   files: boolean;
@@ -46,13 +55,6 @@ export type ActionLogEntry = {
   payload?: any;
 };
 
-export type StateHistoryEntry = {
-  id: string;
-  timestamp: number;
-  action?: string;
-  state: Record<string, any>;
-};
-
 export function Studio() {
   const [panels, setPanels] = useState<PanelState>({
     files: true,
@@ -84,6 +86,16 @@ export function Studio() {
   const [consoleLogs, setConsoleLogs] = useState<ConsoleLog[]>([]);
   const [actionLog, setActionLog] = useState<ActionLogEntry[]>([]);
   const [currentState, setCurrentState] = useState<Record<string, any>>({});
+  // Every module's state (lowercase id → state) when the engine streams it.
+  const [currentModules, setCurrentModules] = useState<ModuleStates | undefined>(undefined);
+  // Last dispatched action, attached to the next timeline entry it caused.
+  const lastActionRef = useRef<string | null>(null);
+  // Components the previewed template references that resolve to nothing.
+  const [unresolvedComponents, setUnresolvedComponents] = useState<string[]>([]);
+  const unresolvedRef = useRef<string[]>([]);
+  // Time-travel request for the preview: a fresh object per scrub, so
+  // re-selecting an entry (or "Go Live") always re-applies it.
+  const [stateOverride, setStateOverride] = useState<StateOverride | null>(null);
   const [stateHistory, setStateHistory] = useState<StateHistoryEntry[]>([]);
   const [historyIndex, setHistoryIndex] = useState(-1);
   const [remoteUrl, setRemoteUrl] = useState<string | null>(null);
@@ -467,6 +479,22 @@ export function Studio() {
         if (data.type === "reload") {
           addConsoleLog("info", `File changed: ${data.file}`);
           loadFileTree();
+        } else if (data.type === "engine-unresolved" && Array.isArray(data.components)) {
+          const names = (data.components as unknown[]).filter((n): n is string => typeof n === "string");
+          // Logged outside the state updater (StrictMode runs updaters twice).
+          const prev = unresolvedRef.current;
+          if (prev.join("\0") !== names.join("\0")) {
+            for (const name of names) {
+              if (!prev.includes(name)) {
+                addConsoleLog(
+                  "warn",
+                  `Component "${name}" is referenced but not defined (deleted or misspelled?) — it renders nothing.`
+                );
+              }
+            }
+            unresolvedRef.current = names;
+            setUnresolvedComponents(names);
+          }
         }
       } catch (e) {
         // ignore
@@ -698,34 +726,29 @@ export function Studio() {
                 openFiles={openFiles}
                 remoteUrl={remoteUrl}
                 style={{ width: previewWidth }}
-                overrideState={
-                  timeTravelRef.current
-                    ? stateHistory[historyIndex]?.state ?? null
-                    : null
-                }
+                overrideState={stateOverride}
+                unresolvedComponents={unresolvedComponents}
                 onLog={addConsoleLog}
-                onActionLog={(name, payload) =>
+                onActionLog={(name, payload) => {
+                  lastActionRef.current = name;
                   setActionLog((prev) => [
                     { time: new Date().toLocaleTimeString(), name, payload },
                     ...prev.slice(0, 99),
-                  ])
-                }
-                onStateChange={(state) => {
+                  ]);
+                }}
+                onStateChange={(state, modules) => {
                   // Skip recording state changes caused by time-travel
                   if (timeTravelRef.current) return;
                   setCurrentState(state);
+                  setCurrentModules(modules);
+                  const action = lastActionRef.current;
                   setStateHistory((prev) => {
-                    const newHistory = [
-                      ...prev,
-                      {
-                        id: `${Date.now()}`,
-                        timestamp: Date.now(),
-                        state,
-                      },
-                    ];
+                    const newHistory = appendHistory(prev, state, modules, action);
+                    if (newHistory === prev) return prev;
                     setHistoryIndex(newHistory.length - 1);
                     return newHistory;
                   });
+                  lastActionRef.current = null;
                 }}
               />
             </>
@@ -741,6 +764,7 @@ export function Studio() {
               consoleLogs={consoleLogs}
               actionLog={actionLog}
               currentState={currentState}
+              currentModules={currentModules}
               stateHistory={stateHistory}
               historyIndex={historyIndex}
               style={{ height: bottomHeight }}
@@ -749,7 +773,11 @@ export function Studio() {
                 timeTravelRef.current = !isAtLatest;
                 setHistoryIndex(index);
                 if (index >= 0 && index < stateHistory.length) {
-                  setCurrentState(stateHistory[index].state);
+                  setCurrentState(stateHistory[index]!.state);
+                  setCurrentModules(stateHistory[index]!.modules);
+                  // Restore every module to that moment (going live
+                  // restores the latest entry).
+                  setStateOverride({ ...timeTravelPayload(stateHistory[index]!) });
                 }
               }}
               onClearConsole={() => setConsoleLogs([])}

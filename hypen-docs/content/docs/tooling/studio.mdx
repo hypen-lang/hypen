@@ -92,7 +92,9 @@ Studio's bottom panel provides four debugging views, accessible via tabs or keyb
 
 ### State Inspector
 
-Shows the current state of your active module as a live JSON tree. Every time state changes — from an action, lifecycle hook, or two-way binding — the inspector updates instantly.
+Shows the state of every module in the session as a live tree, one per module: the entry module, modules mounted in a template, and route modules — the active one and any cached ones you navigated away from (e.g. `home.taps` in the scaffold). Every time state changes — from an action, lifecycle hook, or two-way binding — the inspector updates instantly.
+
+If a template references a component that doesn't exist (for example you just deleted its folder), it renders as nothing — the engine's behavior for unknown components. Studio reports it in the console and terminal and badges the preview with an **Unknown component** notice; re-adding the component renders it again on the next reload.
 
 ### Action Log
 
@@ -110,19 +112,15 @@ Captures `console.log`, `console.warn`, and `console.error` output from your mod
 
 ### Timeline (Time-Travel Debugging)
 
-The timeline records every state snapshot as your app runs. You can:
+The timeline records a snapshot of every module's state each time any of them changes, labelled with the action that caused it and what changed (e.g. `tap  home.taps 1 → 2`). You can:
 
 - **Scrub through history** using a slider to see the state at any point in time
-- **Preview past states** — the live preview updates to show the UI as it appeared at that moment
+- **Preview past states** — every module is restored to that snapshot (including the route, so stepping back across a navigation returns to the earlier screen), and the live preview updates to show the UI as it appeared at that moment
 - **Go Live** — click the "Go Live" button to return to the current state and resume normal operation
 
 This is especially powerful for debugging complex state flows — you can step through exactly how state evolved across a sequence of actions.
 
 <img src="/tooling/studio-timeline.png" alt="The State and Timeline panels with time travel active" />
-
-Note: the State panel and Timeline currently track the **primary module's**
-state. State owned by nested route modules (for example a counter mounted
-via a `Route`) is not yet captured in snapshots or restored by time travel.
 
 ## Integrated Terminal
 

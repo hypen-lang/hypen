@@ -122,6 +122,9 @@ const engineHost = new StudioEngineHost({
   projectDir,
   componentsDir,
   entryName: entryComponent,
+  // Referenced-but-missing components (e.g. a deleted component folder):
+  // Studio logs them and badges the preview.
+  onUnresolvedComponents: (components) => broadcast({ type: "engine-unresolved", components }),
 });
 engineHost.start().catch((err) => {
   console.warn(`[engine] failed to start: ${err?.message ?? err}`);
@@ -264,12 +267,20 @@ function getMimeType(ext: string): string {
 
 // Watch for file changes in the project
 if (existsSync(resolve(projectDir, componentsDir))) {
+  // fs.watch fires several events per save (and one per file when a folder
+  // is deleted or restored): coalesce them into ONE engine reload, so each
+  // change re-runs discovery (and prints its warnings) once.
+  let engineReloadTimer: ReturnType<typeof setTimeout> | null = null;
   watch(resolve(projectDir, componentsDir), { recursive: true }, (eventType, filename) => {
     if (filename && !filename.includes("node_modules")) {
       broadcast({ type: "reload", file: filename });
       // Hot-patch the engine host so connected cells / runners see the
       // change without a full reconnect.
-      engineHost.reload().catch(() => { /* already logged inside */ });
+      if (engineReloadTimer) clearTimeout(engineReloadTimer);
+      engineReloadTimer = setTimeout(() => {
+        engineReloadTimer = null;
+        engineHost.reload().catch(() => { /* already logged inside */ });
+      }, 120);
     }
   });
 }

@@ -45,8 +45,17 @@ export interface PatchMessage {
 export interface StateUpdateMessage {
   type: "stateUpdate";
   module: string;
+  /** The primary (entry) module's state. */
   state: any;
   revision: number;
+  /**
+   * Every module instance on the session — the primary, template-mounted
+   * nested modules and route modules (active or cached) — keyed by the
+   * lowercase module id the session registers them under (the primary's
+   * entry included). Only sent to clients that subscribed with
+   * `{ modules: true }`; legacy clients never see it.
+   */
+  modules?: Record<string, unknown>;
 }
 
 export interface DispatchActionMessage {
@@ -82,7 +91,17 @@ export interface ViewportMessage {
 export interface UpdateStateMessage {
   type: "updateState";
   module: string;
+  /** Patch for the primary module (the only field legacy servers read). */
   state: any;
+  /**
+   * Optional per-module overrides keyed by lowercase module id (as streamed
+   * in `StateUpdateMessage.modules`). A server that understands it applies
+   * each entry to that module instance — e.g. Studio's time-travel restoring
+   * a whole session snapshot — and ignores `state` for the primary when
+   * `modules` carries the primary's id. Legacy servers ignore it and apply
+   * `state` to the primary as before.
+   */
+  modules?: Record<string, unknown>;
 }
 
 /**
@@ -91,6 +110,12 @@ export interface UpdateStateMessage {
  */
 export interface SubscribeStateMessage {
   type: "subscribeState";
+  /**
+   * Also stream every module's state (`StateUpdateMessage.modules`), and
+   * stream on any module state change — not only after a render. Legacy
+   * servers ignore the flag and keep streaming the primary's state only.
+   */
+  modules?: boolean;
 }
 
 /**

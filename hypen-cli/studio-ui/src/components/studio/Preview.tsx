@@ -12,6 +12,7 @@ import { app, HypenModuleInstance, getStateSnapshot } from "@hypen-space/core";
 import { DOMRenderer } from "@hypen-space/web/dom";
 import { RemoteEngine } from "@hypen-space/core/remote/client";
 import { pickPreviewSource, type PreviewSource } from "@/lib/preview-source";
+import type { ModuleStates, StateOverride } from "@/lib/state-history";
 
 // Parse import statements from Hypen DSL
 function parseImports(source: string): Array<{ names: string[]; source: string }> {
@@ -80,10 +81,13 @@ type PreviewProps = {
   openFiles: OpenFile[];
   remoteUrl?: string | null;
   style?: React.CSSProperties;
-  overrideState?: Record<string, any> | null;
+  /** Time-travel target: the primary's state plus every module's, when known. */
+  overrideState?: StateOverride | null;
   onLog: (level: ConsoleLog["level"], message: string) => void;
   onActionLog: (name: string, payload?: any) => void;
-  onStateChange: (state: Record<string, any>) => void;
+  onStateChange: (state: Record<string, any>, modules?: ModuleStates) => void;
+  /** Components the studio engine could not resolve for this preview. */
+  unresolvedComponents?: string[];
 };
 
 // Module-level engine singleton to avoid WASM memory corruption with StrictMode
@@ -132,6 +136,7 @@ export function Preview({
   onLog,
   onActionLog,
   onStateChange,
+  unresolvedComponents = [],
 }: PreviewProps) {
   // Use a separate ref for the Hypen renderer container (not managed by React)
   const containerRef = useRef<HTMLDivElement>(null);
@@ -264,9 +269,9 @@ export function Preview({
           rendererRef.current.applyPatches(patches);
         }
       })
-      .onStateUpdate((state) => {
+      .onStateUpdate((state, modules) => {
         if (!timeTravelingRef.current) {
-          onStateChange(state as Record<string, any>);
+          onStateChange(state as Record<string, any>, modules);
         }
       })
       .onSessionEstablished((info) => {
@@ -278,8 +283,10 @@ export function Preview({
           rendererContainerRef.current.innerHTML = "";
           rendererRef.current = makeRemoteRenderer();
         }
-        // Subscribe to state updates for the state panel and time-travel
-        remote.subscribeState();
+        // Subscribe to state updates for the state panel and time-travel —
+        // every module's state (nested and route modules too), not only
+        // the entry's. Older servers ignore `modules` and stream the entry.
+        remote.subscribeState({ modules: true });
         setEngineReady(true);
         setLoading(false);
       })
@@ -700,11 +707,12 @@ export function Preview({
     timeTravelingRef.current = true;
     try {
       if (remoteEngineRef.current) {
-        // Remote mode: send state override to the server, which re-renders and sends patches back
-        remoteEngineRef.current.updateState(overrideState);
+        // Remote mode: send state override to the server, which restores
+        // every listed module, re-renders and sends patches back.
+        remoteEngineRef.current.updateState(overrideState.state, overrideState.modules);
       } else if (observableStateRef.current) {
         // Local mode: update the module instance directly
-        observableStateRef.current.updateState(overrideState);
+        observableStateRef.current.updateState(overrideState.state);
       }
     } finally {
       timeTravelingRef.current = false;
@@ -799,6 +807,21 @@ export function Preview({
                 transformOrigin: "0 0",
               }}
             />
+            {/* Referenced-but-undefined components render nothing (the
+                engine's unknown-component behaviour); say so on the
+                preview instead of leaving a silently blank area. */}
+            {engineReady && !isLocal && unresolvedComponents.length > 0 && (
+              <div
+                data-testid="unresolved-components"
+                className="absolute left-3 right-3 top-10 z-10 rounded-lg border border-amber-400 bg-amber-50/95 px-3 py-2 text-[11px] leading-snug text-amber-900 shadow"
+              >
+                <span className="font-semibold">Unknown component{unresolvedComponents.length === 1 ? "" : "s"}:</span>{" "}
+                {unresolvedComponents.map((n) => `${n}()`).join(", ")}
+                <div className="text-amber-800/80">
+                  Referenced in a template but not defined (deleted or misspelled?) — rendered as nothing.
+                </div>
+              </div>
+            )}
             {/* Overlay for loading state */}
             {loading && (
               <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-10">

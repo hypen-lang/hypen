@@ -46,3 +46,74 @@ describe("StudioEngineHost.status", () => {
     expect(host.isReady()).toBe(true);
   });
 });
+
+describe("StudioEngineHost unresolved components", () => {
+  // The deleted-component case itself (discovery dropping a removed
+  // component on reload) is covered against the repo packages in
+  // hypen-web/tests/remote-deleted-component.test.ts; this suite covers the
+  // studio reporting on top of whatever @hypen-space/server is installed.
+  test("a referenced-but-undefined component is reported; adding it clears the report", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "hypen-engine-host-unresolved-"));
+    const comps = join(dir, "src/components");
+    try {
+      mkdirSync(join(comps, "App"), { recursive: true });
+      writeFileSync(join(comps, "App/component.hypen"), 'module App { Column { Text("Entry") Banner() } }');
+      const reports: string[][] = [];
+      const host = new StudioEngineHost({
+        projectDir: dir,
+        componentsDir: "src/components",
+        entryName: "App",
+        onUnresolvedComponents: (names) => reports.push(names),
+      });
+      await host.start();
+
+      const open = async () => {
+        const sent: any[] = [];
+        const ws: any = { send: (m: string) => sent.push(JSON.parse(m)), close: () => {} };
+        host.attachSession(ws);
+        host.onMessage(ws, JSON.stringify({ type: "hello" }));
+        await new Promise((r) => setTimeout(r, 300));
+        return { ws, sent };
+      };
+      const text = (sent: any[]) => JSON.stringify(sent.filter((m) => m.type === "initialTree"));
+
+      const a = await open();
+      expect(text(a.sent)).toContain("Entry");
+      expect(reports.at(-1)).toEqual(["Banner"]);
+      host.onClose(a.ws);
+
+      mkdirSync(join(comps, "Banner"), { recursive: true });
+      writeFileSync(join(comps, "Banner/component.hypen"), 'Text("Banner here")');
+      await host.reload();
+      const b = await open();
+      expect(text(b.sent)).toContain("Banner here");
+      expect(reports.at(-1)).toEqual([]);
+      host.onClose(b.ws);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }, 20000);
+
+  test("warns once per name per reload, reports every session", () => {
+    const reports: string[][] = [];
+    const host = new StudioEngineHost({
+      projectDir: "/nonexistent",
+      componentsDir: "src/components",
+      entryName: "App",
+      onUnresolvedComponents: (names) => reports.push(names),
+    });
+    const session = { engine: { getUnresolvedComponents: () => ["Home"] } };
+    const warns: string[] = [];
+    const orig = console.warn;
+    console.warn = (m: string) => warns.push(String(m));
+    try {
+      host.reportUnresolved(session);
+      host.reportUnresolved(session);
+    } finally {
+      console.warn = orig;
+    }
+    expect(warns).toHaveLength(1);
+    expect(warns[0]).toContain('Component "Home" is referenced but not defined');
+    expect(reports).toEqual([["Home"], ["Home"]]);
+  });
+});

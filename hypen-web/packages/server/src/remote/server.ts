@@ -1025,8 +1025,37 @@ export class RemoteServer {
     const discovered = await discoverComponents(dir);
     const loaded = await loadDiscoveredComponents(discovered);
 
+    // Replace — never merge into — the previous discovery: a component
+    // deleted from disk must stop resolving after a reload (otherwise a
+    // still-referenced, deleted component kept rendering its cached
+    // template until the reference was removed too).
+    const previous = this._discoveredComponents;
+    const next: typeof previous = new Map();
     for (const [name, { module, template }] of loaded) {
-      this._discoveredComponents.set(name, { template, module });
+      next.set(name, { template, module });
+    }
+    this._discoveredComponents = next;
+
+    // Discovery imports each component's `.ts`, and named modules
+    // self-register in the shared HypenApp registry as a side effect — so a
+    // deleted module would still be resolved (and mounted) from there. Drop
+    // registry entries discovery itself put there for components that are
+    // gone; definitions a host registered by hand are left alone.
+    const registry = registryOf(this._app);
+    if (registry) {
+      for (const [name, entry] of previous) {
+        if (next.has(name) || !entry.module) continue;
+        if (registry.get(name) === entry.module) {
+          registry.delete(name);
+          log.info(`Component "${name}" was removed from ${dir}`);
+        }
+      }
+      // A re-added component whose `.ts` is served from the ESM cache (same
+      // mtime as before) does not re-run its self-registration: restore it.
+      for (const [name, entry] of next) {
+        const def = entry.module as (HypenModuleDefinition<any> & { name?: string }) | undefined;
+        if (def && def.name === name && !registry.has(name)) registry.set(name, def);
+      }
     }
 
     log.info(
@@ -1275,4 +1304,12 @@ export async function serve(options: {
   }
 
   return server.listen(options.port);
+}
+
+/** The mutable registry behind a `HypenApp` (discovery bookkeeping only). */
+function registryOf(
+  appInstance: HypenApp | null
+): Map<string, HypenModuleDefinition<any>> | null {
+  const registry = (appInstance as unknown as { _registry?: unknown } | null)?._registry;
+  return registry instanceof Map ? (registry as Map<string, HypenModuleDefinition<any>>) : null;
 }

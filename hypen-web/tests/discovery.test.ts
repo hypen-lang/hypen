@@ -57,6 +57,25 @@ describe("Component Discovery", () => {
       }
     });
 
+    test("the built-in-name warning prints once per burst of scans (one reload)", async () => {
+      // A reload scans twice (watcher rescan + RemoteServer.reload); the
+      // warning used to print once per scan.
+      const dir = join(testDir, "burst");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "Avatar.hypen"), "Text('Avatar')");
+      const warn = spyOn(frameworkLoggers.discovery, "warn").mockImplementation(() => {});
+      try {
+        await discoverComponents(dir, { patterns: ["sibling"] });
+        await discoverComponents(dir, { patterns: ["sibling"] });
+        await discoverComponents(dir, { patterns: ["sibling"] });
+        const messages = warn.mock.calls.map((c) => String(c[0]));
+        expect(messages).toHaveLength(1);
+        expect(messages[0]).toContain('"Avatar"');
+      } finally {
+        warn.mockRestore();
+      }
+    });
+
     test("discovers sibling-based components", async () => {
       // Create Button.ts + Button.hypen
       writeFileSync(join(testDir, "Button.ts"), "export default {}");

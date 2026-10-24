@@ -101,6 +101,30 @@ export const BUILT_IN_PRIMITIVES: ReadonlySet<string> = new Set([
   "Marker", "Path",
 ]);
 
+/**
+ * One reload runs discovery more than once (the file watcher's rescan, then
+ * `RemoteServer.reload()`'s own discovery; at startup the CLI's discovery
+ * and `prepare()`), and each pass used to print the built-in-name warning
+ * again. A warning for the same component file is printed at most once per
+ * burst of scans.
+ */
+const SHADOW_WARNING_WINDOW_MS = 3000;
+// Process-wide (shared through `globalThis`), so two copies of this module —
+// the CLI's own @hypen-space/server and the project's — dedupe together.
+const shadowWarnedAt: Map<string, number> = ((globalThis as Record<symbol, unknown>)[
+  Symbol.for("hypen.discovery.shadowWarnedAt")
+] ??= new Map<string, number>()) as Map<string, number>;
+
+function shouldWarnShadow(resolvedDir: string, component: DiscoveredComponent): boolean {
+  const key = `${resolvedDir}\0${component.name}\0${component.hypenPath ?? component.modulePath ?? ""}`;
+  const now = Date.now();
+  const last = shadowWarnedAt.get(key);
+  // Refreshed on every scan, so a burst of scans collapses into one warning;
+  // the next reload (after a quiet gap) warns again.
+  shadowWarnedAt.set(key, now);
+  return last === undefined || now - last > SHADOW_WARNING_WINDOW_MS;
+}
+
 export async function discoverComponents(
   baseDir: string,
   options: DiscoveryOptions = {}
@@ -321,6 +345,7 @@ export async function discoverComponents(
 
   for (const component of components) {
     if (BUILT_IN_PRIMITIVES.has(component.name)) {
+      if (!shouldWarnShadow(resolvedDir, component)) continue;
       frameworkLoggers.discovery.warn(
         `Component "${component.name}" (${relative(resolvedDir, component.hypenPath || component.modulePath || "") || component.name}) has the same name as the built-in ${component.name} element, which takes precedence: ${component.name}() will render the built-in, not this component. Rename it (e.g. "My${component.name}").`
       );
