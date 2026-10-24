@@ -9,16 +9,12 @@ The Swift SDK (`HypenServer`) provides a server-side Hypen implementation for Sw
 
 ## Installation
 
-> **Not published yet.** There is no public Swift package for the server SDK: the standalone `hypen-server-swift` repository on GitHub has no code, so a `.package(url:)` dependency on it will not resolve. The SDK lives in the `hypen-server-swift/` directory of the [Hypen repository](https://github.com/hypen-lang/hypen). Swift Package Manager can't depend on a subdirectory of a remote repository, so clone it and use a local path dependency.
-
-```bash
-git clone https://github.com/hypen-lang/hypen.git
-```
+The SDK is published to the mirror repository [hypen-lang/hypen-server-swift](https://github.com/hypen-lang/hypen-server-swift), tagged with each Hypen release.
 
 ```swift
 // Package.swift (swift-tools-version: 6.0)
 dependencies: [
-    .package(path: "../hypen/hypen-server-swift"),
+    .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.6.7"),
 ],
 targets: [
     .executableTarget(
@@ -30,7 +26,7 @@ targets: [
 ]
 ```
 
-The package declares macOS 13+, iOS 16+, tvOS 16+ and watchOS 9+. The server also needs the native engine library; see [Building the Native Library](#building-the-native-library).
+The package declares macOS 13+, iOS 16+, tvOS 16+ and watchOS 9+. The server also links the native engine library, which is not part of the Swift package: build it from a Hypen checkout at the same version (`git clone --branch v0.6.7 https://github.com/hypen-lang/hypen.git`); see [Building the Native Library](#building-the-native-library).
 
 ## Quick Start
 

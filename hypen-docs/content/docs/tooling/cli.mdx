@@ -8,7 +8,7 @@ description: Hypen command-line interface for creating and managing projects
 The Hypen CLI (`@hypen-space/cli`) is the recommended way to create, develop, and build Hypen applications.
 
 <Callout type="warn">
-This page describes the CLI as it is in the repository, which is newer than the latest npm release (0.6.6). With 0.6.6 and earlier, `hypen <command> --help` prints only the global help, `--no-open` is rejected, `DEBUG=hypen:*` is ignored, a global `hypen` does not hand off to the project's CLI, `hypen build` produces an older bundle without `server.js`, `hypen run` does not read `ANDROID_SERIAL` or `HYPEN_DESKTOP_RUNNER`, `--device`, `--runner` and `--studio-port` are rejected, and `hypen init` overwrites an existing directory. Those parts arrive with the next CLI release.
+This page describes CLI 0.6.7. With 0.6.6 and earlier, `hypen <command> --help` prints only the global help, `--no-open`, `--device`, `--runner` and `--studio-port` are rejected, `DEBUG=hypen:*` is ignored, a global `hypen` does not hand off to the project's CLI, `hypen build` produces an older bundle without `server.js`, `hypen run` does not read `ANDROID_SERIAL` or `HYPEN_DESKTOP_RUNNER`, and `hypen init` overwrites an existing directory. Update a global install with `bun add -g @hypen-space/cli@latest`, and a project with `bun update`.
 </Callout>
 
 ## Installation
@@ -100,7 +100,7 @@ The server-based layout has `src/modules/{App,Home,Counter}.ts` instead of `src/
 
 `src/app.ts` in the file-based layout is **not** used by `hypen dev` or `hypen build`. It runs the same app as a standalone remote-UI (WebSocket) server for native clients or self-hosting (`bun run serve`, `PORT` env var, default 3000). You can delete it.
 
-The generated `package.json` pins the `@hypen-space/*` packages to the CLI's own version (for example `^0.6.5`) and has these scripts:
+The generated `package.json` pins the `@hypen-space/*` packages to the CLI's own version (for example `^0.6.7`) and has these scripts:
 
 | Script | Runs |
 |--------|------|
@@ -374,11 +374,7 @@ HYPEN_IOS_SIMULATOR="iPhone 16 Pro" hypen run ios
 
 #### Desktop
 
-`hypen run desktop` opens the app in Hypen Browser, the native desktop runner.
-
-<Callout type="warn">
-Prebuilt Hypen Browser binaries are **not published yet**, so the download fails with HTTP 404. The CLI then prints build-from-source steps.
-</Callout>
+`hypen run desktop` opens the app in Hypen Browser, the native desktop runner. On first run the CLI downloads `hypen-browser-<target>.tar.gz` from the latest [GitHub release](https://github.com/hypen-lang/hypen/releases) and caches the binary at `~/.hypen/runners/hypen-browser`; `--clean` downloads it again. Prebuilt runners exist for macOS (Apple Silicon and Intel), Windows x86-64 and Linux x86-64. On other platforms, or if the download fails, the CLI prints build-from-source steps.
 
 To build the runner yourself, from a checkout of [the Hypen repository](https://github.com/hypen-lang/hypen):
 
@@ -432,7 +428,7 @@ hypen dev --port 3001
 ### Clicks fail with `invalid scoped UI action`
 
 - A template dispatches an `@actions.*` that its own module doesn't handle, for example a child screen calling a parent's action. Handle the action in that module, or navigate with `@router.push`.
-- On CLI 0.6.6 or earlier, a **global** `hypen dev` uses its own copy of the Hypen packages and every nested-module action fails this way. Run `bun run dev` from the project instead.
+- With a **global** CLI 0.6.6 or earlier, `hypen dev` uses its own copy of the Hypen packages and every nested-module action fails this way. Update the global CLI or run `bun run dev` from the project.
 
 ### Verbose logs
 

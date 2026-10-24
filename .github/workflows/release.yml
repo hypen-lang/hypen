@@ -421,6 +421,8 @@ jobs:
     with:
       version: ${{ needs.resolve.outputs.version }}
       dry-run: false
+    secrets:
+      SWIFT_MIRROR_TOKEN: ${{ secrets.SWIFT_MIRROR_TOKEN }}
 
   # ── Platform: LSP ────────────────────────────────────────────────
   publish-lsp:

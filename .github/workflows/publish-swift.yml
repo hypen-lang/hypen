@@ -21,6 +21,12 @@ on:
         required: false
         type: boolean
         default: true
+    secrets:
+      # Push access to the hypen-lang/hypen-swiftui and
+      # hypen-lang/hypen-server-swift mirrors. A called workflow only sees
+      # secrets its caller passes, so release.yml must pass this.
+      SWIFT_MIRROR_TOKEN:
+        required: true
 
 jobs:
   build-and-test:

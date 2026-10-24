@@ -153,7 +153,7 @@ bun run server.ts
 The server logs a warning that no `allowedOrigins`/`authenticate` is configured. That's expected during development; see [Security](#security) below.
 
 <Callout type="warn">
-`.module(name, def)` picking up the template from `def` needs a `@hypen-space/server` release newer than 0.6.6. On 0.6.6 the server stops with `UI not set`; pass the template to the server as well: `new RemoteServer().module("Counter", counter).ui(template)`.
+`.module(name, def)` picking up the template from `def` needs `@hypen-space/server` 0.6.7 or newer. Older versions stop with `UI not set`.
 </Callout>
 
 ## Step 2: Connect a Web Client

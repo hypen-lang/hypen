@@ -46,7 +46,7 @@ or turn the device capabilities off with `default-features = false`. See `hypen-
 
 ## Running a project with `hypen run desktop`
 
-For a `hypen init` project you don't need to write Rust: `hypen run desktop` starts the dev server and opens it in **Hypen Browser**, a prebuilt desktop runner built on this renderer. Prebuilt runner downloads are not published yet, so the download currently fails and the CLI prints these steps. Build the runner once from the checkout:
+For a `hypen init` project you don't need to write Rust: `hypen run desktop` starts the dev server and opens it in **Hypen Browser**, a prebuilt desktop runner built on this renderer. The CLI downloads it from the latest [GitHub release](https://github.com/hypen-lang/hypen/releases) on first run (macOS Apple Silicon and Intel, Windows x86-64, Linux x86-64). On other platforms, or to run your own build, build the runner from the checkout (the CLI prints these steps when it has no download):
 
 ```bash
 cd hypen

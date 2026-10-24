@@ -20,33 +20,29 @@ A SwiftUI renderer for the [Hypen](https://github.com/hypen-lang/hypen) declarat
 
 ### Swift Package Manager
 
-HypenSwift is not published as a standalone package yet (there is no public
-repository to point `.package(url:)` at). The source lives in the
-`hypen-renderer-swift/` directory of the Hypen monorepo; SwiftPM cannot
-depend on a subdirectory of a remote repository, so clone it and use a local
-path dependency:
-
-```bash
-git clone https://github.com/hypen-lang/hypen.git
-```
+HypenSwift is published from this directory to the mirror repository
+[hypen-lang/hypen-swiftui](https://github.com/hypen-lang/hypen-swiftui), tagged
+in lockstep with Hypen releases:
 
 ```swift
 // Package.swift (swift-tools-version: 6.0)
 dependencies: [
-    .package(path: "../hypen/hypen-renderer-swift")
+    .package(url: "https://github.com/hypen-lang/hypen-swiftui.git", from: "0.6.7")
 ],
 targets: [
     .target(
         name: "YourApp",
         dependencies: [
-            .product(name: "HypenSwift", package: "hypen-renderer-swift")
+            .product(name: "HypenSwift", package: "hypen-swiftui")
         ]
     ),
 ]
 ```
 
-In Xcode: **File > Add Package Dependencies > Add Local...** and pick the
-`hypen-renderer-swift` folder.
+In Xcode: **File > Add Package Dependencies...**, enter
+`https://github.com/hypen-lang/hypen-swiftui.git` and add the `HypenSwift`
+product. To work on the renderer itself, add the `hypen-renderer-swift` folder
+of a monorepo checkout as a local package instead.
 
 ## Quick Start
 

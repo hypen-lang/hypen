@@ -6,21 +6,14 @@ Server-driven UI module system for Swift. Build reactive, cross-platform UIs wit
 
 ## Installation
 
-This package is not published as a standalone Swift package: the
-`github.com/hypen-lang/hypen-server-swift` repository has no code, so a
-`.package(url:)` dependency on it will not resolve. Clone the monorepo and use a
-local path dependency (Swift Package Manager cannot depend on a subdirectory of
-a remote repository):
-
-```bash
-git clone https://github.com/hypen-lang/hypen.git
-cd hypen/hypen-server-swift && ./build-engine.sh   # builds ../target/release/libhypen_engine.{dylib,so}
-```
+The package is published from this directory to the mirror repository
+[hypen-lang/hypen-server-swift](https://github.com/hypen-lang/hypen-server-swift),
+tagged in lockstep with Hypen releases:
 
 ```swift
 // Package.swift (swift-tools-version: 6.0)
 dependencies: [
-    .package(path: "../hypen/hypen-server-swift"),
+    .package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.6.7"),
 ],
 targets: [
     .executableTarget(
@@ -32,14 +25,27 @@ targets: [
 ]
 ```
 
-`HypenServer` links the native engine (`libhypen_engine`), so build, run and
-test with the library on the linker and loader paths:
+`HypenServer` links the native engine (`libhypen_engine`), which is not part of
+the Swift package. Build it from a Hypen checkout at the same version (the
+UniFFI header in the package must match the library):
+
+```bash
+git clone --branch v0.6.7 --depth 1 https://github.com/hypen-lang/hypen.git
+cd hypen/hypen-engine-rs && cargo build --release --features uniffi
+# -> hypen/target/release/libhypen_engine.{dylib,so}
+```
+
+Then build, run and test with the library on the linker and loader paths:
 
 ```bash
 # macOS (Linux: LD_LIBRARY_PATH instead of DYLD_LIBRARY_PATH)
 LIBRARY_PATH=/path/to/hypen/target/release \
 DYLD_LIBRARY_PATH=/path/to/hypen/target/release swift run
 ```
+
+To work on the SDK itself, use the monorepo directory as a local package
+(`.package(path: "../hypen/hypen-server-swift")`) and build the engine with
+`./build-engine.sh`.
 
 Without `LIBRARY_PATH` the link fails with `library 'hypen_engine' not found`.
 On macOS the dylib's install name is the absolute
@@ -50,7 +56,8 @@ that file is the one loaded at run time. Any later `cargo build` in the workspac
 `hypen-engine` without the `uniffi` feature (for example
 `cargo build -p hypen-browser`) overwrites it with a library that has no FFI
 symbols, and tests then abort with `Symbol not found: _ffi_hypen_engine_…`.
-Re-run `./build-engine.sh` after such builds.
+Rebuild the engine with the `uniffi` feature (`./build-engine.sh` in the
+monorepo) after such builds.
 
 ## Quick Start
 
