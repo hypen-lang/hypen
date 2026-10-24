@@ -1,4 +1,5 @@
 pub mod ast;
+pub mod diagnostic;
 #[cfg(feature = "cli")]
 pub mod error;
 pub mod parser;

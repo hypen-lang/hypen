@@ -3,9 +3,10 @@
  * `hypen run`) and `hypen check`.
  *
  * - `.hypen` parse errors come out of the engine as
- *   `{ type: "parseError", message: "unexpected '{' at position 12" }`,
- *   where the position is a UTF-8 byte offset. These helpers turn that into
- *   `file:line:col` plus a code frame.
+ *   `{ type: "parseError", message: "expected component or '}', found '{' at position 24" }`,
+ *   where the position is a UTF-8 byte offset (several errors are joined
+ *   with "; "). These helpers turn that into `file:line:col` (column in
+ *   characters, matching the parser's own diagnostics) plus a code frame.
  * - A component `.ts` that fails to compile surfaces as Bun's
  *   `AggregateError("3 errors building …")`, whose message hides the actual
  *   errors; {@link formatReloadError} lists them with their locations.
@@ -42,24 +43,54 @@ export function engineErrorMessage(err: unknown): string {
 }
 
 /**
+ * Split an engine parse-error message into its individual errors. The engine
+ * formats each as `<description> at position <byte offset>` and joins several
+ * with "; " (the WASI build may prefix the batch with `…: parse error: `).
+ */
+export function parseEngineErrorPositions(message: string): { message: string; byteOffset: number }[] {
+  const out: { message: string; byteOffset: number }[] = [];
+  const re = /(.*?) at position (\d+)(?:; |$)/gs;
+  let m: RegExpExecArray | null;
+  let end = 0;
+  while ((m = re.exec(message)) !== null) {
+    if (m.index !== end) break; // not a well-formed batch
+    out.push({ message: m[1]!.replace(/^(?:[\w-]+: )?parse error: /, ""), byteOffset: Number(m[2]) });
+    end = re.lastIndex;
+  }
+  return end === message.length ? out : [];
+}
+
+/** The leading whitespace-preserving padding that puts a caret under `col`. */
+function caretPad(lineText: string, col: number): string {
+  return [...lineText]
+    .slice(0, col - 1)
+    .map((ch) => (ch === "\t" ? "\t" : " "))
+    .join("");
+}
+
+/**
  * Format an engine parse error for `display` (the file's path as shown to
- * the user): `file:line:col: message` followed by a short code frame. Falls
- * back to `file: message` when the error carries no position.
+ * the user): `file:line:col: message` followed by a short code frame, for
+ * each error in the message. Falls back to `file: message` when the error
+ * carries no position.
  */
 export function formatHypenParseError(display: string, source: string, err: unknown): string[] {
   const message = engineErrorMessage(err);
-  const m = /^(.*) at position (\d+)$/s.exec(message);
-  if (!m) return [`${display}: ${message}`];
-  const { line, col } = byteOffsetToLineCol(source, Number(m[2]));
+  const errors = parseEngineErrorPositions(message);
+  if (errors.length === 0) return [`${display}: ${message}`];
   const lines = source.split("\n");
-  const width = String(Math.min(line + 1, lines.length)).length;
-  const frame: string[] = [];
-  for (let n = Math.max(1, line - 1); n <= Math.min(lines.length, line + 1); n++) {
-    const marker = n === line ? ">" : " ";
-    frame.push(`  ${marker} ${String(n).padStart(width)} | ${lines[n - 1]}`);
-    if (n === line) frame.push(`    ${" ".repeat(width)} | ${" ".repeat(col - 1)}^`);
+  const out: string[] = [];
+  for (const e of errors) {
+    const { line, col } = byteOffsetToLineCol(source, e.byteOffset);
+    const width = String(Math.min(line + 1, lines.length)).length;
+    out.push(`${display}:${line}:${col}: parse error: ${e.message}`);
+    for (let n = Math.max(1, line - 1); n <= Math.min(lines.length, line + 1); n++) {
+      const marker = n === line ? ">" : " ";
+      out.push(`  ${marker} ${String(n).padStart(width)} | ${lines[n - 1]}`);
+      if (n === line) out.push(`    ${" ".repeat(width)} | ${caretPad(lines[n - 1] ?? "", col)}^`);
+    }
   }
-  return [`${display}:${line}:${col}: parse error: ${m[1]}`, ...frame];
+  return out;
 }
 
 /**
@@ -150,7 +181,7 @@ export function createHypenSourceValidator(opts: {
         // throws is not this validator's business.
         const isParseError =
           (err as { type?: string } | null)?.type === "parseError" ||
-          /at position \d+$/.test(engineErrorMessage(err));
+          parseEngineErrorPositions(engineErrorMessage(err)).length > 0;
         if (isParseError) {
           const rel = relative(projectRoot, file);
           problems.push(...formatHypenParseError(!rel || rel.startsWith("..") ? file : rel, source, err));
