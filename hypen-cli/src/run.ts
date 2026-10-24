@@ -39,7 +39,7 @@ export const RUNNER_URLS = {
   // Bare-binary archives attached to hypen-engine-rs releases by the
   // Desktop Installers workflow, under stable version-less names:
   // hypen-browser-<rust-target>.tar.gz
-  desktop: "https://github.com/hypen-lang/hypen-engine-rs/releases/latest/download",
+  desktop: "https://github.com/hypen-lang/hypen/releases/latest/download",
 } as const;
 
 const DESKTOP_BIN = process.platform === "win32" ? "hypen-browser.exe" : "hypen-browser";
