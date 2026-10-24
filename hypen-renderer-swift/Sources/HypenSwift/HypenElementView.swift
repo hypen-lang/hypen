@@ -165,14 +165,22 @@ struct HypenElementContentView: View {
         if let handler = componentHandler(for: element) {
             if hasResponsiveVariants || hasStateVariants || hasCombinedVariants {
                 // Use variant-aware rendering
+                // The handler applies the modifier itself (as on the
+                // standard path below), so VariantAwareView hands it the
+                // effective, state-resolved modifier instead of applying a
+                // second copy on top: padding, background and borders used
+                // to land twice on any element with a `:active` / `:hover` /
+                // responsive variant (e.g. `active:bg-*` buttons squeezed
+                // their label to one letter per line).
                 VariantAwareView(
                     baseModifier: applicatorResult.baseModifier,
                     variants: applicatorResult.variants,
                     isDisabled: isDisabled,
-                    content: {
+                    contentAppliesModifier: true,
+                    content: { effectiveModifier in
                         handler.render(
                             context: context,
-                            modifier: applicatorResult.baseModifier,
+                            modifier: effectiveModifier,
                             children: { AnyView(renderChildren(element)) }
                         )
                     }
@@ -208,7 +216,7 @@ struct HypenElementContentView: View {
                     baseModifier: applicatorResult.baseModifier,
                     variants: applicatorResult.variants,
                     isDisabled: isDisabled,
-                    content: {
+                    content: { _ in
                         ZStack(alignment: .topLeading) {
                             renderChildren(element)
                         }
@@ -264,7 +272,10 @@ struct VariantAwareView<Content: View>: View {
     let baseModifier: HypenModifier
     let variants: VariantModifiers
     var isDisabled: Bool = false
-    let content: () -> Content
+    /// True when `content` applies the modifier it is given (component
+    /// handlers do); the view then must not apply it again.
+    var contentAppliesModifier: Bool = false
+    let content: (HypenModifier) -> Content
 
     @State private var isPressed = false
     @State private var isHovered = false
@@ -274,8 +285,14 @@ struct VariantAwareView<Content: View>: View {
     var body: some View {
         let effectiveModifier = computeEffectiveModifier(screenWidth: screenWidth)
 
-        content()
-            .hypenModifier(effectiveModifier)
+        Group {
+            if contentAppliesModifier {
+                content(effectiveModifier)
+            } else {
+                content(effectiveModifier)
+                    .hypenModifier(effectiveModifier)
+            }
+        }
             .focused($isFocused)
             #if os(macOS) || targetEnvironment(macCatalyst)
             .onHover { hovering in

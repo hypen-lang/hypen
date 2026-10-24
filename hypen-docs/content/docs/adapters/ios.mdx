@@ -283,7 +283,7 @@ Platform-specific features (such as keyboard types on iOS or window background c
 
 ## Requirements
 
-- Xcode 16+ (Swift 6.0)
+- Xcode 16+ (Swift 6.0). Xcode 26 no longer bundles the iOS platform: if `xcodebuild` reports "iOS 26.x is not installed", download it once with `xcodebuild -downloadPlatform iOS` (or **Xcode > Settings > Components**). No Apple ID is needed for that step.
 - iOS 15+ / macOS 12+ / tvOS 15+ / watchOS 8+
 - A running Hypen server to connect to (see [TypeScript SDK](/docs/servers/typescript))
 

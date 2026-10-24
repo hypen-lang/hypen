@@ -58,6 +58,13 @@ public extension HypenAction {
 /// Lifecycle handler called when module is created or destroyed.
 public typealias LifecycleHandler = @Sendable (ObservableState) -> Void
 
+/// Lifecycle handler that also receives the instance's `GlobalContext`
+/// (router, sibling modules). `ModuleInstance` prefers these over the plain
+/// `LifecycleHandler` of the same phase when both are set; the typed
+/// builder (`hypen(...).onActivated { state, ctx in ... }`) produces them so
+/// `ctx?.getRouter()` works inside route-mounted modules.
+public typealias ContextLifecycleHandler = @Sendable (ObservableState, GlobalContext?) -> Void
+
 /// Action handler context provides all data needed to handle an action.
 public struct ActionHandlerContext: @unchecked Sendable {
     public let action: Action
@@ -176,6 +183,13 @@ public struct ModuleDefinition: @unchecked Sendable {
     /// when it returns are cancelled, and deactivation cancels every
     /// activation-owned request.
     public let onActivatedAsync: DeviceLifecycleHandler?
+    /// Context-receiving variants of the four lifecycle hooks. When set,
+    /// `ModuleInstance` calls these (with its `GlobalContext`) instead of
+    /// the plain handler of the same phase.
+    public let onCreatedWithContext: ContextLifecycleHandler?
+    public let onActivatedWithContext: ContextLifecycleHandler?
+    public let onDeactivatedWithContext: ContextLifecycleHandler?
+    public let onDestroyedWithContext: ContextLifecycleHandler?
 
     public init(
         name: String? = nil,
@@ -196,7 +210,11 @@ public struct ModuleDefinition: @unchecked Sendable {
         onReconnect: ReconnectHandler? = nil,
         onExpire: ExpireHandler? = nil,
         preservesReservedKeysOnRestore: Bool = false,
-        onActivatedAsync: DeviceLifecycleHandler? = nil
+        onActivatedAsync: DeviceLifecycleHandler? = nil,
+        onCreatedWithContext: ContextLifecycleHandler? = nil,
+        onActivatedWithContext: ContextLifecycleHandler? = nil,
+        onDeactivatedWithContext: ContextLifecycleHandler? = nil,
+        onDestroyedWithContext: ContextLifecycleHandler? = nil
     ) {
         self.name = name
         self.actions = actions
@@ -217,6 +235,10 @@ public struct ModuleDefinition: @unchecked Sendable {
         self.onExpire = onExpire
         self.preservesReservedKeysOnRestore = preservesReservedKeysOnRestore
         self.onActivatedAsync = onActivatedAsync
+        self.onCreatedWithContext = onCreatedWithContext
+        self.onActivatedWithContext = onActivatedWithContext
+        self.onDeactivatedWithContext = onDeactivatedWithContext
+        self.onDestroyedWithContext = onDestroyedWithContext
     }
 }
 

@@ -20,24 +20,33 @@ A SwiftUI renderer for the [Hypen](https://github.com/hypen-lang/hypen) declarat
 
 ### Swift Package Manager
 
-Add HypenSwift to your `Package.swift`:
+HypenSwift is not published as a standalone package yet (there is no public
+repository to point `.package(url:)` at). The source lives in the
+`hypen-renderer-swift/` directory of the Hypen monorepo; SwiftPM cannot
+depend on a subdirectory of a remote repository, so clone it and use a local
+path dependency:
+
+```bash
+git clone https://github.com/hypen-lang/hypen.git
+```
 
 ```swift
+// Package.swift (swift-tools-version: 6.0)
 dependencies: [
-    .package(url: "https://github.com/hypen-lang/hypen-swiftui.git", from: "0.4.42")
+    .package(path: "../hypen/hypen-renderer-swift")
+],
+targets: [
+    .target(
+        name: "YourApp",
+        dependencies: [
+            .product(name: "HypenSwift", package: "hypen-renderer-swift")
+        ]
+    ),
 ]
 ```
 
-Then add `HypenSwift` to your target's dependencies:
-
-```swift
-.target(
-    name: "YourApp",
-    dependencies: [
-        .product(name: "HypenSwift", package: "hypen-swiftui")
-    ]
-)
-```
+In Xcode: **File > Add Package Dependencies > Add Local...** and pick the
+`hypen-renderer-swift` folder.
 
 ## Quick Start
 
@@ -65,29 +74,21 @@ struct ContentView: View {
         HypenView(
             url: "wss://your-server.com/hypen",
             config: RemoteEngineConfig(
-                reconnectAttempts: 5,
-                reconnectDelay: 2.0,
-                enableLogging: true
+                autoReconnect: true,
+                reconnectInterval: 2.0,
+                maxReconnectAttempts: 5,
+                debugLogging: true
             )
         )
-        .onConnectionStateChange { state in
-            switch state {
-            case .connected:
-                print("Connected to Hypen server")
-            case .disconnected:
-                print("Disconnected")
-            case .error(let message):
-                print("Error: \(message)")
-            default:
-                break
-            }
-        }
-        .onError { error in
-            print("Hypen error: \(error)")
-        }
     }
 }
 ```
+
+`HypenView` shows its own loading and error views (replace them with the
+`loadingContent:` / `errorContent:` arguments). To observe the connection
+state yourself, drive a `RemoteEngine` directly and subscribe to its
+`connectionState` publisher (see the iOS adapter docs, "Using RemoteEngine
+Directly").
 
 ### Custom Component Registry
 
@@ -435,13 +436,15 @@ class MyTests: XCTestCase {
 
 ### Connection Issues
 
+`HypenView` displays connection errors in its error view. To log them,
+subscribe to a `RemoteEngine`'s `connectionState` publisher:
+
 ```swift
-HypenView(url: "ws://localhost:8080/hypen")
-    .onConnectionStateChange { state in
-        if case .error(let msg) = state {
-            print("Connection error: \(msg)")
-        }
-    }
+let engine = try RemoteEngine(urlString: "ws://localhost:3000")
+let subscription = engine.connectionState.sink { state in
+    print("Connection state: \(state)")
+}
+engine.connect()
 ```
 
 ### Debug Logging
