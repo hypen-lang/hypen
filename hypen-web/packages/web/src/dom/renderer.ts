@@ -520,7 +520,7 @@ export class DOMRenderer {
   });
 
   /**
-   * `__virt.window` runtime: padding stand-ins for the rows outside a lazy
+   * `__virt.window` runtime: spacer stand-ins for the rows outside a lazy
    * list's window, scroll anchoring, row aria positions, and viewport
    * reports to the engine. See `virtualize.ts`.
    */

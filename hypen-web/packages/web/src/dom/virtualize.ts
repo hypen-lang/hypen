@@ -7,10 +7,18 @@
  * list's element. This runtime:
  *
  * - stands in for the items outside the window with leading/trailing
- *   PADDING on the list element (added to any author padding), sized from
- *   the measured average row extent (`itemSize` / `windowPadding`);
+ *   SPACERS inside the list's scroll content, sized from the measured
+ *   average row extent (`itemSize` / `windowPadding`). The spacers are the
+ *   list element's `::before` / `::after` pseudo-elements (one injected
+ *   stylesheet, driven by the `--hypen-virt-lead` / `--hypen-virt-trail`
+ *   custom properties), so they are always first/last, are never DOM
+ *   children (engine inserts and `firstElementChild` stay exact), and never
+ *   touch the list's own box: a fixed-height list (`.height(480)`) stays
+ *   480 high and scrolls, where stand-in PADDING on a `border-box` element
+ *   used to inflate it to the full virtual extent. Author padding is left
+ *   alone;
  * - keeps the first visible materialized row still when a window change
- *   alters the leading padding (scroll anchoring);
+ *   alters the leading spacer (scroll anchoring);
  * - stamps `aria-setsize` / `aria-posinset` on every materialized row;
  * - computes the visible range in the list's scroll container (the list
  *   itself, a scrolling ancestor, or the window) and reports the overscanned
@@ -43,14 +51,40 @@ export interface ViewportEngine {
 
 type Axis = "y" | "x";
 
-/** One padding edge: the author's own value plus what the runtime last wrote. */
-interface EdgeState {
-  /** Author padding on this edge (CSS length), "" when none. */
-  base: string;
-  /** Whether `base` came from an inline longhand we must restore on removal. */
-  baseInline: boolean;
-  /** The inline value the runtime last wrote, to tell author writes apart. */
-  written: string | null;
+/** Attribute that turns the list's `::before` / `::after` into stand-in spacers. */
+export const VIRT_ATTR = "data-hypen-virt";
+/** Custom properties the spacers read (px lengths). */
+export const VIRT_LEAD_VAR = "--hypen-virt-lead";
+export const VIRT_TRAIL_VAR = "--hypen-virt-trail";
+/** The list's gap on the scroll axis, cancelled around each spacer. */
+export const VIRT_GAP_VAR = "--hypen-virt-gap";
+
+const STYLE_ID = "hypen-virt-styles";
+
+/**
+ * The spacers. `flex: none` keeps a fixed-size flex list from shrinking
+ * them; `grid-column: 1 / -1` gives each its own full grid row; the
+ * negative margin cancels the gap a flex/grid container puts between the
+ * spacer and the first/last row (rows outside the window already carry
+ * their gap in the measured per-row extent).
+ */
+export const VIRT_CSS = `
+[${VIRT_ATTR}]::before,[${VIRT_ATTR}]::after{content:"";display:block;flex:none;grid-column:1/-1;pointer-events:none;visibility:hidden;padding:0;border:0;min-width:0;min-height:0}
+[${VIRT_ATTR}="y"]::before{height:var(${VIRT_LEAD_VAR},0px);margin:0 0 calc(-1 * var(${VIRT_GAP_VAR},0px)) 0}
+[${VIRT_ATTR}="y"]::after{height:var(${VIRT_TRAIL_VAR},0px);margin:calc(-1 * var(${VIRT_GAP_VAR},0px)) 0 0 0}
+[${VIRT_ATTR}="x"]::before{width:var(${VIRT_LEAD_VAR},0px);margin:0;margin-inline-end:calc(-1 * var(${VIRT_GAP_VAR},0px))}
+[${VIRT_ATTR}="x"]::after{width:var(${VIRT_TRAIL_VAR},0px);margin:0;margin-inline-start:calc(-1 * var(${VIRT_GAP_VAR},0px))}
+`;
+
+/** Inject the spacer stylesheet once (no-op without a DOM). */
+export function ensureVirtStyles(): void {
+  const doc = (globalThis as { document?: Document }).document;
+  if (!doc || !doc.head) return;
+  if (typeof doc.getElementById === "function" && doc.getElementById(STYLE_ID)) return;
+  const style = doc.createElement("style");
+  style.id = STYLE_ID;
+  style.textContent = VIRT_CSS;
+  doc.head.appendChild(style);
 }
 
 interface Anchor {
@@ -65,10 +99,8 @@ interface ListState {
   axis: Axis;
   /** Extent assumed per item (per row of items for grids). */
   itemSize: number;
-  leading: EdgeState;
-  trailing: EdgeState;
-  /** CSS edges the leading/trailing padding were written to. */
-  edges: [string, string] | null;
+  /** Spacer extents (px) and gap the runtime last wrote; null = never. */
+  written: { axis: Axis; lead: string; trail: string; gap: string } | null;
   /** Inline `overflow-anchor` before we disabled native anchoring. */
   prevOverflowAnchor: string | undefined;
   /** Resolved scroll container; `null` = the window. `undefined` = unresolved. */
@@ -122,16 +154,20 @@ function readInline(element: HTMLElement, edge: string): string {
   return style[camel(edge)] ?? "";
 }
 
-function writeInline(element: HTMLElement, edge: string, value: string | null): void {
-  const style = element.style as unknown as Record<string, string> & {
-    removeProperty?(name: string): void;
-  };
-  if (value === null || value === "") {
-    if (typeof style.removeProperty === "function") style.removeProperty(edge);
-    else style[camel(edge)] = "";
-  } else {
-    style[camel(edge)] = value;
-  }
+type StyleRW = {
+  setProperty?(name: string, value: string): void;
+  getPropertyValue?(name: string): string;
+  removeProperty?(name: string): void;
+};
+
+function setVar(element: HTMLElement, name: string, value: string): void {
+  const style = element.style as unknown as StyleRW;
+  if (style.getPropertyValue?.(name) === value) return;
+  style.setProperty?.(name, value);
+}
+
+function clearVar(element: HTMLElement, name: string): void {
+  (element.style as unknown as StyleRW).removeProperty?.(name);
 }
 
 function computed(element: Element): CSSStyleDeclaration | null {
@@ -188,8 +224,8 @@ export class DomVirtualizer {
       else this.columns.set(id, n);
     }
     const state = this.lists.get(id);
-    // Any prop write on a windowed element may be the author's padding, a
-    // gap, a direction or a column change: re-lay it out after the batch.
+    // Any prop write on a windowed element may be a gap, a direction or a
+    // column change: re-lay it out after the batch.
     if (state) this.dirty.add(state);
   }
 
@@ -203,7 +239,7 @@ export class DomVirtualizer {
   /**
    * Before a batch mutates the DOM: snapshot the scroll anchor of every
    * windowed list whose window the batch moves, so the first visible row
-   * can be held in place after the new padding lands.
+   * can be held in place after the new spacers land.
    */
   prepareBatch(patches: ReadonlyArray<{ type: string; id?: string; name?: string }>): void {
     if (this.lists.size === 0) return;
@@ -235,9 +271,7 @@ export class DomVirtualizer {
         window,
         axis: "y",
         itemSize: 0,
-        leading: { base: "", baseInline: false, written: null },
-        trailing: { base: "", baseInline: false, written: null },
-        edges: null,
+        written: null,
         prevOverflowAnchor: undefined,
         scroller: undefined,
         onScroll: null,
@@ -254,7 +288,7 @@ export class DomVirtualizer {
       this.lists.set(id, state);
       this.byElement.set(element, state);
       // Native CSS scroll anchoring would fight the runtime's own anchoring
-      // when the padding changes; opt this subtree out of it.
+      // when the spacers change; opt this subtree out of it.
       const style = element.style as unknown as Record<string, string | undefined>;
       state.prevOverflowAnchor = style.overflowAnchor;
       style.overflowAnchor = "none";
@@ -306,7 +340,7 @@ export class DomVirtualizer {
 
   /**
    * After a batch's structural patches: lay out every list the batch
-   * touched (padding, aria, anchoring) and queue its viewport check.
+   * touched (spacers, aria, anchoring) and queue its viewport check.
    */
   flush(): void {
     if (this.dirty.size === 0) return;
@@ -358,25 +392,50 @@ export class DomVirtualizer {
     }
     if (!(span > 0)) return { total: 0, count: 0 };
     // `rows` rows span `rows - 1` gaps: count one gap into every row.
+    return { total: span + this.gapOf(state), count: rows };
+  }
+
+  /** The list's gap on its scroll axis (computed when available, else inline), px. */
+  private gapOf(state: ListState): number {
+    const y = state.axis === "y";
+    const cs = computed(state.element) as unknown as Record<string, string | undefined> | null;
+    const fromComputed = cssLengthPx(y ? cs?.rowGap : cs?.columnGap);
+    if (cs && (y ? cs.rowGap : cs.columnGap) && fromComputed !== null) return fromComputed;
     const style = state.element.style as unknown as Record<string, string | undefined>;
-    const gap = cssLengthPx(y ? style.rowGap ?? style.gap : style.columnGap ?? style.gap) ?? 0;
-    return { total: span + gap, count: rows };
+    return cssLengthPx(y ? style.rowGap ?? style.gap : style.columnGap ?? style.gap) ?? 0;
+  }
+
+  /**
+   * Whether the gap applies between the spacers and the rows: only a flex
+   * or grid container puts gaps between its items.
+   */
+  private gapApplies(state: ListState): boolean {
+    const style = state.element.style as unknown as Record<string, string | undefined>;
+    const cs = computed(state.element) as unknown as Record<string, string | undefined> | null;
+    const display = cs?.display ?? style.display ?? "";
+    return /flex|grid/.test(display);
+  }
+
+  /**
+   * The author's padding on the list's leading edge (px). The spacers live
+   * inside the content box, after it.
+   */
+  private leadingPadding(state: ListState): number {
+    const edge = state.axis === "y" ? "padding-top" : "padding-left";
+    const cs = computed(state.element) as unknown as Record<string, string | undefined> | null;
+    const fromComputed = cs?.[camel(edge)];
+    if (fromComputed) return cssLengthPx(fromComputed) ?? 0;
+    const inline = readInline(state.element, edge);
+    if (inline) return cssLengthPx(inline) ?? 0;
+    const style = state.element.style as unknown as Record<string, string | undefined>;
+    return cssLengthPx(shorthandEdge(style.padding, edge)) ?? 0;
   }
 
   private layout(state: ListState): void {
     const el = state.element;
     state.needsLayout = false;
-    const axis = this.axisOf(state);
-    const edges: [string, string] = axis === "y" ? ["padding-top", "padding-bottom"] : ["padding-left", "padding-right"];
-    if (state.edges && (state.edges[0] !== edges[0])) {
-      // Direction flipped: restore the old edges before writing the new.
-      this.restoreEdge(el, state.edges[0], state.leading);
-      this.restoreEdge(el, state.edges[1], state.trailing);
-      state.leading = { base: "", baseInline: false, written: null };
-      state.trailing = { base: "", baseInline: false, written: null };
-    }
-    state.axis = axis;
-    state.edges = edges;
+    state.axis = this.axisOf(state);
+    ensureVirtStyles();
 
     const children = childElements(el);
     const measured = this.measure(state, children);
@@ -384,58 +443,22 @@ export class DomVirtualizer {
     // and a grid row is one item tall, so either feeds `windowPadding`.
     state.itemSize = itemSize(state.window, measured.total, measured.count);
     const { leading, trailing } = windowPadding(state.window, state.itemSize, this.columnsOf(state));
-
-    this.writeEdge(el, edges[0], state.leading, leading);
-    this.writeEdge(el, edges[1], state.trailing, trailing);
+    const gap = this.gapApplies(state) ? this.gapOf(state) : 0;
+    this.writeSpacers(state, leading, trailing, gap);
 
     this.stampAria(state, children);
     this.restoreAnchor(state);
     state.laidOut = true;
   }
 
-  /** Re-read the author's padding when it is not what we last wrote. */
-  private refreshBase(el: HTMLElement, edge: string, s: EdgeState): void {
-    const inline = readInline(el, edge);
-    if (s.written !== null && inline === s.written) return;
-    if (inline) {
-      s.base = inline;
-      s.baseInline = true;
-      return;
-    }
-    const style = el.style as unknown as Record<string, string | undefined>;
-    const fromShorthand = shorthandEdge(style.padding, edge);
-    if (fromShorthand) {
-      s.base = fromShorthand;
-      s.baseInline = false;
-      return;
-    }
-    // Stylesheet padding (classes): fold the computed value in, since an
-    // inline longhand would otherwise override it.
-    const cs = computed(el) as unknown as Record<string, string | undefined> | null;
-    const value = cs?.[camel(edge)];
-    s.base = value && cssLengthPx(value) !== 0 ? value : "";
-    s.baseInline = false;
-  }
-
-  private writeEdge(el: HTMLElement, edge: string, s: EdgeState, px: number): void {
-    this.refreshBase(el, edge, s);
-    const basePx = cssLengthPx(s.base);
-    const value =
-      s.base === "" || basePx === 0
-        ? `${px}px`
-        : basePx !== null
-          ? `${basePx + px}px`
-          : `calc(${s.base} + ${px}px)`;
-    if (readInline(el, edge) !== value) writeInline(el, edge, value);
-    s.written = readInline(el, edge) || value;
-  }
-
-  private restoreEdge(el: HTMLElement, edge: string, s: EdgeState): void {
-    if (s.written === null) return;
-    const inline = readInline(el, edge);
-    // The author overwrote it since: leave theirs.
-    if (inline !== s.written) return;
-    writeInline(el, edge, s.baseInline ? s.base : null);
+  private writeSpacers(state: ListState, lead: number, trail: number, gap: number): void {
+    const el = state.element;
+    const next = { axis: state.axis, lead: `${lead}px`, trail: `${trail}px`, gap: `${gap}px` };
+    if (el.getAttribute?.(VIRT_ATTR) !== next.axis) el.setAttribute(VIRT_ATTR, next.axis);
+    setVar(el, VIRT_LEAD_VAR, next.lead);
+    setVar(el, VIRT_TRAIL_VAR, next.trail);
+    setVar(el, VIRT_GAP_VAR, next.gap);
+    state.written = next;
   }
 
   /** Aria: every child carries its item's position in the full list. */
@@ -569,7 +592,7 @@ export class DomVirtualizer {
 
   /**
    * Scroll anchoring (§2): scroll by however far the row captured before the
-   * padding changed has moved, so it stays at the same screen position.
+   * leading spacer changed has moved, so it stays at the same screen position.
    */
   private restoreAnchor(state: ListState): void {
     const anchor = state.anchor;
@@ -625,11 +648,15 @@ export class DomVirtualizer {
     state.frameCancel = cancel;
   }
 
-  /** How far the scroll container has scrolled past the list's first item. */
+  /**
+   * How far the scroll container has scrolled past the list's first item,
+   * i.e. past the start of the leading spacer (which sits right after the
+   * author's padding inside the list's content).
+   */
   private scrolledPast(state: ListState): number {
     const y = state.axis === "y";
     const el = state.element;
-    const leadBase = cssLengthPx(state.leading.base) ?? 0;
+    const leadBase = this.leadingPadding(state);
     if (state.scroller === el) {
       const pos = (y ? el.scrollTop : el.scrollLeft) || 0;
       return pos - leadBase;
@@ -671,9 +698,12 @@ export class DomVirtualizer {
     state.frame = null;
     if (!restore) return;
     const el = state.element;
-    if (state.edges) {
-      this.restoreEdge(el, state.edges[0], state.leading);
-      this.restoreEdge(el, state.edges[1], state.trailing);
+    if (state.written) {
+      el.removeAttribute?.(VIRT_ATTR);
+      clearVar(el, VIRT_LEAD_VAR);
+      clearVar(el, VIRT_TRAIL_VAR);
+      clearVar(el, VIRT_GAP_VAR);
+      state.written = null;
     }
     const style = el.style as unknown as Record<string, string | undefined> & { removeProperty?(n: string): void };
     if (state.prevOverflowAnchor) style.overflowAnchor = state.prevOverflowAnchor;

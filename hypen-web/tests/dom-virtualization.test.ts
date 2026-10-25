@@ -1,11 +1,11 @@
 /**
  * DOM renderer side of list virtualization (docs/virtualization.md §1–§3):
- * `__virt.window` → padding stand-ins, row aria positions, scroll anchoring,
+ * `__virt.window` → `::before`/`::after` spacer stand-ins, row aria positions, scroll anchoring,
  * and `setListViewport` reports from the list's scroll container.
  *
  * fake-dom has no layout, so `FakeLayout` below is a tiny block layout for
- * one list: rows stack along the scroll axis after the list's leading
- * padding (or in grid rows), and the list or one ancestor scrolls.
+ * one list: rows stack along the scroll axis after the list's author
+ * padding and leading spacer (or in grid rows), and the list or one ancestor scrolls.
  */
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Patch } from "../packages/core/src/types";
@@ -25,6 +25,10 @@ const box = (top: number, height: number, left = 0, width = 300): Rect => ({
   height,
 });
 const px = (v: string | undefined) => (v ? parseFloat(v) : 0);
+/** The stand-in spacer extents the runtime writes (custom properties). */
+const cssVar = (el: FakeElement, name: string) => (el.style as any).getPropertyValue(name) as string;
+const lead = (el: FakeElement) => cssVar(el, "--hypen-virt-lead");
+const trail = (el: FakeElement) => cssVar(el, "--hypen-virt-trail");
 
 class FakeLayout {
   /** The scrolling element (the list itself or an ancestor); null = window. */
@@ -44,13 +48,15 @@ class FakeLayout {
     const listTop = this.scroller === list ? 0 : this.listOffset - scroll;
     if (el === this.scroller) return box(0, this.viewport);
     if (el === list) {
-      let h = px(list.style.paddingTop) + px(list.style.paddingBottom);
+      // Author padding around the content; the `::before` / `::after`
+      // spacers are the first / last thing inside it.
+      let h = px(list.style.paddingTop) + px(lead(list)) + px(trail(list)) + px(list.style.paddingBottom);
       for (const c of list.children) h += this.rowHeight(c);
       return box(listTop, this.scroller === list ? this.viewport : h);
     }
     if (el.parentNode === list) {
       const i = list.children.indexOf(el);
-      let y = listTop + px(list.style.paddingTop) - (this.scroller === list ? scroll : 0);
+      let y = listTop + px(list.style.paddingTop) + px(lead(list)) - (this.scroller === list ? scroll : 0);
       if (this.cols > 1) {
         y += Math.floor(i / this.cols) * this.rowHeight(el);
       } else {
@@ -148,14 +154,23 @@ function selfScroll(s: ReturnType<typeof setup>, scrollHeight = 50_000) {
 }
 
 describe("__virt.window layout", () => {
-  test("padding stands in for the rows outside the window; never a plain prop", async () => {
+  test("spacers stand in for the rows outside the window; never a plain prop", async () => {
     const s = setup();
     selfScroll(s);
     s.layout.rowHeight = () => 0; // unmeasured: falls back to the default 48
     s.renderer.applyPatches([...rowPatches(0, 10), win(100, 0, 10)]);
     const list = s.list();
-    expect(list.style.paddingTop).toBe("0px");
-    expect(list.style.paddingBottom).toBe(`${90 * 48}px`);
+    expect(lead(list)).toBe("0px");
+    expect(trail(list)).toBe(`${90 * 48}px`);
+    // The spacers are the list's own ::before / ::after (one stylesheet),
+    // never padding on its box and never sibling nodes.
+    expect(list.attributes["data-hypen-virt"]).toBe("y");
+    expect(list.style.paddingTop).toBeUndefined();
+    expect(list.style.paddingBottom).toBeUndefined();
+    expect(list.children.length).toBe(10);
+    const sheet = (document as any).getElementById("hypen-virt-styles");
+    expect(sheet?.textContent).toContain("[data-hypen-virt]::before");
+    expect(sheet?.textContent).toContain("flex:none");
     expect(list.attributes["__virt.window"]).toBeUndefined();
     expect((list.style as any)["__virt.window"]).toBeUndefined();
     expect(list.style.overflow).toBe("auto"); // List stays a scroll container
@@ -167,22 +182,22 @@ describe("__virt.window layout", () => {
       ...rowPatches(20, 30),
       win(100, 20, 30),
     ]);
-    expect(list.style.paddingTop).toBe("1000px");
-    expect(list.style.paddingBottom).toBe("3500px");
+    expect(lead(list)).toBe("1000px");
+    expect(trail(list)).toBe("3500px");
   });
 
   test("estimatedSize is used for unmeasured rows", () => {
     const s = setup();
     s.layout.rowHeight = () => 0;
     s.renderer.applyPatches([...rowPatches(0, 5), win(20, 0, 5, { estimatedSize: 30 })]);
-    expect(s.list().style.paddingBottom).toBe(`${15 * 30}px`);
+    expect(trail(s.list())).toBe(`${15 * 30}px`);
   });
 
   test("a malformed window is ignored; the current one stays", () => {
     const s = setup();
     s.renderer.applyPatches([...rowPatches(0, 5), win(50, 0, 5)]);
     s.renderer.applyPatches([win(5, 4, 9)]); // end > total
-    expect(s.list().style.paddingBottom).toBe(`${45 * 50}px`);
+    expect(trail(s.list())).toBe(`${45 * 50}px`);
     expect(s.list().children[0]!.attributes["aria-setsize"]).toBe("50");
   });
 
@@ -207,7 +222,7 @@ describe("__virt.window layout", () => {
     expect(s.renderer.getNode("r0")).toBeUndefined();
     expect(list.children[0]!.attributes["aria-posinset"]).toBe("6");
     expect(list.children[9]!.attributes["aria-posinset"]).toBe("15");
-    expect(list.style.paddingTop).toBe(`${5 * 50}px`);
+    expect(lead(list)).toBe(`${5 * 50}px`);
   });
 
   test("multi-node templates group children into items", () => {
@@ -217,8 +232,8 @@ describe("__virt.window layout", () => {
     const list = s.list();
     expect(list.children.map((c) => c.attributes["aria-posinset"]).slice(0, 4)).toEqual(["11", "11", "12", "12"]);
     // 20 nodes × 25px = 500px over 10 items → 50px per item.
-    expect(list.style.paddingTop).toBe("500px");
-    expect(list.style.paddingBottom).toBe(`${80 * 50}px`);
+    expect(lead(list)).toBe("500px");
+    expect(trail(list)).toBe(`${80 * 50}px`);
   });
 
   test("grid pads whole rows of `columns` items", () => {
@@ -227,8 +242,8 @@ describe("__virt.window layout", () => {
     s.layout.rowHeight = () => 100;
     s.renderer.applyPatches([...rowPatches(9, 18), win(30, 9, 18)]);
     const list = s.list();
-    expect(list.style.paddingTop).toBe("300px");
-    expect(list.style.paddingBottom).toBe("400px");
+    expect(lead(list)).toBe("300px");
+    expect(trail(list)).toBe("400px");
   });
 
   test("grid columns from the applicator spelling", () => {
@@ -236,40 +251,63 @@ describe("__virt.window layout", () => {
     s.layout.cols = 2;
     s.layout.rowHeight = () => 100;
     s.renderer.applyPatches([...rowPatches(4, 8), win(20, 4, 8)]);
-    expect(s.list().style.paddingTop).toBe("200px");
-    expect(s.list().style.paddingBottom).toBe("600px");
+    expect(lead(s.list())).toBe("200px");
+    expect(trail(s.list())).toBe("600px");
   });
 
-  test("author padding is preserved and added to", () => {
+  test("author padding is left alone; the spacers sit inside it", async () => {
     const s = setup({ listProps: { "padding.0": 16 } });
+    selfScroll(s);
     s.renderer.applyPatches([...rowPatches(10, 20), win(100, 10, 20)]);
     const list = s.list();
-    expect(list.style.paddingTop).toBe(`${16 + 500}px`);
-    expect(list.style.paddingBottom).toBe(`${16 + 80 * 50}px`);
+    expect(list.style.padding).toBe("16px");
+    expect(list.style.paddingTop).toBeUndefined();
+    expect(lead(list)).toBe("500px");
+    expect(trail(list)).toBe(`${80 * 50}px`);
 
-    // An author longhand written later becomes the new base.
-    s.renderer.applyPatches([{ type: "setProp", id: "list", name: "paddingTop", value: 8 } as Patch]);
-    expect(list.style.paddingTop).toBe(`${8 + 500}px`);
+    // Geometry: item 0 starts after the author padding. Scrolled 16 + 40×50
+    // in, item 40 is at the top: visible [40,50) → wanted [30,60).
+    await tick();
+    s.engine.reports = [];
+    (list as any).scrollTop = 16 + 40 * 50;
+    list.dispatchEvent("scroll");
+    runFrames();
+    expect(s.engine.reports).toEqual([["list", 30, 60]]);
 
     s.renderer.applyPatches([{ type: "removeProp", id: "list", name: "__virt.window" } as Patch]);
-    expect(list.style.paddingTop).toBe("8px");
     expect(list.style.padding).toBe("16px");
+    expect(lead(list)).toBe("");
+    expect(list.attributes["data-hypen-virt"]).toBeUndefined();
   });
 
-  test("horizontal lists pad left/right", () => {
+  test("the gap around the spacers is cancelled in flex/grid containers", () => {
+    const s = setup({ listProps: { gap: 8 } });
+    s.renderer.applyPatches([...rowPatches(0, 5), win(50, 0, 5)]);
+    expect(cssVar(s.list(), "--hypen-virt-gap")).toBe("8px");
+    // FakeLayout stacks rows without gaps (span 250); the runtime adds one
+    // gap to the measured span: (250 + 8) / 5 per item.
+    expect(trail(s.list())).toBe(`${(45 * (250 + 8)) / 5}px`);
+  });
+
+  test("horizontal lists use the inline-axis spacers", () => {
     const s = setup({ listProps: { direction: "horizontal" } });
     FakeElement.layoutHook = null; // unmeasured
     s.renderer.applyPatches([...rowPatches(0, 5), win(10, 2, 7)]);
     const list = s.list();
-    expect(list.style.paddingLeft).toBe(`${2 * 48}px`);
-    expect(list.style.paddingRight).toBe(`${3 * 48}px`);
+    expect(list.attributes["data-hypen-virt"]).toBe("x");
+    expect(lead(list)).toBe(`${2 * 48}px`);
+    expect(trail(list)).toBe(`${3 * 48}px`);
+    expect(list.style.paddingLeft).toBeUndefined();
     expect(list.style.paddingTop).toBeUndefined();
+    const css = (document as any).getElementById("hypen-virt-styles")?.textContent ?? "";
+    expect(css).toContain('[data-hypen-virt="x"]::before{width:var(--hypen-virt-lead');
+    expect(css).toContain("grid-column:1/-1");
   });
 
   test("a windowed Column (sole lazy ForEach) is handled like a List", () => {
     const s = setup({ elementType: "Column" });
     s.renderer.applyPatches([...rowPatches(0, 5), win(50, 0, 5)]);
-    expect(s.list().style.paddingBottom).toBe(`${45 * 50}px`);
+    expect(trail(s.list())).toBe(`${45 * 50}px`);
   });
 });
 
@@ -391,15 +429,17 @@ describe("viewport reports", () => {
     expect(s.engine.reports).toEqual([["list", 10, 40]]);
   });
 
-  test("removeProp drops padding, aria, and listeners", async () => {
+  test("removeProp drops the spacers, aria, and listeners", async () => {
     const s = setup();
     selfScroll(s);
     s.renderer.applyPatches([...rowPatches(0, 20), win(1000, 0, 20)]);
     await tick();
     const list = s.list();
     s.renderer.applyPatches([{ type: "removeProp", id: "list", name: "__virt.window" } as Patch]);
-    expect(list.style.paddingTop).toBeUndefined();
-    expect(list.style.paddingBottom).toBeUndefined();
+    expect(lead(list)).toBe("");
+    expect(trail(list)).toBe("");
+    expect(cssVar(list, "--hypen-virt-gap")).toBe("");
+    expect(list.attributes["data-hypen-virt"]).toBeUndefined();
     expect(list.style.overflowAnchor).toBeUndefined();
     expect(list.children[0]!.attributes["aria-posinset"]).toBeUndefined();
     expect(list.children[0]!.attributes["aria-setsize"]).toBeUndefined();
@@ -425,7 +465,7 @@ describe("viewport reports", () => {
     expect(s.engine.reports).toEqual([]);
   });
 
-  test("a resize re-measures rows and re-pads", async () => {
+  test("a resize re-measures rows and re-sizes the spacers", async () => {
     const observers: Array<() => void> = [];
     g.ResizeObserver = class {
       constructor(private cb: () => void) {
@@ -437,14 +477,14 @@ describe("viewport reports", () => {
     const s = setup();
     selfScroll(s);
     s.renderer.applyPatches([...rowPatches(10, 20), win(100, 10, 20)]);
-    expect(s.list().style.paddingTop).toBe("500px");
+    expect(lead(s.list())).toBe("500px");
     s.layout.rowHeight = () => 80;
     for (const fire of observers) fire();
     runFrames();
-    expect(s.list().style.paddingTop).toBe("800px");
+    expect(lead(s.list())).toBe("800px");
   });
 
-  test("scroll anchoring keeps the first visible row in place when padding changes", () => {
+  test("scroll anchoring keeps the first visible row in place when the leading spacer changes", () => {
     const s = setup();
     selfScroll(s);
     s.renderer.applyPatches([...rowPatches(0, 20), win(1000, 0, 20)]);
@@ -452,16 +492,16 @@ describe("viewport reports", () => {
     list.scrollTop = 620; // row 12 is first visible, 20px cut off
     const anchor = s.renderer.getNode("r12") as unknown as FakeElement;
     const before = anchor.getBoundingClientRect().top;
-    // The new rows are taller, so the average (and leading padding) moves.
+    // The new rows are taller, so the average (and leading spacer) moves.
     s.layout.rowHeight = (row) => (Number(row.dataset.hypenId!.slice(1)) >= 20 ? 150 : 50);
     s.renderer.applyPatches([
       ...Array.from({ length: 10 }, (_, i) => ({ type: "remove", id: `r${i}` }) as Patch),
       ...rowPatches(20, 30),
       win(1000, 10, 30),
     ]);
-    expect(list.style.paddingTop).not.toBe("500px");
+    expect(lead(list)).not.toBe("500px");
     expect(anchor.getBoundingClientRect().top).toBe(before);
-    // Leading padding 0 → 1000px (average 100px); r12 sat 480px lower, so
+    // Leading spacer 0 → 1000px (average 100px); r12 sat 480px lower, so
     // the scroll offset moved with it.
     expect(list.scrollTop).toBe(1120);
   });
@@ -496,8 +536,8 @@ describe("virtualized List end to end (wasm engine + DOMRenderer)", () => {
 
     // initialCount defaults to 30.
     expect(list.children.length).toBe(30);
-    expect(list.style.paddingTop).toBe("0px");
-    expect(list.style.paddingBottom).toBe(`${970 * 50}px`);
+    expect(lead(list)).toBe("0px");
+    expect(trail(list)).toBe(`${970 * 50}px`);
     await tick();
 
     list.scrollTop = 10_000; // item 200 at the top
@@ -510,7 +550,7 @@ describe("virtualized List end to end (wasm engine + DOMRenderer)", () => {
     expect(list.children[0]!.textContent).toBe("row 190");
     expect(list.children[29]!.textContent).toBe("row 219");
     expect(list.children[0]!.attributes["aria-posinset"]).toBe("191");
-    expect(list.style.paddingTop).toBe(`${190 * 50}px`);
-    expect(list.style.paddingBottom).toBe(`${780 * 50}px`);
+    expect(lead(list)).toBe(`${190 * 50}px`);
+    expect(trail(list)).toBe(`${780 * 50}px`);
   });
 });
