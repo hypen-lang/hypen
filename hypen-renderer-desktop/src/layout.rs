@@ -2017,14 +2017,17 @@ impl TaffyState {
     }
 
     /// Solved geometry of a windowed list (`crate::virt`): its scroll axis,
-    /// the content edge's offset inside its border box (virtual padding
-    /// included) and each child's `(near, extent)` along that axis — all
+    /// the content edge's offset inside its border box (the leading
+    /// stand-in included, padding or content offset alike) and each
+    /// child's `(near, extent)` along that axis — all
     /// physical px, relative to the list's border box, so independent of
     /// scrolling and of culling. `None` when the list has no Taffy node.
     pub(crate) fn virt_geometry(
         &self,
         tree: &Tree,
         list_id: &str,
+        scale: f32,
+        viewport: Viewport,
     ) -> Option<crate::virt::ListGeometry> {
         let &tid = self.node_map.get(list_id)?;
         let layout = self.tree.layout(tid).ok()?;
@@ -2033,11 +2036,21 @@ impl TaffyState {
             .style(tid)
             .map(lays_out_horizontally)
             .unwrap_or(false);
-        let content_start = if horizontal {
-            layout.border.left + layout.padding.left
-        } else {
-            layout.border.top + layout.padding.top
+        // A self-scrolling list's stand-ins are a content offset, not
+        // padding: report the content edge and the rows where `emit_items`
+        // puts them, as if the leading stand-in were padding.
+        let offset = match (tree.get(list_id), self.tree.style(tid)) {
+            (Some(node), Ok(style)) => virt_content_offset(node, style, scale, viewport)
+                .map(|(lead, _)| lead)
+                .unwrap_or(0.0),
+            _ => 0.0,
         };
+        let content_start = offset
+            + if horizontal {
+                layout.border.left + layout.padding.left
+            } else {
+                layout.border.top + layout.padding.top
+            };
         let mut children = Vec::new();
         for child in tree.children_of(list_id) {
             let Some(cl) = self
@@ -2052,7 +2065,7 @@ impl TaffyState {
             } else {
                 (cl.location.y, cl.size.height)
             };
-            children.push((child.clone(), near, extent));
+            children.push((child.clone(), near + offset, extent));
         }
         Some(crate::virt::ListGeometry {
             horizontal,
@@ -4545,7 +4558,7 @@ fn build_subtree(
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
-            apply_virt_padding(&mut style, node, scale);
+            apply_virt_padding(&mut style, node, scale, vs.viewport);
             let children = tree
                 .children_of(node_id)
                 .iter()
@@ -4644,7 +4657,7 @@ fn build_subtree(
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
-            apply_virt_padding(&mut style, node, scale);
+            apply_virt_padding(&mut style, node, scale, vs.viewport);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4697,7 +4710,7 @@ fn build_subtree(
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
             apply_stack_fill_min_size(&mut style);
-            apply_virt_padding(&mut style, node, scale);
+            apply_virt_padding(&mut style, node, scale, vs.viewport);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4777,7 +4790,7 @@ fn build_subtree(
             apply_size_props(&mut style, node, &vs, scale);
             apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
-            apply_virt_padding(&mut style, node, scale);
+            apply_virt_padding(&mut style, node, scale, vs.viewport);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4820,7 +4833,7 @@ fn build_subtree(
             apply_size_props(&mut style, node, &vs, scale);
             apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
-            apply_virt_padding(&mut style, node, scale);
+            apply_virt_padding(&mut style, node, scale, vs.viewport);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -4882,7 +4895,7 @@ fn build_subtree(
             // silently re-stacked under the post image otherwise).
             apply_overflow_props(&mut style, node, viewport);
             apply_position_props(&mut style, node, &vs, scale);
-            apply_virt_padding(&mut style, node, scale);
+            apply_virt_padding(&mut style, node, scale, vs.viewport);
             let mut children = Vec::new();
             for child_id in tree.children_of(node_id) {
                 if let Some(c) = build_subtree(
@@ -5329,7 +5342,7 @@ pub(crate) fn node_style_with(
     apply_divider_defaults(&mut style, node, &vs, scale);
     apply_overflow_props(&mut style, node, viewport);
     apply_position_props(&mut style, node, &vs, scale);
-    apply_virt_padding(&mut style, node, scale);
+    apply_virt_padding(&mut style, node, scale, vs.viewport);
     apply_grid_placement_props(node, &vs, &mut style);
     style
 }
@@ -5344,10 +5357,48 @@ pub(crate) fn lays_out_horizontally(style: &Style) -> bool {
         )
 }
 
+/// Whether a windowed list scrolls ITSELF along a box size that its
+/// content does not decide (`.height(480)`, a max height, or a flex-grown
+/// pane) — vertically, the only axis containers scroll on here. Such a
+/// list takes its stand-ins as a content offset inside its scroll content
+/// ([`virt_content_offset`]) instead of padding: under Taffy's border-box
+/// sizing, padding larger than the declared size grows the box to the
+/// padding, so a 480px list became the whole virtual extent, stopped
+/// scrolling, and reported every item visible (the DOM renderer had the
+/// same bug). A content-sized list keeps the padding, which grows it with
+/// its virtual content exactly as the stand-ins should.
+fn virt_scrolls_itself(style: &Style, node: &crate::tree::Node, viewport: Viewport) -> bool {
+    !lays_out_horizontally(style)
+        && is_scrollable_node(node, viewport)
+        && (!style.size.height.is_auto()
+            || !style.max_size.height.is_auto()
+            || style.flex_grow > 0.0)
+}
+
+/// The stand-ins of a self-scrolling windowed list ([`virt_scrolls_itself`])
+/// as `(leading, trailing)` physical px: `emit_items` shifts the list's
+/// in-flow children down by `leading` and adds `trailing` to its scroll
+/// content, and `virt_geometry` reports child positions shifted the same
+/// way. `None` for any other node (its stand-ins, if any, are padding).
+pub(crate) fn virt_content_offset(
+    node: &crate::tree::Node,
+    style: &Style,
+    scale: f32,
+    viewport: Viewport,
+) -> Option<(f32, f32)> {
+    let (leading, trailing) = node
+        .props
+        .get(crate::virt::VIRT_PAD_PROP)
+        .and_then(crate::virt::pad_of)?;
+    virt_scrolls_itself(style, node, viewport).then_some((leading * scale, trailing * scale))
+}
+
 /// Add a windowed list's stand-in padding (the renderer-private
 /// [`crate::virt::VIRT_PAD_PROP`], logical px) to its own padding on the
 /// scroll axis: top/bottom, or left/right when it lays out horizontally.
-fn apply_virt_padding(style: &mut Style, node: &crate::tree::Node, scale: f32) {
+/// A list that scrolls itself takes them as a content offset instead
+/// ([`virt_content_offset`]); its padding is left as authored.
+fn apply_virt_padding(style: &mut Style, node: &crate::tree::Node, scale: f32, viewport: Viewport) {
     let Some((leading, trailing)) = node
         .props
         .get(crate::virt::VIRT_PAD_PROP)
@@ -5355,6 +5406,9 @@ fn apply_virt_padding(style: &mut Style, node: &crate::tree::Node, scale: f32) {
     else {
         return;
     };
+    if virt_scrolls_itself(style, node, viewport) {
+        return;
+    }
     let add = |lp: LengthPercentage, px: f32| -> LengthPercentage {
         let raw = lp.into_raw();
         if raw.tag() == taffy::style::CompactLength::LENGTH_TAG {
@@ -7426,6 +7480,19 @@ fn emit_items(
     }
 
     let mut max_child_bottom_natural = y_natural;
+    // A self-scrolling windowed list's stand-ins (`virt_content_offset`):
+    // its in-flow rows start `leading` into the scroll content and the
+    // content runs `trailing` past the last row — inside the list's box,
+    // never growing it.
+    let virt_offset = if scrollable_idx.is_some() {
+        renderer_id
+            .as_deref()
+            .and_then(|rid| tree.get(rid))
+            .zip(taffy.style(node_id).ok())
+            .and_then(|(node, style)| virt_content_offset(node, style, scale, viewport))
+    } else {
+        None
+    };
     // Video v2 slot visibility: when THIS node is a Video, its children
     // are composition slots and the normative table
     // (`video_v2::slot_visible`) decides which of them are emitted at
@@ -7531,10 +7598,14 @@ fn emit_items(
         } else {
             x
         };
+        let virt_shift = match virt_offset {
+            Some((lead, _)) if !child_is_absolute => lead,
+            _ => 0.0,
+        };
         let child_parent_y = if is_stack && child_is_absolute {
             y_natural + layout.padding.top
         } else {
-            y_natural
+            y_natural + virt_shift
         };
         // Chart `Marker`: Taffy content-sized the box, the chart says where
         // it belongs. Re-origin the child so its rect lands on the data
@@ -7594,7 +7665,7 @@ fn emit_items(
         );
         if scrollable_idx.is_some() {
             if let Ok(cl) = taffy.layout(child) {
-                let cb = y_natural + cl.location.y + cl.size.height;
+                let cb = y_natural + virt_shift + cl.location.y + cl.size.height;
                 if cb > max_child_bottom_natural {
                     max_child_bottom_natural = cb;
                 }
@@ -7606,7 +7677,8 @@ fn emit_items(
         // content_h = total height occupied by children below this
         // container's natural top. Used by the App to clamp the
         // scroll offset against `max(0, content_h - rect.h)`.
-        let content_h = (max_child_bottom_natural - y_natural).max(0.0);
+        let trailing = virt_offset.map_or(0.0, |(_, trail)| trail);
+        let content_h = (max_child_bottom_natural + trailing - y_natural).max(0.0);
         if let Some(meta) = out[idx].scrollable.as_mut() {
             meta.content_h = content_h;
         }

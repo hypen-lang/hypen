@@ -1785,13 +1785,14 @@ impl App {
         let mut reports = Vec::new();
         let mut page_shift = 0.0f32;
         let mut container_shifts: Vec<(String, f32)> = Vec::new();
+        let viewport = self.logical_viewport();
         for id in self.virt.ids() {
             let Some(node) = self.tree.get(&id) else {
                 self.virt.forget(&id);
                 continue;
             };
             let columns = crate::virt::columns_of(node);
-            let Some(geom) = self.taffy.virt_geometry(&self.tree, &id) else {
+            let Some(geom) = self.taffy.virt_geometry(&self.tree, &id, scale, viewport) else {
                 continue;
             };
             if let Some(p) = self.virt.remeasure(&id, &geom, columns, scale) {

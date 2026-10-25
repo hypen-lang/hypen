@@ -586,13 +586,25 @@ mod layout {
         }
 
         fn list(&mut self, list_type: &str, rows: usize, window: Value) -> LayoutPass {
-            let mut batch = vec![create("list", list_type, &[]), insert(ROOT_ID, "list")];
+            self.list_with(list_type, &[], rows, window)
+        }
+
+        fn list_with(
+            &mut self,
+            list_type: &str,
+            props: &[(&str, Value)],
+            rows: usize,
+            window: Value,
+        ) -> LayoutPass {
+            let mut batch = vec![create("list", list_type, props), insert(ROOT_ID, "list")];
             for i in 0..rows {
                 let id = format!("row{i}");
                 batch.push(create(
                     &id,
                     "Column",
-                    &[("width", json!(30)), ("height", json!(30))],
+                    // Rigid rows, like real content (an empty box would
+                    // otherwise shrink inside a fixed-height list).
+                    &[("width", json!(30)), ("height", json!(30)), ("flexShrink", json!(0))],
                 ));
                 batch.push(insert("list", &id));
             }
@@ -628,7 +640,7 @@ mod layout {
         // Measure the rows (30px each) → re-pad: the list spans 100 rows.
         let geom = rig
             .taffy
-            .virt_geometry(&rig.tree, "list")
+            .virt_geometry(&rig.tree, "list", 1.0, vp(800.0))
             .expect("geometry");
         assert!(!geom.horizontal);
         assert_eq!(geom.children.len(), 10);
@@ -646,7 +658,7 @@ mod layout {
         assert!((item(&pass, "row0").rect.y - list.y - 600.0).abs() < 1.0);
 
         // Scrolled 900px into the list: items 30..50 visible, report 10..70.
-        let geom = rig.taffy.virt_geometry(&rig.tree, "list").unwrap();
+        let geom = rig.taffy.virt_geometry(&rig.tree, "list", 1.0, vp(800.0)).unwrap();
         let vis = rig
             .virt
             .visible(
@@ -681,6 +693,49 @@ mod layout {
         assert!(pass.items.iter().any(|it| it.node_id == "row29"));
     }
 
+    /// A list that scrolls itself (`.height(200)` + overflow) keeps its
+    /// declared box: the stand-ins are scroll CONTENT, never padding that a
+    /// border-box size would have to grow around (the DOM renderer had
+    /// exactly that bug: a 480px list grew to the full virtual extent).
+    #[test]
+    fn fixed_height_self_scrolling_list_keeps_its_height() {
+        let mut rig = Rig::new();
+        let pass = rig.list_with(
+            "List",
+            &[("height", json!(200)), ("overflowY", json!("auto"))],
+            10,
+            json!({ "total": 1000, "start": 20, "end": 30, "estimatedSize": 30 }),
+        );
+        let list = item(&pass, "list");
+        assert!((list.rect.h - 200.0).abs() < 1.0, "the list grew: {:?}", list.rect);
+        let meta = list.scrollable.expect("the list scrolls itself");
+        assert!(
+            (meta.content_h - 1000.0 * 30.0).abs() < 1.0,
+            "its scroll content spans every row: {}",
+            meta.content_h
+        );
+        // The first materialized row sits after the leading stand-in.
+        assert!((item(&pass, "row0").rect.y - list.rect.y - 20.0 * 30.0).abs() < 1.0);
+        let geom = rig.taffy.virt_geometry(&rig.tree, "list", 1.0, vp(800.0)).unwrap();
+        // Scrolled 900px: items 30..36 visible in its 200px.
+        let vis = rig
+            .virt
+            .visible(
+                "list",
+                &geom,
+                1,
+                ListViewport {
+                    list_near: list.rect.y,
+                    own_scroll: 900.0,
+                    vis_lo: list.rect.y,
+                    vis_hi: list.rect.y + 200.0,
+                },
+                1.0,
+            )
+            .unwrap();
+        assert_eq!(vis, r(30, 37));
+    }
+
     /// Containers with their own `build_subtree` branch (Center, Stack,
     /// Button) are padded on the first build, not only on a later restyle.
     #[test]
@@ -713,7 +768,7 @@ mod layout {
         assert!((item(&pass, "row0").rect.x - list.x - 30.0).abs() < 1.0);
         assert!(
             rig.taffy
-                .virt_geometry(&rig.tree, "list")
+                .virt_geometry(&rig.tree, "list", 1.0, vp(800.0))
                 .unwrap()
                 .horizontal
         );

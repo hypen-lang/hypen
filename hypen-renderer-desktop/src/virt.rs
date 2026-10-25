@@ -18,7 +18,10 @@
 //!   prop like any other, so the Tree, the Taffy mirror, the paint-only
 //!   classifier and the layout cache all see the change through their usual
 //!   paths, and `layout::apply_virt_padding` adds it to the list's padding
-//!   on the scroll axis;
+//!   on the scroll axis — except for a list that scrolls itself in a box
+//!   its content does not size (`.height(480)`), which takes it as a
+//!   content offset inside its scroll content instead
+//!   (`layout::virt_content_offset`), so the stand-ins never grow its box;
 //! - measures the materialized rows after each layout and re-pads when the
 //!   average moves ([`VirtLists::remeasure`]), keeps the first visible row
 //!   in place across window / padding changes ([`VirtLists::anchor_shift`]),
