@@ -53,6 +53,20 @@ type Axis = "y" | "x";
 
 /** Attribute that turns the list's `::before` / `::after` into stand-in spacers. */
 export const VIRT_ATTR = "data-hypen-virt";
+
+/** Elements whose `role` the virtualizer set (and so may remove). */
+const ownedRoles = new WeakSet<HTMLElement>();
+
+function claimRole(el: HTMLElement, role: string): void {
+  if (el.getAttribute?.("role") == null) {
+    el.setAttribute("role", role);
+    ownedRoles.add(el);
+  }
+}
+
+function releaseRole(el: HTMLElement): void {
+  if (ownedRoles.delete(el)) el.removeAttribute?.("role");
+}
 /** Custom properties the spacers read (px lengths). */
 export const VIRT_LEAD_VAR = "--hypen-virt-lead";
 export const VIRT_TRAIL_VAR = "--hypen-virt-trail";
@@ -461,8 +475,13 @@ export class DomVirtualizer {
     state.written = next;
   }
 
-  /** Aria: every child carries its item's position in the full list. */
+  /**
+   * Aria: the list is a `list` and every child a `listitem` carrying its
+   * item's position in the full list (positions are ignored on generic
+   * elements). An author's own role is left alone.
+   */
   private stampAria(state: ListState, children: HTMLElement[]): void {
+    claimRole(state.element, "list");
     const cpi = childrenPerItem(state.window, children.length);
     const total = String(state.window.total);
     const next = new Set<HTMLElement>();
@@ -471,6 +490,7 @@ export class DomVirtualizer {
       const pos = String(state.window.start + Math.floor(i / cpi) + 1);
       if (child.getAttribute?.("aria-setsize") !== total) child.setAttribute("aria-setsize", total);
       if (child.getAttribute?.("aria-posinset") !== pos) child.setAttribute("aria-posinset", pos);
+      claimRole(child, "listitem");
       next.add(child);
     }
     // A child moved out of the list keeps no stale position.
@@ -478,6 +498,7 @@ export class DomVirtualizer {
       if (!next.has(old) && old.parentNode !== state.element) {
         old.removeAttribute("aria-setsize");
         old.removeAttribute("aria-posinset");
+        releaseRole(old);
       }
     }
     state.stamped = next;
@@ -708,9 +729,11 @@ export class DomVirtualizer {
     const style = el.style as unknown as Record<string, string | undefined> & { removeProperty?(n: string): void };
     if (state.prevOverflowAnchor) style.overflowAnchor = state.prevOverflowAnchor;
     else if (typeof style.removeProperty === "function") style.removeProperty("overflow-anchor");
+    releaseRole(el);
     for (const child of state.stamped) {
       child.removeAttribute("aria-setsize");
       child.removeAttribute("aria-posinset");
+      releaseRole(child);
     }
     state.stamped.clear();
   }

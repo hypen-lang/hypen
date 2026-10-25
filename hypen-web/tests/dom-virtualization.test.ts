@@ -210,6 +210,9 @@ describe("__virt.window layout", () => {
       Array.from({ length: 10 }, (_, i) => String(i + 1))
     );
     expect(list.children.every((c) => c.attributes["aria-setsize"] === "1000")).toBe(true);
+    // Positions only count on list items (generic elements ignore them).
+    expect(list.attributes["role"]).toBe("list");
+    expect(list.children.every((c) => c.attributes["role"] === "listitem")).toBe(true);
 
     s.renderer.applyPatches([
       ...Array.from({ length: 5 }, (_, i) => ({ type: "remove", id: `r${i}` }) as Patch),
@@ -223,6 +226,22 @@ describe("__virt.window layout", () => {
     expect(list.children[0]!.attributes["aria-posinset"]).toBe("6");
     expect(list.children[9]!.attributes["aria-posinset"]).toBe("15");
     expect(lead(list)).toBe(`${5 * 50}px`);
+  });
+
+  test("an author's own role is kept, and survives teardown", () => {
+    const s = setup();
+    s.renderer.applyPatches([...rowPatches(0, 3)]);
+    s.list().setAttribute("role", "listbox");
+    s.list().children[0]!.setAttribute("role", "option");
+    s.renderer.applyPatches([win(100, 0, 3)]);
+    const list = s.list();
+    expect(list.attributes["role"]).toBe("listbox");
+    expect(list.children[0]!.attributes["role"]).toBe("option");
+    expect(list.children[1]!.attributes["role"]).toBe("listitem");
+    s.renderer.applyPatches([{ type: "removeProp", id: "list", name: "__virt.window" } as Patch]);
+    expect(list.attributes["role"]).toBe("listbox");
+    expect(list.children[0]!.attributes["role"]).toBe("option");
+    expect(list.children[1]!.attributes["role"]).toBeUndefined();
   });
 
   test("multi-node templates group children into items", () => {
@@ -443,6 +462,8 @@ describe("viewport reports", () => {
     expect(list.style.overflowAnchor).toBeUndefined();
     expect(list.children[0]!.attributes["aria-posinset"]).toBeUndefined();
     expect(list.children[0]!.attributes["aria-setsize"]).toBeUndefined();
+    expect(list.attributes["role"]).toBeUndefined();
+    expect(list.children[0]!.attributes["role"]).toBeUndefined();
 
     (list as any).scrollTop = 5000;
     list.dispatchEvent("scroll");

@@ -1,6 +1,6 @@
 # List Virtualization
 
-`List` and `Grid` are virtualized out of the box, and so is `ForEach(…, lazy: true)`. The engine materializes only a **window** of a long list's items — creates their nodes, tracks their bindings, sends their patches — and tells the renderer how big the whole list is. The renderer lays out the window, stands in for the rest with padding, and reports back which items are visible as the user scrolls. Over the network that means a 10,000-row list costs about as much as the rows on screen.
+`List` and `Grid` are virtualized out of the box, and so is `ForEach(…, lazy: true)`. The engine materializes only a **window** of a long list's items — creates their nodes, tracks their bindings, sends their patches — and tells the renderer how big the whole list is. The renderer lays out the window, stands in for the rest with empty space inside its scroll content, and reports back which items are visible as the user scrolls. Over the network that means a 10,000-row list costs about as much as the rows on screen.
 
 App code changes nothing:
 
@@ -38,17 +38,17 @@ The engine sets one reserved prop on the list's element (the `List`/`Grid` node,
 | `estimatedSize` | Present only when the template gave `estimatedItemSize:`. |
 
 - It arrives as an ordinary `setProp`, in the same batch as the row `create`/`instantiate`/`insert`/`remove` patches it describes. Apply it **after** the batch's structural patches.
-- `removeProp` of `__virt.window` means the list is no longer windowed: drop the padding and render the children as a normal container.
+- `removeProp` of `__virt.window` means the list is no longer windowed: drop the stand-in space and render the children as a normal container.
 - Each item may render as several children (a multi-node template). Group the children into items: `childrenPerItem = round(children.length / (end - start))`, at least 1; child `i` belongs to item `start + floor(i / childrenPerItem)`.
 - Rows leaving the window arrive as plain `remove`s (never `transition: true`); remove them immediately.
 - The prop is never stored as an ordinary prop on the node: never echo it back, never diff it.
 
 ## 2. Renderer layout
 
-- **Scroll axis**: vertical, unless the element lays out horizontally (`Row`, `List(direction: horizontal)`). A `Grid` with `columns: n` lays items out in rows of `n`: item `i` is in row `floor(i / n)`, so its padding is counted in rows.
+- **Scroll axis**: vertical, unless the element lays out horizontally (`Row`, `List(direction: horizontal)`). A `Grid` with `columns: n` lays items out in rows of `n`: item `i` is in row `floor(i / n)`, so its stand-in space is counted in rows.
 - **Stand-ins live inside the list's scroll content, before the first and after the last materialized row, and never change the list's own box**: a fixed-size list keeps its size and scrolls. They are never sibling nodes either: the engine appends new rows with `before_id: none`, so a trailing spacer element would end up before them. DOM: `::before`/`::after` spacers sized by custom properties, never padding on the list (with `box-sizing: border-box`, padding larger than a fixed height overrides it). Author padding is left untouched. Desktop: a content offset inside the scroll content. Native lazy containers show `total` slots with placeholders of the estimated size (see §5), or padding on the lazy content (`contentPadding` on Compose's `LazyColumn`, padding inside SwiftUI's `LazyVStack`).
-- **Estimating**: `itemSize` = the average measured size of the materialized items (for a grid, of the rows they occupy: `windowRows`), else `estimatedSize`, else **48** (px / pt). Leading padding = `start × itemSize`; trailing padding = `(total − end) × itemSize`. A per-index cache of measured sizes is allowed, but the average alone is correct enough.
-- **Scroll anchoring**: when a window change alters the leading padding, keep the first visible materialized row at the same screen position by adjusting the scroll offset by the difference.
+- **Estimating**: `itemSize` = the average measured size of the materialized items (for a grid, of the rows they occupy: `windowRows`), else `estimatedSize`, else **48** (px / pt). Leading stand-in = `start × itemSize`; trailing stand-in = `(total − end) × itemSize`. A per-index cache of measured sizes is allowed, but the average alone is correct enough.
+- **Scroll anchoring**: when a window change alters the leading stand-in, keep the first visible materialized row at the same screen position by adjusting the scroll offset by the difference.
 - **Accessibility**: rows should expose the full list position (`aria-setsize = total`, `aria-posinset = item index + 1`, or the platform equivalent).
 - Off-screen items do not exist, so browser find-in-page does not find them. That is the accepted trade-off.
 
@@ -72,7 +72,7 @@ The shared math is in `@hypen-space/core` (`packages/core/src/virtualization.ts`
 | `childrenPerItem(window, childCount)` | §1 grouping. |
 | `windowRows(window, columns)` | Rows the materialized items occupy (the divisor for a measured average). |
 | `itemSize(window, measuredTotal, measuredCount)` | §2 estimating. |
-| `windowPadding(window, size, columns)` | §2 leading / trailing padding. |
+| `windowPadding(window, size, columns)` | §2 leading / trailing stand-in size. |
 | `visibleRange`, `wantedRange`, `shouldReport` | §3 steps 2–4. |
 | `windowChanged(previous, next)` | §3 step 4: whether an incoming `__virt.window` differs in value (`total`, `start`, `end`, `estimatedSize`) from the previous one, so the renderer forgets its last report. `true` when there was no previous window. |
 | `viewportReport(window, geometry, lastReported)` | Steps 2–4 in one call (with the below-the-top rule of step 2): the range to send now, or `null`. The caller keeps what it sent as `lastReported`. |

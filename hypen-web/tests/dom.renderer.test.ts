@@ -876,3 +876,27 @@ describe("DOMRenderer path-narrowed text interpolation", () => {
     expect(first.textContent).toBe("uno");
   });
 });
+
+describe("DOMRenderer size applicator removal", () => {
+  test("removeProp clears width, height and min/max sizes", () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, new StubEngine() as unknown as Engine);
+    const sizes = ["width", "height", "minWidth", "minHeight", "maxWidth", "maxHeight"];
+    renderer.applyPatches([
+      {
+        type: "create",
+        id: "list",
+        elementType: "Column",
+        props: Object.fromEntries(sizes.map((s) => [`${s}.0`, 480])),
+      } as Patch,
+      { type: "insert", parentId: "root", id: "list" } as Patch,
+    ]);
+    const el = renderer.getNode("list") as HTMLElement;
+    for (const s of sizes) expect((el.style as any)[s]).toBe("480px");
+
+    renderer.applyPatches(
+      sizes.map((s) => ({ type: "removeProp", id: "list", name: `${s}.0` }) as Patch),
+    );
+    for (const s of sizes) expect((el.style as any)[s]).toBe("");
+  });
+});

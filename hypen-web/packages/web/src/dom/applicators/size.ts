@@ -113,8 +113,23 @@ export function toCssLength(value: any): string {
   return parseSizeValue(value) ?? String(value);
 }
 
+/** Apply a size; a removed applicator (`null`/`undefined`) clears it. */
+function setOrClear(
+  el: HTMLElement,
+  prop: "height" | "minWidth" | "minHeight" | "maxWidth" | "maxHeight",
+  value: unknown
+): void {
+  if (value === null || value === undefined) {
+    el.style[prop] = "";
+    return;
+  }
+  const size = parseSizeValue(value);
+  if (size) el.style[prop] = size;
+}
+
 export const sizeHandlers: Record<string, ApplicatorHandler> = {
   width: (el, value) => {
+    if (value === null || value === undefined) el.style.width = "";
     const size = parseSizeValue(value);
     if (size) {
       el.style.width = size;
@@ -125,28 +140,23 @@ export const sizeHandlers: Record<string, ApplicatorHandler> = {
   },
 
   height: (el, value) => {
-    const size = parseSizeValue(value);
-    if (size) el.style.height = size;
+    setOrClear(el, "height", value);
   },
 
   minWidth: (el, value) => {
-    const size = parseSizeValue(value);
-    if (size) el.style.minWidth = size;
+    setOrClear(el, "minWidth", value);
   },
 
   minHeight: (el, value) => {
-    const size = parseSizeValue(value);
-    if (size) el.style.minHeight = size;
+    setOrClear(el, "minHeight", value);
   },
 
   maxWidth: (el, value) => {
-    const size = parseSizeValue(value);
-    if (size) el.style.maxWidth = size;
+    setOrClear(el, "maxWidth", value);
   },
 
   maxHeight: (el, value) => {
-    const size = parseSizeValue(value);
-    if (size) el.style.maxHeight = size;
+    setOrClear(el, "maxHeight", value);
   },
 
   // Combined size applicator - sets both width and height
