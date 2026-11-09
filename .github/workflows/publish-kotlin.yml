@@ -59,13 +59,13 @@ jobs:
           - os: ubuntu-22.04-arm
             prefix: linux-aarch64
             lib: libhypen_engine.so
-          - os: macos-14
+          - os: macos-latest
             prefix: darwin-aarch64
             lib: libhypen_engine.dylib
           # Intel macOS is cross-compiled on the Apple Silicon runner (the
           # Xcode toolchain targets both); GitHub has retired the macos-13
           # Intel image.
-          - os: macos-14
+          - os: macos-latest
             prefix: darwin-x86-64
             lib: libhypen_engine.dylib
             target: x86_64-apple-darwin

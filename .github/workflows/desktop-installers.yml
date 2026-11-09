@@ -16,6 +16,11 @@ name: Desktop Installers
 
 on:
   workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing release tag to build and attach installers to (optional)"
+        required: false
+        type: string
   release:
     types: [published]
   # release.yml calls this after creating the release: a release created
@@ -63,6 +68,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.event.release.tag_name || github.sha }}
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -89,9 +96,12 @@ jobs:
         shell: bash
         run: cargo install cargo-packager --locked
 
+      - name: Build desktop binary
+        run: cargo build --release --locked -p hypen-browser
+
       - name: Build installers
         shell: bash
-        run: cargo packager --release -p hypen-browser --formats ${{ matrix.formats }} --out-dir dist --verbose
+        run: cargo packager --release -p hypen-browser --formats ${{ matrix.formats }} --out-dir "$GITHUB_WORKSPACE/dist" --verbose
 
       # Bare-binary archive for `hypen run desktop`: the CLI downloads
       # these via the stable (version-less) name at
