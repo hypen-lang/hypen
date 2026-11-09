@@ -143,7 +143,7 @@ describe("StateStore persistence", () => {
       await new Promise((r) => setTimeout(r, 100));
 
       expect(store.saves.length).toBeGreaterThanOrEqual(1);
-      const lastSave = store.saves[store.saves.length - 1];
+      const lastSave = store.saves[store.saves.length - 1]!;
       expect(lastSave.key).toBe("test:Saver");
       expect(lastSave.state.count).toBe(1);
     });

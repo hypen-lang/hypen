@@ -56,16 +56,15 @@ export interface DevOptions {
   debug?: boolean;
 
   /**
-   * @deprecated Only honored by the Node fallback dev server (browser-SPA
-   * flow). Under Bun the dev server streams patches to the built-in web
-   * client and this logs a warning instead.
+   * @deprecated No effect: the dev server streams patches to the built-in
+   * web client (Bun and Node alike), so there is no HTML template to swap.
+   * Passing it logs a warning.
    */
   htmlTemplate?: string;
 
   /**
-   * @deprecated Only honored by the Node fallback dev server (browser-SPA
-   * flow). Under Bun the dev server generates no files and this logs a
-   * warning instead (use `hypen generate` for codegen).
+   * @deprecated No effect: the dev server generates no files (use
+   * `hypen generate` for codegen). Passing it logs a warning.
    */
   outDir?: string;
 
@@ -208,35 +207,13 @@ export function createDevA11yChecker(opts: {
   return () => (chain = chain.then(run).catch(() => {}));
 }
 
-export interface BuildOptions {
-  /**
-   * Path to components directory
-   */
-  components: string;
-
-  /**
-   * Entry component name
-   */
-  entry: string;
-
-  /**
-   * Output directory
-   * Default: "dist"
-   */
-  outDir?: string;
-
-  /**
-   * Enable minification
-   * Default: true
-   */
-  minify?: boolean;
-
-  /**
-   * Enable source maps
-   * Default: false
-   */
-  sourcemap?: boolean;
-}
+/**
+ * Options for the production build. Same shape `hypen build` uses (see
+ * `./build.ts`): `components`, `entry`, `outDir`, `minify`, `sourcemap`,
+ * plus `root` and `log`.
+ */
+export type { BuildOptions, BuildResult } from "./build.js";
+import type { BuildOptions, BuildResult } from "./build.js";
 
 /**
  * Detect if running in Bun
@@ -259,7 +236,8 @@ async function getImplementation() {
 /**
  * Start a development server
  *
- * Automatically uses Bun.serve() in Bun or http.createServer() in Node.js
+ * Both runtimes run the project through a RemoteServer: Bun.serve() under
+ * Bun, node:http + a minimal WebSocket server under Node (see dev-node.ts).
  */
 export async function dev(options: DevOptions): Promise<{
   url: string;
@@ -270,12 +248,19 @@ export async function dev(options: DevOptions): Promise<{
 }
 
 /**
- * Build for production
+ * Build a component-based project for production — the same static site
+ * `hypen build` emits (index.html + main.js + engine WASM + server.js).
+ * See `./build.ts`. Requires Bun.
  *
- * Automatically uses Bun.build() in Bun or esbuild in Node.js
+ * @throws {BuildError} on a missing entry/runtime package, a failed bundle,
+ *   or when not running under Bun.
  */
-export async function build(options: BuildOptions): Promise<void> {
-  const impl = await getImplementation();
+export async function build(options: BuildOptions): Promise<BuildResult> {
+  if (!isBun()) {
+    const { BuildError } = await import("./build.js");
+    throw new BuildError("`hypen build` requires the Bun runtime. Install from https://bun.sh");
+  }
+  const impl = await import("./build.js");
   return impl.build(options);
 }
 

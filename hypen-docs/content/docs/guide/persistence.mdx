@@ -24,6 +24,10 @@ export default app
 
 That's it. The counter's value survives page reloads, reconnections, and server restarts.
 
+<Callout type="info">
+`durableObjectStore` (and the `session()`, `global()` and `withKey()` strategies) come from `@hypen-space/cf` and store state in the Durable Object hosting the session, so they only work in apps served on Cloudflare Workers with `@hypen-space/cf`. On `hypen dev` or a `RemoteServer` (Bun/Node), pass `.persist()` a [custom store](#writing-a-custom-store) instead. The `StateStore` interface is the same everywhere.
+</Callout>
+
 ## Key Strategies
 
 Every persisted module needs a **key strategy** that determines how state is scoped. There are three options:
@@ -63,10 +67,14 @@ Use for: chat rooms, shared counters, collaborative state.
 The storage key is computed from the current state. This enables per-user persistence where the user identity isn't known until after login.
 
 ```typescript
+import { app } from "@hypen-space/core";
 import { durableObjectStore, withKey } from "@hypen-space/cf";
 
+type User = { id: string; name: string };
+type TodoState = { user: User | null; todos: string[] };
+
 app
-  .defineState({ user: null, todos: [] })
+  .defineState<TodoState>({ user: null, todos: [] })
   .persist(durableObjectStore(withKey(state => state.user?.id)))
   .onAction("login", async ({ state }) => {
     const user = await authenticate();
@@ -94,11 +102,8 @@ When a persisted module loads, stored state is merged over the initial state:
 // Your definition
 app.defineState({ count: 0, label: "My Counter" })
 
-// Stored state (from previous session)
-{ count: 5 }
-
-// Result after restore
-{ count: 5, label: "My Counter" }
+// Stored state (from previous session):  { count: 5 }
+// Result after restore:                  { count: 5, label: "My Counter" }
 ```
 
 This means you can safely add new fields to your state — they'll get their default values from `defineState` while existing fields are restored from storage.
@@ -116,15 +121,23 @@ State is restored **before** `onCreated` runs, so your lifecycle handler always 
 Each module defines its own persistence strategy independently. Modules are flat peers — there's no inheritance:
 
 ```typescript
+import { app } from "@hypen-space/core";
+import { durableObjectStore, global, withKey } from "@hypen-space/cf";
+
+type User = { id: string; name: string };
+
 // User profile — per-user persistence
 app
-  .defineState({ user: null, preferences: {} }, { name: "Profile" })
+  .defineState<{ user: User | null; preferences: Record<string, string> }>(
+    { user: null, preferences: {} },
+    { name: "Profile" },
+  )
   .persist(durableObjectStore(withKey(state => state.user?.id)))
   .build();
 
 // Chat — shared by everyone
 app
-  .defineState({ messages: [] }, { name: "Chat" })
+  .defineState({ messages: [] as string[] }, { name: "Chat" })
   .persist(durableObjectStore(global()))
   .build();
 
@@ -186,13 +199,10 @@ interface StateStore<T = unknown> {
 
 ## Deployment
 
-When deploying to Cloudflare with `hypen deploy`, the CLI automatically provisions Durable Objects for modules that use `.persist()`. No manual configuration needed.
+There is no `hypen deploy` command. Where state ends up depends on the store:
 
-```bash
-hypen deploy
-```
-
-See the [CLI reference](/docs/tooling/cli) for deployment options.
+- **`durableObjectStore`**: deploy the app as a Cloudflare Worker with `@hypen-space/cf`. Declare the Durable Object binding and its `new_sqlite_classes` migration in `wrangler.jsonc`, then run `bunx wrangler deploy`. See the [Cloudflare guide](/docs/servers/cloudflare).
+- **A custom store** (Redis, a database, files): nothing to provision on Hypen's side. The store runs wherever your `RemoteServer` runs.
 
 ## See Also
 

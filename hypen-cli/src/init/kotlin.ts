@@ -6,14 +6,15 @@
  * WebSocket protocol. Layouts mirror the TypeScript generator:
  *
  *   - `file-based`: modules are declared in Kotlin; UI templates live in
- *     `components/<Name>/<Name>.hypen` and are picked up via
+ *     `components/<Name>/component.hypen` and are picked up via
  *     `watchComponents(...)`.
  *   - `server-based`: UI templates are kept as Kotlin string constants
  *     inside `Main.kt` and applied with `.ui(...)`.
  */
 
-import { mkdirSync, writeFileSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
+import { dirname, join, resolve } from "path";
+import { fileURLToPath } from "url";
 import { dim } from "../colors.js";
 import type { ModuleLayout } from "./prompts.js";
 
@@ -21,6 +22,29 @@ interface Options {
   projectDir: string;
   projectName: string;
   layout: ModuleLayout;
+  /** SDK version to depend on; defaults to this CLI's own version. */
+  sdkVersion?: string;
+}
+
+/**
+ * The CLI and `space.hypen:hypen-kotlin` are versioned in lockstep, so the
+ * scaffold pins the SDK to the CLI's own version. (`latest.release` would
+ * silently resolve whatever Maven Central has last published, which may not
+ * match the docs and templates this CLI generates.)
+ */
+function cliVersion(): string {
+  try {
+    let dir = dirname(fileURLToPath(import.meta.url));
+    for (let i = 0; i < 6 && dir !== "/" && dir !== "."; i++) {
+      const pkgPath = resolve(dir, "package.json");
+      if (existsSync(pkgPath)) {
+        const pkg = JSON.parse(readFileSync(pkgPath, "utf-8"));
+        if (pkg?.name === "@hypen-space/cli" && pkg.version) return pkg.version;
+      }
+      dir = dirname(dir);
+    }
+  } catch {}
+  return "0.6.7";
 }
 
 function write(projectDir: string, relPath: string, content: string): void {
@@ -78,12 +102,12 @@ const HOME_HYPEN = `module Home {
       .tw("bg-white border border-blue-600 rounded-lg px-4 py-2")
       .padding(12)
       .borderRadius(8)
-      .onClick(@actions.navigate, to: "/counter")
+      .onClick(@router.push, to: "/counter")
     }
     .tw("flex-row gap-3 mt-6")
     .gap(12)
   }
-  .tw("flex-1 items-center justify-center p-8 bg-gray-50")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-gray-50")
   .padding(32)
   .gap(8)
 }
@@ -141,9 +165,9 @@ const COUNTER_HYPEN = `module Counter {
     }
     .tw("mt-8 bg-transparent")
     .padding(12)
-    .onClick(@actions.navigate, to: "/")
+    .onClick(@router.push, to: "/")
   }
-  .tw("flex-1 items-center justify-center p-8 bg-white")
+  .tw("flex-1 w-full items-center justify-center p-8 bg-white")
   .padding(32)
   .gap(12)
 }
@@ -153,7 +177,8 @@ const COUNTER_HYPEN = `module Counter {
 // Kotlin / Gradle sources
 // ---------------------------------------------------------------------------
 
-const BUILD_GRADLE = `plugins {
+function buildGradle(sdkVersion: string): string {
+  return `plugins {
     kotlin("jvm") version "2.0.21"
     kotlin("plugin.serialization") version "2.0.21"
     application
@@ -167,10 +192,10 @@ repositories {
 }
 
 dependencies {
-    // Resolve the latest published SDK from Maven Central, mirroring the
-    // TypeScript scaffold's use of "latest" for @hypen-space/* (avoids a
-    // hardcoded version number that goes stale between releases).
-    implementation("space.hypen:hypen-kotlin:latest.release")
+    // Pinned to the hypen CLI version that generated this project (the CLI
+    // and the SDK are released together). The jar bundles the native Hypen
+    // engine for Linux, macOS and Windows; nothing else to install.
+    implementation("space.hypen:hypen-kotlin:${sdkVersion}")
     implementation("io.ktor:ktor-server-core:3.1.1")
     implementation("io.ktor:ktor-server-netty:3.1.1")
     implementation("io.ktor:ktor-server-websockets:3.1.1")
@@ -178,18 +203,47 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
 }
 
+// Emit Java 17 bytecode with whichever JDK 17+ runs Gradle. (A
+// \`jvmToolchain(17)\` would instead require exactly JDK 17 to be
+// installed, and fail on machines that only have a newer one.)
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
 kotlin {
-    jvmToolchain(17)
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
+    }
 }
 
 application {
     mainClass.set("app.hypen.starter.MainKt")
 }
+
+// Engine developers only: load libhypen_engine from a local build instead of
+// the copy bundled in the SDK jar, e.g.
+//   HYPEN_NATIVE_LIB_DIR=/path/to/hypen/target/release ./gradlew run
+// (or -Phypen.nativeLibDir=...). Leave it unset to use the bundled engine.
+val hypenNativeLibDir: String? =
+    System.getenv("HYPEN_NATIVE_LIB_DIR") ?: (findProperty("hypen.nativeLibDir") as String?)
+
+tasks.named<JavaExec>("run") {
+    if (hypenNativeLibDir != null) {
+        systemProperty("jna.library.path", file(hypenNativeLibDir).absolutePath)
+    }
+}
 `;
+}
 
 function settingsGradle(projectName: string): string {
   const safe = projectName.toLowerCase().replace(/[^a-z0-9._-]/g, "-");
   return `rootProject.name = "${safe}"
+
+// For contributors: build space.hypen:hypen-kotlin from a Hypen checkout
+// instead of the Maven Central artifact:
+//   export HYPEN_KOTLIN_SDK=/path/to/hypen/hypen-kotlin
+System.getenv("HYPEN_KOTLIN_SDK")?.let { includeBuild(it) }
 `;
 }
 
@@ -219,9 +273,13 @@ function hypenConfig(): string {
 }
 
 function mainKotlin(layout: ModuleLayout): string {
+  // File-based: the root template still has to be on the App module — the
+  // server renders it first and reads its Router block to wire routes (a
+  // \`module App { Router { ... } }\` file can't be mounted as a component).
+  // Home/Counter come from \`watchComponents\` below.
   const uiCalls = layout === "server-based"
     ? `        ui(appTemplate)\n`
-    : ``;
+    : `        ui(java.io.File("components/App/component.hypen").readText())\n`;
   const homeUi = layout === "server-based" ? `        ui(homeTemplate)\n` : ``;
   const counterUi = layout === "server-based" ? `        ui(counterTemplate)\n` : ``;
 
@@ -264,10 +322,13 @@ import space.hypen.core.*
 
 // ---------- State types ----------
 
+// \`location\` is the current route path. The template's Router matches its
+// Route(path: ...) children against @{state.location}, and the server keeps
+// it in sync when a screen calls @router.push / @router.back, so App needs
+// no navigation handlers. Don't remove it.
 @Serializable
 data class AppState(
     var location: String = "/",
-    var previousLocation: String = "/",
 )
 
 @Serializable
@@ -280,16 +341,6 @@ data class HomeState(
 data class CounterState(var count: Int = 0)
 
 // ---------- Typed actions (sealed for exhaustive handling) ----------
-
-sealed interface AppAction : HypenAction {
-    @Serializable
-    data class Navigate(val to: String) : AppAction {
-        override val _actionName: String get() = "navigate"
-    }
-    data object NavigateBack : AppAction {
-        override val _actionName: String get() = "navigateBack"
-    }
-}
 
 sealed interface HomeAction : HypenAction {
     data object Tap : HomeAction {
@@ -322,17 +373,6 @@ fun main() {
 
     val appModule = hypen(AppState()) {
         name("App")
-        onAction<AppAction.Navigate> { action, state, _ ->
-            if (action.to.isNotEmpty() && action.to != state.location) {
-                state.previousLocation = state.location
-                state.location = action.to
-            }
-        }
-        onAction<AppAction.NavigateBack> { _, state, _ ->
-            val back = state.previousLocation.ifEmpty { "/" }
-            state.previousLocation = state.location
-            state.location = back
-        }
 ${uiCalls}    }
 
     val homeModule = hypen(HomeState()) {
@@ -376,10 +416,19 @@ ${routes}${watchCall}    }
                     try { send(Frame.Text(msg)) } catch (_: Exception) {}
                 }
 
-                val initialTree = server.handleConnect(
-                    connectionKey = this,
-                    sendMessage = sendMessage
-                )
+                val initialTree = try {
+                    server.handleConnect(
+                        connectionKey = this,
+                        sendMessage = sendMessage
+                    )
+                } catch (e: Throwable) {
+                    // Ktor logs nothing here without an SLF4J backend, so
+                    // report setup failures (e.g. the native engine failing to
+                    // load) instead of a silent close.
+                    System.err.println("Hypen: failed to start a session: $e")
+                    close(CloseReason(CloseReason.Codes.INTERNAL_ERROR, "session setup failed"))
+                    return@webSocket
+                }
                 sendMessage(initialTree)
 
                 try {
@@ -406,10 +455,10 @@ ${routes}${watchCall}    }
 `;
 }
 
-function readme(projectName: string, layout: ModuleLayout): string {
+function readme(projectName: string, layout: ModuleLayout, sdkVersion: string): string {
   const layoutNote =
     layout === "file-based"
-      ? "UI templates live in `components/<Name>/<Name>.hypen` and hot-reload via `watchComponents`."
+      ? "UI templates live in `components/<Name>/component.hypen` and hot-reload via `watchComponents`."
       : "UI templates are inline string constants in `src/main/kotlin/app/hypen/starter/Main.kt`.";
 
   return `# ${projectName}
@@ -419,10 +468,13 @@ Hypen project scaffolded with \`hypen init\` (Kotlin, ${layout}).
 ## Requirements
 
 - JDK 17+
-- Gradle (or use the generated \`./gradlew\` wrapper)
-- The native Hypen engine library — see \`hypen-kotlin/README.md\` for
-  platform-specific build instructions, then add
-  \`-Djna.library.path=<path-to-libhypen>\` to the run command.
+- Gradle 8+ (\`hypen init\` generates a \`./gradlew\` wrapper when Gradle is
+  installed; otherwise run \`gradle wrapper\` once, or use \`gradle run\`)
+
+The project depends on \`space.hypen:hypen-kotlin:${sdkVersion}\` from Maven
+Central (the version of the CLI that generated it). The SDK jar bundles the
+native Hypen engine for Linux (x86-64, arm64), macOS (Apple Silicon, Intel)
+and Windows (x86-64), so no Rust toolchain or library path is needed.
 
 ## Getting started
 
@@ -430,7 +482,29 @@ Hypen project scaffolded with \`hypen init\` (Kotlin, ${layout}).
 ./gradlew run
 \`\`\`
 
+The server listens on \`ws://localhost:3000\` (\`PORT\` overrides it). Connect a
+Hypen client to it, for example the Android gallery app
+(\`adb shell am start -a android.intent.action.VIEW -d "hypenpreview://connect?url=ws://10.0.2.2:3000"\`
+from an emulator).
+
 ${layoutNote}
+
+## For contributors: building the SDK from source
+
+To run against a Hypen checkout instead of the published SDK:
+
+\`\`\`bash
+# Build space.hypen:hypen-kotlin from source (see settings.gradle.kts)
+export HYPEN_KOTLIN_SDK=/path/to/hypen/hypen-kotlin
+
+# Build the engine and load it instead of a bundled one
+(cd /path/to/hypen && cargo build --release -p hypen-engine --features uniffi)
+export HYPEN_NATIVE_LIB_DIR=/path/to/hypen/target/release
+\`\`\`
+
+A source build of the SDK carries no bundled engine, so set
+\`HYPEN_NATIVE_LIB_DIR\` with it. On its own, \`HYPEN_NATIVE_LIB_DIR\` also
+swaps the engine under the published SDK (useful when working on the engine).
 `;
 }
 
@@ -451,11 +525,12 @@ export function generateKotlinProject(opts: Options): void {
     ensureDir(projectDir, rel);
   }
 
-  write(projectDir, "build.gradle.kts", BUILD_GRADLE);
+  const sdkVersion = opts.sdkVersion ?? cliVersion();
+  write(projectDir, "build.gradle.kts", buildGradle(sdkVersion));
   write(projectDir, "settings.gradle.kts", settingsGradle(projectName));
   write(projectDir, ".gitignore", GITIGNORE);
   write(projectDir, "hypen.json", hypenConfig());
-  write(projectDir, "README.md", readme(projectName, layout));
+  write(projectDir, "README.md", readme(projectName, layout, sdkVersion));
   write(projectDir, "src/main/kotlin/app/hypen/starter/Main.kt", mainKotlin(layout));
 
   if (layout === "file-based") {
@@ -467,8 +542,8 @@ export function generateKotlinProject(opts: Options): void {
     ]) {
       ensureDir(projectDir, rel);
     }
-    write(projectDir, "components/App/App.hypen", APP_HYPEN);
-    write(projectDir, "components/Home/Home.hypen", HOME_HYPEN);
-    write(projectDir, "components/Counter/Counter.hypen", COUNTER_HYPEN);
+    write(projectDir, "components/App/component.hypen", APP_HYPEN);
+    write(projectDir, "components/Home/component.hypen", HOME_HYPEN);
+    write(projectDir, "components/Counter/component.hypen", COUNTER_HYPEN);
   }
 }

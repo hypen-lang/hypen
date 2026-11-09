@@ -5,10 +5,28 @@ A complete Go implementation of the Hypen reactive UI framework SDK.
 ## Installation
 
 ```bash
-go get github.com/hypen-space/core
+go get github.com/hypen-lang/hypen/hypen-golang@v0.6.7
 ```
 
-Requires Go 1.25+ (wazero v1.12.0, whose own floor is Go 1.25).
+Requires **Go 1.25+** (wazero v1.12.0, whose own floor is Go 1.25). On an
+older toolchain, run with `GOTOOLCHAIN=go1.25.0` and Go downloads it.
+
+This directory is a subdirectory module of
+[github.com/hypen-lang/hypen](https://github.com/hypen-lang/hypen). Releases
+are tagged `hypen-golang/vX.Y.Z` (in lockstep with the Hypen release), which is
+what `go get ...@vX.Y.Z` resolves. The package name is `core`, so import it as
+`core "github.com/hypen-lang/hypen/hypen-golang"`. The engine WASM
+(`hypen_engine.wasm`) is embedded via `go:embed`, so nothing else is downloaded.
+
+### From source
+
+To build an app against a local checkout of this directory instead of a
+published version:
+
+```bash
+go mod edit -replace=github.com/hypen-lang/hypen/hypen-golang=/path/to/hypen/hypen-golang
+go mod tidy
+```
 
 ## Quick Start
 
@@ -20,9 +38,9 @@ package main
 
 import (
     "fmt"
-    "log"
 
-    core "github.com/hypen-space/core"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // State is a plain Go struct. json tags match the names referenced from
@@ -33,9 +51,10 @@ type CounterState struct {
 }
 
 func main() {
-    // Define the module — .Name(...).Build() auto-registers on the
+    // Define the module — .Name(...) auto-registers it on the
     // package-level core.App singleton, so RemoteServer discovers it
-    // (and any other modules you define) when you serve.
+    // (and any other modules you define) when you serve. UI(...)
+    // finalizes the definition; the trailing .Build() is optional.
     counter := core.NewApp(CounterState{Count: 0, Message: "Ready"}).
         Name("Counter").
         OnCreated(func(state *CounterState, _ core.GlobalContext) {
@@ -59,15 +78,38 @@ func main() {
         `).
         Build()
 
-    // Serve the whole app. WithDefinition sets the primary module; any
+    // Serve the whole app. WithDefinition sets the primary module and
+    // its UI template (no .UI()/.Source() needed on the server); any
     // other modules built with a .Name(...) are picked up automatically
     // from core.App as nested modules.
-    server := remote.NewRemoteServer().WithDefinition(counter)
-    if err := server.Listen(3000); err != nil {
-        log.Fatal(err)
-    }
+    //
+    // Listen blocks until server.Stop(), like http.ListenAndServe.
+    // Open http://localhost:3000 for the built-in web client, or point
+    // any Hypen client at ws://localhost:3000.
+    remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
 }
 ```
+
+Run it with `go run .` (not `go run main.go`, which skips the other
+files in the package).
+
+`Listen` vs. friends:
+
+| Call | Behavior |
+|------|----------|
+| `Listen(port)` | Blocks until `Stop()`; logs a bind/serve error and returns |
+| `ListenAndServe(port) error` | Blocks like `Listen`, returns the error (nil after `Stop()`) |
+| `ListenAsync(port)` | Binds, serves in the background, returns at once; pair with `Wait()` or your own blocking |
+| `remote.Serve(opts)` | Convenience: configures and calls `ListenAsync` |
+
+`Listen` serves the WebSocket endpoint (at `/` and `/ws`), `/health`, and
+a built-in browser client at `/` (`/__hypen__/client.js` — the same remote
+client + DOM renderer the TypeScript server serves). Turn the page off with
+`.DisableWebClient()` or `ServerConfig{DisableWebClient: true}`.
+
+`.Source(dir)` is only needed when the template references components
+defined in `.hypen` files under `dir`; an inline `.UI(...)` template made
+of built-in primitives renders without it.
 
 Mutations made to `ctx.State` are diffed against a pre-handler snapshot when
 the handler returns; only the changed top-level keys are committed to the
@@ -147,8 +189,8 @@ Stream Hypen apps over WebSocket:
 **Server (typed module):**
 ```go
 import (
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 type CounterState struct {
@@ -180,15 +222,14 @@ server := remote.NewRemoteServer().
         fmt.Printf("Client connected: %s\n", client.ID)
     })
 
-server.Listen()
-defer server.Stop()
+server.Listen() // blocks until server.Stop() (use ListenAsync to run in the background)
 ```
 
 > **Single-module demo.** The lower-level `WithState("Name", map[string]any{...}).OnAction(func(action, payload, state))` form skips the typed builder and the registry. Fine for one-off experiments; prefer `NewApp[T]...Name(...).Build()` + `WithDefinition` for real apps.
 
 **Client:**
 ```go
-import "github.com/hypen-space/core/remote"
+import "github.com/hypen-lang/hypen/hypen-golang/remote"
 
 client := remote.NewRemoteEngine("ws://localhost:3000/ws", nil).
     OnConnect(func() {
@@ -223,7 +264,7 @@ changes its options (retained budgets, item caps, broker overrides) and
 `DisableDevice()` is the one opt-out (a plain UI-only server).
 
 ```go
-import "github.com/hypen-space/core/device"
+import "github.com/hypen-lang/hypen/hypen-golang/device"
 
 server := remote.NewRemoteServer().
     WithDefinition(profile).Source("./components").UI(ui).
@@ -339,8 +380,8 @@ result:
 import (
     "errors"
 
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // Ready() closes once the user's hello → initialTree flow has completed and

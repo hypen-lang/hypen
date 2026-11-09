@@ -12,6 +12,8 @@ type Restaurant = {
   deliveryTimeMin: number;
   deliveryTimeMax: number;
   deliveryFee: number;
+  /** `deliveryFee` as a 2-decimal string ("2.50") — the template prints labels, never raw floats. */
+  deliveryFeeLabel: string;
   distanceKm: number;
   isOpen: boolean;
   description: string;
@@ -24,6 +26,7 @@ type MenuItem = {
   description: string;
   imageUrl: string;
   price: number;
+  priceLabel: string;
   isVegetarian: boolean;
   isPopular: boolean;
   section: string;
@@ -36,8 +39,10 @@ type CartItem = {
   name: string;
   imageUrl: string;
   price: number;
+  priceLabel: string;
   quantity: number;
   lineTotal: number;
+  lineTotalLabel: string;
 };
 type OrderSummary = {
   id: string;
@@ -45,6 +50,7 @@ type OrderSummary = {
   status: string;
   statusLabel: string;
   total: number;
+  totalLabel: string;
   itemsSummary: string;
   placedAt: string;
 };
@@ -56,8 +62,11 @@ type OrderDetail = {
   statusLabel: string;
   statusDescription: string;
   subtotal: number;
+  subtotalLabel: string;
   deliveryFee: number;
+  deliveryFeeLabel: string;
   total: number;
+  totalLabel: string;
   address: string;
   placedAt: string;
   items: Array<{
@@ -66,8 +75,10 @@ type OrderDetail = {
     name: string;
     imageUrl: string;
     price: number;
+    priceLabel: string;
     quantity: number;
     lineTotal: number;
+    lineTotalLabel: string;
   }>;
 };
 
@@ -92,19 +103,32 @@ export type AppState = {
   menuItems: MenuItem[];
   isFavorite: boolean;
   cartSubtotal: number;
+  cartSubtotalLabel: string;
   cartItems: CartItem[];
   cartRestaurantName: string;
   cartDeliveryFee: number;
+  cartDeliveryFeeLabel: string;
   cartTotal: number;
+  cartTotalLabel: string;
   orders: OrderSummary[];
   order: OrderDetail;
   totalOrders: number;
   totalSpent: number;
+  totalSpentLabel: string;
   favoriteCount: number;
   searchQuery: string;
   suggestions: { id: string; name: string }[];
   searchResults: Restaurant[];
 };
+
+/**
+ * Money as a fixed 2-decimal string: 14.5 -> "14.50", 16 -> "16.00".
+ * Hypen expressions have no number formatting, so every price the UI shows
+ * comes from one of these `*Label` fields instead of the raw number.
+ */
+export function money(value: number): string {
+  return (Math.round(value * 100) / 100).toFixed(2);
+}
 
 const categories: Category[] = [
   { id: "cat_all", name: "All", icon: "utensils" },
@@ -116,7 +140,13 @@ const categories: Category[] = [
   { id: "cat_coffee", name: "Coffee", icon: "coffee" },
 ];
 
-const featuredRestaurants: Restaurant[] = [
+type RestaurantSeed = Omit<Restaurant, "deliveryFeeLabel">;
+const withFeeLabel = (restaurant: RestaurantSeed): Restaurant => ({
+  ...restaurant,
+  deliveryFeeLabel: money(restaurant.deliveryFee),
+});
+
+const featuredRestaurants: RestaurantSeed[] = [
   { id: "r1", name: "Napoli Pizzeria", cuisine: "Italian", imageUrl: "https://images.unsplash.com/photo-1513104890138-7c749659a591?w=800&h=600&fit=crop", rating: 4.8, ratingCount: 2043, deliveryTimeMin: 20, deliveryTimeMax: 30, deliveryFee: 2.99, distanceKm: 1.2, isOpen: true, description: "Wood-fired Neapolitan pizza with San Marzano tomatoes.", categoryId: "cat_pizza" },
   { id: "r2", name: "Smash & Stack", cuisine: "American", imageUrl: "https://images.unsplash.com/photo-1568901346375-23c9450c58cd?w=800&h=600&fit=crop", rating: 4.6, ratingCount: 1580, deliveryTimeMin: 15, deliveryTimeMax: 25, deliveryFee: 1.99, distanceKm: 0.8, isOpen: true, description: "Smash burgers with hand-cut fries and milkshakes.", categoryId: "cat_burger" },
   { id: "r3", name: "Sakura Sushi Bar", cuisine: "Japanese", imageUrl: "https://images.unsplash.com/photo-1579871494447-9811cf80d66c?w=800&h=600&fit=crop", rating: 4.9, ratingCount: 3120, deliveryTimeMin: 25, deliveryTimeMax: 40, deliveryFee: 3.99, distanceKm: 2.1, isOpen: true, description: "Omakase-grade sushi delivered straight to your door.", categoryId: "cat_sushi" },
@@ -152,7 +182,7 @@ const additionalRestaurantSeeds = [
   ["Early Bird", "Coffee & Bakery", "cat_coffee", "photo-1525351484163-7529414344d8", "Fresh bread, specialty coffee, and colorful breakfast bowls."],
 ] as const;
 
-const restaurants: Restaurant[] = [
+const restaurants: Restaurant[] = ([
   ...featuredRestaurants,
   ...additionalRestaurantSeeds.map(([name, cuisine, categoryId, imageId, description], index) => ({
     id: `r${index + 8}`,
@@ -169,9 +199,10 @@ const restaurants: Restaurant[] = [
     description,
     categoryId,
   })),
-];
+] satisfies RestaurantSeed[]).map(withFeeLabel);
 
-const menuItems: MenuItem[] = [
+type MenuItemSeed = Omit<MenuItem, "priceLabel">;
+const menuItems: MenuItem[] = ([
   { id: "m101", restaurantId: "r1", name: "Margherita", description: "Tomato, fresh mozzarella, basil, olive oil.", imageUrl: "https://images.unsplash.com/photo-1604068549290-dea0e4a305ca?w=600&h=600&fit=crop", price: 14.5, isVegetarian: true, isPopular: true, section: "Pizzas", cartQuantity: 0 },
   { id: "m102", restaurantId: "r1", name: "Pepperoni", description: "Tomato, mozzarella, spicy pepperoni.", imageUrl: "https://images.unsplash.com/photo-1628840042765-356cda07504e?w=600&h=600&fit=crop", price: 16, isVegetarian: false, isPopular: true, section: "Pizzas", cartQuantity: 0 },
   { id: "m201", restaurantId: "r2", name: "Classic Smash", description: "Double smashed patty, cheese, pickles, house sauce.", imageUrl: "https://images.unsplash.com/photo-1550317138-10000687a72b?w=600&h=600&fit=crop", price: 12, isVegetarian: false, isPopular: true, section: "Burgers", cartQuantity: 0 },
@@ -210,7 +241,7 @@ const menuItems: MenuItem[] = [
       cartQuantity: 0,
     },
   ]),
-];
+] satisfies MenuItemSeed[]).map((item) => ({ ...item, priceLabel: money(item.price) }));
 
 const emptyRestaurant = restaurants[0];
 const emptyOrder: OrderDetail = {
@@ -221,8 +252,11 @@ const emptyOrder: OrderDetail = {
   statusLabel: "Preparing",
   statusDescription: "The kitchen is getting everything ready.",
   subtotal: 0,
+  subtotalLabel: money(0),
   deliveryFee: 0,
+  deliveryFeeLabel: money(0),
   total: 0,
+  totalLabel: money(0),
   address: "",
   placedAt: "",
   items: [],
@@ -258,15 +292,32 @@ export function searchRestaurants(query: string) {
   });
 }
 
+function setLineTotal(item: CartItem) {
+  item.lineTotal = round2(item.price * item.quantity);
+  item.lineTotalLabel = money(item.lineTotal);
+}
+
+function setCartSubtotal(state: AppState, value: number) {
+  state.cartSubtotal = round2(value);
+  state.cartSubtotalLabel = money(state.cartSubtotal);
+}
+
 function refreshCart(state: AppState) {
   state.cartCount = state.cartItems.reduce((sum, item) => sum + item.quantity, 0);
-  state.cartSubtotal = round2(state.cartItems.reduce((sum, item) => sum + item.lineTotal, 0));
+  setCartSubtotal(state, state.cartItems.reduce((sum, item) => sum + item.lineTotal, 0));
   const first = state.cartItems[0];
   const restaurant = first ? restaurants.find((r) => r.id === first.restaurantId) : null;
   state.cartRestaurantName = restaurant?.name ?? "";
   state.cartDeliveryFee = restaurant ? restaurant.deliveryFee : 0;
+  state.cartDeliveryFeeLabel = money(state.cartDeliveryFee);
   state.cartTotal = round2(state.cartSubtotal + state.cartDeliveryFee);
+  state.cartTotalLabel = money(state.cartTotal);
   refreshMenuItemQuantities(state);
+}
+
+function setTotalSpent(state: AppState) {
+  state.totalSpent = round2(state.orders.reduce((sum, order) => sum + order.total, 0));
+  state.totalSpentLabel = money(state.totalSpent);
 }
 
 function itemsForRestaurant(state: AppState, restaurantId: string) {
@@ -287,7 +338,8 @@ function setRestaurant(state: AppState, id: string) {
   state.selectedRestaurantId = restaurant.id;
   state.restaurant = restaurant;
   state.menuItems = itemsForRestaurant(state, restaurant.id);
-  state.cartSubtotal = round2(
+  setCartSubtotal(
+    state,
     state.cartItems
       .filter((item) => item.restaurantId === restaurant.id)
       .reduce((sum, item) => sum + item.lineTotal, 0),
@@ -314,8 +366,11 @@ function createOrder(state: AppState): OrderDetail | null {
     statusLabel: "On the way",
     statusDescription: "Your courier is heading toward you now.",
     subtotal: state.cartSubtotal,
+    subtotalLabel: money(state.cartSubtotal),
     deliveryFee: state.cartDeliveryFee,
+    deliveryFeeLabel: money(state.cartDeliveryFee),
     total: state.cartTotal,
+    totalLabel: money(state.cartTotal),
     address: state.currentUser.address,
     placedAt: "Just now",
     items: state.cartItems.map((item) => ({
@@ -324,8 +379,10 @@ function createOrder(state: AppState): OrderDetail | null {
       name: item.name,
       imageUrl: item.imageUrl,
       price: item.price,
+      priceLabel: money(item.price),
       quantity: item.quantity,
       lineTotal: item.lineTotal,
+      lineTotalLabel: money(item.lineTotal),
     })),
   };
 }
@@ -336,7 +393,10 @@ function setOrder(state: AppState, id: string) {
   state.order = existing ?? state.order ?? emptyOrder;
 }
 
-const orderDetails: OrderDetail[] = [
+type OrderDetailSeed = Omit<OrderDetail, "subtotalLabel" | "deliveryFeeLabel" | "totalLabel" | "items"> & {
+  items: Array<Omit<OrderDetail["items"][number], "priceLabel" | "lineTotalLabel">>;
+};
+const orderDetails: OrderDetail[] = ([
   {
     id: "o1",
     restaurantId: "r3",
@@ -371,7 +431,17 @@ const orderDetails: OrderDetail[] = [
       { id: "ol4", menuItemId: "m703", name: "Avocado Toast", imageUrl: menuItems[11].imageUrl, price: 8.5, quantity: 1, lineTotal: 8.5 },
     ],
   },
-];
+] satisfies OrderDetailSeed[]).map((order) => ({
+  ...order,
+  subtotalLabel: money(order.subtotal),
+  deliveryFeeLabel: money(order.deliveryFee),
+  totalLabel: money(order.total),
+  items: order.items.map((item) => ({
+    ...item,
+    priceLabel: money(item.price),
+    lineTotalLabel: money(item.lineTotal),
+  })),
+}));
 
 const initialOrders: OrderSummary[] = orderDetails.map((order) => ({
   id: order.id,
@@ -379,6 +449,7 @@ const initialOrders: OrderSummary[] = orderDetails.map((order) => ({
   status: order.status,
   statusLabel: order.statusLabel,
   total: order.total,
+  totalLabel: order.totalLabel,
   itemsSummary: order.items.map((item) => item.name).join(", "),
   placedAt: order.placedAt,
 }));
@@ -405,14 +476,18 @@ function initialState(): AppState {
     menuItems: menuItems.filter((item) => item.restaurantId === "r1"),
     isFavorite: false,
     cartSubtotal: 0,
+    cartSubtotalLabel: money(0),
     cartItems: [],
     cartRestaurantName: "",
     cartDeliveryFee: 0,
+    cartDeliveryFeeLabel: money(0),
     cartTotal: 0,
+    cartTotalLabel: money(0),
     orders: initialOrders,
     order: orderDetails[0],
     totalOrders: initialOrders.length,
     totalSpent: round2(initialOrders.reduce((sum, order) => sum + order.total, 0)),
+    totalSpentLabel: money(initialOrders.reduce((sum, order) => sum + order.total, 0)),
     favoriteCount: 3,
     searchQuery: "",
     suggestions: [
@@ -453,7 +528,7 @@ export function navigateState(state: AppState, to: string) {
   if (to === "/profile") {
     state.locationKind = "profile";
     state.totalOrders = state.orders.length;
-    state.totalSpent = round2(state.orders.reduce((sum, order) => sum + order.total, 0));
+    setTotalSpent(state);
     refreshCart(state);
     return;
   }
@@ -491,13 +566,15 @@ export const appModule = app
         name: menuItem.name,
         imageUrl: menuItem.imageUrl,
         price: menuItem.price,
+        priceLabel: menuItem.priceLabel,
         quantity: 0,
         lineTotal: 0,
+        lineTotalLabel: money(0),
       };
       state.cartItems.push(existing);
     }
     existing.quantity += 1;
-    existing.lineTotal = round2(existing.price * existing.quantity);
+    setLineTotal(existing);
     setRestaurant(state, menuItem.restaurantId);
     refreshCart(state);
   })
@@ -505,7 +582,7 @@ export const appModule = app
     const item = state.cartItems.find((cartItem) => cartItem.id === action.payload?.itemId);
     if (!item) return;
     item.quantity += 1;
-    item.lineTotal = round2(item.price * item.quantity);
+    setLineTotal(item);
     refreshCart(state);
   })
   .onAction<{ itemId: string }>("decrementItem", ({ state, action }) => {
@@ -515,7 +592,7 @@ export const appModule = app
     if (item.quantity <= 0) {
       state.cartItems = state.cartItems.filter((cartItem) => cartItem.id !== item.id);
     } else {
-      item.lineTotal = round2(item.price * item.quantity);
+      setLineTotal(item);
     }
     refreshCart(state);
   })
@@ -534,6 +611,7 @@ export const appModule = app
       status: order.status,
       statusLabel: order.statusLabel,
       total: order.total,
+      totalLabel: order.totalLabel,
       itemsSummary: summarizeItems(state.cartItems),
       placedAt: order.placedAt,
     });

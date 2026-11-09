@@ -181,6 +181,10 @@ Checkbox {}
     .onChange(@actions.toggleTerms)
 ```
 
+The Checkbox and Switch `onChange` payload doesn't include the new checked state (`{ type: "change", timestamp }`), so the handler flips the field itself: `state.agreeToTerms = !state.agreeToTerms`.
+
+If you pass extra arguments to an event (`.onChange(@actions.toggleTodo, id: @item.id)`), those arguments **are** the payload: `{ id: "..." }`, without the event fields.
+
 ### Checkbox with Label
 
 ```hypen
@@ -223,29 +227,62 @@ Row {
 
 ## Select
 
-A dropdown selection component.
+A dropdown selection component. Pass its choices in `options`, either as plain strings or as `{ value, label, disabled }` objects:
 
 ```hypen
-// With two-way binding (recommended)
-Select {}.bind(@state.country)
+// Strings: each one is both the value and the label
+Select(options: ["Small", "Medium", "Large"]).bind(@state.size)
 
-// With manual event handling
-Select {}
+// Objects: `value` goes to state, `label` is shown; `disabled: true` greys an option out
+Select(options: [
+    { value: "us", label: "United States" },
+    { value: "ca", label: "Canada" },
+    { value: "mx", label: "Mexico", disabled: true }
+])
+    .bind(@state.country)
+```
+
+`options` can also come from state: `Select(options: @state.countries)`.
+
+With manual event handling, set `.value()` and handle `.onChange`:
+
+```hypen
+Select(options: @state.countries)
     .value(@state.country)
     .onChange(@actions.updateCountry)
+```
+
+The `onChange` payload carries the selected option's `value` (always a string) and its `selectedIndex`:
+
+```typescript
+// payload: { type: "change", timestamp: 1712345678901, value: "us", selectedIndex: 0 }
+.onAction<{ value: string; selectedIndex: number }>("updateCountry", ({ action, state }) => {
+  state.country = action.payload!.value;
+})
 ```
 
 **Platform Support:** Web, Android, iOS
 
 ## Slider
 
-A range slider for numeric input.
+A range slider for numeric input. `min`, `max` and `step` set the range (on the web the defaults are 0, 100 and 1):
 
 ```hypen
-Slider {}
+Slider(min: 0, max: 100, step: 1)
     .value(@state.volume)
     .onChange(@actions.updateVolume)
 ```
+
+`onChange` fires when the user releases the thumb. Its payload's `value` is a **string** (`"73"`, not `73`), so convert it before storing it as a number:
+
+```typescript
+// payload: { type: "change", timestamp: 1712345678901, value: "73" }
+.onAction<{ value: string }>("updateVolume", ({ action, state }) => {
+  state.volume = Number(action.payload!.value);
+})
+```
+
+Use `.onInput(@actions.x)` instead to get every intermediate value while dragging (same payload shape). `.bind(@state.volume)` also works on a Slider, but it writes the value as a string too; prefer `.value()` + `.onChange` when the state field must stay a number.
 
 ### Slider with Value Display
 
@@ -329,6 +366,7 @@ interface FormState {
 }
 
 export default app
+  .module("ContactForm")
   .defineState<FormState>({
     name: "",
     email: "",
@@ -344,8 +382,10 @@ export default app
     state.isSubmitting = true;
 
     try {
-      await fetch("/api/contact", {
+      // Module code runs on the server, so use an absolute URL
+      await fetch("https://api.example.com/contact", {
         method: "POST",
+        headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           name: state.name,
           email: state.email,
@@ -361,7 +401,8 @@ export default app
     } finally {
       state.isSubmitting = false;
     }
-  });
+  })
+  .build();
 ```
 
 ## Next Steps

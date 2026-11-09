@@ -472,8 +472,8 @@ try RemoteServer().app(myApp).listen(3000)
 
 ```go
 import (
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 type CounterState struct { Count int `json:"count"` }

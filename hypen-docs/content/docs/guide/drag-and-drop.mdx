@@ -243,7 +243,7 @@ Card("@{item.title}")
     .draggable()
     .states { onState(lifted).opacity(0.6).scale(1.04).tw("shadow-xl") }
 
-Column { ... }
+Column { Text("Drop here") }
     .dropZone(group: "cards", id: "doing")
     .states(transition: easeOut, duration: 120) { onState(over).backgroundColor("#eef2ff") }
 ```

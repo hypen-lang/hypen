@@ -20,9 +20,9 @@
     { "tag": "v1", "new_sqlite_classes": ["MovieDiscoveryDO"] }
   ],
 
-  "vars": {
-    "OMDB_API_KEY": "2ab6e349"
-  },
+  // OMDB_API_KEY is a secret: put it in .dev.vars for `wrangler dev`
+  // (see .dev.vars.example) or `wrangler secret put OMDB_API_KEY` for deploys.
+  // Without a working key the app serves its bundled fallback catalog.
 
   "observability": {
     "enabled": true

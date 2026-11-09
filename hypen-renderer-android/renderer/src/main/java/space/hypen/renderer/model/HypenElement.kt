@@ -229,9 +229,10 @@ class HypenElement(
     ): T = (props[name] as? T) ?: default
 
     /**
-     * Gets a string property.
+     * Gets a string property. Numbers are formatted like JavaScript's
+     * `String(n)` (a whole number shows as `2`, not `2.0`).
      */
-    fun getStringProp(name: String): String? = props[name]?.toString()
+    fun getStringProp(name: String): String? = propToDisplayString(props[name])
 
     /**
      * Gets a string property with a default.
@@ -305,7 +306,7 @@ class HypenElement(
      */
     fun getStringListProp(name: String): List<String>? {
         val value = props[name] ?: props["$name.0"] ?: return null
-        return (value as? List<*>)?.mapNotNull { it?.toString() }
+        return (value as? List<*>)?.mapNotNull { propToDisplayString(it) }
     }
 
     /**
@@ -323,7 +324,7 @@ class HypenElement(
         val result = LinkedHashMap<String, String>(map.size)
         for ((k, v) in map) {
             val key = k?.toString() ?: continue
-            val str = v?.toString() ?: continue
+            val str = propToDisplayString(v) ?: continue
             result[key] = str
         }
         return result

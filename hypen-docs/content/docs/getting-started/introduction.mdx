@@ -7,7 +7,7 @@ description: Learn what Hypen is and why you might want to use it
 
 ## What is Hypen?
 
-Hypen is a declarative UI language for building cross-platform applications. Write your UI once and deploy to Web, Android, and iOS with native performance.
+Hypen is a declarative UI language for building cross-platform applications. Write your UI once and render it natively on Web, Android, iOS and desktop.
 
 ```hypen
 Column {
@@ -25,9 +25,10 @@ Column {
 
 Unlike traditional cross-platform frameworks that use WebViews or custom rendering engines, Hypen compiles to native UI components on each platform:
 
-- **Web**: Native DOM elements
+- **Web**: Native DOM elements (or a `<canvas>`)
 - **Android**: Jetpack Compose
-- **iOS**: SwiftUI (coming soon)
+- **iOS**: SwiftUI (preview: try it with the `hypen run ios` Simulator runner, or add the `HypenSwift` Swift package to your own app)
+- **Desktop**: Hypen Browser, a native desktop runner (`hypen run desktop` downloads it on macOS, Windows x86-64 and Linux x86-64)
 
 ## Why Hypen?
 
@@ -43,7 +44,7 @@ Hypen's syntax is designed to be readable and easy to learn. If you've used Swif
 // Layout with Column and Row
 Column {
     Row {
-        Image("avatar.png").size(48)
+        Image("avatar.png", alt: "Profile photo").size(48)
         Text("John Doe").fontWeight("bold")
     }
     .gap(12)
@@ -68,12 +69,16 @@ module Counter {
 ```
 
 ```typescript
-// counter.ts
+// Counter/component.ts
+import { app } from "@hypen-space/core";
+
 export default app
+  .module("Counter")
   .defineState({ count: 0 })
-  .onAction("increment", async ({ state }) => {
+  .onAction("increment", ({ state }) => {
     state.count++;
-  });
+  })
+  .build();
 ```
 
 ### Native Performance
@@ -116,7 +121,7 @@ The Hypen engine (written in Rust, compiled to WASM) parses your templates, mana
 
 Hypen includes a complete development environment:
 
-- **`hypen dev`** — Hot-reloading dev server for rapid iteration in the browser
+- **`hypen dev`** — Hot-reloading dev server for rapid iteration in the browser (run it with `bun run dev` in a project; the CLI needs [Bun](https://bun.sh))
 - **[Hypen Studio](/docs/tooling/studio)** — A full in-browser IDE with a code editor, live preview, state inspector, action log, time-travel debugging, and an integrated terminal. Run `hypen studio` to launch it.
 - **`hypen run android / ios`** — Preview your app on a real device or simulator with hot reload. Combine with `--studio` to edit in the browser and see changes on the device in real time.
 
@@ -139,6 +144,6 @@ Hypen might not be the best fit for:
 
 Ready to get started?
 
-1. [Installation](/docs/getting-started/installation) — Set up Hypen for your platform
+1. [Installation](/docs/getting-started/installation) — Install Bun and create a project
 2. [Your First App](/docs/getting-started/first-app) — Build a simple counter app
 3. [Guide](/docs/guide/basics) — Learn the language in depth

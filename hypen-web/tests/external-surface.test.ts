@@ -119,8 +119,12 @@ describe("External capability surface — actions", () => {
     );
 
     const reached: string[] = [];
-    engine.onAction("router.replace", () => reached.push("router.replace"));
-    engine.onAction("router.forward", () => reached.push("router.forward"));
+    engine.onAction("router.replace", () => {
+      reached.push("router.replace");
+    });
+    engine.onAction("router.forward", () => {
+      reached.push("router.forward");
+    });
 
     expect(actionNames(engine)).not.toContain("router.replace");
     expect(actionNames(engine)).not.toContain("router.forward");
@@ -249,7 +253,9 @@ describe("External capability surface — navigation", () => {
     const engine = await boot(`module Plain { Text("no router here") }`);
 
     const reached: string[] = [];
-    engine.onAction("router.push", () => reached.push("router.push"));
+    engine.onAction("router.push", () => {
+      reached.push("router.push");
+    });
 
     expect(engine.listRoutes()).toEqual([]);
     expect(actionNames(engine)).not.toContain(AGENT_NAVIGATE);

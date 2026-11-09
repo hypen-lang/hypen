@@ -178,10 +178,10 @@ describe("Plugin Helper Functions", () => {
             .map((n) => n.trim())
             .filter((n) => n.length > 0);
         } else {
-          names = [defaultImport];
+          names = [defaultImport!];
         }
 
-        imports.push({ names, source });
+        imports.push({ names, source: source! });
       }
 
       return imports;
@@ -227,7 +227,7 @@ describe("Plugin Helper Functions", () => {
       const result = parseImports(text);
 
       expect(result).toHaveLength(1);
-      expect(result[0].source).toBe("./Button");
+      expect(result[0]!.source).toBe("./Button");
     });
   });
 

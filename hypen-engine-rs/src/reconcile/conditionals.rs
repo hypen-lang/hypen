@@ -129,8 +129,8 @@ pub(crate) fn find_matching_branch<'a>(
 ///
 /// Returns `(key, children)` where:
 ///   - `key`    is the matched route pattern (for cache keying), or the
-///              sentinel `"__fallback__"` when the fallback branch is
-///              rendered, or `None` when there's no fallback and no match.
+///     sentinel `"__fallback__"` when the fallback branch is
+///     rendered, or `None` when there's no fallback and no match.
 ///   - `children` is the slice of IR nodes to render.
 ///
 /// Used by the Router reconciler to key detached-subtree caches by

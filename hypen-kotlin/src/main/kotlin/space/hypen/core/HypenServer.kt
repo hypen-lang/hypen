@@ -264,7 +264,13 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
     init {
         val builder = HypenServerBuilder().apply(block)
         modules.putAll(builder.modules)
-        routeDefinitions = builder.routes.toList()
+        // No route table: serve the first registered module at "/", so a
+        // single-module server (`module("Counter", counter)` and nothing
+        // else, as in the docs quick start) renders it instead of sending an
+        // empty initial tree with no module mounted.
+        routeDefinitions = builder.routes.toList().ifEmpty {
+            builder.modules.keys.firstOrNull()?.let { listOf(RouteDefinition(path = "/", component = it)) }.orEmpty()
+        }
         sessionManager = SessionManager(builder.sessionConfig)
         onConnectionCallback = builder.onConnectionCallback
         onDisconnectionCallback = builder.onDisconnectionCallback
@@ -432,13 +438,15 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         engine.registerDefaultPrimitives()
 
         // Register discovered components on the new engine
-        componentWatcher?.getComponents()?.values?.forEach { comp ->
+        val discovered = componentWatcher?.getComponents() ?: emptyMap()
+        discovered.values.forEach { comp ->
             try {
                 engine.registerComponent(comp.name, comp.template, comp.hypenPath)
             } catch (e: Exception) {
                 log.warn("Failed to register component '${comp.name}' for new client", e.message ?: "")
             }
         }
+        registerModuleTemplates(engine, discovered.keys)
 
         // Register resources (flat name → SVG string map). The engine owns
         // SVG parsing; each raw string is parsed once per client engine and
@@ -1686,6 +1694,31 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
 
             client.nestedModules[name] = nestedInstance
             globalContext.registerNestedModule(name.lowercase(), nestedInstance)
+        }
+    }
+
+    /**
+     * Named modules that carry their own template (`hypen(...) { name("Home");
+     * ui(tpl) }`) are components too: register each one so `Home()` inside
+     * the primary's `Router { Route ... }` renders it instead of an empty
+     * unknown element. Templates discovered from disk win on a name clash,
+     * and the primary module's template is the root UI, not a component.
+     */
+    private fun registerModuleTemplates(engine: NativeEngine, skip: Set<String>) {
+        val primaryName = routeDefinitions.firstOrNull()?.component ?: "App"
+        val names = LinkedHashSet<String>().apply {
+            addAll(modules.keys)
+            addAll(HypenApp.getNames())
+        }
+        for (name in names) {
+            if (name in skip || name.equals(primaryName, ignoreCase = true)) continue
+            val template = (modules[name] ?: HypenApp.get(name))?.ui
+            if (template.isNullOrBlank()) continue
+            try {
+                engine.registerComponent(name, template)
+            } catch (e: Exception) {
+                log.warn("Failed to register module template '$name' for new client", e.message ?: "")
+            }
         }
     }
 

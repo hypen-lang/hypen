@@ -4,7 +4,7 @@ import (
 	"strings"
 	"sync"
 
-	"github.com/hypen-space/core/device"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
 )
 
 // RouteDefinition maps a route path to a component and optional module.

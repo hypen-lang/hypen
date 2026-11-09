@@ -18,9 +18,17 @@ The key difference between a module and a regular component is that a module's s
 
 ## Defining a Module
 
+A module is two files side by side in its own folder. This is the layout `hypen init` creates and `hypen dev` / `hypen build` discover:
+
+```
+src/components/Counter/
+├── component.hypen   # the UI template
+└── component.ts      # state and actions
+```
+
 ### The UI Template
 
-In your `.hypen` file, define the module's UI:
+In `src/components/Counter/component.hypen`, define the module's UI:
 
 ```hypen
 module Counter {
@@ -53,10 +61,10 @@ module Counter {
 
 ### The Module Definition (TypeScript)
 
-Define the module's state and actions in TypeScript:
+Define the module's state and actions in `src/components/Counter/component.ts`:
 
 ```typescript
-// Counter.ts
+// src/components/Counter/component.ts
 import { app } from "@hypen-space/core";
 
 interface CounterState {
@@ -64,6 +72,8 @@ interface CounterState {
 }
 
 export default app
+  // Register the module under the name the templates use: Counter()
+  .module("Counter")
   .defineState<CounterState>({ count: 0 })
 
   // Lifecycle handler: receives (state, context?)
@@ -71,7 +81,7 @@ export default app
     console.log("Counter module created");
   })
 
-  // Action handler: receives context object { action, state, next, context }
+  // Action handler: receives one object { action, state, context, dataSources }
   .onAction("increment", async ({ state }) => {
     state.count++;
   })
@@ -83,8 +93,21 @@ export default app
   // Lifecycle handler: receives (state, context?)
   .onDestroyed((state, context) => {
     console.log("Counter module destroyed");
-  });
+  })
+
+  // Terminal call: finishes the definition. The template comes from the
+  // sibling component.hypen file.
+  .build();
 ```
+
+<Callout type="info">
+Every module definition ends in exactly one terminal call:
+
+- `.build()` when the template lives in a sibling `.hypen` file (as above), or for a module with no template.
+- `.ui(template)` / `.uiFile(path)` when the template is inline or in a file you name. These already return the built definition; a trailing `.build()` after them is allowed but does nothing.
+
+Start every module that another template renders (`Counter()`, `Home()`, ...) with `app.module("Name")`, using the same name as its folder and its `module Name { ... }` block. Without the name, `hypen dev` still renders the module's state, but its `@actions.*` are rejected with `invalid scoped UI action`. The entry module (`App` in the scaffold) can use a plain `app.defineState(...)`.
+</Callout>
 
 ## State
 
@@ -93,6 +116,8 @@ export default app
 State is defined using `defineState<T>(initialValue)`:
 
 ```typescript
+import { app } from "@hypen-space/core";
+
 interface UserState {
   user: {
     name: string;
@@ -107,7 +132,8 @@ export default app
     user: null,
     isLoading: false,
     error: null
-  });
+  })
+  .build();
 ```
 
 ### Accessing State in Templates
@@ -145,6 +171,8 @@ module Settings {
 ```
 
 ```typescript
+import { app } from "@hypen-space/core";
+
 export default app
   .defineState({
     username: "",
@@ -233,7 +261,9 @@ Actions support async operations like network requests:
   // State changes sync automatically, showing loading state
 
   try {
-    const response = await fetch(`/api/users/${action.payload!.userId}`);
+    // Modules run on the server, so there is no page origin to resolve a
+    // relative URL against: always fetch an absolute URL.
+    const response = await fetch(`https://api.example.com/users/${action.payload!.userId}`);
     const user = await response.json();
     state.user = user;
     state.error = null;
@@ -247,6 +277,23 @@ Actions support async operations like network requests:
 })
 ```
 
+### Where Module Code Runs
+
+Module code (`component.ts`, `.onAction`, `.onCreated`, ...) never runs in the browser page:
+
+- Under `hypen dev` and `RemoteServer`, it runs **on the server** (Bun or Node), and the browser only receives patches.
+- In the static site that `hypen build` produces, it runs in a **Web Worker**.
+
+Either way there is no `window`, `document` or `localStorage`, and a relative `fetch("/api/...")` has no page origin to resolve against. Use the server-safe equivalents instead:
+
+| Instead of | Use |
+|------------|-----|
+| `localStorage` / `sessionStorage` | `.persist(store)` with a server-side store. See [State Persistence](/docs/guide/persistence). |
+| `fetch("/api/users")` | `fetch("https://api.example.com/users")`, an absolute URL |
+| `window.location` / `history` | Router state (`state.location`) and `@router.push`. See [Routing](/docs/guide/routing). |
+
+Timers, `fetch` with absolute URLs and `crypto` work as usual in both places.
+
 ## Lifecycle
 
 Modules have lifecycle hooks for setup and cleanup.
@@ -257,11 +304,10 @@ Called when the module is first mounted. Receives `(state, context?)`:
 
 ```typescript
 .onCreated(async (state, context) => {
-  // Initialize data
-  const savedData = localStorage.getItem('formData');
-  if (savedData) {
-    state.formData = JSON.parse(savedData);
-  }
+  // Load initial data. This runs on the server: use an absolute URL,
+  // not localStorage or a relative fetch.
+  const response = await fetch("https://api.example.com/settings");
+  state.settings = await response.json();
   // State changes sync automatically
 })
 ```
@@ -279,7 +325,7 @@ Called when the module is unmounted. Receives `(state, context?)`:
 
 ## Complete Example: Todo List
 
-### Template (TodoList.hypen)
+### Template (`src/components/TodoList/component.hypen`)
 
 ```hypen
 module TodoList {
@@ -304,20 +350,22 @@ module TodoList {
         }
         .gap(12)
 
-        List(@state.todos) {
-            Row {
-                Text("@{item.text}")
-                    .textDecoration("@{item.completed ? 'line-through' : 'none'}")
-                    .weight(1)
+        List {
+            ForEach(items: @state.todos, key: "id") {
+                Row {
+                    Text("@{item.text}")
+                        .textDecoration("@{item.completed ? 'line-through' : 'none'}")
+                        .weight(1)
+                        .onClick(@actions.toggleTodo, id: @item.id)
 
-                Button { Text("✕") }
-                    .onClick(@actions.deleteTodo, id: "@{item.id}")
-                    .backgroundColor("transparent")
+                    Button { Text("✕") }
+                        .onClick(@actions.deleteTodo, id: @item.id)
+                        .backgroundColor("transparent")
+                }
+                .padding(12)
+                .borderRadius(8)
+                .verticalAlignment("center")
             }
-            .padding(12)
-            .borderRadius(8)
-            .verticalAlignment("center")
-            .onClick(@actions.toggleTodo, id: "@{item.id}")
         }
         .marginTop(16)
     }
@@ -326,10 +374,10 @@ module TodoList {
 }
 ```
 
-### Module (TodoList.ts)
+### Module (`src/components/TodoList/component.ts`)
 
 ```typescript
-import { app } from "@hypen-space/core";
+import { app, type StateStore } from "@hypen-space/core";
 
 interface Todo {
   id: string;
@@ -343,19 +391,27 @@ interface TodoState {
   filter: "all" | "active" | "completed";
 }
 
+// Modules run on the server, so there is no localStorage. Persist through a
+// StateStore instead. This in-memory one keeps one list per browser session
+// until the server restarts; swap it for Redis, a database or a file.
+const saved = new Map<string, TodoState>();
+const todoStore: StateStore<TodoState> = {
+  resolveKey: (_state, moduleName, sessionId) => `${moduleName}:${sessionId}`,
+  load: async (key) => saved.get(key) ?? null,
+  save: async (key, state) => { saved.set(key, state); },
+  delete: async (key) => { saved.delete(key); },
+};
+
 export default app
+  .module("TodoList")
   .defineState<TodoState>({
     todos: [],
     newTodo: "",
     filter: "all"
   })
 
-  .onCreated(async (state, context) => {
-    const saved = localStorage.getItem("todos");
-    if (saved) {
-      state.todos = JSON.parse(saved);
-    }
-  })
+  // Restores the saved list before onCreated runs, and saves after every change
+  .persist(todoStore)
 
   // No "updateNewTodo" handler needed — .bind() handles it automatically
 
@@ -367,7 +423,6 @@ export default app
         completed: false
       });
       state.newTodo = "";
-      saveTodos(state.todos);
     }
   })
 
@@ -375,18 +430,14 @@ export default app
     const todo = state.todos.find(t => t.id === action.payload!.id);
     if (todo) {
       todo.completed = !todo.completed;
-      saveTodos(state.todos);
     }
   })
 
   .onAction<{ id: string }>("deleteTodo", async ({ action, state }) => {
     state.todos = state.todos.filter(t => t.id !== action.payload!.id);
-    saveTodos(state.todos);
-  });
+  })
 
-function saveTodos(todos: Todo[]) {
-  localStorage.setItem("todos", JSON.stringify(todos));
-}
+  .build();
 ```
 
 ## Best Practices
@@ -442,9 +493,9 @@ Name actions by what they do, not how they're triggered:
 
 Modules work identically across all platforms:
 
-- **Web**: Runs in browser with WASM engine
-- **Android**: Native Compose rendering
-- **iOS**: Native rendering
+- **Web**: the browser renders patches with the DOM or Canvas renderer. Module code runs on the server (`hypen dev`, `RemoteServer`) or in a Web Worker (`hypen build`).
+- **Android**: native Compose rendering
+- **iOS**: native rendering
 
 The same module definition works on all platforms, with platform-specific rendering handled automatically by the Hypen runtime.
 

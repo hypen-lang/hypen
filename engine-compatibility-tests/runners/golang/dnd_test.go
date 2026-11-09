@@ -6,7 +6,7 @@ import (
 	"reflect"
 	"testing"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // Replay the same wire assertions as the Rust DnD fixture runner, using the

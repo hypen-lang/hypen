@@ -1,13 +1,18 @@
-.vscode/**
-.vscode-test/**
-src/**
-.gitignore
-.yarnrc
-vsc-extension-quickstart.md
-**/tsconfig.json
-**/.eslintrc.json
-**/*.map
-**/*.ts
-node_modules/**
-
-
+# The VSIX is packaged from the dist/vsix/ stage built by
+# `bun run package:vsix` (scripts/package-vsix.ts), which bundles the
+# runtime dependencies into out/ — so node_modules, src and the tsc output
+# are not shipped. Everything is excluded except what the extension loads.
+**
+!package.json
+!README.md
+!CHANGELOG.md
+!LICENSE
+!language-configuration.json
+!syntaxes/hypen.tmLanguage.json
+!icons/*.png
+!out/extension.js
+!out/server.js
+!wasm/hypen_parser.js
+!wasm/hypen_parser_bg.wasm
+!wasm-engine/hypen_engine.js
+!wasm-engine/hypen_engine_bg.wasm

@@ -108,7 +108,12 @@ dependencies {
 mavenPublishing {
     coordinates("space.hypen", "hypen-renderer", project.version.toString())
     publishToMavenCentral(SonatypeHost.CENTRAL_PORTAL)
-    signAllPublications()
+    // Sign only when a key is configured (gradle-local.properties or
+    // ORG_GRADLE_PROJECT_signingInMemoryKey); unconditional signing breaks
+    // `./gradlew :renderer:publishToMavenLocal` on machines without one.
+    if (listOf("signingInMemoryKey", "signing.keyId", "signing.gnupg.keyName").any { project.findProperty(it) != null }) {
+        signAllPublications()
+    }
 
     pom {
         name.set("Hypen Compose Renderer")

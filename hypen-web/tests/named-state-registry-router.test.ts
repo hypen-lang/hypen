@@ -78,8 +78,8 @@ describe("Named module registration", () => {
     expect(engine.setModuleCalls.length).toBe(0);
     expect(engine.registerModuleCalls.length).toBe(1);
     const call = engine.registerModuleCalls[0];
-    expect(call.name).toBe("homepage");
-    expect(call.initialState).toEqual({ count: 0 });
+    expect(call!.name).toBe("homepage");
+    expect(call!.initialState).toEqual({ count: 0 });
   });
 
   test("anonymous module uses setModule with raw state", () => {
@@ -91,8 +91,8 @@ describe("Named module registration", () => {
     expect(engine.registerModuleCalls.length).toBe(0);
     expect(engine.setModuleCalls.length).toBe(1);
     const call = engine.setModuleCalls[0];
-    expect(call.name).toBe("AnonymousModule");
-    expect(call.initialState).toEqual({ count: 0 });
+    expect(call!.name).toBe("AnonymousModule");
+    expect(call!.initialState).toEqual({ count: 0 });
   });
 
   test("state changes carry the lowercased scope", async () => {
@@ -108,9 +108,9 @@ describe("Named module registration", () => {
 
     expect(engine.notifyCalls.length).toBeGreaterThan(0);
     const lastCall = engine.notifyCalls[engine.notifyCalls.length - 1];
-    expect(lastCall.scope).toBe("counter");
-    expect(lastCall.paths).toEqual(["count"]);
-    expect(lastCall.changedValues.count).toBe(1);
+    expect(lastCall!.scope).toBe("counter");
+    expect(lastCall!.paths).toEqual(["count"]);
+    expect(lastCall!.changedValues.count).toBe(1);
   });
 
   test("registration name is lowercased regardless of source casing", () => {
@@ -121,7 +121,7 @@ describe("Named module registration", () => {
 
     new HypenModuleInstance(engine, def);
 
-    expect(engine.registerModuleCalls[0].name).toBe("myfancymodule");
+    expect(engine.registerModuleCalls[0]!.name).toBe("myfancymodule");
   });
 
   test("empty name module is treated as anonymous", () => {
@@ -132,7 +132,7 @@ describe("Named module registration", () => {
 
     expect(engine.registerModuleCalls.length).toBe(0);
     expect(engine.setModuleCalls.length).toBe(1);
-    expect(engine.setModuleCalls[0].initialState).toEqual({ x: 1 });
+    expect(engine.setModuleCalls[0]!.initialState).toEqual({ x: 1 });
   });
 
   test("nested state object is passed through unchanged", () => {
@@ -147,8 +147,8 @@ describe("Named module registration", () => {
     new HypenModuleInstance(engine, def);
 
     const call = engine.registerModuleCalls[0];
-    expect(call.name).toBe("profile");
-    expect(call.initialState).toEqual({
+    expect(call!.name).toBe("profile");
+    expect(call!.initialState).toEqual({
       user: { name: "Alice", age: 30 },
     });
   });
@@ -167,7 +167,7 @@ describe("App Registry", () => {
     const def = app.defineState({ count: 0 }, { name: "Counter" }).build();
 
     expect(app.has("Counter")).toBe(true);
-    expect(app.get("Counter")).toBe(def);
+    expect(app.get("Counter") as unknown).toBe(def);
   });
 
   test("anonymous module does NOT auto-register", () => {
@@ -224,7 +224,7 @@ describe("App Registry", () => {
       .build();
 
     expect(app.has("Settings")).toBe(true);
-    expect(app.get("Settings")).toBe(def);
+    expect(app.get("Settings") as unknown).toBe(def);
     expect(def.name).toBe("Settings");
   });
 });
@@ -276,10 +276,10 @@ describe("ManagedRouter", () => {
     expect(engine.registerModuleCalls.length).toBe(2);
 
     // State is passed through raw — engine handles scoping via module_scope
-    expect(engine.registerModuleCalls[0].name).toBe("home");
-    expect(engine.registerModuleCalls[0].initialState).toEqual({ count: 0 });
-    expect(engine.registerModuleCalls[1].name).toBe("profile");
-    expect(engine.registerModuleCalls[1].initialState).toEqual({ name: "Alice" });
+    expect(engine.registerModuleCalls[0]!.name).toBe("home");
+    expect(engine.registerModuleCalls[0]!.initialState).toEqual({ count: 0 });
+    expect(engine.registerModuleCalls[1]!.name).toBe("profile");
+    expect(engine.registerModuleCalls[1]!.initialState).toEqual({ name: "Alice" });
   });
 
   test("unregistering module removes it from context", () => {
@@ -365,7 +365,7 @@ describe("App Registry Integration", () => {
     app.defineState({ v: 1 }, { name: "Widget" }).build();
     const def2 = app.defineState({ v: 2 }, { name: "Widget" }).build();
 
-    expect(app.get("Widget")).toBe(def2);
+    expect(app.get("Widget") as unknown).toBe(def2);
   });
 
   test("components returns read-only view of all definitions", () => {

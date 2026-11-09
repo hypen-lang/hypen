@@ -38,9 +38,8 @@ If(condition: @state.showToast) {
 }
 
 // Animate list reorders (FLIP)
-ForEach(@state.items) { item ->
+ForEach(items: @state.items, key: "id") {
     Row { Text("@{item.title}") }
-        .key("@{item.id}")
         .layout(spring)
 }
 
@@ -214,7 +213,7 @@ Image(src: "@{state.restaurant.coverUrl}")
 
 ```hypen
 // Upward-opening bottom sheet: 400px of upward finger travel = closed → open
-Sheet { ... }
+Sheet { Text("Sheet content") }
     .states(@state.sheetPhase) {
         onState(closed).translateY(400)
         onState(open).translateY(0)
@@ -223,7 +222,7 @@ Sheet { ... }
     .settle(curve: spring, duration: 300, bind: @state.sheetPhase)
 
 // Collapsing header driven by the scroll container's offset
-Header { ... }
+Header { Text("Title") }
     .states(@state.headerMode) {
         onState(expanded).height(120)
         onState(collapsed).height(48)
@@ -285,11 +284,12 @@ export default app
     await save();
     state.savePhase = "done";            // pose flip → transition plays → completion fires
   })
-  .onAction("animationDone", ({ action, state }) => {
-    if (action.payload.animation === "states" && action.payload.state === "done") {
+  .onAction<{ animation: string; state?: string }>("animationDone", ({ action, state }) => {
+    if (action.payload?.animation === "states" && action.payload.state === "done") {
       state.savePhase = "idle";          // no `idle` pose declared → back to the base look
     }
-  });
+  })
+  .build();
 ```
 
 Treat completions as motion choreography, not the only path to a correct end state: on a renderer that snaps a channel, the machine still lands in a sensible pose — it just skips the timed hop.

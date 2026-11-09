@@ -36,7 +36,7 @@ Column {
         Row {
             Checkbox {}
                 .checked(@item.completed)
-                .onChange(@actions.toggleTodo)
+                .onChange(@actions.toggleTodo, id: @item.id)
 
             Text(@item.title)
                 .fontSize(16)
@@ -45,7 +45,7 @@ Column {
                 .flex(1)
 
             Button { Text("Delete") }
-                .onClick(@actions.deleteTodo)
+                .onClick(@actions.deleteTodo, id: @item.id)
                 .color("#EF4444")
         }
         .padding(12)
@@ -58,6 +58,8 @@ Column {
 .padding(24)
 .gap(8)
 ```
+
+The extra `id: @item.id` argument on each event is what tells the handler *which* todo was clicked: named arguments after the action reference become `action.payload` (`{ id: "2" }`). Without it the handlers receive no `id` and do nothing.
 
 Paired with this module:
 
@@ -123,7 +125,7 @@ ForEach(items: @state.categories, as: "category", key: "id") {
             .fontSize(20)
             .fontWeight("bold")
 
-        ForEach(items: @item.products, as: "product", key: "sku") {
+        ForEach(items: @category.products, as: "product", key: "sku") {
             Row {
                 Text("@{product.name}")
                 Text("$@{product.price}")
@@ -132,6 +134,12 @@ ForEach(items: @state.categories, as: "category", key: "id") {
     }
 }
 ```
+
+The inner loop reads the outer item through its `as:` name (`@category.products`). Give every loop in a nest its own `as:` name: if both loops use the default `item`, inner `@item.*` references resolve to the *outer* item.
+
+<Callout type="warn">
+A nested `ForEach` whose `items:` reads the outer loop's item needs Hypen 0.6.7 or newer. On 0.6.6 and earlier the inner loop renders nothing.
+</Callout>
 
 ### Accessing the Whole Item
 
@@ -267,28 +275,23 @@ export default app
         errorMessage: "",
         user: null,
     })
-    .onCreated(async (state) => {
-        try {
-            const res = await fetch("/api/user/me");
-            state.user = await res.json();
-            state.loadStatus = "loaded";
-        } catch (e) {
-            state.errorMessage = e.message;
-            state.loadStatus = "error";
-        }
-    })
-    .onAction("loadProfile", async ({ state }) => {
-        state.loadStatus = "loading";
-        try {
-            const res = await fetch("/api/user/me");
-            state.user = await res.json();
-            state.loadStatus = "loaded";
-        } catch (e) {
-            state.errorMessage = e.message;
-            state.loadStatus = "error";
-        }
-    })
+    .onCreated((state) => loadProfile(state))
+    .onAction("loadProfile", ({ state }) => loadProfile(state))
     .build();
+
+async function loadProfile(state: UserState) {
+    state.loadStatus = "loading";
+    try {
+        // Module code runs on the server, not in the page: use an absolute URL.
+        const res = await fetch("https://api.example.com/user/me");
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        state.user = await res.json();
+        state.loadStatus = "loaded";
+    } catch (e) {
+        state.errorMessage = e instanceof Error ? e.message : String(e);
+        state.loadStatus = "error";
+    }
+}
 ```
 
 ### Match Patterns
@@ -297,10 +300,10 @@ When supports several kinds of pattern matching:
 
 ```hypen
 // Exact string match
-Case(match: "loading") { ... }
+Case(match: "loading") { Spinner() }
 
 // Exact number match
-Case(match: 404) { ... }
+Case(match: 404) { Text("Not found") }
 
 // Multiple values (OR match — matches any)
 Case(match: [200, 201, 204]) {

@@ -3,7 +3,7 @@ package remote
 import (
 	"sync"
 
-	"github.com/hypen-space/core/device"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
 )
 
 // dispatchQueue serialises the action dispatches of one session with a

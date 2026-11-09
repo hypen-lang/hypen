@@ -332,7 +332,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-engine"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "exprimo",
  "hypen-parser",
@@ -348,7 +348,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-parser"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "ariadne",
  "chumsky",
@@ -358,7 +358,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-server"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "getrandom",
  "hypen-engine",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "hypen-tailwind-parse"
-version = "0.6.4"
+version = "0.6.5"
 dependencies = [
  "serde",
  "serde_json",

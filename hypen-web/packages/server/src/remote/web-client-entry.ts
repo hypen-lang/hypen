@@ -12,7 +12,7 @@
  * renderer.
  */
 
-import { RemoteEngine } from "@hypen-space/core/remote/client";
+import { RemoteEngine, syncUrlWithRouter } from "@hypen-space/core/remote/client";
 import { DOMRenderer } from "@hypen-space/web";
 
 const container = document.getElementById("app");
@@ -26,10 +26,8 @@ const engine = new RemoteEngine(`${proto}://${location.host}`, {
   // Dev hot reload works by the server dropping the socket; reconnect
   // quickly so an edit shows up in well under a second.
   reconnectInterval: 500,
-  // Wire the browser back button to the conventions the `hypen init`
-  // scaffold uses (`state.location` + a `navigateBack` action). Apps
-  // without them lose nothing — the keys just never match.
-  navigation: { viewStateKey: "location", backAction: "navigateBack" },
+  // No `navigation` option: the URL sync below replaces it (it pushed
+  // entries without changing the URL and could only go back).
 });
 
 function makeRenderer(): DOMRenderer {
@@ -51,6 +49,12 @@ engine.onSessionEstablished(() => {
 });
 
 engine.onPatches((patches) => renderer.applyPatches(patches));
+
+// URL <-> route sync (shared with the Go server's and Cloudflare's clients):
+// the app navigating pushes history entries with the route's path,
+// back/forward and deep links (`/counter`, served the same shell) move the
+// server's router with `router.replace`. See `syncUrlWithRouter`.
+syncUrlWithRouter(engine, { container });
 
 function showBanner(text: string): void {
   let banner = document.getElementById("hypen-status");

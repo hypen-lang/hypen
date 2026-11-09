@@ -7,11 +7,23 @@
  *                       (macOS arm64/x86_64, Windows x64, Linux x64)
  */
 
-import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from "fs";
-import { join } from "path";
+import {
+  closeSync,
+  existsSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "fs";
+import { createHash } from "crypto";
+import { isAbsolute, join, resolve as resolvePath } from "path";
 import { homedir, networkInterfaces } from "os";
 import { createInterface } from "readline";
-import { execFile as nodeExecFile } from "child_process";
+import { execFile as nodeExecFile, spawn as nodeSpawn } from "child_process";
 import { pink, yellow, dim, boldPink, boldYellow } from "./colors.js";
 
 const isBun = typeof globalThis.Bun !== "undefined";
@@ -27,7 +39,7 @@ export const RUNNER_URLS = {
   // Bare-binary archives attached to hypen-engine-rs releases by the
   // Desktop Installers workflow, under stable version-less names:
   // hypen-browser-<rust-target>.tar.gz
-  desktop: "https://github.com/hypen-lang/hypen-engine-rs/releases/latest/download",
+  desktop: "https://github.com/hypen-lang/hypen/releases/latest/download",
 } as const;
 
 const DESKTOP_BIN = process.platform === "win32" ? "hypen-browser.exe" : "hypen-browser";
@@ -40,7 +52,24 @@ export const RUNNER_PATHS = {
   desktop: join(RUNNERS_DIR, DESKTOP_BIN),
   desktopTar: join(RUNNERS_DIR, "hypen-browser.tar.gz"),
   version: join(RUNNERS_DIR, "version.txt"),
+  /** stdout/stderr of the last `hypen run desktop` launches (appended). */
+  desktopLog: join(RUNNERS_DIR, "browser.log"),
+  /** Which APK we installed on which adb serial, to skip reinstalls. */
+  androidInstalls: join(RUNNERS_DIR, "android-installed.json"),
 } as const;
+
+/** Env var that points `hypen run desktop` at a locally built runner. */
+export const DESKTOP_RUNNER_ENV = "HYPEN_DESKTOP_RUNNER";
+
+/** Per-command options that bin/hypen.ts passes through from flags. */
+export interface RunOptions {
+  /** adb serial to use (`--device`); falls back to $ANDROID_SERIAL. */
+  device?: string;
+  /** Path to a hypen-browser binary (`--runner`); falls back to $HYPEN_DESKTOP_RUNNER. */
+  runner?: string;
+}
+
+type ExecFn = (cmd: string[]) => Promise<{ stdout: string; stderr: string; exitCode: number }>;
 
 /**
  * The Rust target triple for the desktop runner archive matching this
@@ -147,19 +176,52 @@ export async function commandExists(cmd: string): Promise<boolean> {
 // ─── Network ──────────────────────────────────────────────
 
 /**
+ * Interfaces that never carry a phone's route back to this machine:
+ * loopback, container bridges (docker/podman/k8s/lxc), hypervisor host-only
+ * networks, and VPN/tunnel devices.
+ */
+const NON_LAN_IFACE =
+  /^(lo|docker|br-|veth|virbr|vboxnet|vmnet|vEthernet|tun|tap|utun|wg|tailscale|zt|cni|flannel|cali|weave|kube|lxc|lxd|podman|cilium|nordlynx|proton|ppp|ipsec|gif|stf|awdl|llw|anpi|bridge|ham)/i;
+
+/** Names of real NICs: Ethernet and Wi-Fi on Linux, macOS and Windows. */
+const LAN_IFACE = /^(en|eth|wl|wlan|wlp|Wi-?Fi|Ethernet)/i;
+
+function isPrivateIPv4(ip: string): boolean {
+  return (
+    ip.startsWith("192.168.") ||
+    ip.startsWith("10.") ||
+    /^172\.(1[6-9]|2\d|3[01])\./.test(ip)
+  );
+}
+
+/**
+ * Pick the address a device on the same network should dial, from an
+ * `os.networkInterfaces()` map. Skips internal, IPv6, link-local
+ * (169.254/16) and container/VM/VPN interfaces, then prefers real NICs and
+ * RFC 1918 addresses. Returns null when nothing usable is left.
+ */
+export function pickLanIP(
+  interfaces: Record<string, Array<{ address: string; family: string | number; internal: boolean }> | undefined>
+): string | null {
+  let best: { ip: string; score: number } | null = null;
+  for (const [name, addrs] of Object.entries(interfaces)) {
+    if (!addrs || NON_LAN_IFACE.test(name)) continue;
+    for (const addr of addrs) {
+      const isV4 = addr.family === "IPv4" || addr.family === 4;
+      if (!isV4 || addr.internal) continue;
+      if (addr.address.startsWith("169.254.")) continue;
+      const score = (LAN_IFACE.test(name) ? 2 : 0) + (isPrivateIPv4(addr.address) ? 1 : 0);
+      if (!best || score > best.score) best = { ip: addr.address, score };
+    }
+  }
+  return best?.ip ?? null;
+}
+
+/**
  * Get the local network IP for physical device connections
  */
 export function getLocalIP(): string | null {
-  const interfaces = networkInterfaces();
-  for (const [, addrs] of Object.entries(interfaces)) {
-    if (!addrs) continue;
-    for (const addr of addrs) {
-      if (addr.family === "IPv4" && !addr.internal) {
-        return addr.address;
-      }
-    }
-  }
-  return null;
+  return pickLanIP(networkInterfaces() as any);
 }
 
 /**
@@ -234,27 +296,50 @@ function ensureRunnersDir(): void {
   }
 }
 
+export interface DownloadResult {
+  ok: boolean;
+  /** HTTP status when the server answered. */
+  status?: number;
+  /** Network/filesystem error message. */
+  error?: string;
+}
+
+/**
+ * Download `url` to `destPath` via a `.part` file, so a failed or partial
+ * download never leaves a broken file where the cache expects a good one.
+ */
+export async function fetchToFile(url: string, destPath: string): Promise<DownloadResult> {
+  const partPath = `${destPath}.part`;
+  try {
+    const response = await fetch(url);
+    if (!response.ok) return { ok: false, status: response.status };
+    const arrayBuffer = await response.arrayBuffer();
+    if (isBun) {
+      await Bun.write(partPath, arrayBuffer);
+    } else {
+      writeFileSync(partPath, Buffer.from(arrayBuffer));
+    }
+    renameSync(partPath, destPath);
+    return { ok: true, status: response.status };
+  } catch (err: any) {
+    rmSync(partPath, { force: true });
+    return { ok: false, error: err?.message ?? String(err) };
+  }
+}
+
 export async function downloadFile(
   url: string,
   destPath: string
 ): Promise<boolean> {
-  try {
-    const response = await fetch(url);
-    if (!response.ok) {
-      console.error(`  Failed to download: HTTP ${response.status}`);
-      return false;
-    }
-    const arrayBuffer = await response.arrayBuffer();
-    if (isBun) {
-      await Bun.write(destPath, arrayBuffer);
+  const result = await fetchToFile(url, destPath);
+  if (!result.ok) {
+    if (result.status !== undefined) {
+      console.error(`  Failed to download: HTTP ${result.status}`);
     } else {
-      writeFileSync(destPath, Buffer.from(arrayBuffer));
+      console.error(`  Download error: ${result.error}`);
     }
-    return true;
-  } catch (err: any) {
-    console.error(`  Download error: ${err.message}`);
-    return false;
   }
+  return result.ok;
 }
 
 /**
@@ -264,6 +349,8 @@ export function cleanRunners(platform?: "android" | "ios" | "desktop"): void {
   console.log(`  ${pink("Cleaning cached runners...")}`);
   if (!platform || platform === "android") {
     if (existsSync(RUNNER_PATHS.android)) rmSync(RUNNER_PATHS.android);
+    // Forget what we installed so the next run reinstalls the fresh APK.
+    if (existsSync(RUNNER_PATHS.androidInstalls)) rmSync(RUNNER_PATHS.androidInstalls);
   }
   if (!platform || platform === "ios") {
     if (existsSync(RUNNER_PATHS.ios)) rmSync(RUNNER_PATHS.ios, { recursive: true });
@@ -278,39 +365,52 @@ export function cleanRunners(platform?: "android" | "ios" | "desktop"): void {
 }
 
 /**
- * Fetch the runner version from the CDN and cache it locally.
+ * A version string we're willing to show as "runner v<x>". Guards against
+ * caching an error page or a usage message as the version.
  */
-async function fetchAndCacheVersion(): Promise<string> {
-  try {
-    const res = await fetch(RUNNER_URLS.version);
-    if (res.ok) {
-      const version = (await res.text()).trim();
-      ensureRunnersDir();
-      if (isBun) {
-        await Bun.write(RUNNER_PATHS.version, version);
-      } else {
-        writeFileSync(RUNNER_PATHS.version, version);
-      }
-      return version;
-    }
-  } catch (e: any) {
-    console.warn(`  Warning: could not fetch runner version: ${e.message}`);
-  }
-  return "unknown";
+export function isPlausibleVersion(text: string | null | undefined): text is string {
+  return !!text && /^v?\d+([.-]\d+){0,3}([.+-][0-9A-Za-z.-]+)?$/.test(text.trim());
 }
 
 /**
- * Get the cached runner version, or "unknown" if not available.
+ * Fetch the runner version from the CDN and cache it locally. Returns null
+ * (and caches nothing) when the endpoint is unavailable or answers with
+ * something that isn't a version.
  */
-function getCachedVersion(): string {
+async function fetchAndCacheVersion(): Promise<string | null> {
+  try {
+    const res = await fetch(RUNNER_URLS.version);
+    if (!res.ok) return null;
+    const version = (await res.text()).trim();
+    if (!isPlausibleVersion(version)) return null;
+    ensureRunnersDir();
+    writeFileSync(RUNNER_PATHS.version, version);
+    return version;
+  } catch {
+    // Version display is cosmetic; never fail or warn over it.
+    return null;
+  }
+}
+
+/**
+ * Get the cached runner version, or null if it isn't known.
+ */
+function getCachedVersion(): string | null {
   try {
     if (existsSync(RUNNER_PATHS.version)) {
-      return readFileSync(RUNNER_PATHS.version, "utf-8").trim();
+      const v = readFileSync(RUNNER_PATHS.version, "utf-8").trim();
+      return isPlausibleVersion(v) ? v : null;
     }
-  } catch (e: any) {
-    console.warn(`  Warning: could not read cached version: ${e.message}`);
+  } catch {
+    // fall through
   }
-  return "unknown";
+  return null;
+}
+
+/** " (runner v1.2.3)" when the version is known, "" otherwise. */
+function versionSuffix(version: string | null | undefined): string {
+  if (!isPlausibleVersion(version)) return "";
+  return ` ${dim(`(runner ${version.startsWith("v") ? version : `v${version}`})`)}`;
 }
 
 export async function ensureAndroidRunner(): Promise<boolean> {
@@ -320,9 +420,7 @@ export async function ensureAndroidRunner(): Promise<boolean> {
   }
   console.log(`  ${pink("Downloading Android runner...")}`);
   console.log(`  ${dim("From:")} ${RUNNER_URLS.android}`);
-  const ok = await downloadFile(RUNNER_URLS.android, RUNNER_PATHS.android);
-  if (ok) await fetchAndCacheVersion();
-  return ok;
+  return downloadFile(RUNNER_URLS.android, RUNNER_PATHS.android);
 }
 
 export async function ensureIOSRunner(): Promise<boolean> {
@@ -356,9 +454,59 @@ export async function ensureIOSRunner(): Promise<boolean> {
   return false;
 }
 
+/** `~/.hypen/...` for display, so the hint is copy-pasteable on every OS. */
+function tildify(p: string): string {
+  const home = homedir();
+  return p.startsWith(home) ? `~${p.slice(home.length)}` : p;
+}
+
+/**
+ * What to do when there is no prebuilt desktop runner to download: build
+ * it from source, then drop it in the cache or point the CLI at it.
+ */
+export function desktopRunnerHelp(reason: string): string {
+  const cmd = (s: string) => `    ${dim("$")} ${s}`;
+  const lines = [
+    "",
+    `  ${boldYellow("No desktop runner:")} ${reason}`,
+    "",
+    "  Build the Hypen Browser from source (needs Rust; see hypen-browser/README.md",
+    "  for the Linux packages: libdbus-1-dev, libclang-dev, libasound2-dev):",
+    cmd("git clone https://github.com/hypen-lang/hypen.git"),
+    cmd("cd hypen && cargo build --release -p hypen-browser"),
+    "",
+    "  Then either copy the binary into the runner cache:",
+    cmd(
+      process.platform === "win32"
+        ? `copy target\\release\\${DESKTOP_BIN} ${tildify(RUNNER_PATHS.desktop)}`
+        : `mkdir -p ${tildify(RUNNERS_DIR)} && cp target/release/${DESKTOP_BIN} ${tildify(RUNNER_PATHS.desktop)}`
+    ),
+    "  or point hypen at it:",
+    cmd(`hypen run desktop --runner ./target/release/${DESKTOP_BIN}`),
+    cmd(`${DESKTOP_RUNNER_ENV}=/path/to/${DESKTOP_BIN} hypen run desktop`),
+    "",
+  ];
+  return lines.join("\n");
+}
+
+/**
+ * An explicitly chosen desktop runner: `--runner <path>`, else
+ * $HYPEN_DESKTOP_RUNNER. Relative paths resolve against the cwd.
+ */
+export function resolveDesktopRunnerOverride(
+  flag?: string,
+  env: NodeJS.ProcessEnv = process.env
+): string | null {
+  const raw = flag?.trim() || env[DESKTOP_RUNNER_ENV]?.trim();
+  if (!raw) return null;
+  const expanded = raw === "~" || raw.startsWith("~/") ? join(homedir(), raw.slice(1)) : raw;
+  return isAbsolute(expanded) ? expanded : resolvePath(expanded);
+}
+
 /**
  * Download + extract the Hypen Browser bare binary for this machine.
  * Cached at ~/.hypen/runners/hypen-browser; `--clean` forces a refresh.
+ * When nothing can be downloaded, prints how to build and install it.
  */
 export async function ensureDesktopRunner(): Promise<boolean> {
   ensureRunnersDir();
@@ -369,8 +517,7 @@ export async function ensureDesktopRunner(): Promise<boolean> {
   const target = desktopTarget();
   if (!target) {
     console.error(
-      `\n  Error: no prebuilt Hypen Browser for ${process.platform}/${process.arch}.\n` +
-        `  Build from source instead: cargo run --release -p hypen-browser\n`
+      desktopRunnerHelp(`no prebuilt Hypen Browser for ${process.platform}/${process.arch}.`)
     );
     return false;
   }
@@ -378,8 +525,17 @@ export async function ensureDesktopRunner(): Promise<boolean> {
   const url = `${RUNNER_URLS.desktop}/hypen-browser-${target}.tar.gz`;
   console.log(`  ${pink("Downloading desktop runner...")}`);
   console.log(`  ${dim("From:")} ${url}`);
-  const downloaded = await downloadFile(url, RUNNER_PATHS.desktopTar);
-  if (!downloaded) return false;
+  const download = await fetchToFile(url, RUNNER_PATHS.desktopTar);
+  if (!download.ok) {
+    const why =
+      download.status === 404
+        ? `no prebuilt runner for ${target} in the latest release (HTTP 404).`
+        : download.status !== undefined
+          ? `download failed (HTTP ${download.status}).`
+          : `download failed (${download.error}).`;
+    console.error(desktopRunnerHelp(why));
+    return false;
+  }
 
   console.log(`  Extracting...`);
   // tar handles .tar.gz on macOS, Linux, and Windows 10+ (bsdtar).
@@ -402,8 +558,81 @@ export async function ensureDesktopRunner(): Promise<boolean> {
   if (process.platform !== "win32") {
     await exec(["chmod", "+x", RUNNER_PATHS.desktop]);
   }
-  await fetchAndCacheVersion();
   return true;
+}
+
+export type LaunchResult =
+  | { state: "running"; pid: number }
+  | { state: "exited"; code: number | null; signal: string | null; logTail: string }
+  | { state: "error"; message: string };
+
+/** The last `maxLines` lines of `path` written after byte `offset`. */
+function readLogTail(path: string, offset: number, maxLines = 20): string {
+  try {
+    const text = readFileSync(path).subarray(offset).toString("utf-8");
+    return text.trimEnd().split(/\r?\n/).slice(-maxLines).join("\n");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Start `bin args...` detached with stdout/stderr appended to `logPath`,
+ * then watch it for `graceMs`. A process that dies inside that window is
+ * reported (with the tail of its log) instead of being called "launched".
+ */
+export async function launchDetached(
+  bin: string,
+  args: string[],
+  opts: { logPath: string; graceMs?: number }
+): Promise<LaunchResult> {
+  const graceMs = opts.graceMs ?? 1500;
+  let fd: number;
+  let offset = 0;
+  try {
+    mkdirSync(join(opts.logPath, ".."), { recursive: true });
+    fd = openSync(opts.logPath, "a");
+    offset = statSync(opts.logPath).size;
+    const header = `\n=== ${new Date().toISOString()} ${[bin, ...args].join(" ")}\n`;
+    writeSync(fd, header);
+    offset += Buffer.byteLength(header);
+  } catch (err: any) {
+    return { state: "error", message: `cannot open log ${opts.logPath}: ${err?.message ?? err}` };
+  }
+
+  return new Promise<LaunchResult>((resolve) => {
+    let settled = false;
+    const settle = (r: LaunchResult) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(r);
+    };
+
+    let child: ReturnType<typeof nodeSpawn>;
+    try {
+      // Detached + own stdio: the window outlives the CLI. Closing the
+      // CLI's server just makes the browser show its reconnect state.
+      child = nodeSpawn(bin, args, { detached: true, stdio: ["ignore", fd, fd] });
+    } catch (err: any) {
+      closeSync(fd);
+      resolve({ state: "error", message: err?.message ?? String(err) });
+      return;
+    }
+    // The child holds its own copy of the descriptor.
+    closeSync(fd);
+
+    child.once("error", (err) => settle({ state: "error", message: err.message }));
+    child.once("exit", (code, signal) =>
+      settle({ state: "exited", code, signal, logTail: readLogTail(opts.logPath, offset) })
+    );
+    const timer = setTimeout(() => {
+      child.removeAllListeners("exit");
+      child.removeAllListeners("error");
+      child.unref();
+      settle({ state: "running", pid: child.pid ?? -1 });
+    }, graceMs);
+  });
 }
 
 // ─── Device discovery ─────────────────────────────────────
@@ -411,6 +640,28 @@ export async function ensureDesktopRunner(): Promise<boolean> {
 /**
  * Parse `adb devices -l` into a structured list
  */
+/**
+ * `adb devices` entries that are attached but can't be used yet
+ * (`unauthorized`, `offline`, ...), with what to do about each — so "no
+ * devices" isn't reported while a phone is plugged in waiting for the USB
+ * debugging prompt.
+ */
+export function unreadyAdbDevices(stdout: string): { id: string; status: string; hint: string }[] {
+  const out: { id: string; status: string; hint: string }[] = [];
+  for (const line of stdout.trim().split("\n").slice(1)) {
+    const [id, status] = line.trim().split(/\s+/);
+    if (!id || !status || status === "device") continue;
+    const hint =
+      status === "unauthorized"
+        ? "accept the \"Allow USB debugging\" prompt on the device"
+        : status === "offline"
+          ? "reconnect it, or run: adb kill-server && adb start-server"
+          : "wait for it to finish booting or reconnect it";
+    out.push({ id, status, hint });
+  }
+  return out;
+}
+
 export async function listAndroidDevices(): Promise<AndroidDevice[]> {
   const { stdout, exitCode } = await exec(["adb", "devices", "-l"]);
   if (exitCode !== 0) return [];
@@ -496,11 +747,218 @@ export async function listIOSSimulators(): Promise<IOSSimulator[]> {
 
 // ─── Android ──────────────────────────────────────────────
 
-export async function runAndroid(port: number, overrideUrl?: string): Promise<void> {
+export type DeviceSelection<T> =
+  | { kind: "device"; device: T }
+  | { kind: "prompt"; devices: T[] }
+  | { kind: "error"; message: string };
+
+/**
+ * Decide which adb device to use. An explicit serial (`--device`, else
+ * $ANDROID_SERIAL) must match a ready device. With several devices and no
+ * serial we prompt — but only on a TTY; otherwise we fail fast rather than
+ * hang waiting for input that will never come.
+ */
+export function selectAndroidDevice(
+  devices: AndroidDevice[],
+  opts: { serial?: string; interactive: boolean }
+): DeviceSelection<AndroidDevice> {
+  const list = () =>
+    devices.map((d) => `    ${d.id}  ${dim(`${d.name} (${d.type})`)}`).join("\n");
+  const serial = opts.serial?.trim();
+  if (serial) {
+    const match = devices.find((d) => d.id === serial);
+    if (match) return { kind: "device", device: match };
+    return {
+      kind: "error",
+      message:
+        `Android device "${serial}" is not connected (or not authorized).` +
+        (devices.length ? `\n  Connected devices:\n${list()}` : ""),
+    };
+  }
+  if (devices.length === 1) return { kind: "device", device: devices[0]! };
+  if (!opts.interactive) {
+    return {
+      kind: "error",
+      message:
+        `${devices.length} Android devices are connected and there is no terminal to ask which one.\n` +
+        `  Pick one with --device <serial> or ANDROID_SERIAL=<serial>:\n${list()}`,
+    };
+  }
+  return { kind: "prompt", devices };
+}
+
+const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]", "::1"]);
+
+/** Forward device:port → host:port over adb. True when adb accepted it. */
+export async function adbReverse(serial: string, port: number, run: ExecFn = exec): Promise<boolean> {
+  const { exitCode } = await run(["adb", "-s", serial, "reverse", `tcp:${port}`, `tcp:${port}`]);
+  return exitCode === 0;
+}
+
+export interface AndroidUrl {
+  url: string;
+  /** How the device reaches the server. */
+  via: "reverse" | "emulator-alias" | "lan" | "override";
+}
+
+/**
+ * The URL the runner should dial. `adb reverse` first: it works for
+ * emulators, USB devices and remote adb alike, with no guessing about
+ * which host address the device can route to. Without it, emulators use
+ * the 10.0.2.2 host alias and physical devices the host's LAN IP.
+ *
+ * An explicit `--url` pointing at this machine's loopback is reversed too
+ * (the device's own localhost would otherwise be the phone itself); any
+ * other `--url` is used as given.
+ */
+export async function resolveAndroidUrl(
+  device: Pick<AndroidDevice, "id" | "type">,
+  port: number,
+  overrideUrl?: string,
+  run: ExecFn = exec
+): Promise<AndroidUrl> {
+  if (overrideUrl) {
+    let parsed: URL | null = null;
+    try {
+      parsed = new URL(overrideUrl);
+    } catch {
+      // not a URL we can reason about; pass it through
+    }
+    if (!parsed || !LOCAL_HOSTS.has(parsed.hostname)) return { url: overrideUrl, via: "override" };
+    const p = Number(parsed.port) || (/^(wss|https):$/.test(parsed.protocol) ? 443 : 80);
+    if (await adbReverse(device.id, p, run)) return { url: overrideUrl, via: "reverse" };
+    if (device.type === "emulator") {
+      parsed.hostname = "10.0.2.2";
+      return { url: parsed.toString().replace(/\/$/, ""), via: "emulator-alias" };
+    }
+    console.warn(
+      `  ${yellow("Warning:")} adb reverse failed; ${overrideUrl} points at the device itself, not this machine.`
+    );
+    return { url: overrideUrl, via: "override" };
+  }
+
+  if (await adbReverse(device.id, port, run)) {
+    return { url: `ws://localhost:${port}`, via: "reverse" };
+  }
+  if (device.type === "physical") {
+    const ip = getLocalIP();
+    if (ip) return { url: `ws://${ip}:${port}`, via: "lan" };
+    console.warn("  Warning: adb reverse failed and no LAN IP was found, falling back to 10.0.2.2");
+  }
+  return { url: `ws://10.0.2.2:${port}`, via: "emulator-alias" };
+}
+
+export interface InstalledPackage {
+  versionName?: string;
+  versionCode?: string;
+  lastUpdateTime?: string;
+}
+
+/** Pull version info out of `adb shell dumpsys package <pkg>`. */
+export function parseDumpsysPackage(out: string): InstalledPackage | null {
+  const versionName = /versionName=(\S+)/.exec(out)?.[1];
+  const versionCode = /versionCode=(\d+)/.exec(out)?.[1];
+  const lastUpdateTime = /lastUpdateTime=([^\r\n]+)/.exec(out)?.[1]?.trim();
+  if (!versionName && !versionCode) return null;
+  return { versionName, versionCode, lastUpdateTime };
+}
+
+export async function getInstalledAndroidRunner(
+  serial: string,
+  run: ExecFn = exec
+): Promise<InstalledPackage | null> {
+  const { stdout, exitCode } = await run(["adb", "-s", serial, "shell", "dumpsys", "package", ANDROID_PACKAGE]);
+  if (exitCode !== 0) return null;
+  return parseDumpsysPackage(stdout);
+}
+
+type InstallRecord = { apk: string; versionCode?: string; lastUpdateTime?: string };
+
+function readInstallRecords(path: string): Record<string, InstallRecord> {
+  try {
+    const data = JSON.parse(readFileSync(path, "utf-8"));
+    return data && typeof data === "object" ? data : {};
+  } catch {
+    return {};
+  }
+}
+
+function sha256File(path: string): string {
+  return createHash("sha256").update(readFileSync(path)).digest("hex");
+}
+
+/**
+ * True when `serial` still has exactly the APK we last installed there:
+ * same APK bytes on our side, and the package on the device hasn't been
+ * reinstalled or updated since (same versionCode and lastUpdateTime).
+ */
+export function isRunnerInstallCurrent(
+  record: InstallRecord | undefined,
+  apkHash: string,
+  installed: InstalledPackage | null
+): boolean {
+  if (!record || !installed) return false;
+  if (record.apk !== apkHash) return false;
+  if (!installed.lastUpdateTime || record.lastUpdateTime !== installed.lastUpdateTime) return false;
+  return record.versionCode === installed.versionCode;
+}
+
+export interface AndroidInstallResult {
+  ok: boolean;
+  skipped: boolean;
+  versionName?: string;
+  error?: string;
+}
+
+/**
+ * `adb install -r` the cached runner APK on `serial` unless that exact APK
+ * is already installed there. `hypen run android --clean` clears the
+ * record, forcing a reinstall.
+ */
+export async function installAndroidRunnerIfNeeded(
+  serial: string,
+  opts: { apkPath?: string; recordsPath?: string; run?: ExecFn } = {}
+): Promise<AndroidInstallResult> {
+  const apkPath = opts.apkPath ?? RUNNER_PATHS.android;
+  const recordsPath = opts.recordsPath ?? RUNNER_PATHS.androidInstalls;
+  const run = opts.run ?? exec;
+
+  const apkHash = sha256File(apkPath);
+  const records = readInstallRecords(recordsPath);
+  const before = await getInstalledAndroidRunner(serial, run);
+  if (isRunnerInstallCurrent(records[serial], apkHash, before)) {
+    return { ok: true, skipped: true, versionName: before?.versionName };
+  }
+
+  const { exitCode, stderr, stdout } = await run(["adb", "-s", serial, "install", "-r", apkPath]);
+  if (exitCode !== 0) {
+    return { ok: false, skipped: false, error: (stderr || stdout).trim() };
+  }
+
+  const after = await getInstalledAndroidRunner(serial, run);
+  if (after?.lastUpdateTime) {
+    records[serial] = { apk: apkHash, versionCode: after.versionCode, lastUpdateTime: after.lastUpdateTime };
+    try {
+      mkdirSync(join(recordsPath, ".."), { recursive: true });
+      writeFileSync(recordsPath, JSON.stringify(records, null, 2));
+    } catch {
+      // Only costs a reinstall next time.
+    }
+  }
+  return { ok: true, skipped: false, versionName: after?.versionName };
+}
+
+export async function runAndroid(
+  port: number,
+  overrideUrl?: string,
+  options: RunOptions = {}
+): Promise<void> {
   const hasAdb = await commandExists("adb");
   if (!hasAdb) {
     console.error(
-      "\n  Error: adb not found.\n  Install Android SDK platform-tools and make sure adb is on your PATH.\n"
+      "\n  Error: adb not found.\n" +
+        "  Install Android SDK platform-tools (https://developer.android.com/tools/releases/platform-tools)\n" +
+        "  and make sure adb is on your PATH (e.g. $ANDROID_HOME/platform-tools).\n"
     );
     process.exit(1);
   }
@@ -508,21 +966,38 @@ export async function runAndroid(port: number, overrideUrl?: string): Promise<vo
   // Discover devices
   const devices = await listAndroidDevices();
   if (devices.length === 0) {
-    console.error(
-      "\n  Error: No Android devices/emulators connected.\n  Start an emulator or connect a device via USB.\n"
-    );
+    const unready = unreadyAdbDevices((await exec(["adb", "devices"])).stdout);
+    if (unready.length > 0) {
+      console.error("\n  Error: no Android device is ready:");
+      for (const d of unready) console.error(`    ${d.id} is ${d.status}: ${d.hint}`);
+      console.error("");
+    } else {
+      console.error(
+        "\n  Error: No Android devices/emulators connected.\n" +
+          "  Start an emulator (emulator -avd <name>) or connect a device with USB debugging on,\n" +
+          "  then check it shows up in: adb devices\n"
+      );
+    }
     process.exit(1);
   }
 
-  // Pick device
-  const device = await promptChoice(
-    devices,
-    (d) => {
-      const tag = d.type === "emulator" ? "emulator" : "physical";
-      return `${d.name} (${tag}) - ${d.id}`;
-    },
-    "Select a device"
-  );
+  // Pick device: --device, then $ANDROID_SERIAL, then the only one, then ask.
+  const selection = selectAndroidDevice(devices, {
+    serial: options.device || process.env.ANDROID_SERIAL,
+    interactive: !!process.stdin.isTTY,
+  });
+  if (selection.kind === "error") {
+    console.error(`\n  Error: ${selection.message}\n`);
+    process.exit(1);
+  }
+  const device =
+    selection.kind === "device"
+      ? selection.device
+      : await promptChoice(
+          selection.devices,
+          (d) => `${d.name} (${d.type}) - ${d.id}`,
+          "Select a device"
+        );
 
   console.log(`  ${pink("Using:")} ${device.name} ${dim(`(${device.id})`)}\n`);
 
@@ -533,27 +1008,23 @@ export async function runAndroid(port: number, overrideUrl?: string): Promise<vo
     process.exit(1);
   }
 
-  // Install (target specific device with -s)
-  console.log(`  ${dim("Installing runner...")}`);
-  const { exitCode: installCode, stderr: installErr } = await exec([
-    "adb",
-    "-s",
-    device.id,
-    "install",
-    "-r",
-    RUNNER_PATHS.android,
-  ]);
-  if (installCode !== 0) {
-    console.error(`  Install failed: ${installErr}`);
+  // Install (target specific device with -s), unless already current
+  console.log(`  ${dim("Checking runner...")}`);
+  const install = await installAndroidRunnerIfNeeded(device.id);
+  if (!install.ok) {
+    console.error(`  Install failed: ${install.error}`);
     process.exit(1);
   }
-  const version = getCachedVersion();
-  console.log(`  ${pink("Installed.")} ${dim(`(runner v${version})`)}`);
+  console.log(
+    `  ${pink(install.skipped ? "Runner up to date." : "Installed.")}${versionSuffix(install.versionName)}`
+  );
 
   // Launch via deep link
-  const wsUrl = overrideUrl || getServerUrl("android", port, device.type);
+  const { url: wsUrl, via } = await resolveAndroidUrl(device, port, overrideUrl);
   const deepLink = `hypenpreview://connect?url=${encodeURIComponent(wsUrl)}`;
-  console.log(`  ${dim("Launching with server:")} ${yellow(wsUrl)}`);
+  const viaNote =
+    via === "reverse" ? " (adb reverse)" : via === "lan" ? " (LAN; device must be on the same network)" : "";
+  console.log(`  ${dim("Launching with server:")} ${yellow(wsUrl)}${dim(viaNote)}`);
 
   const { exitCode: launchCode, stderr: launchErr } = await exec([
     "adb",
@@ -577,7 +1048,97 @@ export async function runAndroid(port: number, overrideUrl?: string): Promise<vo
 
 // ─── iOS ──────────────────────────────────────────────────
 
-export async function runIOS(port: number, overrideUrl?: string): Promise<void> {
+/** Env var naming the simulator `hypen run ios` should use (name or UDID). */
+export const IOS_SIMULATOR_ENV = "HYPEN_IOS_SIMULATOR";
+
+/**
+ * Decide which iOS Simulator to use. An explicit choice (name or UDID, from
+ * `options.device` or $HYPEN_IOS_SIMULATOR) must match an available
+ * simulator. Otherwise booted simulators win; with one candidate, or with no
+ * terminal to ask (CI, piped stdin, a background `hypen run ios`), we take
+ * the first one (booted first, then the first iPhone) instead of waiting
+ * forever on a prompt nobody can answer.
+ */
+export function selectIOSSimulator(
+  simulators: IOSSimulator[],
+  opts: { device?: string; interactive: boolean }
+): DeviceSelection<IOSSimulator> {
+  const ios = simulators.filter((s) => s.runtime.startsWith("iOS"));
+  const pool = ios.length > 0 ? ios : simulators;
+  const list = () =>
+    pool.map((s) => `    ${s.name} - ${s.runtime}  ${dim(s.udid)}`).join("\n");
+  const wanted = opts.device?.trim();
+  if (wanted) {
+    const byUdid = pool.find((s) => s.udid.toLowerCase() === wanted.toLowerCase());
+    const byName = pool.filter((s) => s.name.toLowerCase() === wanted.toLowerCase());
+    const match =
+      byUdid ?? byName.find((s) => s.state === "Booted") ?? byName[0];
+    if (match) return { kind: "device", device: match };
+    return {
+      kind: "error",
+      message:
+        `iOS Simulator "${wanted}" not found.` +
+        (pool.length ? `\n  Available simulators:\n${list()}` : ""),
+    };
+  }
+  const booted = pool.filter((s) => s.state === "Booted");
+  const candidates = booted.length > 0 ? booted : pool;
+  if (candidates.length === 1) return { kind: "device", device: candidates[0]! };
+  if (!opts.interactive) {
+    const iphone = candidates.find((s) => /^iPhone/.test(s.name));
+    return { kind: "device", device: iphone ?? candidates[0]! };
+  }
+  return { kind: "prompt", devices: candidates };
+}
+
+/**
+ * Start the runner on a booted simulator, connected to `wsUrl`.
+ *
+ * The runner reads `DEVICE_LAB_URL` from its environment at launch, which
+ * `simctl launch` sets from `SIMCTL_CHILD_*`. That connects straight away;
+ * the `hypenpreview://connect` deep link instead makes iOS show an
+ * "Open in HypenGallery?" confirmation that blocks until someone clicks it.
+ * The deep link stays as the fallback (retried while the simulator settles).
+ */
+export async function launchIOSRunner(
+  udid: string,
+  wsUrl: string,
+  run: ExecFn = exec,
+  retryDelayMs = 3000
+): Promise<{ ok: boolean; via?: "launch" | "deep-link"; error?: string }> {
+  const launched = await run([
+    "env",
+    `SIMCTL_CHILD_DEVICE_LAB_URL=${wsUrl}`,
+    "xcrun",
+    "simctl",
+    "launch",
+    "--terminate-running-process",
+    udid,
+    IOS_BUNDLE_ID,
+  ]);
+  if (launched.exitCode === 0) return { ok: true, via: "launch" };
+
+  const deepLink = `hypenpreview://connect?url=${encodeURIComponent(wsUrl)}`;
+  let lastError = (launched.stderr || launched.stdout).trim();
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { exitCode, stderr } = await run(["xcrun", "simctl", "openurl", udid, deepLink]);
+    if (exitCode === 0) return { ok: true, via: "deep-link" };
+    lastError = stderr.trim();
+    if (attempt < 2 && stderr.includes("timed out")) {
+      console.log(`  ${dim("Simulator not ready, retrying...")}`);
+      await new Promise((r) => setTimeout(r, retryDelayMs));
+    } else {
+      break;
+    }
+  }
+  return { ok: false, error: lastError };
+}
+
+export async function runIOS(
+  port: number,
+  overrideUrl?: string,
+  options: RunOptions = {}
+): Promise<void> {
   const hasXcrun = await commandExists("xcrun");
   if (!hasXcrun) {
     console.error(
@@ -595,18 +1156,31 @@ export async function runIOS(port: number, overrideUrl?: string): Promise<void> 
     process.exit(1);
   }
 
-  // Prefer booted simulators, but show all
-  const booted = allSimulators.filter((s) => s.state === "Booted");
-  const candidates = booted.length > 0 ? booted : allSimulators;
-
-  const sim = await promptChoice(
-    candidates,
-    (s) => {
-      const state = s.state === "Booted" ? "booted" : "shutdown";
-      return `${s.name} - ${s.runtime} [${state}]`;
-    },
-    "Select a simulator"
-  );
+  // Pick: --device / $HYPEN_IOS_SIMULATOR, then booted ones, then ask
+  // (on a TTY) or take the first iPhone (no TTY).
+  const interactive = !!process.stdin.isTTY;
+  const selection = selectIOSSimulator(allSimulators, {
+    device: options.device || process.env[IOS_SIMULATOR_ENV],
+    interactive,
+  });
+  if (selection.kind === "error") {
+    console.error(`\n  Error: ${selection.message}\n`);
+    process.exit(1);
+  }
+  const sim =
+    selection.kind === "device"
+      ? selection.device
+      : await promptChoice(
+          selection.devices,
+          (s) => {
+            const state = s.state === "Booted" ? "booted" : "shutdown";
+            return `${s.name} - ${s.runtime} [${state}]`;
+          },
+          "Select a simulator"
+        );
+  if (selection.kind === "device" && !interactive && !options.device && !process.env[IOS_SIMULATOR_ENV]) {
+    console.log(`  ${dim(`No terminal to ask; picked a simulator. Choose one with ${IOS_SIMULATOR_ENV}=<name|udid>.`)}`);
+  }
 
   console.log(`  ${pink("Using:")} ${sim.name} ${dim(`(${sim.udid})`)}\n`);
 
@@ -674,34 +1248,17 @@ export async function runIOS(port: number, overrideUrl?: string): Promise<void> 
     console.error(`  Install failed: ${installErr}`);
     process.exit(1);
   }
-  const version = getCachedVersion();
-  console.log(`  ${pink("Installed.")} ${dim(`(runner v${version})`)}`);
+  console.log(`  ${pink("Installed.")}${versionSuffix(getCachedVersion())}`);
 
-  // Launch via deep link (retry a few times if simulator isn't ready yet)
   const wsUrl = overrideUrl || getServerUrl("ios", port, "simulator");
-  const deepLink = `hypenpreview://connect?url=${encodeURIComponent(wsUrl)}`;
   console.log(`  ${dim("Launching with server:")} ${yellow(wsUrl)}`);
-
-  let launchOk = false;
-  for (let attempt = 0; attempt < 3; attempt++) {
-    const { exitCode: launchCode, stderr: launchErr } = await exec([
-      "xcrun",
-      "simctl",
-      "openurl",
-      sim.udid,
-      deepLink,
-    ]);
-    if (launchCode === 0) {
-      launchOk = true;
-      break;
-    }
-    if (attempt < 2 && launchErr.includes("timed out")) {
-      console.log(`  ${dim("Simulator not ready, retrying...")}`);
-      await new Promise((r) => setTimeout(r, 3000));
-    } else {
-      console.error(`  Launch failed: ${launchErr}`);
-      process.exit(1);
-    }
+  const launch = await launchIOSRunner(sim.udid, wsUrl);
+  if (!launch.ok) {
+    console.error(`  Launch failed: ${launch.error}`);
+    process.exit(1);
+  }
+  if (launch.via === "deep-link") {
+    console.log(`  ${dim('If the simulator asks "Open in HypenGallery?", click Open.')}`);
   }
 
   console.log(`  ${pink("Runner launched on")} ${yellow(sim.name)}\n`);
@@ -712,39 +1269,59 @@ export async function runIOS(port: number, overrideUrl?: string): Promise<void> 
 /**
  * Launch the Hypen Browser on this machine, pointed at the dev server.
  * Works on macOS (arm64/x86_64), Windows (x64), and Linux (x64) — the
- * platforms the Desktop Installers workflow publishes binaries for.
+ * platforms the Desktop Installers workflow publishes binaries for — and
+ * anywhere else with a locally built runner (`--runner`/$HYPEN_DESKTOP_RUNNER).
  */
-export async function runDesktop(port: number, overrideUrl?: string): Promise<void> {
-  const hasRunner = await ensureDesktopRunner();
-  if (!hasRunner) {
-    console.error("\n  Error: Could not set up the desktop runner.\n");
-    process.exit(1);
+export async function runDesktop(
+  port: number,
+  overrideUrl?: string,
+  options: RunOptions = {}
+): Promise<void> {
+  let runner = resolveDesktopRunnerOverride(options.runner);
+  if (runner) {
+    if (!existsSync(runner) || statSync(runner).isDirectory()) {
+      const source = options.runner ? "--runner" : `$${DESKTOP_RUNNER_ENV}`;
+      console.error(`\n  Error: ${source} points at ${runner}, which is not a file.\n`);
+      process.exit(1);
+    }
+  } else {
+    const hasRunner = await ensureDesktopRunner();
+    if (!hasRunner) {
+      console.error("  Error: Could not set up the desktop runner.\n");
+      process.exit(1);
+    }
+    runner = RUNNER_PATHS.desktop;
   }
-  const version = getCachedVersion();
-  console.log(`  ${pink("Ready.")} ${dim(`(runner v${version})`)}`);
+  console.log(`  ${pink("Runner:")} ${dim(tildify(runner))}`);
 
   const wsUrl = overrideUrl || `ws://localhost:${port}`;
   console.log(`  ${dim("Launching with server:")} ${yellow(wsUrl)}`);
 
-  // Detach so the window has its own lifetime — closing the CLI's
-  // server just makes the browser show its reconnect state.
-  if (isBun) {
-    const proc = Bun.spawn([RUNNER_PATHS.desktop, wsUrl], {
-      stdout: "ignore",
-      stderr: "ignore",
-      stdin: "ignore",
-    });
-    proc.unref();
-  } else {
-    const { spawn } = await import("child_process");
-    const child = spawn(RUNNER_PATHS.desktop, [wsUrl], {
-      detached: true,
-      stdio: "ignore",
-    });
-    child.unref();
+  const logPath = RUNNER_PATHS.desktopLog;
+  const result = await launchDetached(runner, [wsUrl], { logPath });
+  if (result.state === "error") {
+    const hint = /EACCES/.test(result.message)
+      ? `\n  It is not executable. Make it so with: chmod +x ${runner}`
+      : "";
+    console.error(`\n  Error: could not start ${runner}: ${result.message}${hint}\n`);
+    process.exit(1);
+  }
+  if (result.state === "exited") {
+    const how = result.signal ? `signal ${result.signal}` : `exit code ${result.code}`;
+    if (result.code === 0 && !result.signal) {
+      console.warn(`  ${yellow("Warning:")} Hypen Browser exited right away (${how}).`);
+    } else {
+      console.error(`\n  Error: Hypen Browser exited right after starting (${how}).`);
+    }
+    if (result.logTail) {
+      console.error(`\n${result.logTail.split("\n").map((l) => `    ${dim(l)}`).join("\n")}\n`);
+    }
+    console.error(`  Full log: ${tildify(logPath)}\n`);
+    if (result.code !== 0 || result.signal) process.exit(1);
+    return;
   }
 
-  console.log(`  ${pink("Hypen Browser launched.")}\n`);
+  console.log(`  ${pink("Hypen Browser launched.")} ${dim(`Log: ${tildify(logPath)}`)}\n`);
 }
 
 // ─── Help ─────────────────────────────────────────────────
@@ -764,13 +1341,31 @@ export const RUN_HELP = `
     --port, -p <port>     Dev server port (default: 3000)
     --url <ws://...>      Connect to an existing server (skips built-in server)
     --clean               Delete cached runner and download a fresh copy
+                          (Android: also forces a reinstall)
     --studio              Launch Studio IDE alongside the runner
+    --studio-port <port>  With --studio: Studio's port (default: 5173)
+    --device <id>         Android: adb serial (default: $ANDROID_SERIAL)
+                          iOS: simulator name or UDID (default: $${IOS_SIMULATOR_ENV})
+    --runner <path>       Desktop: use this hypen-browser binary
+                          (default: $${DESKTOP_RUNNER_ENV}, else ~/.hypen/runners/)
 
   This command starts a hypen dev server, downloads and installs the runner app
   (cached in ~/.hypen/runners/), and launches it on your device. Use --url to
   connect to an existing server instead of starting a new one.
 
-  If multiple devices are connected, you'll be prompted to choose one.
+  If multiple Android devices are connected, pass --device (or set
+  ANDROID_SERIAL); in a terminal you'll otherwise be prompted to choose one.
+  Android connects over ${dim("adb reverse")} when it can (ws://localhost:<port>),
+  else via 10.0.2.2 (emulator) or this machine's LAN IP (physical device).
+  The APK is only reinstalled when it changed.
+
+  iOS picks a booted simulator, else asks in a terminal; without a terminal
+  it takes the first iPhone. Pass --device (or set $${IOS_SIMULATOR_ENV}) to
+  choose one by name or UDID.
+
+  Desktop runner output goes to ~/.hypen/runners/browser.log. If no prebuilt
+  runner can be downloaded, build it with ${dim("cargo build --release -p hypen-browser")}
+  and copy it to ~/.hypen/runners/hypen-browser, or pass --runner.
 
   ${boldYellow("Examples:")}
     ${dim("$")} hypen run android
@@ -779,4 +1374,7 @@ export const RUN_HELP = `
     ${dim("$")} hypen run android --port 8080
     ${dim("$")} hypen run desktop --url ws://localhost:3000
     ${dim("$")} hypen run ios --clean
+    ${dim("$")} hypen run android --device emulator-5554
+    ${dim("$")} hypen run ios --device "iPhone 16 Pro"
+    ${dim("$")} hypen run desktop --runner ./target/release/hypen-browser
 `;

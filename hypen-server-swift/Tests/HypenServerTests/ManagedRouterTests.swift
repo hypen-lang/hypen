@@ -282,4 +282,40 @@ final class ManagedRouterTests: XCTestCase {
 
         managed.stop()
     }
+
+    // Typed lifecycle handlers receive the instance's GlobalContext, so a
+    // route module can read its params through `ctx?.getRouter()` — the
+    // pattern the docs and examples/social/swift (Story) use. Before the
+    // fix the typed builder always passed nil.
+    func testTypedLifecycleHandlersReceiveRouterContext() {
+        struct ProfileState: Codable { var userId: String = ""; var sawRouterOnCreate = false }
+        let router = HypenRouter()
+        let app = HypenApp()
+        let ctx = HypenGlobalContext(router: router)
+
+        let _ = hypen(ProfileState(), name: "Profile", app: app)
+            .onCreated { (state: inout ProfileState, ctx: GlobalContext?) in
+                state.sawRouterOnCreate = ctx?.getRouter() != nil
+            }
+            .onActivated { (state: inout ProfileState, ctx: GlobalContext?) in
+                guard let r = ctx?.getRouter(),
+                      let m = r.matchPath(pattern: "/users/:id", path: r.getCurrentPath()),
+                      let id = m.params["id"] else { return }
+                state.userId = id
+            }
+            .build()
+        let _ = app.module("HomePage").defineState(["page": "home"]).build()
+
+        let managed = ManagedRouter(router: router, registry: app, globalContext: ctx)
+            .addRoute(RouteDefinition(path: "/", component: "HomePage"))
+            .addRoute(RouteDefinition(path: "/users/:id", component: "Profile"))
+        managed.start()
+        router.push("/users/42")
+
+        let state = managed.getActiveModule()?.getState()
+        XCTAssertEqual(state?["userId"] as? String, "42")
+        XCTAssertEqual(state?["sawRouterOnCreate"] as? Bool, true)
+
+        managed.stop()
+    }
 }

@@ -2,8 +2,14 @@ import { cn } from "@/lib/utils";
 import { Button } from "@/components/ui/button";
 import { Trash2, Play, Plus, Zap } from "lucide-react";
 import { useEffect, useState, useRef, useCallback } from "react";
-import { JsonEditor } from "json-edit-react";
+import { JsonEditor, githubDarkTheme } from "json-edit-react";
 import type { PanelState, ConsoleLog, ActionLogEntry, StateHistoryEntry } from "./Studio";
+import {
+  changedModules,
+  describeEntry,
+  statePanelData,
+  type ModuleStates,
+} from "@/lib/state-history";
 import { TerminalPanel } from "./TerminalPanel";
 
 interface MockInfo {
@@ -18,6 +24,8 @@ type BottomPanelProps = {
   consoleLogs: ConsoleLog[];
   actionLog: ActionLogEntry[];
   currentState: Record<string, any>;
+  /** Every module's state (lowercase id → state), when the engine streams it. */
+  currentModules?: ModuleStates;
   stateHistory: StateHistoryEntry[];
   historyIndex: number;
   style?: React.CSSProperties;
@@ -37,7 +45,13 @@ type BottomPanelProps = {
  *     produced so far. Editing doesn't make sense here because the
  *     module owns mutations.
  */
-function StatePanel({ state }: { state: Record<string, any> }) {
+function StatePanel({
+  state,
+  modules,
+}: {
+  state: Record<string, any>;
+  modules?: ModuleStates;
+}) {
   const [mock, setMock] = useState<MockInfo | null>(null);
   const [pending, setPending] = useState(false);
   // Track local edits separately from the fetched state so we don't clobber
@@ -115,7 +129,7 @@ function StatePanel({ state }: { state: Record<string, any> }) {
               setLocalState(obj);
               scheduleSave(obj);
             }}
-            theme="githubDark"
+            theme={githubDarkTheme}
             rootName="state"
             collapse={2}
             restrictAdd={false}
@@ -173,10 +187,33 @@ function StatePanel({ state }: { state: Record<string, any> }) {
     );
   }
 
-  // ── Real module: read-only pretty-print ──
+  // ── Real modules: one read-only tree per module (primary, nested and
+  // route modules — active or cached), or the entry's state alone when the
+  // engine predates per-module streaming. ──
+  const data = statePanelData(state, modules);
+  if (data.kind === "modules") {
+    return (
+      <div className="p-2 font-mono text-xs overflow-auto h-full" data-testid="state-modules">
+        {Object.entries(data.modules).map(([id, moduleState]) => (
+          <div key={id} className="mb-2" data-module={id}>
+            <JsonEditor
+              data={moduleState as object}
+              viewOnly
+              theme={githubDarkTheme}
+              rootName={id}
+              collapse={2}
+              enableClipboard={false}
+              minWidth="100%"
+              maxWidth="100%"
+            />
+          </div>
+        ))}
+      </div>
+    );
+  }
   return (
     <div className="p-3 font-mono text-xs overflow-auto h-full">
-      <pre className="text-foreground/80">{JSON.stringify(state, null, 2)}</pre>
+      <pre className="text-foreground/80">{JSON.stringify(data.state, null, 2)}</pre>
     </div>
   );
 }
@@ -202,10 +239,10 @@ function ActionsPanel({
             key={i}
             className="flex items-center gap-2 px-3 py-2 border-b border-border/50 text-sm"
           >
-            <span className="text-muted-foreground text-xs font-mono">{action.time}</span>
-            <span className="text-pink-400 font-medium">{action.name}</span>
+            <span className="text-muted-foreground text-xs font-mono shrink-0">{action.time}</span>
+            <span className="text-pink-400 font-medium shrink-0">{action.name}</span>
             {action.payload && (
-              <span className="text-muted-foreground font-mono text-xs truncate">
+              <span className="text-muted-foreground font-mono text-xs truncate min-w-0">
                 {JSON.stringify(action.payload)}
               </span>
             )}
@@ -311,9 +348,10 @@ function TimelinePanel({
 
       <div className="flex-1 overflow-auto max-h-32">
         {history.slice(-20).map((entry, i) => {
-          const actualIndex = history.length - 20 + i;
-          if (actualIndex < 0) return null;
+          // `slice(-20)` returns fewer than 20 entries on a short history.
+          const actualIndex = Math.max(0, history.length - 20) + i;
           const isActive = actualIndex === currentIndex;
+          const modulesChanged = changedModules(entry);
 
           return (
             <button
@@ -331,6 +369,17 @@ function TimelinePanel({
               {entry.action && (
                 <span className="ml-2 text-pink-400">{entry.action}</span>
               )}
+              <span className="ml-2 font-mono text-foreground/80" data-testid="timeline-change">
+                {describeEntry(entry, history[actualIndex - 1])}
+              </span>
+              {modulesChanged.map((id) => (
+                <span
+                  key={id}
+                  className="ml-1.5 px-1 rounded bg-accent/60 text-[10px] text-muted-foreground"
+                >
+                  {id}
+                </span>
+              ))}
             </button>
           );
         })}
@@ -344,6 +393,7 @@ export function BottomPanel({
   consoleLogs,
   actionLog,
   currentState,
+  currentModules,
   stateHistory,
   historyIndex,
   onHistoryChange,
@@ -360,22 +410,22 @@ export function BottomPanel({
   ].filter(Boolean);
 
   return (
-    <div className="border-t border-border bg-card/50 flex" style={style}>
+    <div className="border-t border-border bg-card/50 flex overflow-hidden" style={style}>
       {panels.state && (
-        <div className="flex-1 border-r border-border flex flex-col">
+        <div className="flex-1 min-w-0 border-r border-border flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               State
             </span>
           </div>
           <div className="flex-1 overflow-auto">
-            <StatePanel state={currentState} />
+            <StatePanel state={currentState} modules={currentModules} />
           </div>
         </div>
       )}
 
       {panels.actions && (
-        <div className="flex-1 border-r border-border flex flex-col">
+        <div className="flex-1 min-w-0 border-r border-border flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Actions
@@ -388,7 +438,7 @@ export function BottomPanel({
       )}
 
       {panels.console && (
-        <div className="flex-1 border-r border-border flex flex-col">
+        <div className="flex-1 min-w-0 border-r border-border flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Console
@@ -401,7 +451,7 @@ export function BottomPanel({
       )}
 
       {panels.timeline && (
-        <div className="flex-1 flex flex-col">
+        <div className="flex-1 min-w-0 flex flex-col">
           <div className="h-8 border-b border-border flex items-center px-3">
             <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider">
               Timeline

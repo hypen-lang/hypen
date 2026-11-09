@@ -62,6 +62,16 @@ export type {
   DeviceOutgoing,
 } from "./remote-session.js";
 
+// Session snapshots (hibernation wake / hot-reload resume).
+export {
+  NodeShadow,
+  SESSION_SNAPSHOT_VERSION,
+  isSessionSnapshot,
+  mergeRestoredState,
+  snapshotPath,
+} from "./snapshot.js";
+export type { SessionSnapshot, SnapshotTree } from "./snapshot.js";
+
 // Negotiated WebSocket extensions vs the device plane (RFC 001 §2.3):
 // permessage-deflate is device-safe only with no context takeover both ways.
 export {

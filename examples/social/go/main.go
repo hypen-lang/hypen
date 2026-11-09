@@ -8,8 +8,8 @@ import (
 	"strings"
 	"time"
 
-	core "github.com/hypen-space/core"
-	"github.com/hypen-space/core/remote"
+	core "github.com/hypen-lang/hypen/hypen-golang"
+	"github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 func main() {
@@ -308,10 +308,9 @@ func buildCommentsModule(db *sql.DB, currentUser User) *core.ModuleDefinition {
 }
 
 // ---------------------------------------------------------------------------
-// Story — route "/story/:id". Pulls a minimal user record to seed the
-// overlay; a "real" story object would come from HomePage's cache, but
-// Go modules don't share state the way the TS plan assumes so we
-// reconstruct from the DB by user id.
+// Story — route "/story/:id". The param is a story id; Go modules don't
+// share state the way the TS plan assumes, so we load the story (and its
+// author) straight from the DB rather than from HomePage's cache.
 // ---------------------------------------------------------------------------
 
 func buildStoryModule(db *sql.DB) *core.ModuleDefinition {
@@ -332,21 +331,9 @@ func buildStoryModule(db *sql.DB) *core.ModuleDefinition {
 				state.Story = nil
 				return
 			}
-			u := getUser(db, id)
-			if u.ID == "" {
-				state.Story = nil
-				return
-			}
-			state.Story = &ViewedStory{
-				ID: id,
-				User: User{
-					ID:          u.ID,
-					Username:    u.Username,
-					DisplayName: u.DisplayName,
-					AvatarUrl:   u.AvatarUrl,
-				},
-				ImageUrl: u.AvatarUrl,
-			}
+			// id is a story id (see StoryItem); getStory falls back to a user
+			// id for deep links and returns nil for anything unknown.
+			state.Story = getStory(db, id)
 		}).
 		Build()
 }

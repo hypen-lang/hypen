@@ -7,17 +7,56 @@ description: Hypen command-line interface for creating and managing projects
 
 The Hypen CLI (`@hypen-space/cli`) is the recommended way to create, develop, and build Hypen applications.
 
+<Callout type="warn">
+This page describes CLI 0.6.7. With 0.6.6 and earlier, `hypen <command> --help` prints only the global help, `--no-open`, `--device`, `--runner` and `--studio-port` are rejected, `DEBUG=hypen:*` is ignored, a global `hypen` does not hand off to the project's CLI, `hypen build` produces an older bundle without `server.js`, `hypen run` does not read `ANDROID_SERIAL` or `HYPEN_DESKTOP_RUNNER`, and `hypen init` overwrites an existing directory. Update a global install with `bun add -g @hypen-space/cli@latest`, and a project with `bun update`.
+</Callout>
+
 ## Installation
 
-```bash
-# Using Bun (recommended)
-bun install -g @hypen-space/cli
+The CLI is a Bun program, so you need [Bun](https://bun.sh) 1.2 or newer. Node.js and npm alone can't run it.
 
-# Using npm
-npm install -g @hypen-space/cli
+You don't have to install it globally. `hypen init` adds `@hypen-space/cli` to every project as a dev dependency, so inside a project you can use the package scripts (`bun run dev`) or `bunx hypen <command>`:
+
+```bash
+bunx @hypen-space/cli init my-app
+cd my-app
+bun run dev        # same as: bunx hypen dev
 ```
 
+If you prefer a global `hypen` command:
+
+```bash
+bun add -g @hypen-space/cli
+hypen --version
+```
+
+A global `hypen` hands every project command (`dev`, `build`, `generate`, `check`, `studio`, `test`, `run`) to the project's own `node_modules/@hypen-space/cli` when there is one, and prints `Using project-local @hypen-space/cli vX (path)` to stderr when it does. That keeps the CLI and your app on the same copy of the Hypen packages, so `bun run dev`, `bunx hypen dev` and a global `hypen dev` behave the same. `init`, `--help` and `--version` always run the global copy. Set `HYPEN_NO_LOCAL_CLI=1` to turn the hand-off off.
+
+Keep `@hypen-space/cli` in your project's `devDependencies` (the scaffold does this).
+
+## Getting Help
+
+```bash
+hypen --help            # all commands
+hypen dev --help        # one command's own flags
+```
+
+An unknown flag or command exits with code 1 and tells you to run `hypen <command> --help` (or `hypen --help`); a mistyped command gets a suggestion (`Unknown command: devv (did you mean dev?)`). Port values are checked strictly: `--port 3000abc` is an error, not port 3000.
+
+The first time you run the CLI interactively on a machine it shows a short tour. It is shown once; the marker is `~/.hypen/onboarding.json`.
+
 ## Commands
+
+| Command | What it does |
+|---------|--------------|
+| [`hypen init [name]`](#hypen-init) | Create a new project |
+| [`hypen dev`](#hypen-dev) | Development server with hot reload |
+| [`hypen build`](#hypen-build) | Production build |
+| [`hypen generate`](#hypen-generate) | Write `.hypen/components.generated.ts` |
+| [`hypen check [path...]`](#hypen-check) | Accessibility checks (alias: `hypen a11y`) |
+| [`hypen studio`](#hypen-studio) | Hypen Studio IDE |
+| [`hypen test`](#hypen-test) | Studio Test Mode |
+| [`hypen run <android\|ios\|desktop>`](#hypen-run) | Launch the app on a device, simulator or desktop runner |
 
 ### `hypen init`
 
@@ -27,12 +66,59 @@ Create a new Hypen project.
 hypen init my-app
 ```
 
-This creates a new directory with:
-- Project structure with `src/components/` (or `src/modules/` for the server-based layout)
-- TypeScript configuration
-- A `hypen.json` configuration file
-- Starter components (Router + Home + Counter) with state and actions
-- Run scripts: `dev`, `studio`, `test`, `build`
+`hypen init` asks for a language (TypeScript, Go or Kotlin), a module layout (file-based or server-based) and which AI agent skill files to add, then scaffolds a starter app (App with a Router, plus Home and Counter screens) into `./my-app` and installs its dependencies. Without a name it scaffolds into the current directory. Outside an interactive terminal it picks TypeScript, the file-based layout and both skill files.
+
+The target directory must be new or empty (a `.git` folder and editor settings are fine): `hypen init` exits with an error rather than overwrite an existing project. Names may not start with `.` or `-` or contain path characters; the `package.json` name is the directory name lowercased with spaces and other invalid characters turned into `-`.
+
+Go projects need Go 1.25 or newer, and Kotlin projects run with `./gradlew run` (or `gradle run`). `dev`, `build`, `generate`, `studio`, `test` and `run` are for TypeScript projects: in a Go or Kotlin project they exit with the command to use instead.
+
+A TypeScript, file-based project looks like this:
+
+```
+my-app/
+├── src/
+│   ├── app.ts                     # Optional standalone server, not used by dev/build
+│   └── components/
+│       ├── App/                   # Root module: owns the Router and `location`
+│       │   ├── component.hypen
+│       │   └── component.ts
+│       ├── Home/                  # "/" screen
+│       │   ├── component.hypen
+│       │   └── component.ts
+│       └── Counter/               # "/counter" screen
+│           ├── component.hypen
+│           └── component.ts
+├── .claude/skills/hypen-ui.md     # Only if you chose the Claude skill
+├── .agent/skills/hypen-ui.md      # Only if you chose the generic agent skill
+├── .gitignore
+├── hypen.json
+├── package.json
+└── tsconfig.json
+```
+
+The server-based layout has `src/modules/{App,Home,Counter}.ts` instead of `src/components/`, and `hypen.json`'s `entry` is the script `./src/app.ts`.
+
+`src/app.ts` in the file-based layout is **not** used by `hypen dev` or `hypen build`. It runs the same app as a standalone remote-UI (WebSocket) server for native clients or self-hosting (`bun run serve`, `PORT` env var, default 3000). You can delete it.
+
+The generated `package.json` pins the `@hypen-space/*` packages to the CLI's own version (for example `^0.6.7`) and has these scripts:
+
+| Script | Runs |
+|--------|------|
+| `dev` | `hypen dev` |
+| `studio` | `hypen studio` |
+| `test` | `hypen test` |
+| `build` | `hypen build` |
+| `start` | `node dist/server.js` (serves the `hypen build` output). Server-based layout: `bun dist/main.js` |
+| `serve` | `bun src/app.ts` (file-based layout only) |
+
+The scaffold's screens navigate with `@router.push`:
+
+```hypen
+Button { Text("Go to Counter") }
+    .onClick(@router.push, to: "/counter")
+```
+
+`Router` matches the root module's `location` state, which the runtime keeps in sync, so `App/component.ts` only declares `location: "/"`. Actions written as `@actions.*` go to the module whose template uses them; a child screen can't call an action that only its parent handles.
 
 ### `hypen dev`
 
@@ -44,97 +130,138 @@ hypen dev
 ```
 
 Options:
-- `--port <number>`, `-p` - Port to run on (default: `3000`)
-- `--debug`, `-d` - Enable debug mode
-- `--a11y` - Print accessibility findings on every rebuild
+- `-p, --port <port>` - Server port (default: `port` in `hypen.json`, else `3000`)
+- `-d, --debug` - Verbose framework logging. `DEBUG=hypen:*` does the same (also `DEBUG=hypen`, `hypen:dev` or `*`; `-hypen:*` excludes)
+- `--a11y` - Print accessibility findings on the initial build and on every rebuild. It never stops the server. `"a11y": { "dev": true }` in `hypen.json` turns it on permanently
 
 One port serves every kind of client:
 
-- **Web client** at `http://localhost:3000` — open it in a browser and your
+- **Web client** at `http://localhost:3000`. Open it in a browser and your
   app is running. No setup, no separate client build.
-- **Remote endpoint** at `ws://localhost:3000` — the same port speaks the
+- **Remote endpoint** at `ws://localhost:3000`. The same port speaks the
   Hypen remote protocol, so native runners, Studio, and Test Mode can all
   connect to it directly.
 
 <img src="/tooling/web-client-home.png" alt="The built-in web client serving a freshly scaffolded app" />
 
 The engine renders server-side and streams minimal patches to every
-connected client. When you save a file, the CLI reloads all connected
-clients: each one reconnects within about half a second and resumes its
-session against the freshly loaded templates and module code. Primary
-module state (like the current route) is preserved across reloads; nested
-route-module state resets.
+connected client. The web client keeps the browser URL in step with the
+root module's `location`: navigating in the app pushes a history entry,
+browser back and forward navigate the app, and opening or reloading a deep
+link such as `http://localhost:3000/counter` starts on that route. Any page
+URL without a file extension gets the app, so deep links work without extra
+configuration.
 
-By default all connected clients mirror one scene — an action dispatched in
+When you save a file, the CLI reloads its templates and module code and
+every connected client reconnects within about half a second. Module state
+can start over after a reload (for example, the counter goes back to 0), so
+don't rely on state surviving an edit.
+
+Errors don't take the page down:
+
+- A `.hypen` file that doesn't parse is reported in the terminal as
+  `file:line:col: parse error: ...` with the offending lines, and nothing
+  is reloaded: open pages keep the last good version until you fix it. (The
+  position comes from the parser and can point at the enclosing block
+  rather than the exact character.)
+- A `component.ts` that fails to compile or throws on import is reported
+  with each error's file, line and column; open pages keep running the
+  previous code.
+- Components added while the server runs are picked up on the next reload,
+  and warnings such as a component named like a built-in element (`Badge`,
+  `Card`, ...) are printed.
+
+`hypen dev` exits with an error if `components` in `hypen.json` points at a
+missing directory, the entry component doesn't exist, or the port is taken.
+
+By default all connected clients mirror one scene: an action dispatched in
 one browser tab (or on a connected device) is replayed to every other
-client, which makes multi-device development seamless.
+client.
+
+For server-based projects (`hypen.json` `entry` is a `.ts`/`.js` script),
+`hypen dev` runs that script with `bun --hot` and passes the port as the
+`PORT` environment variable.
+
+The server reserves paths under `/__hypen__/`. `GET /__hypen__/health`
+returns `{"status":"ok","server":"hypen-remote"}`; session stats at
+`/__hypen__/stats` are only served to loopback requests.
 
 <img src="/tooling/web-client-counter.png" alt="The scaffold's counter screen in the web client" />
 
 ### `hypen build`
 
-Build the application for production.
+Build the application for production. Requires Bun.
 
 ```bash
 hypen build
 ```
 
 Options:
-- `--outDir <path>`, `-o` - Output directory (default: `dist`)
-- `--minify`, `-m` - Minify the output
-- `--sourcemap`, `-s` - Generate source maps
+- `-o, --outDir <dir>` - Output directory (default: `outDir` in `hypen.json`, else `dist`)
+- `-m, --minify` - Minify the output. On by default; pass `--no-minify` to turn it off
+- `-s, --sourcemap` - Emit external source maps
 
-Outputs optimized assets ready for deployment.
+For component projects (`hypen.json` `entry` is a component name such as `"App"`) the output directory is a self-contained static site:
+
+| File | Purpose |
+|------|---------|
+| `index.html` | The page shell |
+| `main.js` | Runs the DOM renderer and keeps the URL in sync |
+| `worker.js` | A Web Worker that runs your modules on the WASM engine, the same way the dev server runs them |
+| `hypen/hypen_engine.js`, `hypen/hypen_engine_bg.wasm` | The engine, copied from your project's `@hypen-space/web-engine`. Nothing is loaded from a CDN at runtime, so the build works offline |
+| `taffy_wasm_bg.wasm` | Layout engine for the canvas renderer |
+| `server.js` | A zero-dependency static server with SPA fallback |
+
+Serve it locally or on any machine with Node or Bun:
+
+```bash
+node dist/server.js            # or: bun dist/server.js, or: bun run start
+PORT=8080 node dist/server.js  # PORT (default 3000) and HOST are read from the environment
+```
+
+Routing, nested-module state, `@actions`, `@router.push`/`@router.back` and browser URLs behave as they do under `hypen dev`. Your module code (`component.ts`) runs inside the worker, so it has no `window`, `document` or `localStorage`; `fetch`, timers and IndexedDB work.
+
+To deploy to a static host (Netlify, Cloudflare Pages, S3, nginx, ...), upload the output directory and make sure that:
+
+- the site is served from the domain root, because asset URLs are absolute (`/main.js`);
+- unknown paths fall back to `index.html`, so deep links like `/counter` load the app.
+
+Script-entry projects (`"entry": "./src/app.ts"`, the server-based layout) are built differently: the entry is bundled to `dist/main.js` with dependencies left external, and you run it with `bun dist/main.js`.
+
+On failure the build exits 1 with `Build failed: <reason>`, for example when `@hypen-space/web-engine` or `@hypen-space/web` is missing, the entry component doesn't exist, a `.hypen` template doesn't parse (reported as `file:line:col`), or bundling fails.
 
 ### `hypen generate`
 
-Generate component imports from the components directory.
+Write a module listing of all discovered components.
 
 ```bash
 hypen generate
 ```
 
-Scans `src/components/` and produces a `components.generated.ts` file that wires up all discovered component templates and modules.
+Scans the components directory (`components` in `hypen.json`, default `./src/components`) and writes `.hypen/components.generated.ts` in the project root, with imports relative to that file (`../src/components/Home/component.js`). `hypen dev` and `hypen build` do their own discovery, so you don't need to run this for either; use it to see what discovery found or to import every component at once. A missing components directory exits 1.
 
-### `hypen run`
+### `hypen check`
 
-Install and launch your app on a native device or simulator.
-
-```bash
-hypen run android
-hypen run ios
-```
-
-This command:
-1. Starts a WebSocket dev server
-2. Downloads the Hypen Runner app (cached in `~/.hypen/runners/`)
-3. Lists connected devices/simulators and prompts you to pick one
-4. Installs the runner app on the selected device
-5. Launches it with a connection back to the dev server
-
-The server stays running with hot reload until you press `Ctrl+C`.
-
-**Platforms:**
-- `android` — Requires `adb` (Android SDK platform-tools). Works with emulators and physical devices connected via USB.
-- `ios` — Requires `xcrun` (Xcode command line tools). Runs on iOS Simulator. Boots the simulator automatically if needed.
-
-Options:
-- `--port <number>`, `-p` - Dev server port (default: `3000`)
-- `--studio` - Open Hypen Studio alongside the device runner
-
-The `--studio` flag launches the Studio IDE at the same time as the device runner, so you can edit components in the browser and see changes live on the device.
+Run the engine's accessibility conformance pass over your `.hypen` sources. `hypen a11y` is an alias.
 
 ```bash
-# Run on Android with Studio open
-hypen run android --studio
-
-# Run on iOS Simulator on a custom port
-hypen run ios --port 8080
+hypen check                                        # all project components
+hypen check src/components/App/component.hypen     # specific files or directories
 ```
+
+Findings print per file. Suppress a finding with a trailing
+`// hypen-a11y-ignore [rule-id]` comment (or one on the line above), or
+project-wide via `hypen.json`: `"a11y": { "ignoreRules": ["rule-id"] }`.
+Suppressed findings are counted in the report but never in the exit code.
+
+Exit codes: `0` clean, `1` findings, `2` couldn't check (missing path or
+parse error; parse errors print as `file:line:col: parse error: ...`). Use
+`hypen dev --a11y` to get the same findings on every rebuild during
+development.
 
 ### `hypen studio`
 
-Open [Hypen Studio](/docs/tooling/studio), a full in-browser IDE for developing and debugging Hypen apps. Includes a code editor with LSP support, live preview, file browser, state inspector, action log, time-travel debugging, and an integrated terminal.
+Open [Hypen Studio](/docs/tooling/studio), a full in-browser IDE for developing and debugging Hypen apps. It includes a code editor with LSP support, live preview, file browser, state inspector, action log, time-travel debugging, and an integrated terminal.
 
 ```bash
 hypen studio
@@ -144,17 +271,20 @@ hypen studio
 
 For server-based projects, Studio starts your entry script for you (or
 reuses an already-running dev server on the configured port) and connects
-the preview to it — one command, no second terminal.
+the preview to it, so you don't need a second terminal.
 
 Options:
-- `--port <number>`, `-p` - Port to run on (default: `5173`)
-- `--open` - Open browser automatically (default: `true`)
+- `-p, --port <port>` - Studio port (default: `5173`; if it is taken, the next free port is used)
+- `--no-open` - Don't open a browser tab
+- `--session <id>` - Load a session teleported from hypen.space into a new `./hypen-<id>` project and open it. If the session can't be fetched, nothing is created and the command exits 1
+
+Outside a project (no `hypen.json` or components directory) Studio still opens, with a note in the terminal and an empty preview.
 
 Studio requires the Bun runtime. See the [Studio documentation](/docs/tooling/studio) for the full feature reference.
 
 ### `hypen test`
 
-Open Studio directly in **Test Mode** — a multi-surface preview board with
+Open Studio directly in **Test Mode**: a multi-surface preview board with
 live web cells (DOM and Canvas) plus Android and iOS device mirrors.
 
 ```bash
@@ -163,56 +293,118 @@ hypen test
 
 <img src="/tooling/test-mode.png" alt="Test Mode with a live web cell rendering the app" />
 
-Inside a project, `hypen test` boots (or reuses) the dev server itself and
-opens with the previews already connected. Cells are fully interactive, and
-actions are mirrored across every surface — tap a button in the web cell
+Inside a project, `hypen test` starts a server for your entry module and
+opens Test Mode connected to it. Cells are fully interactive, and
+actions are mirrored across every surface: tap a button in the web cell
 and a connected device updates too. Outside a project it opens in
 connect-only mode: paste any `ws://` dev-server URL to attach.
 
 Options:
-- `--port <number>`, `-p` - Dev server port (default: `3000`)
-- `--open` - Open browser automatically (default: `true`)
+- `-p, --port <port>` - Preview server port (default: `port` in `hypen.json`, else `3000`; the next free port is used if it is taken)
+- `--studio-port <port>` - Studio's own port (default: `5173`; the next free port is used if it is taken)
+- `--no-open` - Don't open a browser tab
 
-### `hypen check`
-
-Run the engine's accessibility conformance pass over your `.hypen` sources.
+Editing a component hot-reloads every connected cell; a template that doesn't parse is reported in the terminal and the cells keep the last good version. With no devices, the sidebar says what to install (Android SDK and an AVD, or a device attached over adb; the iOS mirror needs macOS with Xcode).
 
 ```bash
-hypen check                                  # all project components
-hypen check src/components/App.hypen         # specific files or dirs
+hypen test --port 4000 --studio-port 5180 --no-open
 ```
 
-Findings print per file. Suppress a finding with a trailing
-`// hypen-a11y-ignore [rule-id]` comment, or project-wide via `hypen.json`:
-`"a11y": { "ignoreRules": ["rule-id"] }`. Exit codes: `0` clean, `1`
-findings, `2` couldn't check. Use `hypen dev --a11y` to get the same
-findings on every rebuild during development.
+### `hypen run`
 
-## Project Structure
+Start a dev server and launch your app on a device, simulator or the desktop runner.
 
-The CLI expects this structure:
-
+```bash
+hypen run android
+hypen run ios
+hypen run desktop
 ```
-my-app/
-├── src/
-│   └── components/
-│       └── App/
-│           ├── component.hypen    # UI template
-│           └── component.ts       # Module logic
-├── hypen.json
-├── package.json
-└── tsconfig.json
+
+This command:
+1. Starts a dev server (unless you pass `--url`)
+2. Downloads the Hypen runner app, cached in `~/.hypen/runners/`
+3. Picks a device (see below), installs the runner if needed, and launches it connected to the dev server
+
+The server keeps running with hot reload until you press `Ctrl+C`.
+
+Options:
+- `-p, --port <port>` - Dev server port (default: `3000`)
+- `--url <ws://...>` - Connect the runner to an already-running server instead of starting one
+- `--clean` - Delete the cached runner and download a fresh copy. On Android this also forces a reinstall
+- `--studio` - Open Hypen Studio alongside the runner, so you edit in the browser and see the change on the device
+- `--studio-port <port>` - With `--studio`: Studio's port (default: `5173`)
+- `--device <id>` - Android: the adb serial to use (default: `ANDROID_SERIAL`). iOS: a simulator name or UDID (default: `HYPEN_IOS_SIMULATOR`)
+- `--runner <path>` - Desktop: the `hypen-browser` binary to launch (default: `HYPEN_DESKTOP_RUNNER`, else `~/.hypen/runners/hypen-browser`)
+
+```bash
+# Run on Android with Studio open
+hypen run android --studio
+
+# Run on the iOS Simulator with the dev server on another port
+hypen run ios --port 8080
+
+# Attach the desktop runner to a server you started yourself
+hypen run desktop --url ws://localhost:3000
 ```
+
+#### Android
+
+Requires `adb` (Android SDK platform-tools); without it the command exits 1 with a link to the download. Works with emulators and with physical devices over USB or remote adb. With nothing attached it exits 1 and says to start an emulator or connect a device; a device that is attached but `unauthorized` or `offline` is named with what to do (accept the USB debugging prompt, reconnect).
+
+- **Choosing a device.** With one device connected, it is used automatically. With several, pass `--device <serial>` or set `ANDROID_SERIAL=<serial>` (see `adb devices`). Otherwise the CLI prompts you in a terminal; in CI or any non-interactive run it exits 1 and lists the connected serials instead of waiting. An unknown serial also exits 1 with the list.
+- **Connecting to the dev server.** The CLI first runs `adb reverse tcp:<port> tcp:<port>`, so the runner reaches your machine at `ws://localhost:<port>` with no shared Wi-Fi needed. If that fails, emulators use `ws://10.0.2.2:<port>` and physical devices use your machine's LAN IP (link-local, Docker, VM and VPN interfaces are skipped). A `--url` on `localhost`/`127.0.0.1` is reversed too; any other `--url` is passed through as given.
+- **Installing.** The runner APK (about 40 MB) is only reinstalled when it changed, or when the app on the device was reinstalled or updated by something else. The CLI prints `Runner up to date.` or `Installed.`. `--clean` forces a fresh download and reinstall.
+
+```bash
+hypen run android --device emulator-5554
+ANDROID_SERIAL=emulator-5554 hypen run android
+```
+
+#### iOS
+
+Requires full Xcode with an iOS Simulator runtime, so macOS only: `xcrun simctl` is not part of the standalone Command Line Tools. Runs on the iOS Simulator and boots one if none is running.
+
+- **Choosing a simulator.** A booted simulator is used if there is one. Otherwise you are asked in a terminal; with no terminal (CI, a background job) the first iPhone is used. Pass `--device <name|udid>` or set `HYPEN_IOS_SIMULATOR` to a simulator name or UDID to choose one.
+- **Launching.** The runner app is downloaded once to `~/.hypen/runners/HypenGallery.app`, installed with `simctl install` and started with the dev server URL in its environment, so it connects right away. `--clean` forces a fresh download.
+
+```bash
+hypen run ios --device "iPhone 16 Pro"
+HYPEN_IOS_SIMULATOR="iPhone 16 Pro" hypen run ios
+```
+
+#### Desktop
+
+`hypen run desktop` opens the app in Hypen Browser, the native desktop runner. On first run the CLI downloads `hypen-browser-<target>.tar.gz` from the latest [GitHub release](https://github.com/hypen-lang/hypen/releases) and caches the binary at `~/.hypen/runners/hypen-browser`; `--clean` downloads it again. Prebuilt runners exist for macOS (Apple Silicon and Intel), Windows x86-64 and Linux x86-64. On other platforms, or if the download fails, the CLI prints build-from-source steps.
+
+To build the runner yourself, from a checkout of [the Hypen repository](https://github.com/hypen-lang/hypen):
+
+```bash
+# Linux only: build dependencies (see hypen-browser/README.md)
+sudo apt install build-essential pkg-config libdbus-1-dev libclang-dev libasound2-dev
+
+cargo build --release -p hypen-browser
+```
+
+Then either copy `target/release/hypen-browser` to `~/.hypen/runners/hypen-browser`, or point the CLI at it:
+
+```bash
+hypen run desktop --runner /path/to/hypen/target/release/hypen-browser
+HYPEN_DESKTOP_RUNNER=/path/to/hypen/target/release/hypen-browser hypen run desktop
+```
+
+A `--runner` path that doesn't exist, or a file that isn't executable, exits 1 with the reason (`chmod +x` for the latter).
+
+The runner's output is appended to `~/.hypen/runners/browser.log`. If it exits within about 1.5 seconds of launch, the CLI prints the exit code and the end of the log and exits 1, instead of reporting a successful launch.
 
 ## Component Discovery
 
-The CLI automatically discovers components by recursively scanning the `components` directory. Multiple naming conventions are supported (folder-based, index-based, sibling files, and single-file).
+The CLI discovers components by recursively scanning the `components` directory. Several naming conventions are supported (folder-based, index-based, sibling files, and single-file).
 
 For the complete discovery reference, naming patterns, and nested component organization, see [Configuration](/docs/tooling/configuration).
 
 ## Configuration
 
-Create a `hypen.json` in your project root:
+`hypen init` writes a `hypen.json` in the project root:
 
 ```json
 {
@@ -233,17 +425,27 @@ For a full reference of all configuration options, discovery patterns, and integ
 hypen dev --port 3001
 ```
 
-### Clear cache
+### Clicks fail with `invalid scoped UI action`
+
+- A template dispatches an `@actions.*` that its own module doesn't handle, for example a child screen calling a parent's action. Handle the action in that module, or navigate with `@router.push`.
+- With a **global** CLI 0.6.6 or earlier, `hypen dev` uses its own copy of the Hypen packages and every nested-module action fails this way. Update the global CLI or run `bun run dev` from the project.
+
+### Verbose logs
 
 ```bash
-rm -rf node_modules/.hypen
-hypen dev
+hypen dev --debug
+DEBUG=hypen:* hypen dev
 ```
+
+### Clearing generated files and caches
+
+- `.hypen/` in the project holds files the CLI generates (`hypen generate` output and the build's intermediate files). It is git-ignored and safe to delete.
+- `hypen run <platform> --clean` deletes the cached runner in `~/.hypen/runners/` and downloads a fresh one.
 
 ## See Also
 
-- [Hypen Studio](/docs/tooling/studio) — Full Studio IDE feature reference
-- [Configuration](/docs/tooling/configuration) — Full config and discovery reference
+- [Hypen Studio](/docs/tooling/studio): full Studio IDE feature reference
+- [Configuration](/docs/tooling/configuration): full config and discovery reference
 - [Installation Guide](/docs/getting-started/installation)
 - [Your First App](/docs/getting-started/first-app)
 - [Language Server (LSP)](/docs/tooling/lsp)

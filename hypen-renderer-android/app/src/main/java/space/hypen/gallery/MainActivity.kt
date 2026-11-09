@@ -4,9 +4,6 @@ import android.app.Activity
 import android.content.Intent
 import android.net.Uri
 import android.os.Bundle
-import android.view.View
-import android.view.WindowInsets
-import android.view.WindowInsetsController
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -25,6 +22,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import space.hypen.renderer.HypenApp
 import space.hypen.renderer.components.HypenSafeAreaInsets
 import space.hypen.renderer.remote.RemoteEngineConfig
@@ -175,29 +175,21 @@ fun GalleryBrowser(
         }
     }
 
-    // Fullscreen handling
+    // Fullscreen handling. Goes through WindowInsetsControllerCompat on every
+    // API level: it toggles only the hide/show flags. Writing
+    // `decorView.systemUiVisibility = SYSTEM_UI_FLAG_VISIBLE` directly (the old
+    // pre-API-30 path) ran on first composition and wiped every other flag,
+    // including SYSTEM_UI_FLAG_LIGHT_STATUS_BAR and the edge-to-edge layout
+    // flags, which left white status-bar icons on the near-white app.
     LaunchedEffect(isFullscreen) {
         activity?.let { act ->
-            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.R) {
-                val controller = act.window.insetsController
-                if (isFullscreen) {
-                    controller?.hide(WindowInsets.Type.systemBars())
-                    controller?.systemBarsBehavior =
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
-                } else {
-                    controller?.show(WindowInsets.Type.systemBars())
-                }
+            val controller = WindowCompat.getInsetsController(act.window, act.window.decorView)
+            if (isFullscreen) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
             } else {
-                @Suppress("DEPRECATION")
-                if (isFullscreen) {
-                    act.window.decorView.systemUiVisibility = (
-                            View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                                    or View.SYSTEM_UI_FLAG_FULLSCREEN
-                                    or View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            )
-                } else {
-                    act.window.decorView.systemUiVisibility = View.SYSTEM_UI_FLAG_VISIBLE
-                }
+                controller.show(WindowInsetsCompat.Type.systemBars())
             }
         }
     }

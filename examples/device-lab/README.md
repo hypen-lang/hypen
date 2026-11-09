@@ -25,6 +25,14 @@ LIBRARY_PATH="$PWD/../target/release" DYLD_LIBRARY_PATH="$PWD/../target/release"
 cargo run
 ```
 
+The TS lab's ports can be moved with `DEVICE_LAB_WEB_PORT` (page, default
+45100) and `DEVICE_LAB_PORT` (TS server, default 45101), e.g.
+`DEVICE_LAB_WEB_PORT=46100 DEVICE_LAB_PORT=46101 bun examples/device-lab/server.ts`;
+the Rust lab reads `DEVICE_LAB_WEB_PORT` and `DEVICE_LAB_RUST_PORT` (default
+45105). The Go, Kotlin and Swift labs still listen on fixed ports and only allow
+the page origin `http://127.0.0.1:45100`, so keep the default page port when
+testing them.
+
 Open `http://127.0.0.1:45100/?renderer=dom` or
 `http://127.0.0.1:45100/?renderer=canvas`. The server selector reconnects the
 renderer to the selected backend.
@@ -38,11 +46,16 @@ descriptions and permissions.
 
 ## Fixtures and evidence
 
-- `sample.txt`: 102,000-byte text upload fixture. The Save button generates the same 102,000-byte payload (its historical UI label says Save 96K).
-- `empty.txt`: zero-byte file fixture.
+- `sample.txt`: 102,000-byte text upload fixture. It is git-ignored and
+  written by `server.ts` on first start; it holds the same 102,000 bytes the
+  Save button generates (its historical UI label says Save 96K).
+- `empty.txt`: zero-byte file fixture (committed).
 - `../../hypen-browser/assets/icons/icon-512.png`: repository-owned photo fixture.
 - `results-2026-09-26/ts.jsonl`: TS action results from the interactive app.
 - `results-2026-09-26/uploads/`: received bytes named by SHA-256, for comparison with fixtures.
+  Both are created by `server.ts` as you run checks and are git-ignored
+  (`results-*/`), so a fresh clone has none — earlier rounds' evidence is
+  summarized in the `LIVE-RESULTS*.md` reports.
 - Other backends print `DEVICE_LAB` action results to their terminal.
 
 The Cancel button currently cancels pending TS and Go requests. The Kotlin and

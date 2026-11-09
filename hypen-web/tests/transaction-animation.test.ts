@@ -107,8 +107,8 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     await flushMicrotasks(3);
 
     expect(engine.notifyCalls.length).toBe(1);
-    expect(engine.notifyCalls[0].paths).toEqual(["count"]);
-    expect(engine.notifyCalls[0].animation).toBe("spring");
+    expect(engine.notifyCalls[0]!.paths).toEqual(["count"]);
+    expect(engine.notifyCalls[0]!.animation).toBe("spring");
 
     // A subsequent, unrelated mutation flushes UNSTAMPED — the stamp was
     // consumed by (and cleared after) the first flush.
@@ -116,7 +116,7 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     await flushMicrotasks(2);
 
     expect(engine.notifyCalls.length).toBe(2);
-    expect(engine.notifyCalls[1].animation).toBeUndefined();
+    expect(engine.notifyCalls[1]!.animation).toBeUndefined();
   });
 
   test("two flushes from one handler: sync mutation stamped, post-await mutation unstamped", async () => {
@@ -136,10 +136,10 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     await flushMicrotasks(4);
 
     expect(engine.notifyCalls.length).toBe(2);
-    expect(engine.notifyCalls[0].values.count).toBe(1);
-    expect(engine.notifyCalls[0].animation).toBe("easeOut");
-    expect(engine.notifyCalls[1].values.count).toBe(2);
-    expect(engine.notifyCalls[1].animation).toBeUndefined();
+    expect(engine.notifyCalls[0]!.values.count).toBe(1);
+    expect(engine.notifyCalls[0]!.animation).toBe("easeOut");
+    expect(engine.notifyCalls[1]!.values.count).toBe(2);
+    expect(engine.notifyCalls[1]!.animation).toBeUndefined();
   });
 
   test("a handler whose ONLY mutation is after an await flushes unstamped", async () => {
@@ -158,8 +158,8 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     await flushMicrotasks(4);
 
     expect(engine.notifyCalls.length).toBe(1);
-    expect(engine.notifyCalls[0].values.count).toBe(7);
-    expect(engine.notifyCalls[0].animation).toBeUndefined();
+    expect(engine.notifyCalls[0]!.values.count).toBe(7);
+    expect(engine.notifyCalls[0]!.animation).toBeUndefined();
   });
 
   test("a stamped handler that never mutates leaves nothing pending", async () => {
@@ -182,7 +182,7 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     await flushMicrotasks(2);
 
     expect(engine.notifyCalls.length).toBe(1);
-    expect(engine.notifyCalls[0].animation).toBeUndefined();
+    expect(engine.notifyCalls[0]!.animation).toBeUndefined();
   });
 
   test("a PRE-QUEUED mutation (e.g. .bind) in the same task flushes UNSTAMPED before the stamped handler flush", async () => {
@@ -206,11 +206,11 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     expect(engine.notifyCalls.length).toBe(2);
     // The pre-queued mutation was drained synchronously at dispatch entry —
     // unstamped, and NOT coalesced into the handler's stamped flush.
-    expect(engine.notifyCalls[0].values.count).toBe(5);
-    expect(engine.notifyCalls[0].animation).toBeUndefined();
+    expect(engine.notifyCalls[0]!.values.count).toBe(5);
+    expect(engine.notifyCalls[0]!.animation).toBeUndefined();
     // The handler's own flush carries the stamp.
-    expect(engine.notifyCalls[1].values.count).toBe(6);
-    expect(engine.notifyCalls[1].animation).toBe("spring");
+    expect(engine.notifyCalls[1]!.values.count).toBe(6);
+    expect(engine.notifyCalls[1]!.animation).toBe("spring");
   });
 
   test("two stamped dispatches in one task: each handler's mutations flush with its OWN stamp", async () => {
@@ -234,10 +234,10 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     // mutations while the FIRST stamp is still pending — so each dispatch's
     // mutations glide with its own spec instead of coalescing under one.
     expect(engine.notifyCalls.length).toBe(2);
-    expect(engine.notifyCalls[0].values.count).toBe(1);
-    expect(engine.notifyCalls[0].animation).toBe("spring");
-    expect(engine.notifyCalls[1].values.count).toBe(2);
-    expect(engine.notifyCalls[1].animation).toBe("easeOut");
+    expect(engine.notifyCalls[0]!.values.count).toBe(1);
+    expect(engine.notifyCalls[0]!.animation).toBe("spring");
+    expect(engine.notifyCalls[1]!.values.count).toBe(2);
+    expect(engine.notifyCalls[1]!.animation).toBe("easeOut");
   });
 
   test("two stamped dispatches, first handler never mutates: LAST stamp wins the single flush", async () => {
@@ -261,7 +261,7 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     // entry (last-stamp-wins), and its identity-compared clear cannot
     // cancel bump's stamp.
     expect(engine.notifyCalls.length).toBe(1);
-    expect(engine.notifyCalls[0].animation).toBe("easeOut");
+    expect(engine.notifyCalls[0]!.animation).toBe("easeOut");
   });
 
   test("token identity: two dispatches with the SAME spec value cannot clear each other's stamp", async () => {
@@ -285,7 +285,7 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
     await flushMicrotasks(4);
 
     expect(engine.notifyCalls.length).toBe(1);
-    expect(engine.notifyCalls[0].animation).toBe("spring");
+    expect(engine.notifyCalls[0]!.animation).toBe("spring");
   });
 
   test("spec-object stamps flow through verbatim; unstamped actions stamp nothing", async () => {
@@ -301,12 +301,12 @@ describe("transaction animation: pending-stamp consumption (SDK)", () => {
 
     await engine.dispatch("bump", { curve: "spring", duration: 300 });
     await flushMicrotasks(3);
-    expect(engine.notifyCalls[0].animation).toEqual({ curve: "spring", duration: 300 });
+    expect(engine.notifyCalls[0]!.animation).toEqual({ curve: "spring", duration: 300 });
 
     await engine.dispatch("bump");
     await flushMicrotasks(3);
     expect(engine.notifyCalls.length).toBe(2);
-    expect(engine.notifyCalls[1].animation).toBeUndefined();
+    expect(engine.notifyCalls[1]!.animation).toBeUndefined();
   });
 });
 
@@ -409,7 +409,10 @@ class StubEngine {
 const makeDomRenderer = () => {
   const container = document.createElement("div");
   const engine = new StubEngine();
-  const renderer = new DOMRenderer(container, engine as unknown as Engine);
+  const renderer = new DOMRenderer(
+    container,
+    engine as unknown as ConstructorParameters<typeof DOMRenderer>[1],
+  );
   return { engine, renderer };
 };
 
@@ -432,11 +435,11 @@ describe("transaction animation: DOM event `animate:` extraction", () => {
       { type: "insert", parentId: "root-1", id: "btn" } as Patch,
     ]);
 
-    const btn = renderer.getNode("btn") as FakeElement;
+    const btn = renderer.getNode("btn") as unknown as FakeElement;
     btn.dispatchEvent("click", { type: "click", target: btn });
 
     expect(engine.dispatchCalls.length).toBe(1);
-    const { name, payload } = engine.dispatchCalls[0];
+    const { name, payload } = engine.dispatchCalls[0]!;
     expect(name).toBe("toggle");
     expect(payload.postId).toBe("p1");
     expect(payload[ACTION_ANIMATE_KEY]).toBe("spring");
@@ -465,10 +468,10 @@ describe("transaction animation: DOM event `animate:` extraction", () => {
       { type: "insert", parentId: "root-1", id: "btn" } as Patch,
     ]);
 
-    const btn = renderer.getNode("btn") as FakeElement;
+    const btn = renderer.getNode("btn") as unknown as FakeElement;
     btn.dispatchEvent("click", { type: "click", target: btn });
 
-    const { payload } = engine.dispatchCalls[0];
+    const { payload } = engine.dispatchCalls[0]!;
     expect(payload[ACTION_ANIMATE_KEY]).toEqual({ curve: "spring", duration: 300 });
     expect(payload.postId).toBe("p2");
     expect("animate" in payload).toBe(false);
@@ -492,11 +495,11 @@ describe("transaction animation: DOM event `animate:` extraction", () => {
       { type: "insert", parentId: "root-1", id: "btn" } as Patch,
     ]);
 
-    const btn = renderer.getNode("btn") as FakeElement;
+    const btn = renderer.getNode("btn") as unknown as FakeElement;
     btn.dispatchEvent("click", { type: "click", target: btn });
 
     expect(engine.dispatchCalls.length).toBe(1);
-    const { payload } = engine.dispatchCalls[0];
+    const { payload } = engine.dispatchCalls[0]!;
     // The user's `animate: false` reaches the handler payload untouched…
     expect(payload.animate).toBe(false);
     expect(payload.id).toBe("x");
@@ -522,10 +525,10 @@ describe("transaction animation: DOM event `animate:` extraction", () => {
       { type: "insert", parentId: "root-1", id: "btn" } as Patch,
     ]);
 
-    const btn = renderer.getNode("btn") as FakeElement;
+    const btn = renderer.getNode("btn") as unknown as FakeElement;
     btn.dispatchEvent("click", { type: "click", target: btn });
 
-    const { payload } = engine.dispatchCalls[0];
+    const { payload } = engine.dispatchCalls[0]!;
     expect(payload[ACTION_ANIMATE_KEY]).toBe("spring");
     expect(payload.animate).toBe(false);
   });
@@ -544,7 +547,7 @@ describe("transaction animation: DOM event `animate:` extraction", () => {
       { type: "insert", parentId: "root-1", id: "btn" } as Patch,
     ]);
 
-    const btn = renderer.getNode("btn") as FakeElement;
+    const btn = renderer.getNode("btn") as unknown as FakeElement;
     btn.dispatchEvent("click", { type: "click", target: btn });
 
     expect(engine.dispatchCalls).toEqual([
@@ -607,7 +610,7 @@ describe("transaction animation: canvas `animate:` extraction", () => {
     dispatchNodeEvent(engine as any, node, "click", { clientX: 1, clientY: 2 });
 
     expect(engine.dispatchCalls.length).toBe(1);
-    const { name, payload } = engine.dispatchCalls[0];
+    const { name, payload } = engine.dispatchCalls[0]!;
     expect(name).toBe("toggle");
     expect(payload.postId).toBe("p1");
     expect(payload[ACTION_ANIMATE_KEY]).toBe("spring");
@@ -623,7 +626,7 @@ describe("transaction animation: canvas `animate:` extraction", () => {
 
     dispatchNodeEvent(engine as any, node, "click", {});
 
-    const { payload } = engine.dispatchCalls[0];
+    const { payload } = engine.dispatchCalls[0]!;
     expect(ACTION_ANIMATE_KEY in payload).toBe(false);
   });
 });

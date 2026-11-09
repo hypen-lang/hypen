@@ -9,14 +9,28 @@ You are an expert in writing Hypen DSL templates and TypeScript module logic. Hy
 
 ## File Structure
 
-Hypen projects organize components as paired files:
+Hypen projects organize components as paired files. \`hypen init\` creates:
 
 \`\`\`
-src/components/
-  ComponentName/
-    component.hypen    # UI template
-    component.ts       # State & logic (module)
+hypen.json             # { "components": "./src/components", "entry": "App", ... }
+src/
+  app.ts               # Optional standalone remote-UI server (bun src/app.ts).
+                       # NOT used by \`hypen dev\` or \`hypen build\`.
+  components/
+    App/               # Root module (\`entry\`): owns the Router
+      component.hypen  # UI template
+      component.ts     # State & logic (module)
+    Home/
+      component.hypen
+      component.ts
+    Counter/
+      component.hypen
+      component.ts
 \`\`\`
+
+Components are discovered from \`src/components/<Name>/\` by folder name. A folder with only \`component.hypen\` is a stateless component; adding \`component.ts\` makes it a module with its own state and actions.
+
+Scripts: \`hypen dev\` (dev server, hot reload), \`hypen build\` (static site in \`dist/\`), \`node dist/server.js\` (serve the build).
 
 ## Hypen DSL Syntax
 
@@ -85,7 +99,8 @@ Text('Embed "quotes" freely')
 
 // References
 @state.username        // State binding
-@actions.login         // Action dispatch
+@actions.login         // Action dispatch (handled by THIS module)
+@router.push           // Built-in navigation action (works from any module)
 @item                  // Current ForEach item
 
 // Lists
@@ -182,8 +197,8 @@ import HomePage from "./pages/HomePage"
 
 | Component | Description | Key Props | Has Children |
 |-----------|-------------|-----------|-------------|
-| \`Router\` | Routing container | initialRoute | Yes (Route children) |
-| \`Route\` | Route definition | path | Yes |
+| \`Router\` | Routing container; matches routes against \`@{state.location}\` | value (optional location override) | Yes (Route children, optional \`Fallback {}\`) |
+| \`Route\` | Route definition | path (\`"/"\`, \`"/users/:id"\`, \`"/docs/*"\`) | Yes |
 | \`HypenApp\` | Embed remote Hypen app | - | No |
 
 ## Control Flow
@@ -520,8 +535,16 @@ export default app
 - **State mutations are auto-tracked** via Proxy. Just assign values directly - no \`setState()\` or sync callback needed.
 - **Actions are async** - use \`async/await\` freely for API calls.
 - **Action payloads** come from UI event arguments: \`.onClick(@actions.remove, id: "@{item.id}")\` delivers \`action.payload.id\`.
-- **\`context.router\`** provides \`HypenRouter\` for programmatic navigation.
+- **\`context.router\`** provides \`HypenRouter\` for programmatic navigation (\`context.router?.push("/x")\`). From templates, prefer \`@router.push\` (see Routing).
+- **Actions are scoped to the module that declares them.** \`@actions.foo\` in \`Home/component.hypen\` only reaches \`Home\`'s \`.onAction("foo")\`. A child cannot call a parent's action; pass data through state, use \`context.getModule\`, or (for navigation) use \`@router.*\`.
 - **\`context.getModule<T>("name")\`** for cross-module communication.
+
+### \`.build()\` rules
+
+- **File-based modules** (\`component.ts\` next to \`component.hypen\`): end the chain with \`.build()\` and \`export default\` the result. The template comes from \`component.hypen\`.
+- **Inline UI** (\`\` .ui(hypen\`...\`) \`\`): \`.ui()\` is terminal and already returns the built module. Do NOT call \`.build()\` after it, and do not call \`.ui()\` after \`.build()\`.
+- Exactly one terminal call per module: either \`.build()\` or \`.ui(...)\`. Forgetting it gives a blank page and a confusing error at startup.
+- \`app.module("Name")\` names a module and registers it in the shared registry (used by child modules such as \`Home\` and \`Counter\`). The root module can use plain \`app.defineState(...)\`.
 
 ## Complete Examples
 
@@ -768,29 +791,70 @@ module App {
 
 ### Routing
 
-**component.hypen:**
+The root module owns the \`Router\`. Routes match against \`@{state.location}\`, so the root module's state must have a \`location\` field. The runtime keeps it in sync with the current route and the browser URL; you never write it yourself.
+
+**App/component.hypen:**
 \`\`\`hypen
-Column {
-  Header
+module App {
+  Column {
+    Header()
 
-  Router {
-    Route("/") {
-      HomePage
+    Router {
+      Route(path: "/") {
+        Home()
+      }
+      Route(path: "/products") {
+        Products()
+      }
+      Route(path: "/products/:id") {
+        ProductDetail()
+      }
+      Fallback {
+        NotFound()
+      }
     }
-    Route("/products") {
-      ProductsPage
-    }
-    Route("/about") {
-      AboutPage
-    }
+    .tw("flex-1 w-full")
   }
-  .flex(1)
-
-  Footer
+  .tw("w-full min-h-screen")
 }
-.width("100%")
-.minHeight("100vh")
 \`\`\`
+
+**App/component.ts:**
+\`\`\`typescript
+import { app } from "@hypen-space/core";
+
+export default app
+  .defineState<{ location: string }>({ location: "/" })
+  .build();
+\`\`\`
+
+Rules:
+- Use \`Route(path: "/x") { Screen() }\`: named \`path:\` argument, and call the screen component with \`()\`.
+- Each routed module (\`Home\`, \`Products\`, ...) is created when its route is first shown and kept alive (with its state) when you navigate away and back.
+- Give page roots \`w-full\` (or \`.fillMaxWidth(true)\`) so they fill the screen on desktop and mobile instead of shrinking to their content.
+
+**Navigating** from any module's template with the built-in \`@router.*\` actions. No handler is needed:
+
+\`\`\`hypen
+Button { Text("Products") }
+  .onClick(@router.push, to: "/products")           // go to a path (adds a history entry)
+
+Button { Text("Open") }
+  .onClick(@router.push, to: "/products/@{item.id}")
+
+Button { Text("Back") }
+  .onClick(@router.back)                            // previous entry (no-op if there is none)
+
+Button { Text("Log in") }
+  .onClick(@router.replace, to: "/login")           // replace the current entry
+
+Button { Text("Forward") }
+  .onClick(@router.forward)
+\`\`\`
+
+From a TypeScript action handler, use \`context.router?.push("/products")\` (also \`replace\`, \`back\`).
+
+Do NOT write \`.onClick(@actions.navigate, to: "/x")\` in a child module and handle \`navigate\` in the parent: actions are scoped to the module whose template dispatches them, so the parent never receives it.
 
 ## Common Patterns
 

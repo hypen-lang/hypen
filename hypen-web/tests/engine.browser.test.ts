@@ -89,7 +89,7 @@ class FakeWasmEngine {
   }
 }
 
-const wasmInitMock = mock(() => Promise.resolve());
+const wasmInitMock = mock((..._args: unknown[]) => Promise.resolve());
 
 // Mock the WASM module - use absolute path to match the actual import path
 import { resolve } from "path";
@@ -140,7 +140,7 @@ describeFn("Engine (browser)", () => {
 
     expect(FakeWasmEngine.instances.length).toBe(1);
     expect(wasmInitMock.mock.calls.length).toBe(1);
-    expect(wasmInitMock.mock.calls[0]).toEqual([mockInitOptions.wasmUrl]);
+    expect(wasmInitMock.mock.calls[0]).toEqual([{ module_or_path: mockInitOptions.wasmUrl }]);
   });
 
   test("propagates wasm init failure", async () => {
@@ -192,7 +192,7 @@ describeFn("Engine (browser)", () => {
 
     const wasm = FakeWasmEngine.instances[0];
     const patches = [{ type: "create", id: "root" }];
-    wasm.renderCallback?.(patches);
+    wasm!.renderCallback?.(patches);
 
     expect(handler).toHaveBeenCalledWith(patches);
   });
@@ -201,33 +201,33 @@ describeFn("Engine (browser)", () => {
     const engine = new Engine();
     await engine.init(mockInitOptions);
 
-    engine.setComponentResolver((name, context) => ({
+    engine.setComponentResolver((name: string, context: string | null) => ({
       source: `Text(\"${name}\")`,
       path: context,
     }));
 
     const wasm = FakeWasmEngine.instances[0];
-    const component = wasm.componentResolver?.("Widget", "/src/routes");
+    const component = wasm!.componentResolver?.("Widget", "/src/routes");
 
     expect(component).toEqual({ source: "Text(\"Widget\")", path: "/src/routes" });
-    expect(wasm.resolverCalls).toEqual([{ name: "Widget", context: "/src/routes" }]);
+    expect(wasm!.resolverCalls).toEqual([{ name: "Widget", context: "/src/routes" }]);
   });
 
   test("component resolver handles null result and throws", async () => {
     const engine = new Engine();
     await engine.init(mockInitOptions);
 
-    const resolver = mock((name: string) => {
+    const resolver = mock((name: string, _context: string | null) => {
       if (name === "Missing") return null;
       if (name === "Boom") throw new Error("resolver failed");
       return { source: "Text(\"Ok\")", path: null };
     });
 
-    engine.setComponentResolver((name, context) => resolver(name, context));
+    engine.setComponentResolver((name: string, context: string | null) => resolver(name, context));
 
     const wasm = FakeWasmEngine.instances[0];
-    expect(wasm.componentResolver?.("Missing", null)).toBeNull();
-    expect(() => wasm.componentResolver?.("Boom", null)).toThrowError("resolver failed");
+    expect(wasm!.componentResolver?.("Missing", null)).toBeNull();
+    expect(() => wasm!.componentResolver?.("Boom", null)).toThrowError("resolver failed");
     expect(resolver.mock.calls).toHaveLength(2);
   });
 
@@ -236,7 +236,7 @@ describeFn("Engine (browser)", () => {
     await engine.init(mockInitOptions);
 
     engine.renderSource("Column {}");
-    expect(FakeWasmEngine.instances[0].renderSources).toEqual(["Column {}"]);
+    expect(FakeWasmEngine.instances[0]!.renderSources).toEqual(["Column {}"]);
   });
 
   test("renderLazyComponent forwards to wasm", async () => {
@@ -244,7 +244,7 @@ describeFn("Engine (browser)", () => {
     await engine.init(mockInitOptions);
 
     engine.renderLazyComponent("LazyButton {}");
-    expect(FakeWasmEngine.instances[0].renderLazySources).toEqual(["LazyButton {}"]);
+    expect(FakeWasmEngine.instances[0]!.renderLazySources).toEqual(["LazyButton {}"]);
   });
 
   test("renderInto forwards source, parent id and state", async () => {
@@ -254,8 +254,8 @@ describeFn("Engine (browser)", () => {
     engine.renderInto("Text(\"Counter\")", "route-1", { count: 7 });
 
     const wasm = FakeWasmEngine.instances[0];
-    expect(wasm.renderIntoCalls.length).toBe(1);
-    expect(wasm.renderIntoCalls[0]).toEqual({
+    expect(wasm!.renderIntoCalls.length).toBe(1);
+    expect(wasm!.renderIntoCalls[0]).toEqual({
       source: "Text(\"Counter\")",
       parentId: "route-1",
       state: { count: 7 },
@@ -270,7 +270,7 @@ describeFn("Engine (browser)", () => {
     engine.renderInto("Text(\"State\")", "route-1", state);
 
     const wasm = FakeWasmEngine.instances[0];
-    const recorded = wasm.renderIntoCalls[0].state as any;
+    const recorded = wasm!.renderIntoCalls[0]!.state as any;
 
     expect(recorded).toEqual({ nested: { value: 1 } });
     recorded.nested.value = 99;
@@ -286,7 +286,7 @@ describeFn("Engine (browser)", () => {
     state.count = 42;
 
     const wasm = FakeWasmEngine.instances[0];
-    expect(wasm.updateStateCalls[0]).toEqual({ count: 1 });
+    expect(wasm!.updateStateCalls[0]).toEqual({ count: 1 });
   });
 
   test("notifyStateChange skips update when no paths", async () => {
@@ -296,7 +296,7 @@ describeFn("Engine (browser)", () => {
     engine.updateStateSparse(null, [], { value: 1 });
 
     const wasm = FakeWasmEngine.instances[0];
-    expect(wasm.updateStateCalls.length).toBe(0);
+    expect(wasm!.updateStateCalls.length).toBe(0);
   });
 
   test("updateState clones patch", async () => {
@@ -307,7 +307,7 @@ describeFn("Engine (browser)", () => {
     engine.updateState(null, patch);
     patch.value.nested = false;
 
-    expect(FakeWasmEngine.instances[0].updateStateCalls[0]).toEqual({ value: { nested: true } });
+    expect(FakeWasmEngine.instances[0]!.updateStateCalls[0]).toEqual({ value: { nested: true } });
   });
 
   test("dispatchAction delegates to wasm", async () => {
@@ -315,7 +315,7 @@ describeFn("Engine (browser)", () => {
     await engine.init(mockInitOptions);
 
     engine.dispatchAction("save", { id: 1 });
-    expect(FakeWasmEngine.instances[0].dispatchCalls).toEqual([
+    expect(FakeWasmEngine.instances[0]!.dispatchCalls).toEqual([
       { name: "save", payload: { id: 1 } },
     ]);
   });
@@ -333,7 +333,7 @@ describeFn("Engine (browser)", () => {
     try {
       engine.onAction("increment", handler);
       const wasm = FakeWasmEngine.instances[0];
-      wasm.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
+      wasm!.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
 
       await Promise.resolve();
 
@@ -357,7 +357,7 @@ describeFn("Engine (browser)", () => {
     try {
       engine.onAction("increment", handler);
       const wasm = FakeWasmEngine.instances[0];
-      await wasm.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
+      await wasm!.actionHandlers.get("increment")?.({ name: "increment", payload: 1 });
 
       expect(handler).toHaveBeenCalled();
       expect(errorSpy).not.toHaveBeenCalled();
@@ -371,7 +371,7 @@ describeFn("Engine (browser)", () => {
     await engine.init(mockInitOptions);
 
     engine.setModule("Counter", ["increment"], ["count"], { count: 0 });
-    expect(FakeWasmEngine.instances[0].moduleInit).toEqual({
+    expect(FakeWasmEngine.instances[0]!.moduleInit).toEqual({
       name: "Counter",
       actions: ["increment"],
       stateKeys: ["count"],
@@ -384,7 +384,7 @@ describeFn("Engine (browser)", () => {
     await engine.init(mockInitOptions);
 
     const wasm = FakeWasmEngine.instances[0];
-    wasm.revision = 99;
+    wasm!.revision = 99;
     expect(engine.getRevision()).toBe(99);
   });
 });

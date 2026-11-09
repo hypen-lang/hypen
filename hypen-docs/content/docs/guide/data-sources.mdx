@@ -18,12 +18,17 @@ Database → Plugin.onChange() → DataSourceManager → engine.setContext() →
 3. The `DataSourceManager` merges sparse updates and pushes the full state via `setContext()`
 4. The engine marks all nodes bound to `@provider.*` as dirty and re-renders them
 
+<Callout type="warn">
+No data source plugin has been published yet. `@hypen-space/plugin-spacetimedb`, used in the examples below, is **not released on npm** (`bun add` fails), and there is no Firebase plugin either. The plugin interface in `@hypen-space/core` is available today: to use a database now, [write a plugin](#writing-a-plugin) for it. The SpacetimeDB snippets show what using one looks like.
+</Callout>
+
 ## Using a Plugin
 
 Register a plugin in your module definition with `.useDataSource()`:
 
 ```typescript
-import { app, hypen, state } from "@hypen-space/core";
+import { app, hypen } from "@hypen-space/core";
+// Not published yet; see the note above
 import { SpacetimeDBPlugin } from "@hypen-space/plugin-spacetimedb";
 
 export default app
@@ -380,7 +385,7 @@ export class WebSocketPlugin implements DataSourcePlugin<WsConfig> {
 
 ## Publishing a Plugin
 
-Data source plugins should be published as separate npm packages following the naming convention `@hypen-space/plugin-{name}` or `hypen-plugin-{name}`.
+Data source plugins should be published as separate npm packages named `hypen-plugin-{name}` (or under your own scope). The `@hypen-space/plugin-{name}` names are reserved for official plugins.
 
 ### Package Structure
 
@@ -397,7 +402,7 @@ hypen-plugin-mydb/
 
 ```json
 {
-  "name": "@hypen-space/plugin-mydb",
+  "name": "hypen-plugin-mydb",
   "version": "0.1.0",
   "type": "module",
   "main": "dist/index.js",

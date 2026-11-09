@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 
-	wire "github.com/hypen-space/core/remote/device"
+	wire "github.com/hypen-lang/hypen/hypen-golang/remote/device"
 )
 
 // Typed parameter and result shapes: the thin remote/device structs. Params

@@ -131,6 +131,13 @@ type ServerConfig struct {
 	// each message is deflated in isolation without a shared sliding
 	// window across messages.
 	DisableCompression bool
+
+	// DisableWebClient stops Listen() from serving the built-in browser
+	// client (an HTML shell at `/` plus `/__hypen__/client.js`, the same
+	// remote client + DOM renderer the TypeScript server serves). On by
+	// default; negative for the same zero-value reason as
+	// DisableCompression. The WebSocket endpoint is unaffected.
+	DisableWebClient bool
 }
 
 // ConnectionState represents the client connection state

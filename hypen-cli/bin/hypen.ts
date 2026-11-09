@@ -13,9 +13,10 @@
  */
 
 import { parseArgs } from "util";
-import { existsSync, mkdirSync, writeFileSync, readFileSync } from "fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { join, resolve, dirname, basename } from "path";
 import { execSync } from "child_process";
+import { tmpdir, constants as osConstants } from "os";
 import { fileURLToPath } from "url";
 import { pink, yellow, dim, boldPink, boldYellow } from "../src/colors.js";
 import { promptSkillChoice, installSkills, ensureGitignoreSkillEntries } from "../src/skills.js";
@@ -28,6 +29,11 @@ import {
 } from "../src/init/typescript.js";
 import { generateGoProject } from "../src/init/go.js";
 import { generateKotlinProject } from "../src/init/kotlin.js";
+import { initTargetProblem } from "../src/init/target.js";
+import { nonTsProjectKind, nonTsRunHint, parsePortArg } from "../src/project-kind.js";
+import { findLocalCli, findPackageRoot, importFromProject } from "../src/dev-resolve.js";
+import { isHypenDebugEnv } from "../src/dev-debug.js";
+import { createHypenSourceValidator, formatReloadError } from "../src/dev-diagnostics.js";
 
 /**
  * Detect runtime
@@ -73,23 +79,29 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${pink("dev")}             Start development server
     ${pink("build")}           Build for production
     ${pink("generate")}        Generate component imports
-    ${pink("check")} [path...] Run accessibility conformance over .hypen files
-                    (paths may be files or directories; default: project components)
-                    Suppress findings with a trailing ${dim("// hypen-a11y-ignore [rule-id, ...]")}
-                    comment (or on the line above), or project-wide via hypen.json:
-                    ${dim('"a11y": { "ignoreRules": ["rule-id", ...] }')} — suppressed
-                    findings are counted in the report, never in the exit code
+    ${pink("check")} [path...] Accessibility checks over .hypen files (alias: ${pink("a11y")})
     ${pink("studio")}          Open Hypen Studio IDE
     ${pink("test")}            Open Studio Test Mode (live previews + device mirrors)
     ${pink("run")} <platform>  Install and launch on device (android|ios|desktop)
 
   ${boldYellow("Options:")}
-    -h, --help      Show this help message
+    -h, --help      Show this help message (${dim("hypen <command> --help")} lists a
+                    command's own flags)
     -v, --version   Show version number
-    --a11y          With dev: print accessibility findings on the initial
-                    build and every rebuild (never fails the server; also
-                    enabled via hypen.json ${dim('"a11y": { "dev": true }')})
-    --studio        Open Studio alongside device runner (with run command)
+    -p, --port      Server port (dev, studio, test, run)
+    -d, --debug     dev: verbose framework logging (or ${dim("DEBUG=hypen:*")})
+    --a11y          dev: print accessibility findings on every rebuild
+    -o, --outDir    build: output directory (default: dist)
+    -m, --minify    build: minify (default on; ${dim("--no-minify")} to disable)
+    -s, --sourcemap build: emit external source maps
+    --no-open       studio/test: don't open a browser tab
+    --session <id>  studio: load a teleported hypen.space session
+    --studio-port   test, run --studio: Studio's own port (default: 5173)
+    --url <ws://>   run: connect the runner to an existing server
+    --studio        run: open Studio alongside the runner
+    --clean         run: re-download the cached runner
+    --device        run android: adb serial to use
+    --runner        run desktop: path to a hypen-browser binary
 
   ${boldYellow("Examples:")}
     ${dim("$")} hypen init my-app
@@ -97,7 +109,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${dim("$")} hypen dev --a11y
     ${dim("$")} hypen build --minify
     ${dim("$")} hypen check
-    ${dim("$")} hypen check src/components/App.hypen
+    ${dim("$")} hypen check src/components/App/component.hypen
     ${dim("$")} hypen studio --port 5173
     ${dim("$")} hypen test
     ${dim("$")} hypen run android
@@ -105,6 +117,143 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${dim("$")} hypen run android --url ws://localhost:3000
     ${dim("$")} hypen run ios --studio
 `;
+
+/**
+ * Per-command help, printed by `hypen <command> --help`. Each entry lists
+ * exactly the flags that command reads below — keep them in sync.
+ */
+const COMMAND_HELP: Record<string, string> = {
+  init: `
+  ${boldPink("hypen init")} ${dim("-")} Create a new Hypen project
+
+  ${boldYellow("Usage:")}
+    hypen init [name]
+
+  Prompts for a language (TypeScript, Go, Kotlin), a module layout, and
+  which AI agent skills to install, then scaffolds a Counter starter
+  (Router + Home + Counter) into ${dim("./<name>")} (or the current directory)
+  and installs dependencies.
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen init my-app
+`,
+  dev: `
+  ${boldPink("hypen dev")} ${dim("-")} Start the development server with hot reload
+
+  ${boldYellow("Usage:")}
+    hypen dev [options]
+
+  ${boldYellow("Options:")}
+    -p, --port <port>   Server port (default: hypen.json "port", else 3000)
+    -d, --debug         Verbose framework logging (also: ${dim("DEBUG=hypen:*")})
+    --a11y              Print accessibility findings on the initial build and
+                        every rebuild (also hypen.json ${dim('"a11y": { "dev": true }')})
+
+  Serves the web client at http://localhost:<port> and a Remote UI endpoint
+  at ws://localhost:<port> for native runners. Server-based projects
+  (hypen.json "entry" is a .ts/.js script) run that script with ${dim("bun --hot")}
+  and receive the port as ${dim("PORT")}.
+
+  Runs under Bun or Node. Under Node the project's ${dim("component.ts")} modules
+  are imported directly, which needs Node >= 22.18 (TypeScript type
+  stripping); older Node versions exit with instructions to use Bun.
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen dev
+    ${dim("$")} hypen dev --port 4000 --debug
+`,
+  build: `
+  ${boldPink("hypen build")} ${dim("-")} Build for production
+
+  ${boldYellow("Usage:")}
+    hypen build [options]
+
+  ${boldYellow("Options:")}
+    -o, --outDir <dir>  Output directory (default: hypen.json "outDir", else dist)
+    -m, --minify        Minify output (default: on; ${dim("--no-minify")} to disable)
+    -s, --sourcemap     Emit external source maps
+
+  ${boldYellow("Output:")} ${dim("(component projects)")}
+    A static site: index.html, main.js, the engine WASM (no CDN at runtime)
+    and server.js, a zero-dependency server with SPA fallback:
+    ${dim("$")} node dist/server.js        ${dim("# PORT=8080 to change the port")}
+    Any static host works if unknown paths fall back to index.html.
+    Script-entry projects (hypen.json "entry": "./src/app.ts") get the entry
+    bundled to dist/main.js instead (run with bun dist/main.js).
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen build
+    ${dim("$")} hypen build --outDir out --no-minify --sourcemap
+`,
+  generate: `
+  ${boldPink("hypen generate")} ${dim("-")} Generate component imports
+
+  ${boldYellow("Usage:")}
+    hypen generate
+
+  Scans the components directory (hypen.json "components", default
+  ./src/components) and writes ${dim(".hypen/components.generated.ts")} in the
+  project root.
+`,
+  check: `
+  ${boldPink("hypen check")} ${dim("-")} Run accessibility conformance over .hypen files
+
+  ${boldYellow("Usage:")}
+    hypen check [path...]      ${dim("(alias: hypen a11y)")}
+
+  Paths may be files or directories; with none, the project's components
+  directory is checked. Suppress a finding with a trailing
+  ${dim("// hypen-a11y-ignore [rule-id, ...]")} comment (or one on the line above),
+  or project-wide via hypen.json ${dim('"a11y": { "ignoreRules": ["rule-id"] }')}.
+
+  ${boldYellow("Exit codes:")}
+    0  clean    1  findings    2  could not check (missing path, parse error)
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen check
+    ${dim("$")} hypen check src/components/App/component.hypen
+`,
+  studio: `
+  ${boldPink("hypen studio")} ${dim("-")} Open Hypen Studio IDE
+
+  ${boldYellow("Usage:")}
+    hypen studio [options]
+
+  ${boldYellow("Options:")}
+    -p, --port <port>   Studio port (default: 5173; the next free port is used
+                        if it is taken)
+    --no-open           Don't open a browser tab
+    --session <id>      Load a teleported hypen.space session into a new
+                        ./hypen-<id> project and open it
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen studio
+    ${dim("$")} hypen studio --port 5180 --no-open
+`,
+  test: `
+  ${boldPink("hypen test")} ${dim("-")} Open Studio Test Mode (live previews + device mirrors)
+
+  ${boldYellow("Usage:")}
+    hypen test [options]
+
+  ${boldYellow("Options:")}
+    -p, --port <port>   Preview server port (default: hypen.json "port", else
+                        3000; the next free port is used if it is taken)
+    --studio-port <port>
+                        Studio's own port (default: 5173; the next free port
+                        is used if it is taken)
+    --no-open           Don't open a browser tab
+
+  Inside a project, starts a Remote UI server for the entry module and opens
+  Test Mode connected to it; elsewhere Studio opens in connect-only mode.
+  Edits to the components hot-reload every connected preview.
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen test
+    ${dim("$")} hypen test --port 4000 --studio-port 5180 --no-open
+`,
+};
+COMMAND_HELP.a11y = COMMAND_HELP.check!;
 
 interface Config {
   components: string;
@@ -207,6 +356,31 @@ function validateProjectName(name: string): string | null {
 }
 
 /**
+ * Give a Kotlin scaffold a `./gradlew` wrapper using the Gradle on PATH.
+ * Generated in an empty scratch project and copied over, so it doesn't
+ * configure the scaffold itself (no plugin/dependency downloads during
+ * `hypen init`). Returns false when there's no usable Gradle.
+ */
+function generateGradleWrapper(projectDir: string): boolean {
+  const scratch = mkdtempSync(join(tmpdir(), "hypen-gradle-wrapper-"));
+  try {
+    writeFileSync(join(scratch, "settings.gradle.kts"), "");
+    execSync("gradle wrapper --quiet", { cwd: scratch, stdio: "ignore", timeout: 120_000 });
+    for (const file of ["gradlew", "gradlew.bat", "gradle/wrapper/gradle-wrapper.jar", "gradle/wrapper/gradle-wrapper.properties"]) {
+      const from = join(scratch, file);
+      if (!existsSync(from)) return false;
+      mkdirSync(dirname(join(projectDir, file)), { recursive: true });
+      cpSync(from, join(projectDir, file));
+    }
+    return true;
+  } catch {
+    return false;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
  * Initialize a new project
  */
 async function initProject(name?: string) {
@@ -220,6 +394,19 @@ async function initProject(name?: string) {
       console.error(`\n  ${nameError}\n`);
       process.exit(1);
     }
+  }
+
+  // Refuse to scaffold over an existing project: the generators overwrite
+  // package.json, hypen.json and the starter components unconditionally.
+  const targetProblem = initTargetProblem(projectDir);
+  if (targetProblem) {
+    console.error(`\n  Error: ${targetProblem}`);
+    console.error(
+      name
+        ? `  Choose a different name, or remove the directory first.\n`
+        : `  Run ${dim("hypen init <name>")} to create a new directory, or run it in an empty one.\n`
+    );
+    process.exit(1);
   }
 
   // Render banner once per invocation so the user sees the Hypen wordmark
@@ -282,8 +469,8 @@ async function initProject(name?: string) {
       console.error(`\n  Failed to install dependencies. Run ${dim(`${pm} install`)} manually.\n`);
     }
   } else if (language === "go") {
-    // go.mod ships without a hypen require; `go mod tidy` reads the import
-    // in main.go and pins the latest published github.com/hypen-space/core.
+    // go.mod requires github.com/hypen-lang/hypen/hypen-golang at this CLI's
+    // version; `go mod tidy` fetches it and writes go.sum + indirect deps.
     console.log(`\n  ${dim("Resolving Go modules...")}`);
     try {
       execSync("go mod tidy", { cwd: projectDir, stdio: "inherit" });
@@ -291,25 +478,36 @@ async function initProject(name?: string) {
       console.error(`\n  Failed to resolve modules. Run ${dim("go mod tidy")} manually.\n`);
     }
   }
-  // Kotlin resolves space.hypen:hypen-kotlin (latest.release) from Maven
-  // Central on the first `./gradlew build`/`run`; nothing to install here.
+  // Kotlin resolves space.hypen:hypen-kotlin (pinned to this CLI's version,
+  // native engine bundled) from Maven Central on the first `./gradlew
+  // build`/`run`. The scaffold ships no
+  // wrapper jar, so generate `./gradlew` with a local Gradle when there is
+  // one; otherwise the hint below says `gradle run`.
+  let kotlinRun = "gradle run";
+  if (language === "kotlin") {
+    if (generateGradleWrapper(projectDir)) kotlinRun = "./gradlew run";
+  }
 
   if (language === "typescript") {
+    // Print the package.json scripts, not bare `hypen ...`: the docs use
+    // `bunx @hypen-space/cli init` (no global install), so `hypen` is only
+    // on PATH inside the project's scripts (node_modules/.bin).
+    const run = isBun ? "bun run" : "npm run";
     console.log(`
   ${boldPink("Done!")} To get started:
 
-    ${name ? `${dim("$")} cd ${name}\n    ` : ""}${dim("$")} hypen dev     ${dim("# dev server + web client at http://localhost:3000")}
+    ${name ? `${dim("$")} cd ${/\s/.test(name) ? JSON.stringify(name) : name}\n    ` : ""}${dim("$")} ${run} dev     ${dim("# dev server + web client at http://localhost:3000")}
 
   ${boldYellow("Also try:")}
-    ${dim("$")} hypen studio  ${dim("# Hypen Studio IDE (starts the dev server for you)")}
-    ${dim("$")} hypen test    ${dim("# Test Mode: live web + device previews")}
+    ${dim("$")} ${run} studio  ${dim("# Hypen Studio IDE (starts the dev server for you)")}
+    ${dim("$")} ${run} test    ${dim("# Test Mode: live web + device previews")}
 `);
   } else {
-    const nextCommand = language === "go" ? "go run ." : "./gradlew run";
+    const nextCommand = language === "go" ? "go run ." : kotlinRun;
     console.log(`
   ${boldPink("Done!")} To get started:
 
-    ${name ? `${dim("$")} cd ${name}\n    ` : ""}${dim("$")} ${nextCommand}
+    ${name ? `${dim("$")} cd ${/\s/.test(name) ? JSON.stringify(name) : name}\n    ` : ""}${dim("$")} ${nextCommand}
 `);
   }
 }
@@ -587,15 +785,26 @@ async function buildProject(options: {
     return;
   }
 
-  const { build } = await import("../src/dev.js");
-
-  await build({
-    components: config.components,
-    entry: config.entry,
-    outDir: options.outDir || config.outDir || "dist",
-    minify: options.minify ?? true,
-    sourcemap: options.sourcemap ?? false,
-  });
+  // Component-based projects: a static site (index.html + main.js + the
+  // engine WASM + a tiny SPA server.js). See src/build.ts.
+  if (!isBun) {
+    console.error("\n  `hypen build` requires the Bun runtime. Install from https://bun.sh\n");
+    process.exit(1);
+  }
+  const { build, BuildError } = await import("../src/build.js");
+  try {
+    await build({
+      components: config.components,
+      entry: config.entry,
+      outDir: options.outDir || config.outDir || "dist",
+      minify: options.minify ?? true,
+      sourcemap: options.sourcemap ?? false,
+    });
+  } catch (err: any) {
+    if (!(err instanceof BuildError)) throw err;
+    console.error(`\n  Build failed: ${err.message}\n`);
+    process.exit(1);
+  }
 }
 
 /**
@@ -603,14 +812,23 @@ async function buildProject(options: {
  */
 async function generateComponents() {
   const config = await loadConfig();
-  const { generateComponentsCode } = await import(
-    "@hypen-space/server"
+  const componentsDir = resolve(config.components);
+  if (!existsSync(componentsDir)) {
+    console.error(`\n  Error: components directory not found: ${config.components}`);
+    console.error(`  Set ${dim('"components"')} in hypen.json to the folder that holds your components.\n`);
+    process.exit(1);
+  }
+  const { generateComponentsCode } = await importFromProject(
+    "@hypen-space/server",
+    () => import("@hypen-space/server")
   );
 
-  const code = await generateComponentsCode(config.components);
-  const outputPath = resolve(".hypen/components.generated.ts");
-
   const outputDir = resolve(".hypen");
+  const outputPath = join(outputDir, "components.generated.ts");
+  // Imports are written relative to the generated file, so it resolves
+  // from .hypen/ (e.g. "../src/components/Home/component.js").
+  const code = await generateComponentsCode(componentsDir, { outputDir });
+
   if (!existsSync(outputDir)) {
     mkdirSync(outputDir, { recursive: true });
   }
@@ -704,6 +922,13 @@ async function startStudio(options: { port?: number; open?: boolean; session?: s
   if (options.session) {
     console.log(`\n  ${dim("Fetching session:")} ${options.session}...`);
     sessionData = await fetchSession(options.session);
+    if (!sessionData) {
+      // Opening Studio on the current directory instead would look like the
+      // session loaded (and the exit message would point at a project that
+      // was never created).
+      console.error(`  Could not load session ${options.session}; nothing was created.\n`);
+      process.exit(1);
+    }
     if (sessionData) {
       console.log(`  ${pink("Session loaded:")} ${sessionData.example} example`);
 
@@ -755,6 +980,12 @@ async function startStudio(options: { port?: number; open?: boolean; session?: s
 
   const config = await loadConfig();
   const projectDirName = options.session ? `hypen-${options.session}` : null;
+  if (!options.session && !existsSync(resolve("hypen.json")) && !existsSync(resolve(config.components))) {
+    console.log(
+      `  ${yellow("Not inside a Hypen project")} ${dim("(no hypen.json or " + config.components + ").")} ` +
+        `${dim("Run")} hypen init <name> ${dim("to create one; Studio opens with an empty preview.")}`
+    );
+  }
 
   // Server-based projects: start (or reuse) the entry script so Studio's
   // preview can connect immediately — no second terminal with `hypen dev`.
@@ -794,6 +1025,34 @@ async function startStudio(options: { port?: number; open?: boolean; session?: s
   }
 }
 
+/** Parse-checks the project's .hypen sources (see src/dev-diagnostics.ts). */
+function projectSourceValidator(componentsDir: string) {
+  return createHypenSourceValidator({
+    componentsDir,
+    loadServer: () => importFromProject("@hypen-space/server", () => import("@hypen-space/server")),
+  });
+}
+
+/**
+ * Print template parse errors, if any. Returns true when there were some,
+ * in which case the caller skips the reload so connected clients keep the
+ * last good version instead of reconnecting into a blank page.
+ */
+async function reportTemplateErrors(validate: () => Promise<string[]>): Promise<boolean> {
+  const problems = await validate();
+  if (problems.length === 0) return false;
+  console.error(`\n  ${yellow("Not reloaded:")} fix the error below; connected previews keep the last good version.`);
+  for (const line of problems) console.error(`  ${line}`);
+  console.error("");
+  return true;
+}
+
+function reportReloadFailure(e: unknown) {
+  const [first, ...rest] = formatReloadError(e);
+  console.error(`  Hot reload failed: ${first}`);
+  for (const line of rest) console.error(`  ${line}`);
+}
+
 /**
  * Handle test command: hypen test
  *
@@ -803,7 +1062,7 @@ async function startStudio(options: { port?: number; open?: boolean; session?: s
  * Connect input so the previews come up populated. Otherwise Studio opens in
  * connect-only mode — the user can type any `ws://hypen-dev-url` and connect.
  */
-async function testMode(options: { port?: number; open?: boolean }) {
+async function testMode(options: { port?: number; open?: boolean; studioPort?: number }) {
   const { studio } = await import("../src/studio/server.js");
 
   const hasConfig = existsSync(resolve("hypen.json"));
@@ -840,11 +1099,16 @@ async function testMode(options: { port?: number; open?: boolean }) {
       }
     } else {
     try {
-      const { RemoteServer } = await import("@hypen-space/server/remote");
-      const { discoverComponents, loadDiscoveredComponents, watchComponents } = await import(
-        "@hypen-space/server"
+      const { RemoteServer } = await importFromProject(
+        "@hypen-space/server/remote",
+        () => import("@hypen-space/server/remote")
       );
-      const { configureLogger } = await import("@hypen-space/core");
+      const { discoverComponents, loadDiscoveredComponents, watchComponents } =
+        await importFromProject("@hypen-space/server", () => import("@hypen-space/server"));
+      const { configureLogger } = await importFromProject(
+        "@hypen-space/core",
+        () => import("@hypen-space/core")
+      );
 
       const componentsDir = resolve(config.components || "./src/components");
       const discovered = await discoverComponents(componentsDir);
@@ -887,6 +1151,7 @@ async function testMode(options: { port?: number; open?: boolean }) {
         // Mirror `hypen dev`: watch the components dir and hot-reload
         // every connected preview (web cells + native runners) when a
         // `.hypen` or sibling module file changes.
+        const validateSources = projectSourceValidator(componentsDir);
         let isInitialScan = true;
         const watcher = watchComponents(componentsDir, {
           onChange: async () => {
@@ -894,16 +1159,17 @@ async function testMode(options: { port?: number; open?: boolean }) {
               isInitialScan = false;
               return;
             }
+            if (await reportTemplateErrors(validateSources)) return;
             try {
               await remoteServer.reload();
             } catch (e: any) {
-              console.warn(`  ${dim("Hot reload failed:")} ${e?.message ?? e}`);
+              reportReloadFailure(e);
             }
           },
         });
         stopWatcher = () => watcher.stop();
 
-        configureLogger({ level: "info" });
+        configureLogger({ level: process.env.DEBUG ? "info" : "warn" });
       }
     } catch (err: any) {
       console.warn(
@@ -938,7 +1204,7 @@ async function testMode(options: { port?: number; open?: boolean }) {
   await studio({
     components,
     entry,
-    port: 5173,
+    port: options.studioPort ?? 5173,
     open: options.open ?? true,
     remoteUrl: remoteWsUrl || undefined,
     testMode: true,
@@ -955,8 +1221,17 @@ async function testMode(options: { port?: number; open?: boolean }) {
  */
 async function handleRun(
   platform: string | undefined,
-  options: { port?: number; url?: string; studio?: boolean; clean?: boolean }
+  options: {
+    port?: number;
+    url?: string;
+    studio?: boolean;
+    studioPort?: number;
+    clean?: boolean;
+    device?: string;
+    runner?: string;
+  }
 ) {
+  const runOpts = { device: options.device, runner: options.runner };
   const { runAndroid, runIOS, runDesktop, cleanRunners, RUN_HELP } = await import("../src/run.js");
   const config = await loadConfig();
   const port = options.port || config.port || 3000;
@@ -984,13 +1259,13 @@ async function handleRun(
 
     switch (platform) {
       case "android":
-        await runAndroid(port, options.url);
+        await runAndroid(port, options.url, runOpts);
         break;
       case "ios":
-        await runIOS(port, options.url);
+        await runIOS(port, options.url, runOpts);
         break;
       case "desktop":
-        await runDesktop(port, options.url);
+        await runDesktop(port, options.url, runOpts);
         break;
     }
 
@@ -1005,10 +1280,13 @@ async function handleRun(
   await ensureProjectDeps();
 
   // Use RemoteServer (WebSocket) for native clients instead of HTTP dev server
-  const { RemoteServer } = await import("@hypen-space/server/remote");
-  const { discoverComponents, loadDiscoveredComponents, watchComponents } = await import(
-    "@hypen-space/server"
+  // Project-local packages first: see src/dev-resolve.ts.
+  const { RemoteServer } = await importFromProject(
+    "@hypen-space/server/remote",
+    () => import("@hypen-space/server/remote")
   );
+  const { discoverComponents, loadDiscoveredComponents, watchComponents } =
+    await importFromProject("@hypen-space/server", () => import("@hypen-space/server"));
 
   const componentsDir = resolve(config.components || "./src/components");
   const entryName = config.entry || "App";
@@ -1031,10 +1309,16 @@ async function handleRun(
   }
 
   console.log(`  ${dim("Module:")}     ${entryName} (${entry.module.name || "anonymous"})`);
-  console.log(`  ${dim("Template:")}   ${entry.template ? entry.template.substring(0, 60) + "..." : "(empty)"}`)
+  const templatePreview = (entry.template ?? "").replace(/\s+/g, " ").trim();
+  console.log(
+    `  ${dim("Template:")}   ${templatePreview ? (templatePreview.length > 60 ? templatePreview.slice(0, 60) + "..." : templatePreview) : "(empty)"}`
+  );
 
   // Suppress framework logs during runner setup so device picker is visible
-  const { configureLogger } = await import("@hypen-space/core");
+  const { configureLogger } = await importFromProject(
+    "@hypen-space/core",
+    () => import("@hypen-space/core")
+  );
   configureLogger({ level: "error" });
 
   // Start the WebSocket server (quietly)
@@ -1075,26 +1359,26 @@ async function handleRun(
   switch (platform) {
     case "android":
       console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow("Android")}\n`);
-      await runAndroid(actualPort);
+      await runAndroid(actualPort, undefined, runOpts);
       break;
 
     case "ios":
       console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow("iOS")}\n`);
-      await runIOS(actualPort);
+      await runIOS(actualPort, undefined, runOpts);
       break;
 
     case "desktop":
       console.log(`\n  ${boldPink("Hypen Run")} ${dim("-")} ${yellow("Desktop")}\n`);
-      await runDesktop(actualPort);
+      await runDesktop(actualPort, undefined, runOpts);
       break;
   }
 
   // Restore normal log level now that runner setup is done
-  configureLogger({ level: "info" });
+  configureLogger({ level: process.env.DEBUG ? "info" : "warn" });
 
   // Start Studio alongside if --studio flag is set
   if (options.studio) {
-    const studioPort = 5173;
+    const studioPort = options.studioPort ?? 5173;
     const remoteWsUrl = `ws://localhost:${actualPort}`;
     console.log(`  ${pink("Starting Studio...")} ${dim(`(connected to ${remoteWsUrl})`)}`);
 
@@ -1112,6 +1396,7 @@ async function handleRun(
   }
 
   // Watch for file changes and hot-reload all connected clients
+  const validateSources = projectSourceValidator(componentsDir);
   let isInitialScan = true;
   const watcher = watchComponents(componentsDir, {
     onChange: async () => {
@@ -1120,12 +1405,13 @@ async function handleRun(
         isInitialScan = false;
         return;
       }
+      if (await reportTemplateErrors(validateSources)) return;
       console.log(`  ${yellow("File changed")} — reloading clients...`);
       try {
         await remoteServer.reload();
         console.log(`  ${pink("Hot reload complete")} (${remoteServer.getClientCount()} client(s))`);
       } catch (e: any) {
-        console.error(`  Hot reload failed: ${e.message}`);
+        reportReloadFailure(e);
       }
     },
   });
@@ -1143,30 +1429,132 @@ async function handleRun(
   console.log(`  ${pink("Server running.")} ${dim("Press Ctrl+C to stop.")}\n`);
 }
 
-// Parse command line arguments
-const { values, positionals } = parseArgs({
-  args: process.argv.slice(2),
-  options: {
-    help: { type: "boolean", short: "h" },
-    version: { type: "boolean", short: "v" },
-    port: { type: "string", short: "p" },
-    debug: { type: "boolean", short: "d" },
-    outDir: { type: "string", short: "o" },
-    minify: { type: "boolean", short: "m" },
-    sourcemap: { type: "boolean", short: "s" },
-    open: { type: "boolean" },
-    session: { type: "string" },
-    url: { type: "string" },
-    studio: { type: "boolean" },
-    clean: { type: "boolean" },
-    a11y: { type: "boolean" },
-  },
-  allowPositionals: true,
+// Hand off to the project's own CLI. A globally installed `hypen` resolves
+// @hypen-space/* from its global install, while the project's component.ts
+// files import the project's copies — two `app` registries, so nested
+// modules lose their action handlers ("invalid scoped UI action") and
+// Studio's preview can't resolve primitives. When the project depends on
+// @hypen-space/cli (every `hypen init` scaffold does), re-run the command
+// with that CLI so everything shares the project's packages.
+//
+// Skipped for `init` (no project yet), help/version output, when running
+// this CLI from a source checkout (bin/hypen.ts — contributors run it
+// against example projects on purpose), and with HYPEN_NO_LOCAL_CLI=1.
+// HYPEN_CLI_REEXEC guards against loops.
+await maybeDelegateToLocalCli();
+
+async function maybeDelegateToLocalCli(): Promise<void> {
+  const argv = process.argv.slice(2);
+  const command = argv.find((a) => !a.startsWith("-"));
+  if (!command || command === "init") return;
+  if (argv.some((a) => a === "-h" || a === "--help" || a === "-v" || a === "--version")) return;
+  if (process.env.HYPEN_CLI_REEXEC || process.env.HYPEN_NO_LOCAL_CLI === "1") return;
+  const selfFile = fileURLToPath(import.meta.url);
+  if (selfFile.endsWith(".ts")) return;
+
+  const selfRoot = findPackageRoot(dirname(selfFile), "@hypen-space/cli");
+  const local = findLocalCli(process.cwd(), selfRoot);
+  if (!local) return;
+
+  console.error(
+    dim(`  Using project-local @hypen-space/cli${local.version ? ` v${local.version}` : ""} (${local.root})`)
+  );
+  // Older local CLIs reject `--no-open`; every version honors the
+  // HYPEN_NO_OPEN env var, so pass the intent that way.
+  const env: Record<string, string | undefined> = { ...process.env, HYPEN_CLI_REEXEC: "1" };
+  const forwarded = argv.filter((a) => {
+    if (a !== "--no-open") return true;
+    env.HYPEN_NO_OPEN = "1";
+    return false;
+  });
+  const { spawn } = await import("child_process");
+  const child = spawn(process.execPath, [local.bin, ...forwarded], { stdio: "inherit", env });
+  // The child owns shutdown: forward signals instead of dying first and
+  // orphaning it (Ctrl+C reaches both via the process group anyway).
+  const forward = (signal: NodeJS.Signals) => () => {
+    try { child.kill(signal); } catch { /* already gone */ }
+  };
+  process.on("SIGINT", forward("SIGINT"));
+  process.on("SIGTERM", forward("SIGTERM"));
+  process.on("SIGHUP", forward("SIGHUP"));
+  const code: number = await new Promise((done) => {
+    // A child killed by a signal (Ctrl+C) exits like a shell reports it:
+    // 128 + the signal number (130 for SIGINT), not a generic failure.
+    child.on("exit", (exitCode, signal) =>
+      done(exitCode ?? (signal ? 128 + (osConstants.signals[signal] ?? 0) : 0))
+    );
+    child.on("error", (err) => {
+      console.error(`  Failed to start the project-local CLI: ${err.message}`);
+      done(1);
+    });
+  });
+  process.exit(code);
+}
+
+// Parse command line arguments. `--no-<flag>` negations are peeled off
+// first: util.parseArgs only understands them on newer runtimes.
+const NEGATABLE = ["open", "minify"] as const;
+const negated = new Set<string>();
+const rawArgs = process.argv.slice(2).filter((arg) => {
+  const m = /^--no-(.+)$/.exec(arg);
+  if (m && (NEGATABLE as readonly string[]).includes(m[1]!)) {
+    negated.add(m[1]!);
+    return false;
+  }
+  return true;
 });
 
-// Handle global flags
+let parsed;
+try {
+  parsed = parseArgs({
+    args: rawArgs,
+    options: {
+      help: { type: "boolean", short: "h" },
+      version: { type: "boolean", short: "v" },
+      port: { type: "string", short: "p" },
+      debug: { type: "boolean", short: "d" },
+      outDir: { type: "string", short: "o" },
+      minify: { type: "boolean", short: "m" },
+      sourcemap: { type: "boolean", short: "s" },
+      open: { type: "boolean" },
+      session: { type: "string" },
+      url: { type: "string" },
+      studio: { type: "boolean" },
+      clean: { type: "boolean" },
+      device: { type: "string" },
+      runner: { type: "string" },
+      a11y: { type: "boolean" },
+      "studio-port": { type: "string" },
+    },
+    allowPositionals: true,
+  });
+} catch (err: any) {
+  // Unknown/malformed flags: say which, point at the command's help.
+  const cmd = rawArgs.find((a) => !a.startsWith("-"));
+  // Node's message continues with advice about `--` positionals, which is
+  // noise for a typo'd flag.
+  const message = String(err?.message ?? err).replace(/\. To specify a positional argument.*$/s, "");
+  console.error(`\n  Error: ${message}`);
+  console.error(`  Run ${dim(`hypen ${cmd ? cmd + " " : ""}--help`)} for the available options.\n`);
+  process.exit(1);
+}
+const { values, positionals } = parsed;
+for (const flag of negated) (values as Record<string, unknown>)[flag] = false;
+
+// `DEBUG=hypen:*` (or `hypen`, `hypen:dev`, `*`) turns on --debug.
+if (!values.debug && isHypenDebugEnv(process.env.DEBUG)) {
+  values.debug = true;
+}
+
+// Handle global flags. `hypen <command> --help` prints that command's help.
 if (values.help) {
-  console.log(HELP);
+  const cmd = positionals[0];
+  if (cmd === "run") {
+    const { RUN_HELP } = await import("../src/run.js");
+    console.log(RUN_HELP);
+  } else {
+    console.log((cmd && COMMAND_HELP[cmd]) || HELP);
+  }
   process.exit(0);
 }
 
@@ -1175,18 +1563,46 @@ if (values.version) {
   process.exit(0);
 }
 
-// Validate port if provided
-if (values.port) {
-  const port = parseInt(values.port);
-  const portError = validatePort(port);
-  if (portError) {
-    console.error(`\n  Error: ${portError}\n`);
+// Validate ports if provided (strictly: `3000abc` is an error, not 3000).
+for (const flag of ["port", "studio-port"] as const) {
+  const raw = values[flag];
+  if (raw === undefined) continue;
+  const parsedPort = parsePortArg(raw);
+  if ("error" in parsedPort) {
+    console.error(`\n  Error: --${flag}: ${parsedPort.error}\n`);
     process.exit(1);
   }
 }
+const portValue = values.port ? parsePortArg(values.port) : null;
+const cliPort = portValue && "port" in portValue ? portValue.port : undefined;
+const studioPortValue = values["studio-port"] ? parsePortArg(values["studio-port"]) : null;
+const cliStudioPort =
+  studioPortValue && "port" in studioPortValue ? studioPortValue.port : undefined;
 
 // Execute command
 const command = positionals[0];
+
+// Go/Kotlin projects run on their own SDK. Without this, dev/studio/test
+// would "repair" them with a package.json + npm install and serve their
+// templates without their modules.
+const TS_ONLY_COMMANDS = new Set(["dev", "build", "generate", "studio", "test", "run"]);
+if (command && TS_ONLY_COMMANDS.has(command) && !(command === "run" && values.url)) {
+  const kind = nonTsProjectKind(process.cwd());
+  if (kind) {
+    const lang = kind === "go" ? "Go" : "Kotlin";
+    console.error(
+      `\n  Error: this is a ${lang} Hypen project; \`hypen ${command}\` works with TypeScript projects.`
+    );
+    console.error(`  Run it with ${yellow(nonTsRunHint(kind, process.cwd()))} (see README.md).`);
+    if (command === "test" || command === "studio") {
+      console.error(
+        `  To preview it in Test Mode, start the server, then run ${dim("hypen test")} outside the project and connect to ${dim("ws://localhost:<port>")}.`
+      );
+    }
+    console.error("");
+    process.exit(1);
+  }
+}
 
 // First run on this machine? Walk new users through a short tour before
 // handing off to the command. No-ops for non-interactive runs and after
@@ -1200,7 +1616,7 @@ switch (command) {
 
   case "dev":
     await devServer({
-      port: values.port ? parseInt(values.port) : undefined,
+      port: cliPort,
       debug: values.debug,
       a11y: values.a11y,
     });
@@ -1225,7 +1641,7 @@ switch (command) {
 
   case "studio":
     await startStudio({
-      port: values.port ? parseInt(values.port) : undefined,
+      port: cliPort,
       open: values.open,
       session: values.session,
     });
@@ -1233,24 +1649,32 @@ switch (command) {
 
   case "test":
     await testMode({
-      port: values.port ? parseInt(values.port) : undefined,
+      port: cliPort,
       open: values.open,
+      studioPort: cliStudioPort,
     });
     break;
 
   case "run":
     await handleRun(positionals[1], {
-      port: values.port ? parseInt(values.port) : undefined,
+      port: cliPort,
       url: values.url,
       studio: values.studio,
+      studioPort: cliStudioPort,
       clean: values.clean,
+      device: values.device,
+      runner: values.runner,
     });
     break;
 
   default:
     if (command) {
-      console.error(`\n  Unknown command: ${command}\n`);
+      const known = ["init", "dev", "build", "generate", "check", "a11y", "studio", "test", "run"];
+      const guess = known.find((k) => k.startsWith(command.slice(0, 2)));
+      console.error(`\n  Unknown command: ${command}${guess ? ` (did you mean ${pink(guess)}?)` : ""}`);
+      console.error(`  Run ${dim("hypen --help")} for the list of commands.\n`);
+      process.exit(1);
     }
     console.log(HELP);
-    process.exit(command ? 1 : 0);
+    process.exit(0);
 }

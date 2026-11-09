@@ -31,7 +31,7 @@
 //! The fast path must be *observationally identical* to the slow path.
 //! Substitution goes through the same [`replace_value_item_bindings`] the
 //! full pass uses, and resolution through the same
-//! [`resolve_single_value`], so a value can't resolve differently depending
+//! [`resolve_prop_value`], so a value can't resolve differently depending
 //! on which path touched it. The compiled path is also strictly
 //! *narrower*, not different: props that don't depend on the item are
 //! untouched by an item change by definition (state-bound props update
@@ -40,7 +40,7 @@
 
 use super::diff::{emit_semantics_delta, is_engine_internal_prop, ReconcileCtx};
 use super::item_bindings::replace_value_item_bindings;
-use super::resolve::resolve_single_value;
+use super::resolve::resolve_prop_value;
 use super::Patch;
 use crate::ir::{IRNode, NodeId, Value};
 use std::sync::Arc;
@@ -299,7 +299,8 @@ pub(crate) fn plan_instantiation(template: &IRNode) -> Option<InstantiationPlan>
         let mut evaluator = None;
         for (key, value) in &element.props {
             if is_statically_resolvable(value) {
-                if let Some(v) = resolve_single_value(
+                if let Some(v) = resolve_prop_value(
+                    key,
                     value,
                     &serde_json::Value::Null,
                     None,
@@ -521,8 +522,14 @@ pub(crate) fn apply_compiled_row(
 
         // Same substitution + resolution the full pass performs.
         let new_raw = replace_value_item_bindings(&entry.value, item, item_name);
-        let new_resolved =
-            resolve_single_value(&new_raw, ctx.state, None, ctx.data_sources, &mut evaluator);
+        let new_resolved = resolve_prop_value(
+            &entry.prop,
+            &new_raw,
+            ctx.state,
+            None,
+            ctx.data_sources,
+            &mut evaluator,
+        );
 
         let Some(node) = ctx.tree.get_mut(node_id) else {
             return false;
@@ -670,7 +677,8 @@ pub(crate) fn build_row_prototype(
             }
             if value_depends_on_item(value, item_name) {
                 item_entries.push((Arc::from(key.as_str()), value.clone()));
-            } else if let Some(v) = resolve_single_value(
+            } else if let Some(v) = resolve_prop_value(
+                key,
                 value,
                 effective_state,
                 None,
@@ -760,7 +768,8 @@ pub(crate) fn instantiate_row_from_proto(
             let mut raw_overlay = Vec::with_capacity(proto_node.item_entries.len());
             for (prop, raw_value) in &proto_node.item_entries {
                 let new_raw = replace_value_item_bindings(raw_value, item, item_name);
-                if let Some(v) = resolve_single_value(
+                if let Some(v) = resolve_prop_value(
+                    prop,
                     &new_raw,
                     ctx.state,
                     None,

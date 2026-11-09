@@ -5,19 +5,20 @@ description: Get up and running with Hypen quickly
 
 # Getting Started
 
-Welcome to Hypen! Write your UI once and run it natively on Web, Android, and iOS — all from a single codebase.
+Welcome to Hypen! Write your UI once and run it natively on Web, Android, iOS and desktop, all from a single codebase.
 
 ## Develop Anywhere, Run Everywhere
 
-Hypen gives you a complete development workflow out of the box:
+Hypen gives you a complete development workflow out of the box. The CLI runs on [Bun](https://bun.sh); inside a project, run these through the project's scripts (`bun run dev`) or `bunx hypen ...`:
 
 - **`hypen dev`** — Start a hot-reloading dev server and preview in the browser
 - **`hypen studio`** — Open a full in-browser IDE with live preview, state inspector, time-travel debugging, and an integrated terminal
 - **`hypen run android`** — Preview your app on an Android device or emulator with hot reload
 - **`hypen run ios`** — Preview your app on the iOS Simulator with hot reload
+- **`hypen run desktop`** — Preview in Hypen Browser, the native desktop runner (downloaded on first run)
 - **`hypen run android --studio`** — Edit in Studio and preview on a device at the same time
 
-You can go from zero to running on all three platforms in minutes.
+You can go from zero to running on web and mobile in minutes.
 
 ## Quick Start
 
@@ -27,7 +28,7 @@ You can go from zero to running on all three platforms in minutes.
 
 3. **[Your First App](/docs/getting-started/first-app)** — Build a counter app step-by-step
 
-4. **[Building a Remote App](/docs/getting-started/remote-app)** — Stream your app to Web, Android, and iOS from a single server
+4. **[Building a Remote App](/docs/getting-started/remote-app)** — Stream your app to Web and Android from your own server
 
 ## What You'll Learn
 
@@ -44,8 +45,8 @@ Ready to begin? Start with the [Introduction](/docs/getting-started/introduction
 
 ## Choose Your Path
 
-**Local Apps** — Great for learning and simple projects:
-- Follow [Your First App](/docs/getting-started/first-app) to build a local counter
+**CLI projects** — Great for learning and for most apps:
+- Follow [Your First App](/docs/getting-started/first-app) to build a counter in a `hypen init` project. `hypen build` turns it into a static site.
 
-**Remote Apps** — Recommended for production cross-platform apps:
-- Follow [Building a Remote App](/docs/getting-started/remote-app) to stream to Web, Android, and iOS
+**Your own server** — When you want to host the app inside your own Bun server:
+- Follow [Building a Remote App](/docs/getting-started/remote-app) to stream to Web and Android clients

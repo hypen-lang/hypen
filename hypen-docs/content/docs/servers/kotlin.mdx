@@ -5,38 +5,112 @@ description: Complete guide to building Hypen servers with Kotlin and the JVM
 
 # Kotlin SDK
 
-The Kotlin SDK (`space.hypen.core`) provides a server-side Hypen implementation for Kotlin/JVM applications. It features a type-safe Kotlin DSL for module definitions, sealed-class actions, coroutine support for async handlers, session management, and Remote UI streaming over WebSocket.
+The Kotlin SDK (Maven artifact `space.hypen:hypen-kotlin`, package `space.hypen.core`) provides a server-side Hypen implementation for Kotlin/JVM applications. It features a type-safe Kotlin DSL for module definitions, sealed-class actions, coroutine support for async handlers, session management, and Remote UI streaming over WebSocket.
 
 ## Installation
 
-Add the dependency to your `build.gradle.kts`:
+The SDK is published to Maven Central as **`space.hypen:hypen-kotlin`**:
 
 ```kotlin
+// build.gradle.kts
+repositories {
+    mavenCentral()
+}
+
 dependencies {
-    implementation("space.hypen:hypen-core:0.1.0")
+    implementation("space.hypen:hypen-kotlin:0.6.7")
 }
 ```
-
-Or with Maven:
 
 ```xml
 <dependency>
     <groupId>space.hypen</groupId>
-    <artifactId>hypen-core</artifactId>
-    <version>0.1.0</version>
+    <artifactId>hypen-kotlin</artifactId>
+    <version>0.6.7</version>
 </dependency>
 ```
 
+### Native engine library
+
+The SDK drives the Rust engine through UniFFI/JNA. The jar bundles the native library for Linux (x86-64 and arm64, glibc), macOS (Apple Silicon and Intel) and Windows (x86-64), and JNA loads the right one from the classpath at runtime. There is nothing else to install: no Rust toolchain, no `jna.library.path`.
+
+To use a different build of the engine (for example while working on it), point JNA at its directory. `-Djna.library.path` is searched before the bundled copy:
+
+```bash
+cargo build --release -p hypen-engine --features uniffi   # from a Hypen checkout
+java -Djna.library.path=/path/to/hypen/target/release ...
+```
+
+### Building from source (contributors)
+
+To work on the SDK itself, build it from a checkout of the [Hypen repository](https://github.com/hypen-lang/hypen). A source build bundles no engine, so build that too and point the tests and your app at it:
+
+```bash
+cd hypen
+cargo build --release -p hypen-engine --features uniffi   # -> target/release/libhypen_engine.so
+cd hypen-kotlin
+./gradlew test                                            # uses ../target/release
+```
+
+To use the checkout from another Gradle project, add `includeBuild("/path/to/hypen/hypen-kotlin")` to its `settings.gradle.kts` (projects from `hypen init` do this when `HYPEN_KOTLIN_SDK` is set) and run it with `-Djna.library.path=/path/to/hypen/target/release`.
+
 ## Quick Start
 
-Create a counter module using the Kotlin DSL and serve it over WebSocket:
+`HypenServer` is transport-agnostic: it holds modules and sessions, and you plug it into a WebSocket server. This complete program serves a counter with Ktor. Add Ktor next to the SDK:
 
 ```kotlin
+// build.gradle.kts
+plugins {
+    kotlin("jvm") version "2.0.21"
+    kotlin("plugin.serialization") version "2.0.21"
+    application
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation("space.hypen:hypen-kotlin:0.6.7")
+    implementation("io.ktor:ktor-server-core:3.1.1")
+    implementation("io.ktor:ktor-server-netty:3.1.1")
+    implementation("io.ktor:ktor-server-websockets:3.1.1")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.7.3")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.9.0")
+}
+
+application {
+    mainClass.set("MainKt")
+}
+```
+
+```kotlin
+// src/main/kotlin/Main.kt
+import io.ktor.server.application.*
+import io.ktor.server.engine.*
+import io.ktor.server.netty.*
+import io.ktor.server.routing.*
+import io.ktor.server.websocket.*
+import io.ktor.websocket.*
+import kotlinx.serialization.Serializable
 import space.hypen.core.*
 
+// State as a data class
+@Serializable
+data class CounterState(var count: Int = 0)
+
+// Actions as a sealed interface. The UI dispatches them by name.
+sealed interface CounterAction : HypenAction {
+    data object Increment : CounterAction {
+        override val _actionName: String get() = "increment"
+    }
+    data object Decrement : CounterAction {
+        override val _actionName: String get() = "decrement"
+    }
+}
+
 fun main() {
-    // 1. Define the module — name(...) also auto-registers it on the
-    //    global HypenApp singleton for ManagedRouter / ComponentResolver.
+    // 1. Define the module.
     val counter = hypen(CounterState()) {
         name("Counter")
 
@@ -47,20 +121,17 @@ fun main() {
             Column {
                 Text("Count: @{state.count}")
                 Row {
-                    Button("@actions.decrement") { Text("-") }
-                    Button("@actions.increment") { Text("+") }
+                    Button { Text("-") }.onClick(@actions.decrement)
+                    Button { Text("+") }.onClick(@actions.increment)
                 }
             }
         """.trimIndent())
     }
 
-    // 2. Build the server DSL — register every module here. Add more with
-    //    additional module("Name", def) calls, plus route(...) entries if
-    //    you want URL-driven module routing.
+    // 2. Register modules on the server. Add more module("Name", def)
+    //    calls, plus route(...) entries for URL-driven module routing.
     val server = HypenServer {
         module("Counter", counter)
-        // module("Feed", feed)
-        // route("/counter", "Counter")
 
         session {
             ttl = 3600
@@ -71,20 +142,33 @@ fun main() {
         onDisconnection { client -> println("Disconnected: ${client.id}") }
     }
 
-    // Wire into Ktor — see "Integrating with Ktor" below
-    println("Server ready")
-}
-
-// State as a data class
-@Serializable
-data class CounterState(var count: Int = 0)
-
-// Actions as sealed interface
-sealed interface CounterAction : HypenAction {
-    data object Increment : CounterAction
-    data object Decrement : CounterAction
+    // 3. Serve it over WebSocket with Ktor.
+    embeddedServer(Netty, port = 3000) {
+        install(WebSockets)
+        routing {
+            webSocket("/") {
+                val send: suspend (String) -> Unit = { msg ->
+                    try { send(Frame.Text(msg)) } catch (_: Exception) {}
+                }
+                send(server.handleConnect(connectionKey = this, sendMessage = send))
+                try {
+                    for (frame in incoming) {
+                        if (frame is Frame.Text) {
+                            server.handleMessage(this, frame.readText(), send)
+                        }
+                    }
+                } finally {
+                    server.handleDisconnect(this)
+                }
+            }
+        }
+    }.start(wait = true)
 }
 ```
+
+Run it with `./gradlew run`, then point a Hypen client (Android, desktop, a web `RemoteEngine`) at `ws://localhost:3000`. Unlike the TypeScript and Go servers, the Kotlin server does not serve a built-in browser page. `hypen init` can generate this project for you (choose Kotlin); its `Main.kt` uses the same wiring, and it depends on the same Maven Central artifact, so `./gradlew run` works right away. For contributors, `HYPEN_KOTLIN_SDK` builds the SDK from a checkout and `HYPEN_NATIVE_LIB_DIR` loads a locally built engine — see the generated `README.md`.
+
+For production wiring (upgrade admission, compression that keeps the device plane working, binary device frames), see [Integrating with Ktor](#integrating-with-ktor) and `hypen-kotlin/example-server/src/main/kotlin/Sockets.kt` in the repository.
 
 ## Kotlin DSL
 
@@ -855,7 +939,7 @@ watcher.stop()
 
 ## WASM Engine
 
-The `NativeEngine` uses UniFFI bindings to run the Rust Hypen engine via WASI:
+The `NativeEngine` uses UniFFI bindings to run the Rust Hypen engine natively (through JNA, from the library bundled in the jar):
 
 ```kotlin
 val engine = NativeEngine()
@@ -1083,7 +1167,8 @@ WORKDIR /app
 COPY . .
 RUN gradle shadowJar --no-daemon
 
-FROM eclipse-temurin:17-jre-alpine
+# glibc-based image: the bundled Linux engine does not load on musl (Alpine)
+FROM eclipse-temurin:17-jre
 WORKDIR /app
 COPY --from=build /app/build/libs/*-all.jar app.jar
 COPY --from=build /app/components ./components
@@ -1093,13 +1178,13 @@ CMD ["java", "-jar", "app.jar"]
 
 ### Production Checklist
 
-- Bundle the native WASM engine library with your deployment
+- The engine ships inside the SDK jar (keep it in your fat jar / image). The Linux builds need glibc, so use a glibc-based JRE image (for example `eclipse-temurin:17-jre`), not Alpine
 - Each client gets its own module instance — plan memory accordingly
 - Use `server.shutdown()` for graceful shutdown
 - Monitor sessions via `server.getStats()`
 - Set appropriate session TTL for your use case
 - Use `ConcurrentPolicy.KICK_OLD` (default) to prevent stale connections
-- Add authentication at the HTTP layer before WebSocket upgrade
+- Configure `allowedOrigins(...)` and/or `authenticate { }` in the `HypenServer { }` block, and call `server.admit(...)` before accepting the upgrade (see `example-server/src/main/kotlin/Sockets.kt`)
 - Use coroutine scopes for async action handlers
 
 ## Requirements
@@ -1107,7 +1192,7 @@ CMD ["java", "-jar", "app.jar"]
 - Kotlin 2.0+ with JVM target 17+
 - `kotlinx-coroutines-core` 1.9+
 - `kotlinx-serialization-json` 1.7+
-- JNA 5.14+ (for UniFFI native bindings)
+- JNA 5.14+ (a dependency of the SDK). The native `hypen_engine` library is bundled in the jar for Linux x86-64/arm64, macOS arm64/x86-64 and Windows x86-64 (see [Native engine library](#native-engine-library))
 - Ktor (recommended for WebSocket serving)
 
 ## See Also

@@ -286,12 +286,13 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
-    // Detach the old children from the LOGICAL parent up front so creation
-    // doesn't append at arbitrary positions during the pass — the final
-    // children list is rebuilt in desired order as we go.
-    if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-        parent_node.children.clear();
-    }
+    // The LOGICAL parent's child list keeps its OLD order for the whole pass
+    // (creation appends to it) and is replaced by the desired order at the
+    // end. Reconciling a reused child that is itself control flow (an `If`
+    // per item, a nested ForEach as the row root) looks up the rendered node
+    // FOLLOWING it to anchor anything it inserts — which is the next old
+    // row, still in the renderer at this point — so its siblings must still
+    // be visible here.
 
     // One fingerprint for the whole pass — every child stamped this cycle
     // shares it, and a keyed match only skips when BOTH its stored item and
@@ -359,9 +360,6 @@ pub(crate) fn reconcile_iterable_children_full(
                 // full reconcile sees those.
                 let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
 
-                if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-                    parent_node.children.push_back(old_id);
-                }
                 if !memo_hit {
                     // Fast path: apply just the item-dependent prop deltas
                     // via the compiled binding map. Falls back to full
@@ -406,9 +404,6 @@ pub(crate) fn reconcile_iterable_children_full(
                 });
                 let same_template = memo.is_some_and(|m| m.templates_hash == templates_hash);
 
-                if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
-                    parent_node.children.push_back(old_id);
-                }
                 if !memo_hit {
                     // Same fast path as the keyed branch: positional reuse
                     // re-resolves every item-dependent prop against the new
@@ -494,6 +489,10 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
+    if let Some(parent_node) = ctx.tree.get_mut(parent_id) {
+        parent_node.children = new_child_ids.iter().copied().collect();
+    }
+
     // Stamp keys onto the (re-used or freshly created) tree nodes so the
     // *next* reconcile finds them again. `new_child_keys` is dead after this,
     // so the keys MOVE into the nodes — and a node already carrying its key
@@ -540,19 +539,45 @@ pub(crate) fn reconcile_iterable_children_full(
         in_lis[idx] = true;
     }
 
-    // Walk backwards so each Move's anchor (`new_child_ids[i + 1]`) is already
-    // in its final position — the forward direction is wrong for any reorder
-    // needing two or more moves (e.g. [a,b,c] → [c,b,a]).
+    // Walk backwards so each Move's anchor (the first rendered node of
+    // `new_child_ids[i + 1..]`) is already in its final position — the
+    // forward direction is wrong for any reorder needing two or more moves
+    // (e.g. [a,b,c] → [c,b,a]).
+    //
+    // A child may be a transparent control-flow node (an `If` / `When` per
+    // row, a nested ForEach as the row root). The renderer never created it,
+    // so it can neither be moved nor anchored on: move every node it renders,
+    // in order, and anchor on the first node the following children render.
+    // `anchor` tracks that node as the walk goes; `None` = end of this
+    // iterable's region (re-anchored by the enclosing control-flow reconcile
+    // when the region is followed by siblings).
+    let mut anchor: Option<NodeId> = None;
+    let mut rendered: Vec<NodeId> = Vec::new();
     for new_idx in (0..new_child_ids.len()).rev() {
-        if in_lis[new_idx] {
+        let child = new_child_ids[new_idx];
+        let is_flow = ctx
+            .tree
+            .get(child)
+            .is_some_and(|n| n.control_flow.is_some());
+        if !is_flow {
+            if !in_lis[new_idx] {
+                ctx.patches
+                    .push(Patch::move_node(render_parent, child, anchor));
+            }
+            anchor = Some(child);
             continue;
         }
-        let before_id = new_child_ids.get(new_idx + 1).copied();
-        ctx.patches.push(Patch::move_node(
-            render_parent,
-            new_child_ids[new_idx],
-            before_id,
-        ));
+        rendered.clear();
+        super::diff::collect_rendered_nodes(ctx.tree, child, &mut rendered);
+        if !in_lis[new_idx] {
+            for &node in &rendered {
+                ctx.patches
+                    .push(Patch::move_node(render_parent, node, anchor));
+            }
+        }
+        if let Some(&first) = rendered.first() {
+            anchor = Some(first);
+        }
     }
 
     // Remove old children that weren't reused.

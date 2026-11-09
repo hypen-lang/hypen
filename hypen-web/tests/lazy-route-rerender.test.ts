@@ -73,7 +73,7 @@ describe("Lazy Route Re-rendering", () => {
       getState: () => mockState,
     };
 
-    let mockState = { cart: [] };
+    let mockState: { cart: Array<{ id: number; name: string }> } = { cart: [] };
 
     // Import the router update function
     // updateRouteVisibility imported at top level
@@ -83,7 +83,7 @@ describe("Lazy Route Re-rendering", () => {
     await updateRouteVisibility("/cart", mockEngine as any);
 
     expect(renderCalls.length).toBe(1);
-    expect(renderCalls[0].component).toBe("CartPage");
+    expect(renderCalls[0]!.component).toBe("CartPage");
     expect(cartRoute.style.display).toBe("flex");
     expect(cartRoute.innerHTML).toContain("Items: 0");
 
@@ -92,7 +92,7 @@ describe("Lazy Route Re-rendering", () => {
     await updateRouteVisibility("/products", mockEngine as any);
 
     expect(renderCalls.length).toBe(1);
-    expect(renderCalls[0].component).toBe("ProductsPage");
+    expect(renderCalls[0]!.component).toBe("ProductsPage");
     expect(productsRoute.style.display).toBe("flex");
     expect(cartRoute.style.display).toBe("none");
 
@@ -104,7 +104,7 @@ describe("Lazy Route Re-rendering", () => {
     await updateRouteVisibility("/cart", mockEngine as any);
 
     expect(renderCalls.length).toBe(1);
-    expect(renderCalls[0].component).toBe("CartPage");
+    expect(renderCalls[0]!.component).toBe("CartPage");
     expect(cartRoute.style.display).toBe("flex");
     expect(cartRoute.innerHTML).toContain("Items: 2");
   });

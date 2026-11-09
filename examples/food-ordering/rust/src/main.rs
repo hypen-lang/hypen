@@ -35,7 +35,7 @@ use queries::{
     user_total_orders, user_total_spent,
 };
 use types::{
-    AppState, CategoryIdPayload, ItemIdPayload, QueryPayload, Restaurant, Suggestion, User,
+    money, AppState, CategoryIdPayload, ItemIdPayload, QueryPayload, Restaurant, Suggestion, User,
 };
 
 // ---------------------------------------------------------------------------
@@ -67,6 +67,12 @@ fn build_initial_state(db: &Connection, current_user: User) -> AppState {
         suggestions,
         search_results: restaurants,
         current_user,
+        // Labels for the zero-valued money fields, so nothing renders as a
+        // bare "$" before the first route hook fills them in.
+        cart_subtotal_label: money(0.0),
+        cart_delivery_fee_label: money(0.0),
+        cart_total_label: money(0.0),
+        total_spent_label: money(0.0),
         ..Default::default()
     }
 }
@@ -174,6 +180,7 @@ fn build_app_module(
 fn refresh_cart_for_restaurant(conn: &Connection, user_id: &str, state: &mut AppState) {
     let restaurant_id = &state.restaurant.id;
     state.cart_subtotal = cart_subtotal_for_restaurant(conn, user_id, restaurant_id);
+    state.cart_subtotal_label = money(state.cart_subtotal);
     state.cart_count = cart_count_for_restaurant(conn, user_id, restaurant_id);
 }
 
@@ -193,9 +200,12 @@ fn refresh_full_cart(conn: &Connection, user_id: &str, state: &mut AppState) {
     state.cart_count = items.iter().map(|i| i.quantity).sum::<i32>();
     state.cart_items = items;
     state.cart_subtotal = subtotal;
+    state.cart_subtotal_label = money(subtotal);
     state.cart_restaurant_name = restaurant_name;
     state.cart_delivery_fee = delivery_fee;
+    state.cart_delivery_fee_label = money(delivery_fee);
     state.cart_total = total;
+    state.cart_total_label = money(total);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,9 +299,12 @@ fn build_session(
 
                 slot.insert("cartItems".into(), to_json(&items));
                 slot.insert("cartSubtotal".into(), Value::from(subtotal));
+                slot.insert("cartSubtotalLabel".into(), Value::String(money(subtotal)));
                 slot.insert("cartRestaurantName".into(), Value::String(name));
                 slot.insert("cartDeliveryFee".into(), Value::from(fee));
+                slot.insert("cartDeliveryFeeLabel".into(), Value::String(money(fee)));
                 slot.insert("cartTotal".into(), Value::from(total));
+                slot.insert("cartTotalLabel".into(), Value::String(money(total)));
                 slot.insert("cartCount".into(), Value::from(count));
             }
         }
@@ -334,10 +347,9 @@ fn build_session(
                     "totalOrders".into(),
                     Value::from(user_total_orders(&conn, &user_id)),
                 );
-                slot.insert(
-                    "totalSpent".into(),
-                    Value::from(user_total_spent(&conn, &user_id)),
-                );
+                let total_spent = user_total_spent(&conn, &user_id);
+                slot.insert("totalSpent".into(), Value::from(total_spent));
+                slot.insert("totalSpentLabel".into(), Value::String(money(total_spent)));
                 slot.insert("favoriteCount".into(), Value::from(0u32));
                 slot.insert(
                     "cartCount".into(),
@@ -365,6 +377,7 @@ fn build_session(
                 slot.insert("restaurant".into(), to_json(&restaurant));
                 slot.insert("menuItems".into(), to_json(&menu));
                 slot.insert("cartSubtotal".into(), Value::from(cart_subtotal));
+                slot.insert("cartSubtotalLabel".into(), Value::String(money(cart_subtotal)));
                 slot.insert("cartCount".into(), Value::from(cart_count_here));
                 slot.insert("isFavorite".into(), Value::Bool(false));
             }

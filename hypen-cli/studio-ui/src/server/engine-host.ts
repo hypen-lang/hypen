@@ -9,9 +9,11 @@
  * action is replayed on every session's engine, so a tap on the web cell
  * updates the native mirror too (assuming deterministic handlers).
  *
- * On source file changes, `reload()` → `remoteServer.reload()` which uses
- * the engine's reconciler to emit minimal patches instead of tearing down
- * the tree. `reset()` is the escape hatch for when state gets wedged:
+ * On source file changes, `reload()` → `remoteServer.reload()`, which
+ * briefly disconnects every client (close 1012); each one redials with its
+ * session id and resumes against the fresh code with every module's state
+ * (primary, nested, route modules) restored from the suspended session's
+ * snapshot. `reset()` is the escape hatch for when state gets wedged:
  * closes every live session so clients reconnect into a clean engine.
  *
  * When the entry .hypen has no sibling .ts module, we synthesise a mock
@@ -36,6 +38,7 @@ import {
   findArrayPaths,
   type TemplateReferences,
 } from "./mock-state.ts";
+import { createHypenSourceValidator } from "../../../src/dev-diagnostics.ts";
 
 interface EngineTransport {
   send: (msg: unknown) => void;
@@ -46,6 +49,13 @@ interface StudioEngineHostOptions {
   projectDir: string;
   componentsDir: string;
   entryName: string;
+  /**
+   * Called after each preview session renders with the components its
+   * template references that resolve to nothing (deleted / misspelled /
+   * never created) — `[]` once everything resolves again. Studio shows them
+   * in the console and as a banner over the preview.
+   */
+  onUnresolvedComponents?: (names: string[]) => void;
 }
 
 interface WsSessionHandle {
@@ -72,6 +82,8 @@ export class StudioEngineHost {
   private readonly options: StudioEngineHostOptions;
   private remoteServer: RemoteServer | null = null;
   private ready = false;
+  /** Set once bootstrap returned without a usable engine (see status()). */
+  private unavailableReason: string | null = null;
   private readyPromise: Promise<void> | null = null;
   private readonly sessions = new WeakMap<ServerWebSocket<any>, WsSessionHandle>();
   // Live sessions keyed by transport so we can iterate on state-push.
@@ -81,6 +93,12 @@ export class StudioEngineHost {
   private readonly pendingSockets: ServerWebSocket<any>[] = [];
 
   private mock: MockBinding | null = null;
+  /** Parse-checks the .hypen sources before a reload (lazy engine boot). */
+  private validateSources: (() => Promise<string[]>) | null = null;
+  /** Last parse errors reported, so an unchanged error isn't re-printed. */
+  private lastProblems = "";
+  /** Unresolved component names already reported since the last reload. */
+  private reportedUnresolved = new Set<string>();
 
   constructor(options: StudioEngineHostOptions) {
     this.options = options;
@@ -88,7 +106,17 @@ export class StudioEngineHost {
 
   async start(): Promise<void> {
     if (this.readyPromise) return this.readyPromise;
-    this.readyPromise = this.bootstrap();
+    this.readyPromise = this.bootstrap().then(
+      () => {
+        if (!this.ready && !this.unavailableReason) {
+          this.unavailableReason = "engine did not start";
+        }
+      },
+      (err) => {
+        this.unavailableReason = err?.message ?? String(err);
+        throw err;
+      }
+    );
     return this.readyPromise;
   }
 
@@ -106,7 +134,9 @@ export class StudioEngineHost {
         console.log(
           `  [engine] server-based project — previews connect to ${remoteUrl}.`
         );
+        this.unavailableReason = `server-based project (previews use ${remoteUrl})`;
       } else {
+        this.unavailableReason = "server-based project without a running server";
         console.warn(
           `  [engine] server-based project (entry: ${this.options.entryName}) — ` +
             `run \`hypen dev\` and connect Test Mode to its ws:// URL to preview.`
@@ -130,6 +160,7 @@ export class StudioEngineHost {
         `  [engine] no components directory found — tried: ${candidates.join(", ")}. ` +
           `Studio will render nothing until one exists.`
       );
+      this.unavailableReason = "no components directory";
       return;
     }
 
@@ -142,6 +173,7 @@ export class StudioEngineHost {
         `  [engine] entry "${this.options.entryName}" not found in ${componentsAbs} — ` +
           `studio will render nothing until the file is created.`
       );
+      this.unavailableReason = `entry "${this.options.entryName}" not found`;
       return;
     }
 
@@ -168,6 +200,9 @@ export class StudioEngineHost {
       .onSessionCreate((session: any) => {
         // Track sessions so mock-state pushes can reach every engine.
         this.liveSessions.add(session);
+        Promise.resolve(session.ready)
+          .then(() => this.reportUnresolved(session))
+          .catch(() => { /* session closed before it rendered */ });
       });
 
     await this.remoteServer.prepare();
@@ -176,6 +211,33 @@ export class StudioEngineHost {
     for (const ws of this.pendingSockets.splice(0)) {
       this.attachSession(ws);
     }
+  }
+
+  /**
+   * A component the template references but that resolves to nothing
+   * (e.g. its folder was just deleted) renders as nothing — the engine's
+   * unknown-component behaviour. The engine's own warning is muted here
+   * (framework logs are at "error"), so say it once per reload in the
+   * studio terminal and hand the list to the UI.
+   */
+  reportUnresolved(session: { engine?: { getUnresolvedComponents?: () => string[] } }): void {
+    let names: string[] = [];
+    try {
+      names = [...(session.engine?.getUnresolvedComponents?.() ?? [])].sort();
+    } catch {
+      return;
+    }
+    for (const name of names) {
+      if (this.reportedUnresolved.has(name)) continue;
+      this.reportedUnresolved.add(name);
+      console.warn(
+        `  [engine] Component "${name}" is referenced but not defined in ` +
+          `${this.options.componentsDir} (deleted or misspelled?) — it renders nothing until it exists.`
+      );
+    }
+    // Every session render reports (a Studio tab opened later learns the
+    // current list from its own preview session).
+    this.options.onUnresolvedComponents?.(names);
   }
 
   private synthesiseMock(template: string): MockBinding {
@@ -265,6 +327,23 @@ export class StudioEngineHost {
 
   async reload(): Promise<void> {
     if (!this.remoteServer) return;
+    // Autosave writes half-typed templates to disk. Reloading one with a
+    // syntax error would blank every preview; keep the last good render
+    // instead (the editor already squiggles the error).
+    this.validateSources ??= createHypenSourceValidator({
+      componentsDir: resolve(this.options.projectDir, this.options.componentsDir),
+      projectRoot: this.options.projectDir,
+    });
+    const problems = await this.validateSources();
+    if (problems.length > 0) {
+      const text = problems.join("\n");
+      if (text !== this.lastProblems) {
+        console.warn(`[engine] not reloading the preview until this parses:\n${text}`);
+      }
+      this.lastProblems = text;
+      return;
+    }
+    this.lastProblems = "";
     // If we're in mock mode, re-scan the template in case the user added or
     // removed `@{state.*}` references; merge new paths into existing state
     // so previously-edited values survive the re-render.
@@ -272,6 +351,8 @@ export class StudioEngineHost {
       try { await this.rescanMockFromSource(); } catch { /* keep going */ }
     }
     try {
+      // Fresh code: report still-missing components again (once).
+      this.reportedUnresolved.clear();
       await this.remoteServer.reload();
       // Re-push because `reload()` re-renders but won't reset state to the
       // mock's current values — especially important when new paths were
@@ -358,6 +439,18 @@ export class StudioEngineHost {
 
   isReady(): boolean {
     return this.ready;
+  }
+
+  /**
+   * Lifecycle for clients deciding whether to stream from `/ws/engine`:
+   * `starting` (sockets attached now are queued until bootstrap finishes),
+   * `ready`, or `unavailable` (bootstrap finished without an engine — e.g.
+   * no entry component yet; sockets would never be served).
+   */
+  status(): { state: "starting" | "ready" | "unavailable"; reason?: string } {
+    if (this.ready) return { state: "ready" };
+    if (this.unavailableReason) return { state: "unavailable", reason: this.unavailableReason };
+    return { state: "starting" };
   }
 }
 

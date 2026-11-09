@@ -87,11 +87,11 @@ Button { Icon("trash") }.label("Delete")
 Icon("checkmark").hidden()
 
 // Navigation landmark on a plain container.
-Column { … }.landmark("navigation")
+Column { Link(href: "/") { Text("Home") } }.landmark("navigation")
 
 // Reactive disclosure state.
 Button("Menu").expanded(@state.menuOpen).controls("menu-panel")
-Column { … }.id("menu-panel")
+Column { Text("Menu items") }.id("menu-panel")
 ```
 
 ## Labelling form controls
@@ -203,8 +203,8 @@ tab.id`, positionally paired:
 Tabs {
     Tab("Overview").selected(@state.overviewSelected).onClick(@actions.showOverview)
     Tab("Settings").selected(@state.settingsSelected).onClick(@actions.showSettings)
-    TabPanel { … }
-    TabPanel { … }
+    TabPanel { Text("Overview content") }
+    TabPanel { Text("Settings content") }
 }.id("settings")
 ```
 
@@ -262,13 +262,13 @@ role — no configuration:
   route's first heading, else its `main` landmark, else the subtree root — so
   screen readers announce the new page. Returning to a cached route restores
   the focus you left there. Apps with their own focus management can opt out
-  with `new DOMRenderer(root, { routeFocus: "off" })`.
+  with `new DOMRenderer(root, engine, undefined, { routeFocus: "off" })`.
 
 ## Checking your app: `hypen check`
 
 ```bash
 hypen check                              # whole project
-hypen check src/components/profile.hypen # one file
+hypen check src/components/Profile/component.hypen  # one file
 hypen check src/components src/shared    # specific directories
 ```
 

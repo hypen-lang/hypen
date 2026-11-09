@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version tag (e.g. v0.2.0) — will be pushed to the Go module repo"
+        description: "SDK version, with or without a leading v (e.g. 0.6.7 or v0.6.7). Tagged as hypen-golang/v<version>."
         required: true
         type: string
       dry-run:
@@ -23,9 +23,34 @@ on:
         default: true
 
 jobs:
+  # The Go SDK is the subdirectory module github.com/hypen-lang/hypen/hypen-golang.
+  # Go resolves `@vX.Y.Z` of a subdirectory module from the tag
+  # `hypen-golang/vX.Y.Z` (prefix = directory, then a semver WITH the `v`).
+  resolve:
+    name: Resolve tag
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      tag: ${{ steps.v.outputs.tag }}
+    steps:
+      - id: v
+        env:
+          INPUT_VERSION: ${{ inputs.version }}
+        run: |
+          RAW="${INPUT_VERSION#hypen-golang/}"
+          VERSION="${RAW#v}"
+          if ! echo "$VERSION" | grep -Eq '^[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?$'; then
+            echo "::error::'$INPUT_VERSION' is not a semver version (expected X.Y.Z or vX.Y.Z)"
+            exit 1
+          fi
+          echo "version=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=hypen-golang/v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Go module version: v$VERSION (tag hypen-golang/v$VERSION)"
+
   test:
     name: Test
     runs-on: ubuntu-latest
+    needs: [resolve]
     steps:
       - uses: actions/checkout@v4
 
@@ -34,7 +59,24 @@ jobs:
           go-version-file: hypen-golang/go.mod
           cache-dependency-path: hypen-golang/go.sum
 
-      # Build the WASI WASM the Go SDK loads at runtime
+      - name: Check module path and committed engine
+        run: |
+          grep -qx 'module github.com/hypen-lang/hypen/hypen-golang' go.mod \
+            || { echo "::error::hypen-golang/go.mod must declare module github.com/hypen-lang/hypen/hypen-golang"; exit 1; }
+          # hypen_engine.wasm is go:embed-ed (embed.go), so the module zip the
+          # proxy serves contains exactly the committed file. It must be tracked.
+          git ls-files --error-unmatch hypen_engine.wasm
+          test -s hypen_engine.wasm
+        working-directory: hypen-golang
+
+      # Test the committed engine — that is what `go get` users receive.
+      - name: Run tests
+        run: |
+          go vet ./...
+          go test -v ./...
+        working-directory: hypen-golang
+
+      # Warn (not fail) when the committed engine lags the engine sources.
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-wasip1
@@ -46,31 +88,60 @@ jobs:
             tailwind-parse
             hypen-engine-rs
 
-      - name: Build WASI WASM
+      - name: Compare committed WASM with a fresh build
         run: |
           cargo build --target wasm32-wasip1 --release --features wasi
-          mkdir -p pkg/wasi
-          cp ../target/wasm32-wasip1/release/hypen_engine.wasm pkg/wasi/
+          if ! cmp -s ../target/wasm32-wasip1/release/hypen_engine.wasm ../hypen-golang/hypen_engine.wasm; then
+            echo "::warning::hypen-golang/hypen_engine.wasm differs from a fresh wasm32-wasip1 build. The tag ships the committed file; rebuild and commit it if the engine changed."
+          fi
         working-directory: hypen-engine-rs
 
-      - name: Copy WASM to Go SDK (embedded via go:embed)
-        run: cp hypen-engine-rs/pkg/wasi/hypen_engine.wasm hypen-golang/hypen_engine.wasm
-
-      - name: Run tests
-        run: go test -v ./...
-        working-directory: hypen-golang
-
-  # Go modules are published by pushing a tag to the repo.
-  # The Go module proxy picks it up automatically.
+  # Go modules are published by pushing a tag to the repo; the Go module
+  # proxy fetches it on first request (we request it below to warm it).
   tag:
     name: Tag Release
     runs-on: ubuntu-latest
-    needs: [test]
+    needs: [resolve, test]
     if: ${{ !inputs.dry-run }}
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Create and push tag
+        env:
+          TAG: ${{ needs.resolve.outputs.tag }}
+          VERSION: ${{ needs.resolve.outputs.version }}
         run: |
-          git tag "hypen-golang/${{ inputs.version }}"
-          git push origin "hypen-golang/${{ inputs.version }}"
+          # Tag the same commit as the repo release tag (vX.Y.Z) when it
+          # exists, so the Go module and the GitHub release match.
+          TARGET=HEAD
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            TARGET="$VERSION^{commit}"
+          fi
+          git ls-tree --name-only "$TARGET" -- hypen-golang/hypen_engine.wasm | grep -q . \
+            || { echo "::error::hypen-golang/hypen_engine.wasm is not committed at $TARGET"; exit 1; }
+          if git rev-parse -q --verify "refs/tags/$TAG" >/dev/null; then
+            echo "::error::$TAG already exists (Go module versions are immutable)"
+            exit 1
+          fi
+          git tag "$TAG" "$TARGET"
+          git push origin "refs/tags/$TAG"
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: hypen-golang/go.mod
+
+      - name: Warm the Go module proxy
+        env:
+          VERSION: ${{ needs.resolve.outputs.version }}
+        run: |
+          for i in 1 2 3 4 5; do
+            if GOPROXY=https://proxy.golang.org go list -m "github.com/hypen-lang/hypen/hypen-golang@$VERSION"; then
+              exit 0
+            fi
+            sleep 15
+          done
+          echo "::warning::proxy.golang.org has not picked up $VERSION yet; it will on first go get."

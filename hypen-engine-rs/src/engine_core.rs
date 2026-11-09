@@ -812,6 +812,78 @@ impl Default for EngineCore {
     }
 }
 
+/// Keep one scope's declarations bounded, dropping the oldest template first.
+fn bound_scope<T>(
+    map: &mut IndexMap<DeclarationKey, T>,
+    scope: &Option<String>,
+    evicted: &mut HashSet<Option<String>>,
+) {
+    while map.keys().filter(|(s, _)| s == scope).count() > MAX_TEMPLATES_PER_SCOPE {
+        let Some(oldest) = map.keys().find(|(s, _)| s == scope).cloned() else {
+            return;
+        };
+        // `shift_remove`, not `swap_remove`: insertion order *is* the FIFO
+        // order this eviction reads back.
+        map.shift_remove(&oldest);
+        // Never silent. An eviction un-declares part of an app that may still
+        // be on screen, so the manifest reports the scope as degraded rather
+        // than simply offering less than it should.
+        evicted.insert(scope.clone());
+    }
+}
+
+/// Structural id of a template, stable across renders of the same source.
+///
+/// Hashes the serialized IR rather than deriving `Hash`: `IRNode` carries
+/// `serde_json::Value` throughout, which is not `Hash`, and a hand-rolled
+/// field-by-field hash would silently stop distinguishing whatever field
+/// someone later adds and forgets to feed it. Serialization covers the tree by
+/// construction. The hash need only be stable within a process — nothing
+/// persists it — so `DefaultHasher` is fine, and the bytes go straight into it
+/// rather than through an intermediate `String`.
+fn template_id(node: &IRNode) -> u64 {
+    use std::hash::Hasher;
+
+    struct HashSink<'a>(&'a mut std::collections::hash_map::DefaultHasher);
+    impl std::io::Write for HashSink<'_> {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.write(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    // Serializing an IRNode cannot fail for any tree the engine can hold; a
+    // partial write still hashed whatever it managed, which is as good an id.
+    let _ = serde_json::to_writer(HashSink(&mut hasher), node);
+    hasher.finish()
+}
+
+/// The module scope a template's bindings resolve against.
+///
+/// Bindings carry no scope of their own — they resolve against the enclosing
+/// `module X { … }`. Takes the first scope the tree declares, which is the
+/// enclosing module for anything rendered through `render_ir_node`.
+fn template_scope(root: &IRNode) -> Option<String> {
+    let mut found = None;
+    crate::ir::walk::walk_ir(root, &mut |node| {
+        if found.is_some() {
+            return;
+        }
+        found = match node {
+            IRNode::Element(e) => e.module_scope.clone(),
+            IRNode::Conditional { module_scope, .. } | IRNode::Router { module_scope, .. } => {
+                module_scope.clone()
+            }
+            IRNode::ForEach { .. } => None,
+        };
+    });
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -949,76 +1021,4 @@ mod tests {
             patches[1]
         );
     }
-}
-
-/// Keep one scope's declarations bounded, dropping the oldest template first.
-fn bound_scope<T>(
-    map: &mut IndexMap<DeclarationKey, T>,
-    scope: &Option<String>,
-    evicted: &mut HashSet<Option<String>>,
-) {
-    while map.keys().filter(|(s, _)| s == scope).count() > MAX_TEMPLATES_PER_SCOPE {
-        let Some(oldest) = map.keys().find(|(s, _)| s == scope).cloned() else {
-            return;
-        };
-        // `shift_remove`, not `swap_remove`: insertion order *is* the FIFO
-        // order this eviction reads back.
-        map.shift_remove(&oldest);
-        // Never silent. An eviction un-declares part of an app that may still
-        // be on screen, so the manifest reports the scope as degraded rather
-        // than simply offering less than it should.
-        evicted.insert(scope.clone());
-    }
-}
-
-/// Structural id of a template, stable across renders of the same source.
-///
-/// Hashes the serialized IR rather than deriving `Hash`: `IRNode` carries
-/// `serde_json::Value` throughout, which is not `Hash`, and a hand-rolled
-/// field-by-field hash would silently stop distinguishing whatever field
-/// someone later adds and forgets to feed it. Serialization covers the tree by
-/// construction. The hash need only be stable within a process — nothing
-/// persists it — so `DefaultHasher` is fine, and the bytes go straight into it
-/// rather than through an intermediate `String`.
-fn template_id(node: &IRNode) -> u64 {
-    use std::hash::Hasher;
-
-    struct HashSink<'a>(&'a mut std::collections::hash_map::DefaultHasher);
-    impl std::io::Write for HashSink<'_> {
-        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-            self.0.write(buf);
-            Ok(buf.len())
-        }
-        fn flush(&mut self) -> std::io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut hasher = std::collections::hash_map::DefaultHasher::new();
-    // Serializing an IRNode cannot fail for any tree the engine can hold; a
-    // partial write still hashed whatever it managed, which is as good an id.
-    let _ = serde_json::to_writer(HashSink(&mut hasher), node);
-    hasher.finish()
-}
-
-/// The module scope a template's bindings resolve against.
-///
-/// Bindings carry no scope of their own — they resolve against the enclosing
-/// `module X { … }`. Takes the first scope the tree declares, which is the
-/// enclosing module for anything rendered through `render_ir_node`.
-fn template_scope(root: &IRNode) -> Option<String> {
-    let mut found = None;
-    crate::ir::walk::walk_ir(root, &mut |node| {
-        if found.is_some() {
-            return;
-        }
-        found = match node {
-            IRNode::Element(e) => e.module_scope.clone(),
-            IRNode::Conditional { module_scope, .. } | IRNode::Router { module_scope, .. } => {
-                module_scope.clone()
-            }
-            IRNode::ForEach { .. } => None,
-        };
-    });
-    found
 }

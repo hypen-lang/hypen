@@ -364,9 +364,8 @@ fn handle_route_change(
     let preloaded = {
         let mut g = inner.lock().unwrap();
         let key = g.routes[idx].cache_key();
-        g.persisted.remove(&key).map(|m| {
+        g.persisted.remove(&key).inspect(|_| {
             g.lru.retain(|k| k != &key);
-            m
         })
     };
     unmount_active(inner, global_context, options);

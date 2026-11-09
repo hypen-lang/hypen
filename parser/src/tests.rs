@@ -2119,3 +2119,317 @@ fn test_hypenapp_with_slot_children() {
         "expected two .slot() applicators on children"
     );
 }
+
+// ============================================================================
+// Precise error positions
+//
+// Each case asserts the exact byte span, the 1-based line:col (columns in
+// characters) and the message of the FIRST error. Before the fix, chumsky's
+// `try_map`-based text helpers discarded the furthest error, so every error
+// inside a block was reported at the outermost block's '{'.
+// ============================================================================
+
+/// (span start, span end, line, col, message) of the first error.
+fn first_error(input: &str) -> (usize, usize, usize, usize, String) {
+    let errors = crate::parse_document(input).expect_err("expected a parse error");
+    let e = &errors[0];
+    let (line, col) = crate::diagnostic::line_col(input, e.span().start);
+    (
+        e.span().start,
+        e.span().end,
+        line,
+        col,
+        crate::diagnostic::describe_error(e),
+    )
+}
+
+#[track_caller]
+fn assert_error(input: &str, span: (usize, usize), line_col: (usize, usize), message: &str) {
+    let (start, end, line, col, msg) = first_error(input);
+    assert_eq!(
+        ((start, end), (line, col), msg.as_str()),
+        (span, line_col, message),
+        "input: {input:?}"
+    );
+}
+
+#[test]
+fn test_error_pos_stray_braces_in_nested_block() {
+    // The reported bug: the error belongs at the stray '{', not at the
+    // module's opening brace (1:13).
+    assert_error(
+        "module Home {\n  Column {{{\n}",
+        (24, 25),
+        (2, 11),
+        "expected component or '}', found '{'",
+    );
+    // Same on a single line.
+    assert_error(
+        "module Home { Column {{{",
+        (22, 23),
+        (1, 23),
+        "expected component or '}', found '{'",
+    );
+}
+
+#[test]
+fn test_error_pos_unclosed_paren_before_brace() {
+    assert_error(
+        "module Home {\n  Column {\n    Text(\"hi\"\n  }\n}",
+        (41, 42),
+        (4, 3),
+        "expected ',' or ')', found '}' (the '(' at 3:9 is never closed)",
+    );
+}
+
+#[test]
+fn test_error_pos_unclosed_brace_at_eof_points_at_opener() {
+    // Only the module's block is unclosed: report its '{', not the EOF.
+    assert_error(
+        "module Home {\n  Column {\n    Text(\"a\")\n  }\n",
+        (12, 13),
+        (1, 13),
+        "unclosed '{': expected a matching '}', found end of input",
+    );
+    // Several unclosed: the innermost one is reported.
+    assert_error(
+        "module Home {\n  Column {\n    Row {\n      Text(\"a\")\n",
+        (33, 34),
+        (3, 9),
+        "unclosed '{': expected a matching '}', found end of input",
+    );
+}
+
+#[test]
+fn test_error_pos_unmatched_closers() {
+    assert_error(
+        "module Home {\n  Text(\"a\")\n}\n}",
+        (28, 29),
+        (4, 1),
+        "unmatched '}': no '{' is open here (expected applicator (.name) or component)",
+    );
+    assert_error(
+        "module Home {\n  Text(\"a\"))\n}",
+        (25, 26),
+        (2, 12),
+        "unmatched ')': no '(' is open here (expected '{', applicator (.name), component or '}')",
+    );
+}
+
+#[test]
+fn test_error_pos_missing_closing_quote() {
+    assert_error(
+        "module Home {\n  Text(\"hello)\n}",
+        (21, 22),
+        (2, 8),
+        "unclosed string literal: missing closing quote '\"'",
+    );
+    assert_error(
+        "Text('hello)",
+        (5, 6),
+        (1, 6),
+        "unclosed string literal: missing closing quote '\\''",
+    );
+}
+
+#[test]
+fn test_error_pos_bad_applicator_syntax() {
+    assert_error(
+        "module Home {\n  Text(\"a\").padding(\n}",
+        (35, 36),
+        (3, 1),
+        "expected argument or ')', found '}' (the '(' at 2:20 is never closed)",
+    );
+    assert_error(
+        "module Home {\n  Text(\"a\").padding(16\n}",
+        (37, 38),
+        (3, 1),
+        "expected ',' or ')', found '}' (the '(' at 2:20 is never closed)",
+    );
+    assert_error(
+        "module Home {\n  Text(\"a\").\n}",
+        (26, 27),
+        (2, 13),
+        "expected applicator name, found line break",
+    );
+    // Applicator left open at the end of the file.
+    assert_error(
+        "Text(\"a\").padding(",
+        (17, 18),
+        (1, 18),
+        "unclosed '(': expected a matching ')', found end of input",
+    );
+}
+
+#[test]
+fn test_error_pos_unknown_token() {
+    assert_error(
+        "module Home {\n  Text(\"a\") $\n}",
+        (26, 27),
+        (2, 13),
+        "expected '{', applicator (.name), component or '}', found '$'",
+    );
+}
+
+#[test]
+fn test_error_pos_misplaced_comma() {
+    assert_error(
+        "module Home {\n  Text(\"a\",, \"b\")\n}",
+        (25, 26),
+        (2, 12),
+        "expected argument or ')', found ','",
+    );
+    assert_error(
+        "module Home {\n  Text(, \"b\")\n}",
+        (21, 22),
+        (2, 8),
+        "expected argument or ')', found ','",
+    );
+    assert_error(
+        "Text([1, 2)",
+        (10, 11),
+        (1, 11),
+        "expected ',' or ']', found ')'",
+    );
+}
+
+#[test]
+fn test_error_pos_missing_named_value() {
+    assert_error(
+        "module Home {\n  Text(\"a\", key: )\n}",
+        (31, 32),
+        (2, 18),
+        "expected value, found ')'",
+    );
+}
+
+#[test]
+fn test_error_pos_unclosed_interpolation_in_string() {
+    assert_error(
+        "module Home {\n  Text(\"Hi @{state.name\")\n}",
+        (25, 27),
+        (2, 12),
+        "unclosed '@{' interpolation: expected '}' before the closing quote",
+    );
+    // Balanced and nested braces are fine.
+    assert!(parse_component(r#"Text("Hi @{state.name}, @{ {a: 1}.a }")"#).is_ok());
+    assert!(parse_component(r#"Text("email@{domain}")"#).is_ok());
+    assert!(parse_component(r#"Text("not an @ interpolation { }")"#).is_ok());
+}
+
+#[test]
+fn test_error_pos_interpolation_outside_string() {
+    assert_error(
+        "module Home {\n  Text(@{state.name)\n}",
+        (21, 23),
+        (2, 8),
+        "'@{...}' interpolation is only allowed inside a string: write \"@{state.name}\" or the reference @state.name",
+    );
+}
+
+#[test]
+fn test_error_pos_stray_characters() {
+    assert_error(
+        "module Home {\n  Text(\"a\");\n}",
+        (25, 26),
+        (2, 12),
+        "expected '{', applicator (.name), component or '}', found ';'",
+    );
+}
+
+#[test]
+fn test_error_pos_unclosed_block_comment() {
+    assert_error(
+        "Text(\"a\")\n/* open",
+        (10, 12),
+        (2, 1),
+        "unclosed block comment: missing '*/'",
+    );
+}
+
+#[test]
+fn test_error_pos_after_multibyte_text() {
+    // Spans are UTF-8 byte offsets; line:col counts characters. 'é' is two
+    // bytes and '🎉' four, so byte offset and column diverge after them.
+    assert_error(
+        "module Home {\n  Text(\"é\") ;\n}",
+        (27, 28),
+        (2, 13),
+        "expected '{', applicator (.name), component or '}', found ';'",
+    );
+    assert_error(
+        "Text(\"🎉\" ;)",
+        (12, 13),
+        (1, 10),
+        "expected ',' or ')', found ';'",
+    );
+    assert_error(
+        "Column {\n  Text(\"日本語\")\n  Text(\"x\" ]\n}",
+        (40, 41),
+        (3, 12),
+        "unmatched ']': no '[' is open here (expected ',' or ')')",
+    );
+    // The found token itself may be multi-byte: its span covers all bytes.
+    assert_error(
+        "Text(\"a\") é",
+        (10, 12),
+        (1, 11),
+        "expected '{', applicator (.name) or component, found 'é'",
+    );
+}
+
+#[test]
+fn test_lsp_position_uses_utf16_columns() {
+    use crate::diagnostic::lsp_position;
+    let src = "Text(\"🎉\" ;)";
+    // ';' is at byte 12, char 9 (0-based), UTF-16 unit 10 ('🎉' is a pair).
+    assert_eq!(lsp_position(src, 12), (0, 10));
+    assert_eq!(lsp_position("a\né;", 4), (1, 1));
+}
+
+#[test]
+fn test_format_error_simple_ends_with_byte_position() {
+    let input = "module Home {\n  Text(\"é\") ;\n}";
+    let errors = crate::parse_document(input).unwrap_err();
+    assert_eq!(
+        crate::error::format_error_simple(&errors[0]),
+        "expected '{', applicator (.name), component or '}', found ';' at position 27"
+    );
+}
+
+#[test]
+fn test_format_parse_errors_labels_precise_column() {
+    use crate::error::format_parse_errors;
+    let input = "module Home {\n  Text(\"é\") ;\n}";
+    let errors = crate::parse_document(input).unwrap_err();
+    let out = format_parse_errors("t.hypen", input, &errors);
+    // Ariadne reports line:col (1-based, characters).
+    assert!(out.contains("t.hypen:2:13"), "{out}");
+    assert!(out.contains("found ';'"), "{out}");
+}
+
+#[test]
+fn test_error_pos_string_missing_quote_swallows_next_line() {
+    // The quote of `.tw("` closes the string opened on line 2, and the parser
+    // only fails at `t`. Point at the string that is really unclosed.
+    let input = "Column {\n  Text(\"Go →)\n    .tw(\"text-blue\")\n}";
+    let (start, end, line, col, msg) = first_error(input);
+    assert_eq!(((start, end), (line, col)), ((16, 17), (2, 8)), "{msg}");
+    assert_eq!(
+        msg,
+        "unclosed string literal? this string runs past the end of its line and is only closed by the quote at 3:9 (expected ',' or ')', found 't')"
+    );
+    // A deliberate multi-line string followed by valid code is untouched.
+    assert!(parse_component("Text(\"a\nb\")").is_ok());
+}
+
+#[test]
+fn test_error_pos_names_unclosed_paren_on_earlier_line() {
+    let input = "Column {\n  Text(\"Tap me\"\n    .tw(\"x\")\n}";
+    assert_error(
+        input,
+        (29, 30),
+        (3, 5),
+        "expected ',' or ')', found '.' (the '(' at 2:7 is never closed)",
+    );
+}

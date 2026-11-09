@@ -103,10 +103,14 @@ The `Text` rule is what lets you keep `.hypen` templates, `.sql` schemas, and
 ## Run and Deploy
 
 ```bash
-bun run dev              # wrangler dev on http://localhost:8787
+bunx wrangler dev        # http://localhost:8787
 bunx wrangler login
-bun run deploy
+bunx wrangler deploy
 ```
+
+(Add `"dev": "wrangler dev"` and `"deploy": "wrangler deploy"` to your `package.json` scripts if you prefer `bun run dev` / `bun run deploy`.)
+
+`wrangler dev` may log two warnings that are expected in development: `no allowedOrigins/authenticate configured — any client can connect` (set them before you deploy) and `Device plane off: ... sessions stay UI-only` (only `context.device` features are affected).
 
 Connect a DOM or Canvas client to `ws://localhost:8787`, or open the URL
 directly if you passed `serveClient`.

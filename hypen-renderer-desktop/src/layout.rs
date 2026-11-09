@@ -1675,10 +1675,13 @@ impl TaffyState {
                     }
                     if tree
                         .get(id)
-                        .is_some_and(|node| node.element_type.eq_ignore_ascii_case("Row"))
+                        .is_some_and(|node| follows_parent_alignment(&node.element_type))
                     {
-                        self.apply_row_width_demand_style(tid, tree);
+                        self.settle_parent_alignment_style(tid, tree);
                     }
+                    // This node's `align_items` may have changed; Row /
+                    // Button children inherit it unless they align themselves.
+                    self.settle_children_parent_alignment(tid, tree);
                     if let Some(parent_tid) = tree
                         .parent_of(id)
                         .filter(|parent| {
@@ -1687,7 +1690,7 @@ impl TaffyState {
                         })
                         .and_then(|parent| self.node_map.get(parent).copied())
                     {
-                        self.apply_row_width_demand_style(parent_tid, tree);
+                        self.settle_parent_alignment_style(parent_tid, tree);
                     }
                 }
                 // A `slot` (re)tag flips a Video child between full-bleed
@@ -1854,6 +1857,14 @@ impl TaffyState {
         // runs whenever a Stack's children change so newly-inserted
         // children get the right styling and reordering doesn't
         // strand absolute settings on the wrong child.
+        // A Row's default cross-axis placement follows its new parent's
+        // `align_items` (see `apply_row_width_demand`).
+        if tree
+            .get(child_id)
+            .is_some_and(|node| follows_parent_alignment(&node.element_type))
+        {
+            self.settle_parent_alignment_style(child_tid, tree);
+        }
         if parent_tid != self.root {
             if let Some(parent_node) = tree.get(parent_id) {
                 if parent_node.element_type.eq_ignore_ascii_case("Stack") {
@@ -1874,26 +1885,81 @@ impl TaffyState {
                     self.apply_grid_child_styles(parent_tid, tree);
                 }
                 if parent_node.element_type.eq_ignore_ascii_case("Row") {
-                    self.apply_row_width_demand_style(parent_tid, tree);
+                    self.settle_parent_alignment_style(parent_tid, tree);
                 }
             }
         }
     }
 
-    fn apply_row_width_demand_style(&mut self, row_tid: NodeId, tree: &Tree) {
-        let Some(row_node) = self
+    /// Settle the parent-dependent default cross-axis placement of a Row
+    /// (see [`apply_row_width_demand`]) or an actionable surface (see
+    /// [`apply_actionable_parent_alignment`]). Other element types are left
+    /// untouched.
+    fn settle_parent_alignment_style(&mut self, tid: NodeId, tree: &Tree) {
+        let Some(node) = self
             .renderer_for_taffy
-            .get(&row_tid)
+            .get(&tid)
             .and_then(|rid| tree.get(rid))
         else {
             return;
         };
-        let children: Vec<NodeId> = self.tree.children(row_tid).unwrap_or_default();
-        let Ok(mut style) = self.tree.style(row_tid).cloned() else {
+        let Ok(mut style) = self.tree.style(tid).cloned() else {
             return;
         };
-        apply_row_width_demand(row_node, &mut style, &self.tree, &children);
-        let _ = self.tree.set_style(row_tid, style);
+        let parent_align_items = self
+            .tree
+            .parent(tid)
+            .and_then(|parent| self.tree.style(parent).ok())
+            .and_then(|parent_style| parent_style.align_items);
+        if node.element_type.eq_ignore_ascii_case("Row") {
+            let children: Vec<NodeId> = self.tree.children(tid).unwrap_or_default();
+            apply_row_width_demand(node, &mut style, &self.tree, &children, parent_align_items);
+        } else if is_actionable_type(&node.element_type) {
+            apply_actionable_parent_alignment(node, &mut style, parent_align_items);
+        } else {
+            return;
+        }
+        if self.tree.style(tid).is_ok_and(|current| *current == style) {
+            return;
+        }
+        let _ = self.tree.set_style(tid, style);
+    }
+
+    /// Re-run [`Self::settle_parent_alignment_style`] for every Row / Button
+    /// child of `parent_tid`. Their default cross-axis placement depends on its
+    /// parent's `align_items`, which `node_style_with` (parent-agnostic)
+    /// cannot see, so it is settled whenever the Row is linked under a
+    /// parent or that parent is restyled.
+    fn settle_children_parent_alignment(&mut self, parent_tid: NodeId, tree: &Tree) {
+        let row_children: Vec<NodeId> = self
+            .tree
+            .children(parent_tid)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|child| {
+                self.renderer_for_taffy
+                    .get(child)
+                    .and_then(|rid| tree.get(rid))
+                    .is_some_and(|node| follows_parent_alignment(&node.element_type))
+            })
+            .collect();
+        for row in row_children {
+            self.settle_parent_alignment_style(row, tree);
+        }
+    }
+
+    /// Settle every Row's / Button's parent-dependent alignment after a full build.
+    fn settle_parent_alignment(&mut self, tree: &Tree) {
+        let rows: Vec<NodeId> = self
+            .renderer_for_taffy
+            .iter()
+            .filter_map(|(tid, rid)| {
+                follows_parent_alignment(&tree.get(rid)?.element_type).then_some(*tid)
+            })
+            .collect();
+        for row in rows {
+            self.settle_parent_alignment_style(row, tree);
+        }
     }
 
     /// Grid direct children stretch to their tracks on Web, Android, and
@@ -2008,9 +2074,10 @@ impl TaffyState {
         {
             self.apply_grid_child_styles(parent_tid, tree);
         }
-        if node.element_type.eq_ignore_ascii_case("Row") {
-            self.apply_row_width_demand_style(tid, tree);
+        if follows_parent_alignment(&node.element_type) {
+            self.settle_parent_alignment_style(tid, tree);
         }
+        self.settle_children_parent_alignment(tid, tree);
         if let Some(parent_tid) = tree
             .parent_of(id)
             .filter(|parent| {
@@ -2019,7 +2086,7 @@ impl TaffyState {
             })
             .and_then(|parent| self.node_map.get(parent).copied())
         {
-            self.apply_row_width_demand_style(parent_tid, tree);
+            self.settle_parent_alignment_style(parent_tid, tree);
         }
     }
 
@@ -2149,14 +2216,11 @@ impl TaffyState {
             .renderer_for_taffy
             .iter()
             .filter_map(|(tid, rid)| {
-                tree.get(rid)?
-                    .element_type
-                    .eq_ignore_ascii_case("Row")
-                    .then_some(*tid)
+                follows_parent_alignment(&tree.get(rid)?.element_type).then_some(*tid)
             })
             .collect();
         for tid in row_parents {
-            self.apply_row_width_demand_style(tid, tree);
+            self.settle_parent_alignment_style(tid, tree);
         }
     }
 
@@ -2827,6 +2891,9 @@ impl LayoutPass {
                 .tree
                 .new_with_children(outer_style, &root_children)
                 .expect("taffy root node");
+            // `build_subtree` builds a Row before its parent exists, so the
+            // parent-dependent Row alignment is settled here, once linked.
+            state.settle_parent_alignment(tree);
             state.structure_key = key;
             state.root_initialised = true;
             state.last_root_viewport = Some(viewport);
@@ -4729,6 +4796,8 @@ fn build_subtree(
                 display: Display::Flex,
                 flex_direction: dir,
                 align_items: Some(AlignItems::Start),
+                // Provisional; `apply_row_width_demand` settles it once the
+                // parent is known. See the matching note in `node_style_with`.
                 align_self: et.eq_ignore_ascii_case("Row").then_some(AlignSelf::Start),
                 padding: Rect_ {
                     left: length(pad.left * scale),
@@ -4775,7 +4844,8 @@ fn build_subtree(
                 }
             }
             if et.eq_ignore_ascii_case("Row") {
-                apply_row_width_demand(node, &mut style, taffy, &children);
+                // Parent not built yet; `settle_parent_alignment` revisits.
+                apply_row_width_demand(node, &mut style, taffy, &children, None);
             } else if style.size.width == Dimension::auto()
                 && children.iter().any(|child| {
                     taffy.style(*child).is_ok_and(|child_style| {
@@ -5174,9 +5244,13 @@ pub(crate) fn node_style_with(
             flex_direction: dir,
             align_items: Some(AlignItems::Start),
             // DOM Column children wrap to intrinsic cross-axis width by
-            // default (`align-items: flex-start`). Mark Rows explicitly so a
-            // definite height / child fillMaxHeight does not accidentally
-            // make the Row stretch across the viewport on Desktop.
+            // default (`align-items: flex-start`). Mark Rows `Start` so a
+            // definite height / child fillMaxHeight does not make the Row
+            // stretch across the viewport under a parent whose Taffy
+            // `align_items` is unset (= stretch: the root, Button, Stack).
+            // This is provisional: `apply_row_width_demand` drops it once
+            // the parent is known and sets its own `align_items`, so the Row
+            // follows a centred Column like the DOM Row (no `align-self`).
             align_self: et.eq_ignore_ascii_case("Row").then_some(AlignSelf::Start),
             padding: Rect_ {
                 left: length(pad.left * scale),
@@ -6043,29 +6117,95 @@ fn apply_grid_image_stretch(node: &crate::tree::Node, style: &mut Style) {
     style.align_self = Some(AlignSelf::Stretch);
 }
 
-fn apply_row_width_demand(
+fn is_actionable_type(element_type: &str) -> bool {
+    ACTIONABLE_TYPES
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(element_type))
+}
+
+/// Element types whose default cross-axis placement depends on the parent's
+/// `align_items`, settled by `settle_parent_alignment_style`.
+fn follows_parent_alignment(element_type: &str) -> bool {
+    element_type.eq_ignore_ascii_case("Row") || is_actionable_type(element_type)
+}
+
+/// Default cross-axis placement of a Button / Link / Card.
+///
+/// `node_style_with` marks actionable surfaces `AlignSelf::Start` so they
+/// stay content-width under a parent whose Taffy `align_items` is unset
+/// (= stretch: the root, a Button, a Stack). The DOM Button sets no
+/// `align-self`, though, so under a parent that does set `align_items`
+/// (`items-center`, `Center`, any Column) it follows the parent. Forcing
+/// `Start` there left-aligned the scaffold Counter's "Back to Home" Button
+/// inside its `items-center` Column. An explicit `alignSelf`, or a fill
+/// that already chose `Stretch`, is left alone.
+fn apply_actionable_parent_alignment(
     node: &crate::tree::Node,
     style: &mut Style,
-    taffy: &TaffyTree<NodeContext>,
-    children: &[NodeId],
+    parent_align_items: Option<AlignItems>,
 ) {
-    let explicitly_sized_or_aligned = node.props.keys().any(|key| {
-        let base = key
-            .split('@')
+    let declares_align_self = node.props.keys().any(|key| {
+        key.split('@')
             .next()
             .unwrap_or(key)
             .split('.')
             .next()
             .unwrap_or(key)
-            .to_ascii_lowercase();
-        matches!(
-            base.as_str(),
-            "width" | "fillmaxwidth" | "fillmaxsize" | "alignself"
-        )
+            .eq_ignore_ascii_case("alignSelf")
     });
-    if explicitly_sized_or_aligned {
+    if declares_align_self {
         return;
     }
+    if matches!(style.align_self, None | Some(AlignSelf::Start)) {
+        style.align_self = parent_align_items.is_none().then_some(AlignSelf::Start);
+    }
+}
+
+fn apply_row_width_demand(
+    node: &crate::tree::Node,
+    style: &mut Style,
+    taffy: &TaffyTree<NodeContext>,
+    children: &[NodeId],
+    parent_align_items: Option<AlignItems>,
+) {
+    let prop_base = |key: &String| {
+        key.split('@')
+            .next()
+            .unwrap_or(key)
+            .split('.')
+            .next()
+            .unwrap_or(key)
+            .to_ascii_lowercase()
+    };
+    if node.props.keys().any(|key| prop_base(key) == "alignself") {
+        return;
+    }
+    let explicitly_sized = node.props.keys().any(|key| {
+        matches!(
+            prop_base(key).as_str(),
+            "width" | "fillmaxwidth" | "fillmaxsize"
+        )
+    });
+    if !explicitly_sized {
+        apply_row_default_cross_alignment(style, taffy, children);
+    }
+    // The `Start` default only guards parents whose `align_items` is unset
+    // (Taffy then stretches). A parent that sets one — every Column
+    // (`Start`), `Center`, `items-center` — places the Row itself, like the
+    // DOM Row, which sets no `align-self`. Forcing `Start` there pinned the
+    // scaffold's centred button Row to the left edge.
+    if style.align_self == Some(AlignSelf::Start) && parent_align_items.is_some() {
+        style.align_self = None;
+    }
+}
+
+/// Stretch a Row that needs a finite width (free-space distribution or a
+/// growing / percentage child); otherwise wrap it to content (`Start`).
+fn apply_row_default_cross_alignment(
+    style: &mut Style,
+    taffy: &TaffyTree<NodeContext>,
+    children: &[NodeId],
+) {
 
     let distributes_free_space = matches!(
         style.justify_content,

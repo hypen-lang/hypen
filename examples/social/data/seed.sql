@@ -132,7 +132,23 @@ INSERT OR IGNORE INTO comments (id, post_id, user_id, text, created_at) VALUES
 ('c7', 'p4', 'u3', 'Japan is on my bucket list', datetime('now', '-6 hours')),
 ('c8', 'p4', 'u4', 'The colors in this are magical', datetime('now', '-5 hours')),
 ('c9', 'p5', 'u1', 'Beast mode! How was the altitude?', datetime('now', '-11 hours')),
-('c10', 'p5', 'u2', 'Congrats on the summit!', datetime('now', '-10 hours'));
+('c10', 'p5', 'u2', 'Congrats on the summit!', datetime('now', '-10 hours')),
+('c11', 'p37', 'u1', 'Which book? I need a new one for the weekend.', datetime('now', '-15 minutes')),
+('c12', 'p37', 'u26', 'Edinburgh light is made for reading corners.', datetime('now', '-12 minutes')),
+('c13', 'p37', 'u6', 'This is the coziest thing on my feed today.', datetime('now', '-8 minutes')),
+('c14', 'p31', 'u1', 'The blues in this are unreal.', datetime('now', '-25 minutes')),
+('c15', 'p31', 'u7', 'What film stock was this?', datetime('now', '-20 minutes')),
+('c16', 'p38', 'u1', 'Jealous of that swell. Was the water freezing?', datetime('now', '-40 minutes')),
+('c17', 'p38', 'u5', 'Dawn patrol pays off every time.', datetime('now', '-35 minutes')),
+('c18', 'p39', 'u3', 'Those tomatoes deserve their own cooking show.', datetime('now', '-60 minutes')),
+('c19', 'p39', 'u1', 'Teach me your ways, my plants are struggling.', datetime('now', '-55 minutes')),
+('c20', 'p32', 'u4', 'The composition here is so calm.', datetime('now', '-70 minutes'));
+
+-- Keep every post's comments_count equal to the comment rows that actually
+-- exist, so the feed never says "View all N comments" for a list that has
+-- fewer (or none). Runs on every seed pass, which also repairs databases
+-- seeded by older versions of this file.
+UPDATE posts SET comments_count = (SELECT COUNT(*) FROM comments c WHERE c.post_id = posts.id);
 
 -- Likes (alice has liked some posts)
 INSERT OR IGNORE INTO likes (post_id, user_id) VALUES

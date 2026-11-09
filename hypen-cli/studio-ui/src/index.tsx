@@ -122,6 +122,9 @@ const engineHost = new StudioEngineHost({
   projectDir,
   componentsDir,
   entryName: entryComponent,
+  // Referenced-but-missing components (e.g. a deleted component folder):
+  // Studio logs them and badges the preview.
+  onUnresolvedComponents: (components) => broadcast({ type: "engine-unresolved", components }),
 });
 engineHost.start().catch((err) => {
   console.warn(`[engine] failed to start: ${err?.message ?? err}`);
@@ -264,12 +267,20 @@ function getMimeType(ext: string): string {
 
 // Watch for file changes in the project
 if (existsSync(resolve(projectDir, componentsDir))) {
+  // fs.watch fires several events per save (and one per file when a folder
+  // is deleted or restored): coalesce them into ONE engine reload, so each
+  // change re-runs discovery (and prints its warnings) once.
+  let engineReloadTimer: ReturnType<typeof setTimeout> | null = null;
   watch(resolve(projectDir, componentsDir), { recursive: true }, (eventType, filename) => {
     if (filename && !filename.includes("node_modules")) {
       broadcast({ type: "reload", file: filename });
       // Hot-patch the engine host so connected cells / runners see the
       // change without a full reconnect.
-      engineHost.reload().catch(() => { /* already logged inside */ });
+      if (engineReloadTimer) clearTimeout(engineReloadTimer);
+      engineReloadTimer = setTimeout(() => {
+        engineReloadTimer = null;
+        engineHost.reload().catch(() => { /* already logged inside */ });
+      }, 120);
     }
   });
 }
@@ -299,15 +310,15 @@ function findWasmBrowserDir(): string | null {
 }
 const wasmBrowserDir = findWasmBrowserDir();
 
-function wasmFileResponse(fileName: string, contentType: string): Response {
+function wasmFileResponse(fileName: string, contentType: string, head = false): Response {
   if (!wasmBrowserDir) return new Response("Not Found", { status: 404 });
-  try {
-    return new Response(Bun.file(join(wasmBrowserDir, fileName)), {
-      headers: { "Content-Type": contentType },
-    });
-  } catch {
-    return new Response("Not Found", { status: 404 });
-  }
+  const path = join(wasmBrowserDir, fileName);
+  if (!existsSync(path)) return new Response("Not Found", { status: 404 });
+  // HEAD (the client's availability probe) must not carry the file body:
+  // Bun streams a Bun.file body even for HEAD and Chromium then logs the
+  // probe as an aborted request (net::ERR_ABORTED).
+  if (head) return new Response(null, { headers: { "Content-Type": contentType } });
+  return new Response(Bun.file(path), { headers: { "Content-Type": contentType } });
 }
 
 const server = serve({
@@ -318,11 +329,11 @@ const server = serve({
     // HEAD is the client's availability probe (lib/wasm-urls.ts).
     "/wasm/hypen_engine.js": {
       GET: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
-      HEAD: () => wasmFileResponse("hypen_engine.js", "application/javascript"),
+      HEAD: () => wasmFileResponse("hypen_engine.js", "application/javascript", true),
     },
     "/wasm/hypen_engine_bg.wasm": {
       GET: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
-      HEAD: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm"),
+      HEAD: () => wasmFileResponse("hypen_engine_bg.wasm", "application/wasm", true),
     },
 
     // TS→JS transpile for the in-browser preview's sibling `.ts` modules.
@@ -380,7 +391,13 @@ const server = serve({
 
     "/api/engine/status": {
       async GET(req) {
-        return Response.json({ ready: engineHost.isReady() });
+        // `state` lets the editor Preview decide between streaming from
+        // /ws/engine (real module handlers) and its layout-only fallback.
+        return Response.json({
+          ready: engineHost.isReady(),
+          ...engineHost.status(),
+          remoteUrl: remoteUrl || undefined,
+        });
       },
     },
 

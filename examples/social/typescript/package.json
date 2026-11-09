@@ -2,6 +2,7 @@
   "name": "hypen-instagram-ts",
   "type": "module",
   "scripts": {
+    "setup": "bun install --cwd ../../../hypen-web && bun install",
     "dev": "bun run server/index.ts",
     "web": "bun --hot web/serve.ts",
     "db:reset": "rm -f instagram.db && bun run dev"

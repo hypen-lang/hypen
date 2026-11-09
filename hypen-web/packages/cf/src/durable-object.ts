@@ -14,6 +14,23 @@
  * a non-hello first message synthesises one so the initial tree is re-sent
  * before the message is processed.
  *
+ * What survives an eviction, and how:
+ *   - the session id — in the socket's hibernation attachment;
+ *   - a session snapshot — in DO storage under `hypen:session-snapshot:<id>`,
+ *     rewritten after every message (and every async state change): the
+ *     state of EVERY module instance on the connection (primary, nested,
+ *     route modules — live or cached), whose primary `location` restores
+ *     the active route, plus the shape of the tree the client shows;
+ *   - `.persist(durableObjectStore(...))` stores, as before.
+ * On wake the session re-adopts the id, seeds each module from the snapshot
+ * (route modules as they re-mount), renders, and sends a fresh initialTree.
+ * The message that woke the DO still addresses the PREVIOUS engine's node
+ * ids, so it is re-targeted by structural position onto the rebuilt tree
+ * before dispatch — the first action after a wake applies instead of
+ * failing as a "stale UI action target". A snapshot is also what a client
+ * reconnecting with a NEW socket (same session id) resumes from after an
+ * eviction. Snapshots expire with the session TTL (1 h by default).
+ *
  * Device plane (RFC 001 §2.5): hibernation restoration applies to UI-only
  * sockets. A socket that negotiated the device plane carries a
  * `deviceEnabled` marker in its hibernation attachment (written before the
@@ -57,6 +74,7 @@ import {
   type SessionHost,
   type SessionTransport,
   type OutgoingMessage,
+  type SessionSnapshot,
 } from "@hypen-space/core/remote";
 import {
   DO_AGGREGATE_RETAINED_BYTES,
@@ -398,6 +416,9 @@ export abstract class HypenDurableObject {
   /** Whether the open-admission warning was logged for this DO. */
   private _admissionWarned = false;
 
+  /** Whether this incarnation already swept expired session snapshots. */
+  private _snapshotsSwept = false;
+
 
   constructor(ctx: DurableObjectState, env: unknown) {
     this.ctx = ctx;
@@ -463,6 +484,7 @@ export abstract class HypenDurableObject {
 
     // Bind DO storage so persistence calls route to this DO's storage.
     this.bindStorage();
+    await this.sweepSnapshots();
 
     return new Response(null, {
       status: 101,
@@ -561,6 +583,10 @@ export abstract class HypenDurableObject {
 
     // Keep the id beside the socket so the NEXT hibernation can resume too.
     this.rememberSessionId(ws, session);
+
+    // Make what this message changed durable before the runtime may evict
+    // the DO (later async changes are saved by the session's own timer).
+    await session.flushSnapshot();
   }
 
   /**
@@ -634,6 +660,11 @@ export abstract class HypenDurableObject {
         : {}),
       sessionManager: this.getSessionManager(),
       discoveredComponents,
+      loadSnapshot: async (sessionId: string) =>
+        (await self.ctx.storage.get(snapshotKey(sessionId))) as SessionSnapshot | undefined,
+      saveSnapshot: async (sessionId: string, snapshot: SessionSnapshot) => {
+        await self.ctx.storage.put(snapshotKey(sessionId), snapshot);
+      },
       createEngine() {
         return self.createEngine();
       },
@@ -757,6 +788,30 @@ export abstract class HypenDurableObject {
     return list && list.length > 0 ? new Set(list.map(normalizeOrigin)) : null;
   }
 
+  /**
+   * Drop session snapshots older than the session TTL (once per DO
+   * incarnation, on a new connection). Needs `storage.list`; best-effort.
+   */
+  private async sweepSnapshots(): Promise<void> {
+    if (this._snapshotsSwept) return;
+    this._snapshotsSwept = true;
+    const storage = this.ctx.storage;
+    if (typeof storage.list !== "function") return;
+    try {
+      const ttlMs = this.getSessionManager().getTtl() * 1000;
+      const now = Date.now();
+      const entries = await storage.list({ prefix: SNAPSHOT_PREFIX });
+      for (const [key, value] of entries) {
+        const savedAt = (value as { savedAt?: unknown } | null)?.savedAt;
+        if (typeof savedAt !== "number" || now - savedAt > ttlMs) {
+          await storage.delete(key);
+        }
+      }
+    } catch (err) {
+      log.warn("Session snapshot sweep failed:", err);
+    }
+  }
+
   /** Get or lazily (re)create the session for a WebSocket. */
   private ensureSession(ws: WebSocket): RemoteSession {
     let session = this.sessions.get(ws);
@@ -802,6 +857,13 @@ export abstract class HypenDurableObject {
   protected onStorageBound(_storage: DurableObjectStorage): void {
     // no-op by default
   }
+}
+
+/** DO storage key prefix of session snapshots. */
+export const SNAPSHOT_PREFIX = "hypen:session-snapshot:";
+
+function snapshotKey(sessionId: string): string {
+  return SNAPSHOT_PREFIX + sessionId;
 }
 
 /** View a binary WebSocket message as bytes without copying. */

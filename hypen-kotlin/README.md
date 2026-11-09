@@ -18,13 +18,23 @@ A Kotlin implementation of the Hypen SDK for building stateful UI modules. This 
 
 ## Installation
 
-Add to your `build.gradle.kts`:
+The SDK is on Maven Central. Add to your `build.gradle.kts`:
 
 ```kotlin
+repositories {
+    mavenCentral()
+}
+
 dependencies {
-    implementation("space.hypen:hypen-kotlin:0.5.0")
+    implementation("space.hypen:hypen-kotlin:0.6.7")
 }
 ```
+
+The jar bundles the native Hypen engine (`libhypen_engine`, loaded through
+JNA) for Linux x86-64 and arm64 (glibc), macOS Apple Silicon and Intel, and
+Windows x86-64. No Rust toolchain, `jna.library.path` or
+`HYPEN_NATIVE_LIB_DIR` is needed. To run against a different engine build,
+pass `-Djna.library.path=<dir>`; JNA searches it before the bundled copy.
 
 ## Quick Start
 
@@ -467,18 +477,33 @@ Run tests:
 ./gradlew test
 ```
 
-## Building
+## Building from source (contributors)
+
+A source build bundles no engine unless you give it one, so build the native
+library first (from the repository root):
 
 ```bash
-# Build the library
-./gradlew build
-
-# Run tests
+cargo build --release -p hypen-engine --features uniffi   # -> target/release/libhypen_engine.so
+cd hypen-kotlin
+./gradlew build    # tests load ../target/release via jna.library.path
 ./gradlew test
-
-# Generate documentation
-./gradlew dokkaHtml
 ```
+
+To produce a jar that bundles engines like the published one, lay the
+libraries out by JNA platform prefix under `build/natives` (or pass
+`-Phypen.nativesDir=<dir>`):
+
+```
+build/natives/linux-x86-64/libhypen_engine.so
+build/natives/linux-aarch64/libhypen_engine.so
+build/natives/darwin-aarch64/libhypen_engine.dylib
+build/natives/darwin-x86-64/libhypen_engine.dylib
+build/natives/win32-x86-64/hypen_engine.dll
+```
+
+Any subset present is bundled; `-Phypen.requireNatives=true` (used by the
+release workflow, `.github/workflows/publish-kotlin.yml`) fails the build
+unless all five are there.
 
 ## Architecture
 
@@ -486,7 +511,7 @@ Run tests:
 space.hypen.core/
 ├── Types.kt                # Core types (Patch, Action, StateChange, HypenAction)
 ├── Engine.kt               # IEngine interface
-├── NativeEngine.kt         # WASM-backed engine via JNA
+├── NativeEngine.kt         # Native (UniFFI) engine via JNA
 ├── ObservableState.kt      # Reactive state container
 ├── AppBuilder.kt           # Typed + untyped fluent module builder
 ├── ModuleInstance.kt       # Runtime module management

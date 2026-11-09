@@ -17,6 +17,8 @@
  * receive the new immutable files.
  */
 
+import { HOME_ORIGIN } from "./endpoints";
+
 /** A rendition request: pixel box plus JPEG/WebP quality. */
 export interface Crop {
   w: number;
@@ -61,7 +63,8 @@ export const CROP_KEYS = ["default", "sm", "md", "lg", "xl"] as const;
 export const SWATCH_CROP: Crop = { w: 96, h: 96, q: 60 };
 
 export const WALLPAPER_ASSET_VERSION = "v1";
-export const WALLPAPER_ASSET_ORIGIN = "https://hypen-home-screen.ian-dae.workers.dev";
+/** This worker's own origin (local `wrangler dev` by default; see endpoints.ts). */
+export const WALLPAPER_ASSET_ORIGIN = HOME_ORIGIN;
 
 export interface UnsplashPhoto {
   /** Preset id — also the key persisted in the Durable Object. */

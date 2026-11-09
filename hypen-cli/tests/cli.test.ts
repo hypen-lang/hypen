@@ -60,6 +60,58 @@ describe("CLI", () => {
       expect(result.stdout).toContain("Usage:");
       expect(result.exitCode).toBe(0);
     });
+
+    test.each([
+      ["dev", ["hypen dev", "--port", "--debug", "--a11y", "DEBUG=hypen:*"]],
+      ["build", ["hypen build", "--outDir", "--minify", "--no-minify", "--sourcemap"]],
+      ["studio", ["hypen studio", "--port", "--no-open", "--session"]],
+      ["test", ["hypen test", "--port", "--no-open"]],
+      ["run", ["hypen run", "--url", "--clean", "--studio", "--device", "--runner", "desktop"]],
+      ["check", ["hypen check", "hypen-a11y-ignore", "Exit codes"]],
+      ["a11y", ["hypen check"]],
+      ["generate", ["hypen generate", ".hypen/components.generated.ts"]],
+      ["init", ["hypen init"]],
+    ])("`hypen %s --help` prints that command's help", async (cmd, expected) => {
+      const result = await runCli([cmd, "--help"]);
+      expect(result.exitCode).toBe(0);
+      for (const text of expected) expect(result.stdout).toContain(text);
+      // Not the global help.
+      expect(result.stdout).not.toContain("Commands:");
+    });
+
+    test("global help lists common flags and points at per-command help", async () => {
+      const result = await runCli(["--help"]);
+      for (const flag of ["--port", "--debug", "--outDir", "--no-open", "<command> --help"]) {
+        expect(result.stdout).toContain(flag);
+      }
+    });
+
+    test("--no-open is accepted", async () => {
+      const result = await runCli(["studio", "--no-open", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).not.toContain("Unknown option");
+    });
+
+    test("run accepts --device and --runner", async () => {
+      const result = await runCli(["run", "android", "--device", "emulator-5554", "--runner", "./x", "--help"]);
+      expect(result.exitCode).toBe(0);
+      expect(result.stderr).not.toContain("Unknown option");
+    });
+
+    test("--runner is passed through to `hypen run desktop`", async () => {
+      const result = await runCli([
+        "run", "desktop", "--url", "ws://localhost:1", "--runner", "/nonexistent/hypen-browser",
+      ]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--runner points at /nonexistent/hypen-browser");
+    });
+
+    test("unknown flags fail with a pointer to the command's help", async () => {
+      const result = await runCli(["dev", "--bogus"]);
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr).toContain("--bogus");
+      expect(result.stderr).toContain("hypen dev --help");
+    });
   });
 
   describe("version command", () => {
@@ -87,6 +139,12 @@ describe("CLI", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toContain("Creating Hypen project");
       expect(result.stdout).toContain("Done!");
+      // The closing hint must be runnable without a global install
+      // (docs use `bunx @hypen-space/cli init`), so it names the
+      // package.json scripts rather than a bare `hypen dev`.
+      expect(result.stdout).toContain("bun run dev");
+      expect(result.stdout).toContain("bun run studio");
+      expect(result.stdout).not.toMatch(/\$\S* hypen dev/);
 
       // Check files were created
       const projectDir = join(testDir, projectName);
@@ -116,6 +174,20 @@ describe("CLI", () => {
       expect(packageJson.type).toBe("module");
       expect(packageJson.scripts.dev).toBe("hypen dev");
       expect(packageJson.scripts.build).toBe("hypen build");
+      // `hypen build` writes a static site with a zero-dependency server.js
+      // (dist/main.js is the browser bundle and crashes under Node).
+      expect(packageJson.scripts.start).toBe("node dist/server.js");
+      expect(packageJson.scripts.serve).toBe("bun src/app.ts");
+
+      // SDK versions follow the CLI that created the project, not "latest".
+      const cliPkg = JSON.parse(readFileSync(join(import.meta.dir, "../package.json"), "utf-8"));
+      for (const dep of ["@hypen-space/core", "@hypen-space/server", "@hypen-space/web", "@hypen-space/web-engine"]) {
+        expect(packageJson.dependencies[dep]).toBe(`^${cliPkg.version}`);
+      }
+      expect(packageJson.devDependencies["@hypen-space/cli"]).toBe(`^${cliPkg.version}`);
+      expect(JSON.stringify(packageJson)).not.toContain("\"latest\"");
+      // The project never used esbuild (the CLI ships its own).
+      expect(packageJson.devDependencies.esbuild).toBeUndefined();
     });
 
     test("creates hypen.json with correct content", async () => {
@@ -183,11 +255,13 @@ describe("CLI", () => {
         "utf-8"
       );
 
-      // Typed navigation action drives the Router's current route.
+      // App only holds the `location` the Router matches against; screens
+      // navigate with the built-in @router.* actions, so App has no
+      // navigate handler (a child's @actions.navigate never reached it).
       expect(componentTs).toContain("defineState");
       expect(componentTs).toContain("location");
-      expect(componentTs).toContain(".onAction<NavigatePayload>");
-      expect(componentTs).toContain("\"navigate\"");
+      expect(componentTs).not.toContain("\"navigate\"");
+      expect(componentTs).toContain(".build()");
 
       // Template should declare a Router with at least the two routes
       // we scaffold (Home + Counter) and use Tailwind via `.tw(...)`.
@@ -241,9 +315,74 @@ describe("CLI", () => {
 
       expect(homeTs).toContain("app\n  .module(\"Home\")");
       expect(homeTs).toContain(".onAction<UpdateGreetingPayload>");
-      // Home links back to /counter through the parent's navigate action.
-      expect(homeHypen).toContain("@actions.navigate");
-      expect(homeHypen).toContain("/counter");
+      // Home navigates with the built-in router action. A child module's
+      // @actions.* are scoped to that child, so @actions.navigate (handled
+      // only by App) was rejected as an invalid scoped UI action.
+      expect(homeHypen).toContain(".onClick(@router.push, to: \"/counter\")");
+      expect(homeHypen).not.toContain("@actions.navigate");
+    });
+
+    test("no scaffold screen dispatches an action its own module doesn't handle", () => {
+      for (const layout of ["file-based", "server-based"] as const) {
+        const projectDir = join(testDir, `scoped-${layout}`);
+        mkdirSync(projectDir, { recursive: true });
+        generateTypescriptProject({ projectDir, projectName: "scoped", layout });
+
+        const sources =
+          layout === "file-based"
+            ? ["App", "Home", "Counter"].map((name) => ({
+                name,
+                hypen: readFileSync(join(projectDir, `src/components/${name}/component.hypen`), "utf-8"),
+                ts: readFileSync(join(projectDir, `src/components/${name}/component.ts`), "utf-8"),
+              }))
+            : ["App", "Home", "Counter"].map((name) => {
+                const ts = readFileSync(join(projectDir, `src/modules/${name}.ts`), "utf-8");
+                return { name, hypen: ts, ts };
+              });
+
+        for (const { name, hypen, ts } of sources) {
+          const used = [...hypen.matchAll(/@actions\.(\w+)/g)].map((m) => m[1]!);
+          for (const action of used) {
+            expect(`${layout}/${name}: ${ts.includes(`"${action}"`) ? action : `missing ${action}`}`).toBe(
+              `${layout}/${name}: ${action}`,
+            );
+          }
+        }
+        const counter = sources.find((s) => s.name === "Counter")!.hypen;
+        expect(counter).toContain(".onClick(@router.push, to: \"/\")");
+      }
+    });
+
+    test("scaffold page roots fill the screen width", () => {
+      const projectDir = join(testDir, "width-app");
+      mkdirSync(projectDir, { recursive: true });
+      generateTypescriptProject({ projectDir, projectName: "width-app", layout: "file-based" });
+      // Without w-full the page Column shrinks to its content on desktop
+      // and Android (the web happened to stretch it).
+      for (const name of ["Home", "Counter"]) {
+        const hypen = readFileSync(join(projectDir, `src/components/${name}/component.hypen`), "utf-8");
+        const lines = hypen.trimEnd().split("\n");
+        // The page root's .tw(...) is the line just before the module's closing brace.
+        expect(lines[lines.length - 2]).toContain("w-full");
+      }
+    });
+
+    test("server-based scaffold starts the bundled entry with bun", () => {
+      const projectDir = join(testDir, "server-start");
+      mkdirSync(projectDir, { recursive: true });
+      generateTypescriptProject({ projectDir, projectName: "server-start", layout: "server-based" });
+      const pkg = JSON.parse(readFileSync(join(projectDir, "package.json"), "utf-8"));
+      expect(pkg.scripts.start).toBe("bun dist/main.js");
+      expect(pkg.scripts.serve).toBeUndefined();
+    });
+
+    test("file-based src/app.ts explains it is not used by hypen dev", () => {
+      const projectDir = join(testDir, "appts");
+      mkdirSync(projectDir, { recursive: true });
+      generateTypescriptProject({ projectDir, projectName: "appts", layout: "file-based" });
+      const appTs = readFileSync(join(projectDir, "src/app.ts"), "utf-8");
+      expect(appTs).toContain("`hypen dev` and `hypen build` do NOT use this file");
+      expect(appTs).toContain("bun run serve");
     });
 
     test("creates tsconfig.json", async () => {
@@ -298,7 +437,7 @@ describe("CLI", () => {
       // than waiting for clean exit because Studio is designed to run
       // indefinitely.
       const proc = spawn({
-        cmd: ["bun", cliPath, "test"],
+        cmd: ["bun", cliPath, "test", "--studio-port", "5498"],
         cwd: testDir,
         stdout: "pipe",
         stderr: "pipe",

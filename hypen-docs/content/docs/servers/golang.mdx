@@ -5,13 +5,39 @@ description: Complete guide to building Hypen servers with Go
 
 # Go SDK
 
-The Go SDK (`github.com/hypen-space/core`) provides a server-side Hypen implementation for Go applications with reactive state management, routing, cross-module communication, and Remote UI streaming over WebSocket.
+The Go SDK (`github.com/hypen-lang/hypen/hypen-golang`, package `core`) provides a server-side Hypen implementation for Go applications with reactive state management, routing, cross-module communication, and Remote UI streaming over WebSocket.
 
 ## Installation
 
+Requires **Go 1.25 or newer** (the WASM runtime, wazero v1.12, needs it). On an older toolchain, prefix commands with `GOTOOLCHAIN=go1.25.0` and Go downloads 1.25 for you.
+
 ```bash
-go get github.com/hypen-space/core
+go get github.com/hypen-lang/hypen/hypen-golang@v0.6.7
 ```
+
+The SDK is the `hypen-golang/` directory of the [Hypen repository](https://github.com/hypen-lang/hypen), published as a Go module with tags `hypen-golang/vX.Y.Z` that match the Hypen release (`hypen init` pins the version of the CLI that created the project). The package is named `core`, so import it with that alias:
+
+```go
+import (
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
+)
+```
+
+The engine WASM is embedded in the module, so there is nothing else to download or copy.
+
+### From source (SDK contributors)
+
+To build against a checkout of the SDK instead of the published module, add a `replace` directive:
+
+```bash
+git clone https://github.com/hypen-lang/hypen.git
+cd my-app
+go mod edit -replace=github.com/hypen-lang/hypen/hypen-golang=../hypen/hypen-golang
+go mod tidy
+```
+
+Remove it (`go mod edit -dropreplace=github.com/hypen-lang/hypen/hypen-golang`) to go back to the published version.
 
 ## Quick Start
 
@@ -25,8 +51,8 @@ package main
 import (
     "fmt"
 
-    core "github.com/hypen-space/core"
-    "github.com/hypen-space/core/remote"
+    core "github.com/hypen-lang/hypen/hypen-golang"
+    "github.com/hypen-lang/hypen/hypen-golang/remote"
 )
 
 // Module state as a Go struct. json tags match the @{state.xxx}
@@ -36,8 +62,8 @@ type CounterState struct {
 }
 
 func main() {
-    // 1. Define the module — .Name(...).Build() auto-registers onto the
-    //    package-level core.App singleton.
+    // 1. Define the module. UI(...) sets the template and finalizes the
+    //    definition (a trailing .Build() is allowed but not needed).
     counter := core.NewApp(CounterState{Count: 0}).
         Name("Counter").
         OnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
@@ -53,19 +79,18 @@ func main() {
                     .fontWeight("bold")
 
                 Row {
-                    Button("@actions.decrement") { Text("-") }.padding(16)
-                    Button("@actions.increment") { Text("+") }.padding(16)
+                    Button { Text("-") }.onClick(@actions.decrement).padding(16)
+                    Button { Text("+") }.onClick(@actions.increment).padding(16)
                 }
                 .gap(16)
             }
             .padding(32)
-        `).
-        Build()
+        `)
 
-    // 2. Serve the app. WithDefinition picks the primary module; any other
-    //    modules you built with .Name(...).Build() are auto-discovered from
-    //    core.App as nested modules.
-    server := remote.NewRemoteServer().
+    // 2. Serve it. WithDefinition sets the primary module and its template,
+    //    so the server needs no .UI() or .Source(). Listen blocks until
+    //    Stop(), like http.ListenAndServe.
+    remote.NewRemoteServer().
         WithDefinition(counter).
         OnConnection(func(client *remote.Client) {
             fmt.Printf("Connected: %s\n", client.ID)
@@ -74,24 +99,44 @@ func main() {
             fmt.Printf("Disconnected: %s\n", client.ID)
         }).
         Listen(3000)
-
-    defer server.Stop()
-    fmt.Println("Server running on ws://localhost:3000")
-    select {} // Block forever
 }
 ```
 
-> **Single-module demo?** The lower-level `RemoteServer.WithState("Name", map[string]any{...}).OnAction(...).UI(...).Listen(port)` form skips the typed builder and the registry — fine for one-off experiments.
+Run it:
+
+```bash
+go mod tidy
+go run .
+```
+
+Use `go run .`, not `go run main.go`: the latter compiles only that one file and breaks as soon as the package has more.
+
+Open http://localhost:3000 in a browser. `Listen` serves a built-in web client there (the same remote client and DOM renderer the TypeScript server ships) and accepts WebSocket connections at both `/` and `/ws`, so native clients (Android, desktop) connect to `ws://<host>:3000`. See the [Remote App Tutorial](/docs/getting-started/remote-app) for connecting clients.
 
 Mutations made to `ctx.State` are diffed against a pre-handler snapshot when
 the handler returns; only changed top-level keys are committed to the
 underlying `ObservableState`, so the engine still sees minimal deltas.
 
-Any Hypen client (web, Android, iOS) can connect to `ws://localhost:3000` and render this UI. See the [Remote App Tutorial](/docs/getting-started/remote-app) for connecting clients.
+If you need to do something after the server is up, use `ListenAsync`, which binds the port, serves in the background and returns:
+
+```go
+server := remote.NewRemoteServer().WithDefinition(counter).ListenAsync(3000)
+fmt.Println("Server running on", server.GetURL())
+server.Wait() // block until server.Stop()
+```
+
+| Call | Behavior |
+|------|----------|
+| `Listen(port...)` | Blocks until `Stop()`. Panics on misconfiguration (no module or UI); logs a bind/serve error and returns. |
+| `ListenAndServe(port...) error` | Blocks like `Listen` and returns the error (`nil` after `Stop()`). |
+| `ListenAsync(port...)` | Binds, serves in the background and returns at once. Pair with `Wait()`. |
+| `Wait()` | Blocks until `Stop()`. |
+
+> **Single-module demo?** The lower-level `RemoteServer.WithState("Name", map[string]any{...}).OnAction(...).UI(...).Listen(port)` form skips the typed builder and the registry, which is fine for one-off experiments.
 
 ### Serve() Helper
 
-For simpler cases, use the `Serve()` convenience function:
+For simpler cases, use the `Serve()` convenience function. Unlike `Listen`, `Serve` does not block (it calls `ListenAsync`), so block on `Wait()` afterwards:
 
 ```go
 server := remote.Serve(remote.ServeOptions{
@@ -112,8 +157,10 @@ server := remote.Serve(remote.ServeOptions{
         return state
     },
 })
-defer server.Stop()
+server.Wait()
 ```
+
+The returned state map is rendered after every action.
 
 ## App Builder API
 
@@ -252,7 +299,9 @@ Return values:
 `UI(template)` sets the inline Hypen DSL template and finalizes the module
 definition in one call — the recommended way to create single-file
 components. `UIFile(path)` does the same but reads the template from
-disk. `Build()` finalizes without a template.
+disk (it returns `(*ModuleDefinition, error)`). `Build()` finalizes without
+a template. `.UI(...).Build()` also compiles: `Build()` on a finished
+`*ModuleDefinition` is a no-op that returns it.
 
 ```go
 module := core.NewApp(MyState{Count: 0}).
@@ -563,7 +612,7 @@ Button { Text("Search") }.onClick(@router.push, to: "/search")
 Button { Text("←") }.onClick(@router.back)
 ```
 
-Per-route module handlers use `ctx.Context.GetRouter()` to read
+Per-route module handlers use `ctx.GetRouter()` to read
 route params in `OnActivated`:
 
 ```go
@@ -579,6 +628,14 @@ core.NewApp(UserProfileState{}).
     }).
     Build()
 ```
+
+> **Known issue in the current Go SDK:** under the auto-router,
+> `ctx.GetRouter()` still returns `nil` in routed modules' `OnActivated`,
+> so the pattern above renders an empty screen. Until that is fixed, wire
+> routing manually (below) or pass the id another way. Also, a named module
+> that should render as a nested component needs its template in a `.hypen`
+> file under `.Source(dir)`; a template given only through `.Name(...).UI(...)`
+> is not registered as a component yet.
 
 Opt out with `server.DisableAutoRouter()` to wire routing manually.
 See the [Routing Guide](/docs/guide/routing) for the DSL-level
@@ -768,28 +825,37 @@ resolver.GetCacheSize()
 `RemoteServer` streams UI over WebSocket to any Hypen client using a fluent builder pattern:
 
 ```go
-server := remote.NewRemoteServer().
-    Module("MyApp", moduleConfig).
-    UI(uiTemplate).
+remote.NewRemoteServer().
+    WithDefinition(counter).
     Config(remote.ServerConfig{Port: 3000, Hostname: "0.0.0.0"}).
     OnConnection(connectHandler).
     OnDisconnection(disconnectHandler).
-    Listen(3000)
+    Listen()
 ```
 
 ### Builder Methods
 
 | Method | Description |
 |--------|-------------|
-| `.Module(name, config)` | Set the module to serve |
-| `.WithState(name, state)` | Quick setup with just name and state |
-| `.OnAction(handler)` | Set action handler (simple mode) |
-| `.UI(dsl)` | Set the Hypen DSL template |
-| `.Config(config)` | Server configuration (port, hostname, compression) |
+| `.WithDefinition(def)` | Serve a `*core.ModuleDefinition` as the primary module. Its template (from `.UI()`/`.UIFile()`) becomes the server UI. |
+| `.Module(name, config)` | Set the module from a `*remote.ModuleConfig` |
+| `.WithState(name, state)` | Quick setup with just a name and a state map |
+| `.OnAction(handler)` | Action handler for `WithState`/`Serve` apps: `func(action string, payload any, state map[string]any) map[string]any` |
+| `.UI(dsl)` | Set the Hypen DSL template. Optional with `WithDefinition` when the definition has a template; an explicit `.UI()` wins. |
+| `.Source(dir)` | Load components from `.hypen` files under `dir`. Only needed when the template uses such components; inline primitives render without it. |
+| `.Config(config)` | Server configuration (port, hostname, compression, web client) |
 | `.DisableCompression()` | Opt out of WebSocket permessage-deflate (on by default) |
+| `.DisableWebClient()` | Don't serve the built-in browser client at `/` |
+| `.DisableAutoRouter()` | Don't wire `Router { Route ... }` blocks automatically |
+| `.AllowedOrigins(origins...)` | Browser `Origin` allowlist for the WebSocket upgrade |
+| `.Authenticate(func(*http.Request) bool)` | Admit or refuse each upgrade |
 | `.OnConnection(callback)` | Called when a client connects |
 | `.OnDisconnection(callback)` | Called when a client disconnects |
-| `.Listen(port?)` | Start the WebSocket server |
+| `.OnSessionCreate(callback)` | Called with each new `*RemoteSession` |
+| `.Listen(port...)` | Start the server and block until `Stop()` |
+| `.ListenAndServe(port...) error` | Like `Listen`, but returns the error |
+| `.ListenAsync(port...)` | Start the server in the background and return |
+| `.Wait()` | Block until `Stop()` |
 | `.Stop()` | Stop the server |
 
 ### Server Methods
@@ -810,6 +876,15 @@ server.BroadcastPatches(patches)
 server.BroadcastState(state)
 ```
 
+### HTTP endpoints
+
+| Path | Serves |
+|------|--------|
+| `/`, `/index.html` | Built-in web client page (unless disabled); WebSocket upgrades are also accepted at `/` |
+| `/__hypen__/client.js` | The web client bundle |
+| `/ws` | WebSocket endpoint |
+| `/health` | Health check |
+
 ### Configuration
 
 ```go
@@ -821,6 +896,9 @@ remote.ServerConfig{
     // The field is phrased negatively because a zero-valued Go bool
     // has to mean "keep the default".
     DisableCompression: false, // default: false (compression enabled)
+
+    // Built-in browser client at `/`, on by default.
+    DisableWebClient: false,
 }
 ```
 
@@ -1179,7 +1257,7 @@ core.SetLogHandler(core.LogHandlerFunc(
 ### Docker
 
 ```dockerfile
-FROM golang:1.21-alpine AS build
+FROM golang:1.25-alpine AS build
 WORKDIR /app
 COPY go.mod go.sum ./
 RUN go mod download
@@ -1189,26 +1267,27 @@ RUN CGO_ENABLED=0 go build -o server .
 FROM alpine:latest
 WORKDIR /app
 COPY --from=build /app/server .
-COPY --from=build /app/hypen_engine.wasm .
+# Only if you use .Source("./components"):
 COPY --from=build /app/components ./components
 EXPOSE 3000
 CMD ["./server"]
 ```
 
+The engine WASM is embedded in the binary, so the runtime image needs nothing besides the server (and your `components/` directory if you use `.Source(...)`). If your `go.mod` has a local `replace` for the SDK, drop it before building the image (or vendor with `go mod vendor`): the replaced path is outside the build context.
+
 ### Production Checklist
 
-- Include the `hypen_engine.wasm` file in your deployment
+- Configure `AllowedOrigins(...)` and/or `Authenticate(...)` for the WebSocket upgrade
 - Each client gets its own module instance — plan memory accordingly
-- Use `defer server.Stop()` for graceful shutdown
+- Call `server.Stop()` on shutdown (for example from a signal handler)
 - Monitor active connections via `server.GetClientCount()`
-- Set appropriate `MaxConnections` in server options for capacity planning
-- Add authentication at the HTTP layer before WebSocket upgrade
+- Use `/health` for load balancer checks
 
 ## Requirements
 
-- Go 1.21+
+- Go 1.25+
 - `gorilla/websocket` (WebSocket support)
-- `tetratelabs/wazero` (WASM runtime, no CGo required)
+- `tetratelabs/wazero` v1.12 (WASM runtime, no CGo required)
 
 ## See Also
 

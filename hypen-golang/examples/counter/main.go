@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // CounterState is the module's state shape. Fields are tagged with json

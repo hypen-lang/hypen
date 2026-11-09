@@ -273,7 +273,7 @@ ${rail("Horror & chills", "horror")}
 ${rail("Sci-fi B-movies", "scifi")}
 ${rail("Comedy classics", "comedy")}
 
-        Text("All titles are public-domain or freely licensed films served directly by the Internet Archive (archive.org).")
+        Text("All titles are public-domain or freely licensed films, streamed directly from the Internet Archive (archive.org) or, for the Blender open movies, Wikimedia Commons.")
           .tw("px-5 md:px-10 pt-10 pb-8 text-[11px]")
           .color("#4A4A55")
           .maxWidth(1280)

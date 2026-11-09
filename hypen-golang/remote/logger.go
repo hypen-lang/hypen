@@ -6,7 +6,7 @@ import (
 	"os"
 	"sync"
 
-	core "github.com/hypen-space/core"
+	core "github.com/hypen-lang/hypen/hypen-golang"
 )
 
 // LogLevel represents the severity level for logging.
@@ -27,8 +27,8 @@ const (
 
 // Global configuration
 var (
-	globalLevel                = LogLevelError // Default to error-only
-	globalOutput    io.Writer = os.Stderr
+	globalLevel            = LogLevelError // Default to error-only
+	globalOutput io.Writer = os.Stderr
 	globalMu     sync.RWMutex
 )
 

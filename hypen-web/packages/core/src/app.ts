@@ -277,6 +277,54 @@ export interface HypenModuleDefinition<T = unknown> {
 export type HypenModule<T = unknown> = HypenModuleDefinition<T>;
 
 /**
+ * The definition `.ui()` / `.uiFile()` return. It is already built; its
+ * `build()` exists only so the common `.ui(tpl).build()` chain keeps working
+ * and returns the definition itself. Non-enumerable, so spreads, JSON and
+ * structured clones of the definition never see it.
+ */
+export type BuiltModuleDefinition<T = unknown> = HypenModuleDefinition<T> & {
+  build(): BuiltModuleDefinition<T>;
+};
+
+function withNoopBuild<T>(definition: HypenModuleDefinition<T>): BuiltModuleDefinition<T> {
+  const built = definition as BuiltModuleDefinition<T>;
+  Object.defineProperty(built, "build", {
+    value: () => built,
+    enumerable: false,
+    configurable: true,
+    writable: true,
+  });
+  return built;
+}
+
+/**
+ * Anything a host accepts where it needs a module: a built definition, or a
+ * builder that has not had `.build()` / `.ui()` called on it yet.
+ */
+export type HypenModuleLike<T = any> = HypenModuleDefinition<T> | HypenAppBuilder<T>;
+
+/**
+ * Normalise a {@link HypenModuleLike} to a built definition: a builder is
+ * built (which also registers a named module in its app registry), a
+ * definition is returned as is. Duck-typed rather than `instanceof` so a
+ * builder from another copy of `@hypen-space/core` is recognised too.
+ */
+export function resolveModuleDefinition<T = any>(
+  module: HypenModuleLike<T>
+): HypenModuleDefinition<T> {
+  const candidate = module as Partial<HypenModuleDefinition<T>> & { build?: unknown };
+  if (
+    candidate !== null &&
+    typeof candidate === "object" &&
+    !Array.isArray(candidate.actions) &&
+    typeof candidate.build === "function"
+  ) {
+    return (candidate.build as () => HypenModuleDefinition<T>)();
+  }
+  return module as HypenModuleDefinition<T>;
+}
+
+/**
  * Builder for creating Hypen app modules
  */
 export class HypenAppBuilder<T> {
@@ -523,11 +571,13 @@ export class HypenAppBuilder<T> {
    * ```
    *
    * @param template - The Hypen DSL template string
-   * @returns The built module definition (calls build() internally)
+   * @returns The built module definition (calls build() internally). A
+   *   trailing `.build()` on it is a harmless no-op returning the same
+   *   definition, so `.ui(tpl).build()` works too.
    */
-  ui(template: string): HypenModuleDefinition<T> {
+  ui(template: string): BuiltModuleDefinition<T> {
     this.template = template;
-    return this.build();
+    return withNoopBuild(this.build());
   }
 
   /**
@@ -544,12 +594,13 @@ export class HypenAppBuilder<T> {
    * ```
    *
    * @param path - Path to a .hypen template file
-   * @returns The built module definition (calls build() internally)
+   * @returns The built module definition (calls build() internally); a
+   *   trailing `.build()` is a no-op, as with `.ui()`.
    */
-  uiFile(path: string): HypenModuleDefinition<T> {
+  uiFile(path: string): BuiltModuleDefinition<T> {
     const fs = require("fs");
     this.template = fs.readFileSync(path, "utf-8").trim();
-    return this.build();
+    return withNoopBuild(this.build());
   }
 
   /**
@@ -763,7 +814,18 @@ export class HypenModuleInstance<T extends object = any> {
     definition: HypenModuleDefinition<T>,
     router?: HypenRouter | null,
     globalContext?: HypenGlobalContext,
-    sessionId?: string
+    sessionId?: string,
+    options?: {
+      /**
+       * Back the engine's PRIMARY module slot even when the definition is
+       * named. A host serving a named module (`app.module("Counter")…`) as
+       * its entry sets this so an unwrapped template (`Column { … }`, no
+       * `module Counter { … }` around it) still resolves `@{state.*}` and
+       * routes `@actions.*` to this instance. The name is kept for
+       * everything else (persistence keys, logs).
+       */
+      primary?: boolean;
+    }
   ) {
     this.engine = engine;
     this.definition = definition;
@@ -781,7 +843,7 @@ export class HypenModuleInstance<T extends object = any> {
 
     // Lowercase module name — used as the engine-side scope key. Empty for
     // anonymous modules (which become the engine's primary module).
-    const moduleKey = (definition.name || "").toLowerCase();
+    const moduleKey = options?.primary ? "" : (definition.name || "").toLowerCase();
     this.moduleKey = moduleKey;
 
     // Create observable state that forwards changed paths to the engine.

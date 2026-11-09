@@ -141,13 +141,13 @@ fn test_remove_node_clears_all_dependencies() {
     // THEN: All dependencies cleared
     assert!(graph
         .get_dependent_nodes("user.name")
-        .map_or(true, |n| !n.contains(&node_id)));
+        .is_none_or(|n| !n.contains(&node_id)));
     assert!(graph
         .get_dependent_nodes("user.email")
-        .map_or(true, |n| !n.contains(&node_id)));
+        .is_none_or(|n| !n.contains(&node_id)));
     assert!(graph
         .get_dependent_nodes("settings")
-        .map_or(true, |n| !n.contains(&node_id)));
+        .is_none_or(|n| !n.contains(&node_id)));
 }
 
 #[test]

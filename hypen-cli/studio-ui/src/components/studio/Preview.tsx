@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from "react";
+import { actionLogEntry } from "@/lib/action-log";
 import { cn } from "@/lib/utils";
 import { RefreshCw, Smartphone } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -10,6 +11,8 @@ import { localWasmInitOptions } from "@/lib/wasm-urls";
 import { app, HypenModuleInstance, getStateSnapshot } from "@hypen-space/core";
 import { DOMRenderer } from "@hypen-space/web/dom";
 import { RemoteEngine } from "@hypen-space/core/remote/client";
+import { pickPreviewSource, type PreviewSource } from "@/lib/preview-source";
+import type { ModuleStates, StateOverride } from "@/lib/state-history";
 
 // Parse import statements from Hypen DSL
 function parseImports(source: string): Array<{ names: string[]; source: string }> {
@@ -66,15 +69,25 @@ function resolvePath(basePath: string, relativePath: string): string {
   return baseParts.join("/");
 }
 
+/** Logical size of the previewed device (iPhone 15 Pro, in CSS px / pt). */
+const PHONE_DEVICE = { w: 393, h: 852 };
+/** On-screen width of the phone's glass inside the 14px bezel. */
+const PHONE_SCREEN_W = 322;
+const PHONE_SCALE = PHONE_SCREEN_W / PHONE_DEVICE.w;
+const PHONE_SCREEN_H = Math.round(PHONE_DEVICE.h * PHONE_SCALE);
+
 type PreviewProps = {
   activeFile: string | null;
   openFiles: OpenFile[];
   remoteUrl?: string | null;
   style?: React.CSSProperties;
-  overrideState?: Record<string, any> | null;
+  /** Time-travel target: the primary's state plus every module's, when known. */
+  overrideState?: StateOverride | null;
   onLog: (level: ConsoleLog["level"], message: string) => void;
   onActionLog: (name: string, payload?: any) => void;
-  onStateChange: (state: Record<string, any>) => void;
+  onStateChange: (state: Record<string, any>, modules?: ModuleStates) => void;
+  /** Components the studio engine could not resolve for this preview. */
+  unresolvedComponents?: string[];
 };
 
 // Module-level engine singleton to avoid WASM memory corruption with StrictMode
@@ -123,6 +136,7 @@ export function Preview({
   onLog,
   onActionLog,
   onStateChange,
+  unresolvedComponents = [],
 }: PreviewProps) {
   // Use a separate ref for the Hypen renderer container (not managed by React)
   const containerRef = useRef<HTMLDivElement>(null);
@@ -134,6 +148,18 @@ export function Preview({
   const observableStateRef = useRef<any>(null);
   const timeTravelingRef = useRef(false);
   const remoteEngineRef = useRef<RemoteEngine | null>(null);
+
+  // Where the preview streams from (see lib/preview-source.ts). `null`
+  // while we wait for the studio engine to finish booting.
+  const [source, setSource] = useState<PreviewSource | null>(
+    remoteUrl ? { kind: "remote", url: remoteUrl, external: true } : null
+  );
+  // Bumped by the refresh button in remote mode: a fresh RemoteEngine =
+  // a fresh session (initial state, initial route).
+  const [reconnectNonce, setReconnectNonce] = useState(0);
+  const connectUrl = source?.kind === "remote" ? source.url : null;
+  const isLocal = source?.kind === "local";
+  const isExternal = source?.kind === "remote" && source.external;
 
   // Cache for resolved components
   const componentCacheRef = useRef<Map<string, string>>(new Map());
@@ -148,6 +174,9 @@ export function Preview({
       div.style.inset = "0";
       div.style.overflowY = "auto";
       div.style.overflowX = "hidden";
+      // Same fullscreen contract as the `hypen dev` client (#app): a flex
+      // column whose root component stretches to the device frame.
+      div.className = "hypen-preview-root";
       containerRef.current.appendChild(div);
       rendererContainerRef.current = div;
     }
@@ -163,15 +192,63 @@ export function Preview({
     };
   }, []);
 
-  // Remote mode: connect to a RemoteServer (used with `hypen run --studio`)
+  // Resolve the preview source. An explicit remote URL (server-based
+  // project, `hypen run --studio`) wins; otherwise stream from the
+  // studio-hosted engine so the real module handlers run — the in-browser
+  // engine only wires the entry's own module, so taps on nested modules
+  // (Home, Counter, ...) and `@router.push` would have no handler.
   useEffect(() => {
-    if (!remoteUrl || !rendererContainerRef.current) return;
+    if (remoteUrl) {
+      setSource({ kind: "remote", url: remoteUrl, external: true });
+      return;
+    }
+    let cancelled = false;
+    const deadline = Date.now() + 20_000;
+    (async () => {
+      while (!cancelled) {
+        let status = null;
+        try {
+          const res = await fetch("/api/engine/status");
+          if (res.ok) status = await res.json();
+        } catch {
+          // Studio server restarting — keep polling until the deadline.
+        }
+        const next = pickPreviewSource(status, window.location, Date.now() > deadline);
+        if (next) {
+          if (cancelled) return;
+          if (next.kind === "local") {
+            onLog(
+              "warn",
+              `Studio engine unavailable${next.reason ? ` (${next.reason})` : ""} — ` +
+                "previewing the open .hypen file in-browser; only its own module's actions run."
+            );
+          }
+          setSource(next);
+          return;
+        }
+        await new Promise((r) => setTimeout(r, 250));
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [remoteUrl]);
 
-    onLog("info", `Connecting to remote engine: ${remoteUrl}`);
+  // Remote mode: stream from a RemoteServer — the studio-hosted engine
+  // (default) or the project's own server (`hypen run --studio`, server-based
+  // projects). Actions go to the server, where the module handlers live.
+  useEffect(() => {
+    if (!connectUrl || !rendererContainerRef.current) return;
+
+    onLog("info", `Connecting to ${isExternal ? "remote" : "studio"} engine: ${connectUrl}`);
     setLoading(true);
+    rendererContainerRef.current.innerHTML = "";
 
-    const remote = new RemoteEngine(remoteUrl, {
+    const remote = new RemoteEngine(connectUrl, {
       session: { props: { platform: "studio" } },
+      // The studio engine drops every client on a source change (close
+      // 1012, hot reload); redial fast so edits show up promptly.
+      ...(isExternal ? {} : { reconnectInterval: 300 }),
     });
     remoteEngineRef.current = remote;
 
@@ -180,7 +257,8 @@ export function Preview({
       new DOMRenderer(rendererContainerRef.current!, {
         dispatchAction: (name: string, payload?: unknown) => {
           remote.dispatchAction(name, payload);
-          onActionLog(name, payload);
+          const entry = actionLogEntry(name, payload);
+          onActionLog(entry.name, entry.payload);
         },
       });
     rendererRef.current = makeRemoteRenderer();
@@ -191,9 +269,9 @@ export function Preview({
           rendererRef.current.applyPatches(patches);
         }
       })
-      .onStateUpdate((state) => {
+      .onStateUpdate((state, modules) => {
         if (!timeTravelingRef.current) {
-          onStateChange(state as Record<string, any>);
+          onStateChange(state as Record<string, any>, modules);
         }
       })
       .onSessionEstablished((info) => {
@@ -205,8 +283,10 @@ export function Preview({
           rendererContainerRef.current.innerHTML = "";
           rendererRef.current = makeRemoteRenderer();
         }
-        // Subscribe to state updates for the state panel and time-travel
-        remote.subscribeState();
+        // Subscribe to state updates for the state panel and time-travel —
+        // every module's state (nested and route modules too), not only
+        // the entry's. Older servers ignore `modules` and stream the entry.
+        remote.subscribeState({ modules: true });
         setEngineReady(true);
         setLoading(false);
       })
@@ -232,15 +312,16 @@ export function Preview({
     return () => {
       remote.dispose();
       remoteEngineRef.current = null;
+      setEngineReady(false);
       if (rendererContainerRef.current) {
         rendererContainerRef.current.innerHTML = "";
       }
     };
-  }, [remoteUrl]);
+  }, [connectUrl, reconnectNonce]);
 
   // Initialize engine (local mode only)
   const initEngine = async () => {
-    if (remoteUrl) return; // Skip local engine when in remote mode
+    if (!isLocal) return; // Skip local engine when streaming from a server
     if (!rendererContainerRef.current) return;
 
     try {
@@ -315,9 +396,14 @@ export function Preview({
     }
   };
 
-  // Refresh preview (local mode only — remote mode streams patches automatically)
+  // Refresh preview. Remote mode: reconnect (fresh session). Local mode:
+  // re-render the open buffers in the in-browser engine.
   const refreshPreview = async () => {
-    if (!rendererContainerRef.current || remoteUrl) return;
+    if (connectUrl) {
+      setReconnectNonce((n) => n + 1);
+      return;
+    }
+    if (!rendererContainerRef.current || !isLocal) return;
 
     setLoading(true);
 
@@ -353,6 +439,11 @@ export function Preview({
       rendererContainerRef.current.innerHTML = "";
       rendererRef.current.clear();
       engineRef.current.reset();
+      // The WASM reset() rebuilds the engine core from scratch, which also
+      // drops the default primitives Engine.init() registered. Without
+      // them every Column/Text/Row is routed to the component resolver and
+      // logs a "did not resolve" warning. Re-register them.
+      engineRef.current.wasmEngine?.registerDefaultPrimitives?.();
 
       // Parse explicit imports and build import map
       const imports = parseImports(hypenFile.content);
@@ -461,8 +552,9 @@ export function Preview({
 
       // Register discovered components' modules with the engine so their
       // `@{state.*}` bindings resolve in the preview (mirrors the remote
-      // session's registerNestedModules). Action HANDLERS still live only
-      // in Test Mode / the running app — the local preview is layout-first.
+      // session's registerNestedModules). Action HANDLERS only run when the
+      // preview streams from the studio engine; this in-browser fallback is
+      // layout-first.
       for (const [name, path] of importMapRef.current) {
         const tsPath = path.endsWith(".ts")
           ? path
@@ -615,11 +707,12 @@ export function Preview({
     timeTravelingRef.current = true;
     try {
       if (remoteEngineRef.current) {
-        // Remote mode: send state override to the server, which re-renders and sends patches back
-        remoteEngineRef.current.updateState(overrideState);
+        // Remote mode: send state override to the server, which restores
+        // every listed module, re-renders and sends patches back.
+        remoteEngineRef.current.updateState(overrideState.state, overrideState.modules);
       } else if (observableStateRef.current) {
         // Local mode: update the module instance directly
-        observableStateRef.current.updateState(overrideState);
+        observableStateRef.current.updateState(overrideState.state);
       }
     } finally {
       timeTravelingRef.current = false;
@@ -645,14 +738,14 @@ export function Preview({
     .join("\0");
 
   useEffect(() => {
-    if (remoteUrl || !hypenFile) return;
+    if (!isLocal || !hypenFile) return;
 
     const timer = setTimeout(() => {
       refreshPreview();
     }, 500);
 
     return () => clearTimeout(timer);
-  }, [relevantContentKey]);
+  }, [relevantContentKey, isLocal]);
 
   return (
     <div className="border-l border-border bg-card/50 flex flex-col shrink-0" style={style}>
@@ -661,54 +754,92 @@ export function Preview({
         <span className="text-xs font-medium text-muted-foreground uppercase tracking-wider flex items-center gap-2">
           <Smartphone className="w-4 h-4" />
           Preview
-          {remoteUrl && (
+          {isExternal && (
             <span className="text-[10px] px-1.5 py-0.5 rounded bg-pink-500/20 text-pink-400 font-medium normal-case">
               Remote
             </span>
           )}
+          {isLocal && (
+            <span
+              className="text-[10px] px-1.5 py-0.5 rounded bg-zinc-500/20 text-zinc-400 font-medium normal-case"
+              title="Studio engine unavailable: rendering in-browser, only the entry module's actions run"
+            >
+              Layout only
+            </span>
+          )}
         </span>
-        {!remoteUrl && (
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={refreshPreview}
-            disabled={loading}
-          >
-            <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
-          </Button>
-        )}
+        <Button
+          variant="ghost"
+          size="sm"
+          onClick={refreshPreview}
+          disabled={loading || !source}
+          title={connectUrl ? "Restart preview session" : "Re-render preview"}
+        >
+          <RefreshCw className={cn("w-4 h-4", loading && "animate-spin")} />
+        </Button>
       </div>
 
       {/* Preview Container */}
       <div className="flex-1 p-4 flex items-start justify-center overflow-auto bg-gradient-to-b from-zinc-800 to-zinc-900">
         {/* Phone Frame — matches landing page Iphone15Pro structure */}
-        <div className="w-[350px] h-[710px] bg-black rounded-[60px] border-[14px] border-black shadow-2xl overflow-hidden">
+        <div
+          className="bg-black rounded-[60px] border-[14px] border-black shadow-2xl overflow-hidden shrink-0"
+          style={{ width: PHONE_SCREEN_W + 28, height: PHONE_SCREEN_H + 28 }}
+        >
           {/* Screen — white backdrop + black default text colour so apps
               without explicit bg/color match the device default (and Test
               Mode, which forces these in PreviewFrame). Without this, the
               black phone bezel shows through and Text nodes inherit the
               studio shell's dark-theme foreground, which vanishes on the
               first white-backed component the user adds. */}
-          <div className="w-full h-full overflow-hidden rounded-[46px] bg-white text-black">
+          <div className="relative w-full h-full overflow-hidden rounded-[46px] bg-white text-black">
+            {/* Device viewport: laid out at the phone's logical size
+                (iPhone 15 Pro, 393x852pt) and scaled down to the frame, so
+                the app wraps and centres the way it does on a device
+                instead of reflowing into a ~320px column. */}
             <div
               ref={containerRef}
-              className="w-full h-full relative"
-            >
-              {/* Overlay for loading state */}
-              {loading && (
-                <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-10">
-                  <RefreshCw className="w-6 h-6 animate-spin text-zinc-400" />
+              className="absolute left-0 top-0"
+              style={{
+                width: PHONE_DEVICE.w,
+                height: PHONE_DEVICE.h,
+                transform: `scale(${PHONE_SCALE})`,
+                transformOrigin: "0 0",
+              }}
+            />
+            {/* Referenced-but-undefined components render nothing (the
+                engine's unknown-component behaviour); say so on the
+                preview instead of leaving a silently blank area. */}
+            {engineReady && !isLocal && unresolvedComponents.length > 0 && (
+              <div
+                data-testid="unresolved-components"
+                className="absolute left-3 right-3 top-10 z-10 rounded-lg border border-amber-400 bg-amber-50/95 px-3 py-2 text-[11px] leading-snug text-amber-900 shadow"
+              >
+                <span className="font-semibold">Unknown component{unresolvedComponents.length === 1 ? "" : "s"}:</span>{" "}
+                {unresolvedComponents.map((n) => `${n}()`).join(", ")}
+                <div className="text-amber-800/80">
+                  Referenced in a template but not defined (deleted or misspelled?) — rendered as nothing.
                 </div>
-              )}
-              {!engineReady && !loading && (
-                <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-400 text-center p-4 text-sm z-10">
-                  <p className="mb-2">{remoteUrl ? "Connecting to device..." : "Preview not ready"}</p>
-                  <p className="text-xs text-zinc-500">
-                    {remoteUrl ? "Waiting for remote engine connection" : "Open a .hypen file and click refresh"}
-                  </p>
-                </div>
-              )}
-            </div>
+              </div>
+            )}
+            {/* Overlay for loading state */}
+            {loading && (
+              <div className="absolute inset-0 flex items-center justify-center bg-black/70 z-10">
+                <RefreshCw className="w-6 h-6 animate-spin text-zinc-400" />
+              </div>
+            )}
+            {!engineReady && !loading && (
+              <div className="absolute inset-0 flex flex-col items-center justify-center text-zinc-400 text-center p-4 text-sm z-10">
+                <p className="mb-2">{connectUrl || !source ? "Connecting..." : "Preview not ready"}</p>
+                <p className="text-xs text-zinc-500">
+                  {isExternal
+                    ? "Waiting for remote engine connection"
+                    : connectUrl || !source
+                      ? "Waiting for the studio engine"
+                      : "Open a .hypen file and click refresh"}
+                </p>
+              </div>
+            )}
           </div>
         </div>
       </div>

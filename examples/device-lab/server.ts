@@ -3,10 +3,20 @@ import { RemoteServer } from "../../hypen-web/packages/server/src/remote/server.
 import { sha256Hex } from "../../hypen-web/packages/core/src/remote/device/index.ts";
 import { mkdir, appendFile } from "node:fs/promises";
 
+// Ports: DEVICE_LAB_WEB_PORT (the web page, default 45100) and DEVICE_LAB_PORT
+// (this TS server, default 45101). The other backends keep their own ports
+// (Go 45102, Kotlin 45103, Swift 45104, Rust 45105) and allow the page's
+// origin http://127.0.0.1:45100 — change both together if you move the page.
+const WEB_PORT = Number(process.env.DEVICE_LAB_WEB_PORT) || 45100;
+const TS_PORT = Number(process.env.DEVICE_LAB_PORT) || 45101;
 const ui = await Bun.file(new URL("app.hypen", import.meta.url)).text();
 const names = ["gallery.pick", "file.pick", "file.save", "camera.capture", "mic.record", "bluetooth.select", "bluetooth.scan", "permission.query", "permission.request"] as const;
 const saveBytes = new TextEncoder().encode("Device Lab payload 0123456789\n".repeat(3400));
 await mkdir(new URL("results-2026-09-26/uploads", import.meta.url), { recursive: true });
+// `sample.txt` is the 102,000-byte upload fixture — the same bytes the Save
+// action produces. It is git-ignored, so materialize it on first start.
+const sampleFixture = Bun.file(new URL("sample.txt", import.meta.url));
+if (!(await sampleFixture.exists())) await Bun.write(sampleFixture, saveBytes);
 const pending = new WeakMap<object, AbortController>();
 let sequence = 0;
 async function summarize(value: any): Promise<any> {
@@ -69,16 +79,16 @@ for (const name of ["status","query","permission","gallery","file","save","camer
   });
 }
 const server = new RemoteServer().module("App", builder.build()).ui(ui)
-  .config({ hostname: "127.0.0.1", ...(process.env.DEVICE_LAB_NO_COMPRESSION === "1" ? { compression: false } : {}), webClient: false, allowedOrigins: ["http://127.0.0.1:45100"],
+  .config({ hostname: "127.0.0.1", ...(process.env.DEVICE_LAB_NO_COMPRESSION === "1" ? { compression: false } : {}), webClient: false, allowedOrigins: [`http://127.0.0.1:${WEB_PORT}`],
     authenticate: (request: Request) => new URL(request.url).searchParams.get("token") === "device-lab" });
-await server.listen(45101);
+await server.listen(TS_PORT);
 
 const build = await Bun.build({ entrypoints: [new URL("web.ts", import.meta.url).pathname], target: "browser", format: "esm" });
 if (!build.success) throw new Error(build.logs.join("\n"));
 const bundle = await build.outputs[0].text();
-Bun.serve({ hostname: "127.0.0.1", port: 45100, fetch(request) {
+Bun.serve({ hostname: "127.0.0.1", port: WEB_PORT, fetch(request) {
   const u = new URL(request.url);
   if(u.pathname === "/app.js") return new Response(bundle, { headers: { "content-type": "text/javascript" } });
-  return new Response(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Device Lab</title><style>body{margin:0;background:#f1f5f9;font-family:system-ui}nav{padding:12px;background:#142334;color:white}a{color:white;margin:8px}#app{width:440px;min-height:680px;background:white;margin:12px auto}canvas{width:440px;height:740px;display:block}#connection{font-size:12px}</style><nav><a href="/?renderer=dom">DOM</a><a href="/?renderer=canvas">Canvas</a>Server <select id="server"><option value="45101">TS</option><option value="45102">Go</option><option value="45103">Kotlin</option><option value="45104">Swift</option><option value="45105">Rust</option></select> <span id="connection">Connecting</span></nav><div id="app"></div><script type="module" src="/app.js"></script>`, { headers: { "content-type": "text/html" } });
+  return new Response(`<!doctype html><meta name="viewport" content="width=device-width,initial-scale=1"><title>Device Lab</title><style>body{margin:0;background:#f1f5f9;font-family:system-ui}nav{padding:12px;background:#142334;color:white}a{color:white;margin:8px}#app{width:440px;min-height:680px;background:white;margin:12px auto}canvas{width:440px;height:740px;display:block}#connection{font-size:12px}</style><nav><a href="/?renderer=dom">DOM</a><a href="/?renderer=canvas">Canvas</a>Server <select id="server"><option value="${TS_PORT}">TS</option><option value="45102">Go</option><option value="45103">Kotlin</option><option value="45104">Swift</option><option value="45105">Rust</option></select> <span id="connection">Connecting</span></nav><script>window.DEVICE_LAB_TS_PORT=${JSON.stringify(String(TS_PORT))}</script><div id="app"></div><script type="module" src="/app.js"></script>`, { headers: { "content-type": "text/html" } });
 } });
-console.log("Device Lab: http://127.0.0.1:45100 / native ws://127.0.0.1:45101?token=device-lab");
+console.log(`Device Lab: http://127.0.0.1:${WEB_PORT} / native ws://127.0.0.1:${TS_PORT}/ws?token=device-lab`);

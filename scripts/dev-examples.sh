@@ -2,40 +2,45 @@
 #
 # Run the Cloudflare example apps locally with `wrangler dev`.
 #
-#   scripts/dev-examples.sh                  # launcher set: home-screen simple todo calculator
+#   scripts/dev-examples.sh                  # launcher set: home-screen todo calculator
 #   scripts/dev-examples.sh all              # every example with a CF worker
 #   scripts/dev-examples.sh todo calculator  # just these
-#   scripts/dev-examples.sh --fresh ...      # force-rebuild WASM + package dists first
+#   scripts/dev-examples.sh --local ...      # run against this checkout's engine + packages
+#   scripts/dev-examples.sh --local --fresh  # ...rebuilding the package dists first
 #
-# Then open http://localhost:8787 (the home-screen launcher embeds the others).
+# Then open http://localhost:8787 (the home-screen launcher embeds the others;
+# its icons point at the local ports below by default).
 #
-# This script exists because three non-obvious things must line up before
-# `wrangler dev` works from a fresh clone:
+# The examples depend on the PUBLISHED @hypen-space/* and hypen-engine
+# packages, so a plain `bun install && bun run dev` in any example works from a
+# fresh clone — no WASM build, no `file:` links. This script just runs several
+# of them at once, which needs a few things lined up:
 #
-#   1. WASM first. The examples depend on `hypen-engine` as
-#      `file:../../../hypen-engine-rs/pkg/web` — a build artifact that does
-#      not exist in a fresh checkout. Same for the @hypen-space/* package
-#      dists (wrangler's esbuild resolves the `import` export condition,
-#      which points at dist/).
+#   1. Fixed ports. examples/home-screen's launcher points each icon at
+#      ws://localhost:<port>/ws (src/endpoints.ts); the table below must match.
 #
-#   2. bun installs `file:` deps as per-file SYMLINK farms, and esbuild
-#      resolves each symlink to its real path — so imports inside
-#      @hypen-space/cf re-resolve from hypen-web/packages/cf/ (no
-#      node_modules there) and the build fails with
-#      'Could not resolve "hypen-engine"'. Workaround: dereference the
-#      local packages into real copies (cp -rL) after install.
-#
-#   3. Every `wrangler dev` defaults its debugging inspector to port 9230;
+#   2. Every `wrangler dev` defaults its debugging inspector to port 9230;
 #      concurrent instances need distinct --inspector-port values or the
 #      second one dies with "Address already in use (127.0.0.1:9230)".
+#      Set HYPEN_EXAMPLES_INSPECTOR_BASE to move the range (default 9230).
 #
-#   4. wrangler dev fronts the Worker with its own ProxyWorker, pinned to
+#   3. wrangler dev fronts the Worker with its own ProxyWorker, pinned to
 #      compatibilityDate 2023-12-18 — so it re-negotiates permessage-deflate
 #      WITH context takeover toward the browser even when the example sets
 #      `no_web_socket_compression`. Browsers then keep the connection UI-only
 #      (RFC 001 §2.3: no device plane, no uploads). The script adds the same
 #      flag to the installed wrangler's ProxyWorker. Local dev only; deployed
 #      Workers take the flag from wrangler.jsonc.
+#
+#   4. (--local only) To test unreleased engine/SDK changes, the installed
+#      hypen-engine and @hypen-space/{core,web,cf} are overwritten with this
+#      checkout's builds: hypen-engine-rs/pkg/web (build it with
+#      `cd hypen-engine-rs && ./build-wasm.sh`) and the hypen-web package
+#      dists (rebuilt here when stale or with --fresh). The local engine
+#      build includes the device broker; the published 0.6.5 one may not, in
+#      which case wrangler logs "Device plane off: no device broker … —
+#      sessions stay UI-only" and device features (e.g. home-screen's Files
+#      uploads) are unavailable. Everything else works without --local.
 #
 set -euo pipefail
 
@@ -45,7 +50,7 @@ WEB_DIR="$REPO_ROOT/hypen-web"
 LOG_DIR="${TMPDIR:-/tmp}/hypen-dev-examples"
 mkdir -p "$LOG_DIR"
 
-# name -> "relative-dir http-port" (ports must match examples/home-screen APPS)
+# name -> "relative-dir http-port" (ports must match examples/home-screen/cloudflare/src/launcher.ts APPS)
 #
 # Deliberately NOT a `declare -A` associative array: macOS still ships bash
 # 3.2, which has none. Worse, it fails obscurely rather than loudly — bash
@@ -84,14 +89,16 @@ example_names() {
   done <<<"$EXAMPLES_TABLE"
 }
 
-DEFAULT_SET=(home-screen simple todo calculator)
+DEFAULT_SET=(home-screen todo calculator)
 ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator hypeflix)
 
 FRESH=0
+LOCAL=0
 SELECTED=()
 for arg in "$@"; do
   case "$arg" in
-    --fresh) FRESH=1 ;;
+    --fresh) FRESH=1; LOCAL=1 ;;
+    --local) LOCAL=1 ;;
     all) SELECTED=("${ALL_SET[@]}") ;;
     *)
       if ! example_entry "$arg" >/dev/null; then
@@ -106,10 +113,11 @@ done
 
 command -v bun >/dev/null || { echo "bun is required (https://bun.sh)" >&2; exit 1; }
 
-# ---- 1. Engine WASM (web target) ----------------------------------------
-if [[ $FRESH -eq 1 || ! -f "$ENGINE_DIR/pkg/web/package.json" ]]; then
-  echo "==> Building engine WASM (pkg/web)..."
-  (cd "$ENGINE_DIR" && bun x wasm-pack build --target web --out-dir pkg/web --features js,device-broker)
+# ---- 1. Engine WASM (web target, --local only) ---------------------------
+if [[ $LOCAL -eq 1 && ! -f "$ENGINE_DIR/pkg/web/package.json" ]]; then
+  echo "--local needs the engine's web build at hypen-engine-rs/pkg/web." >&2
+  echo "Build it first:  (cd hypen-engine-rs && ./build-wasm.sh)" >&2
+  exit 1
 fi
 
 # ---- 2. hypen-web package dists ------------------------------------------
@@ -141,28 +149,14 @@ dists_stale() {
   done
   return 1
 }
-if [[ $FRESH -eq 1 ]] || dists_stale; then
+if [[ $LOCAL -eq 1 ]] && { [[ $FRESH -eq 1 ]] || dists_stale; }; then
   echo "==> Building @hypen-space packages (core, web, device-web, cf)..."
   (cd "$WEB_DIR" && bun install && bun run build:core && bun run build:web && bun run build:device-web)
   (cd "$WEB_DIR/packages/cf" && bun run build)
 fi
 
-# ---- 3. Install + dereference each example --------------------------------
-# bun links file: deps as per-file symlinks; esbuild realpaths them, which
-# breaks bare-import resolution inside the linked packages. Replace the
-# local packages with real copies.
-dereference() {
-  local dir="$1"
-  for pkg in "@hypen-space/cf" "@hypen-space/core" "@hypen-space/web" "hypen-engine"; do
-    local src="$dir/node_modules/$pkg"
-    [[ -d "$src" ]] || continue
-    rm -rf "$src.real"
-    cp -rL "$src" "$src.real" 2>/dev/null || true
-    rm -rf "$src" && mv "$src.real" "$src"
-  done
-}
-
-# Gotcha 4: let the device plane through wrangler's dev ProxyWorker.
+# ---- 3. Install each example ------------------------------------------------
+# Gotcha 3: let the device plane through wrangler's dev ProxyWorker.
 patch_wrangler_proxy() {
   local cli="$1/node_modules/wrangler/wrangler-dist/cli.js"
   [[ -f "$cli" ]] || return 0
@@ -194,15 +188,22 @@ for name in "${SELECTED[@]}"; do
   read -r rel _port <<<"$(example_entry "$name")"
   dir="$REPO_ROOT/$rel"
   echo "==> Installing $name ($rel)..."
+  # A previous --local run overwrote packages that `bun install` would treat
+  # as already installed; start clean so the published versions come back.
+  if [[ $LOCAL -eq 0 && -f "$dir/node_modules/.hypen-local-overlay" ]]; then
+    rm -rf "$dir/node_modules"
+  fi
   (cd "$dir" && bun install --silent)
-  dereference "$dir"
   patch_wrangler_proxy "$dir"
-  # Keep the engine + @hypen-space copies current with the local builds.
-  rm -rf "$dir/node_modules/hypen-engine"
-  cp -rL "$ENGINE_DIR/pkg/web" "$dir/node_modules/hypen-engine"
-  for short in core web cf; do
-    sync_local_pkg "$dir" "$short"
-  done
+  if [[ $LOCAL -eq 1 ]]; then
+    # Overlay this checkout's engine + @hypen-space builds (gotcha 4).
+    touch "$dir/node_modules/.hypen-local-overlay"
+    rm -rf "$dir/node_modules/hypen-engine"
+    cp -rL "$ENGINE_DIR/pkg/web" "$dir/node_modules/hypen-engine"
+    for short in core web cf; do
+      sync_local_pkg "$dir" "$short"
+    done
+  fi
 done
 
 # ---- 4. Launch -------------------------------------------------------------
@@ -215,7 +216,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-inspector=9230
+inspector="${HYPEN_EXAMPLES_INSPECTOR_BASE:-9230}"
 for name in "${SELECTED[@]}"; do
   read -r rel port <<<"$(example_entry "$name")"
   dir="$REPO_ROOT/$rel"
@@ -243,5 +244,9 @@ for name in "${SELECTED[@]}"; do
 done
 
 echo
-echo "Launcher: http://localhost:8787  (Ctrl-C stops everything)"
+if [[ " ${SELECTED[*]} " == *" home-screen "* ]]; then
+  echo "Launcher: http://localhost:8787  (Ctrl-C stops everything)"
+else
+  echo "Ctrl-C stops everything."
+fi
 wait

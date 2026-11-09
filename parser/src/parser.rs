@@ -1,6 +1,229 @@
+use chumsky::error::{LabelError, RichPattern};
 use chumsky::prelude::*;
 
 use crate::ast::*;
+
+// ----------------------------------------------------------------------------
+// Lexical primitives
+//
+// chumsky 1.0.0-alpha.8's `try_map` *discards* the pending "alternative"
+// error when its mapper fails (`TryMap::go` takes `inp.errors.alt` and never
+// restores it on the `Err` path). Every `text::*` helper (`whitespace`,
+// `ascii::ident`, `keyword`, `int`, `digits`) is built on `try_map`, so the
+// first time one of them failed — e.g. the comment/whitespace padding after a
+// failed children block — the furthest error found so far was thrown away and
+// the report fell back to the enclosing block: `module Home { Column {{{`
+// was reported at the module's `{` instead of at the stray `{`.
+//
+// These replacements are built on `custom`, which records its failure through
+// `add_alt_err` (furthest error wins, ties merge) and reports the character
+// actually found. (`filter` would also keep the alt, but it records
+// `found: None`, which then reads as "found end of input".)
+// Do not reintroduce `text::*` helpers or `try_map` on a hot path.
+// ----------------------------------------------------------------------------
+
+type Extra<'a> = extra::Err<Rich<'a, char>>;
+
+/// Label for "this token could continue here" (more identifier characters,
+/// more digits, a decimal point). Always true right after such a token, so it
+/// is never useful in a message and `diagnostic` filters it out.
+pub(crate) const CONTINUE_LABEL: &str = "token continuation";
+
+/// One character satisfying `pred`. On failure the error is labelled `label`
+/// and carries the character found (or end of input) with its exact span.
+fn char_where<'a>(
+    label: &'static str,
+    pred: fn(char) -> bool,
+) -> impl Parser<'a, &'a str, char, Extra<'a>> + Clone {
+    custom(
+        move |inp: &mut chumsky::input::InputRef<'a, '_, &'a str, Extra<'a>>| {
+            let before = inp.cursor();
+            let found = inp.peek();
+            match found {
+                Some(c) if pred(c) => {
+                    inp.skip();
+                    Ok(c)
+                }
+                _ => {
+                    let at = inp.span_since(&before).start;
+                    let len = found.map_or(0, char::len_utf8);
+                    Err(
+                        <Rich<'a, char> as LabelError<'a, &'a str, _>>::expected_found(
+                            [RichPattern::Label(label.into())],
+                            found.map(chumsky::util::MaybeRef::Val),
+                            SimpleSpan::new(at, at + len),
+                        ),
+                    )
+                }
+            }
+        },
+    )
+}
+
+/// ASCII identifier: `[A-Za-z_][A-Za-z0-9_]*` (same as `text::ascii::ident`).
+fn ident<'a>() -> impl Parser<'a, &'a str, &'a str, Extra<'a>> + Clone {
+    char_where("identifier", |c| c.is_ascii_alphabetic() || c == '_')
+        .then(char_where(CONTINUE_LABEL, |c| c.is_ascii_alphanumeric() || c == '_').repeated())
+        .to_slice()
+}
+
+/// A whole-word keyword (same as `text::keyword`): `modules` is not `module`.
+fn keyword<'a>(kw: &'static str) -> impl Parser<'a, &'a str, &'a str, Extra<'a>> + Clone {
+    custom(
+        move |inp: &mut chumsky::input::InputRef<'a, '_, &'a str, Extra<'a>>| {
+            let before = inp.cursor();
+            let save = inp.save();
+            let mut word = String::new();
+            while let Some(c) = inp.peek() {
+                let ok = if word.is_empty() {
+                    c.is_ascii_alphabetic() || c == '_'
+                } else {
+                    c.is_ascii_alphanumeric() || c == '_'
+                };
+                if !ok {
+                    break;
+                }
+                word.push(c);
+                inp.skip();
+            }
+            if word == kw {
+                return Ok(inp.slice_since(&before..));
+            }
+            let span = inp.span_since(&before);
+            let found = inp.peek();
+            inp.rewind(save);
+            let found = if word.is_empty() {
+                found
+            } else {
+                word.chars().next()
+            };
+            Err(
+                <Rich<'a, char> as LabelError<'a, &'a str, _>>::expected_found(
+                    [RichPattern::Identifier(kw.to_string())],
+                    found.map(chumsky::util::MaybeRef::Val),
+                    if word.is_empty() {
+                        SimpleSpan::new(span.start, span.start + found.map_or(0, char::len_utf8))
+                    } else {
+                        span
+                    },
+                ),
+            )
+        },
+    )
+}
+
+/// One or more whitespace characters.
+fn whitespace1<'a>() -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone {
+    char_where("whitespace", char::is_whitespace)
+        .repeated()
+        .at_least(1)
+}
+
+/// One or more ASCII decimal digits (same as `text::digits(10)`).
+fn digits<'a>() -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone {
+    char_where("digit", |c| c.is_ascii_digit())
+        .repeated()
+        .at_least(1)
+}
+
+/// Non-negative decimal integer without leading zeros (same as `text::int(10)`).
+fn int<'a>() -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone {
+    char_where("digit", |c| c.is_ascii_digit() && c != '0')
+        .then(char_where(CONTINUE_LABEL, |c| c.is_ascii_digit()).repeated())
+        .ignored()
+        .or(just('0').ignored())
+}
+
+/// The rest of a quoted string after its opening `quote` (lexed by hand).
+///
+/// Errors are positioned *after* the opening quote, so the labels of the
+/// enclosing value/argument parsers (which start at the quote) do not
+/// overwrite these messages:
+/// - end of input before the closing quote: "unclosed string literal",
+///   spanning the opening quote;
+/// - a `@{` interpolation still open at the closing quote: spans the `@{`
+///   (the engine would fail to evaluate it at runtime anyway).
+fn string_body<'a>(quote: char) -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone {
+    custom(
+        move |inp: &mut chumsky::input::InputRef<'a, '_, &'a str, Extra<'a>>| {
+            let before = inp.cursor();
+            let mut off = inp.span_since(&before).start;
+            let open = off - quote.len_utf8();
+            // Byte offset of the innermost unclosed `@{` and its brace depth.
+            let mut interp: Option<usize> = None;
+            let mut depth = 0u32;
+            let mut prev_at = false;
+            loop {
+                let Some(c) = inp.peek() else {
+                    return Err(Rich::custom(
+                        SimpleSpan::new(open, open + quote.len_utf8()),
+                        format!("unclosed string literal: missing closing quote {quote:?}"),
+                    ));
+                };
+                inp.skip();
+                if c == '\\' {
+                    // Escape: the next character is taken literally.
+                    off += 1;
+                    if let Some(n) = inp.peek() {
+                        inp.skip();
+                        off += n.len_utf8();
+                    }
+                    prev_at = false;
+                    continue;
+                }
+                if c == quote {
+                    if let Some(at) = interp {
+                        return Err(Rich::custom(
+                            SimpleSpan::new(at, at + 2),
+                            "unclosed '@{' interpolation: expected '}' before the closing quote",
+                        ));
+                    }
+                    return Ok(());
+                }
+                match c {
+                    '{' if interp.is_some() => depth += 1,
+                    '{' if prev_at => {
+                        interp = Some(off - 1);
+                        depth = 1;
+                    }
+                    '}' if interp.is_some() => {
+                        depth -= 1;
+                        if depth == 0 {
+                            interp = None;
+                        }
+                    }
+                    _ => {}
+                }
+                prev_at = c == '@';
+                off += c.len_utf8();
+            }
+        },
+    )
+}
+
+/// Fails with a targeted message when a `@` is followed by `{` outside a
+/// string (`Text(@{state.name})`); otherwise fails silently (no expectation).
+fn interpolation_outside_string<'a>() -> impl Parser<'a, &'a str, &'a str, Extra<'a>> + Clone {
+    custom(
+        move |inp: &mut chumsky::input::InputRef<'a, '_, &'a str, Extra<'a>>| {
+            let before = inp.cursor();
+            let at = inp.span_since(&before).start;
+            let found = inp.peek();
+            Err(if found == Some('{') {
+                Rich::custom(
+                SimpleSpan::new(at - 1, at + 1),
+                "'@{...}' interpolation is only allowed inside a string: write \"@{state.name}\" or the reference @state.name",
+            )
+            } else {
+                <Rich<'a, char> as LabelError<'a, &'a str, RichPattern<'a, char>>>::expected_found(
+                    [],
+                    found.map(chumsky::util::MaybeRef::Val),
+                    SimpleSpan::new(at, at + found.map_or(0, char::len_utf8)),
+                )
+            })
+        },
+    )
+}
 
 /// Parse a line comment: // ... until end of line
 fn line_comment<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>> + Clone {
@@ -8,21 +231,39 @@ fn line_comment<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>
 }
 
 /// Parse a block comment: /* ... */ (supports nesting)
-fn block_comment<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>> + Clone {
-    recursive(|nested_comment| {
-        just("/*")
-            .then(
-                nested_comment
-                    .ignored()
-                    .or(any()
-                        .and_is(just("*/").not())
-                        .and_is(just("/*").not())
-                        .ignored())
-                    .repeated(),
-            )
-            .then(just("*/"))
-            .ignored()
-    })
+fn block_comment<'a>() -> impl Parser<'a, &'a str, (), Extra<'a>> + Clone {
+    // The body is lexed by hand so that a comment left open reports
+    // "unclosed block comment" at its `/*` instead of a generic error.
+    just("/*").ignore_then(custom(
+        |inp: &mut chumsky::input::InputRef<'a, '_, &'a str, Extra<'a>>| {
+            let before = inp.cursor();
+            let open = inp.span_since(&before).start - 2;
+            let mut depth = 1usize;
+            let mut prev: Option<char> = None;
+            loop {
+                let Some(c) = inp.next() else {
+                    return Err(Rich::custom(
+                        SimpleSpan::new(open, open + 2),
+                        "unclosed block comment: missing '*/'",
+                    ));
+                };
+                match (prev, c) {
+                    (Some('/'), '*') => {
+                        depth += 1;
+                        prev = None;
+                    }
+                    (Some('*'), '/') => {
+                        depth -= 1;
+                        if depth == 0 {
+                            return Ok(());
+                        }
+                        prev = None;
+                    }
+                    _ => prev = Some(c),
+                }
+            }
+        },
+    ))
 }
 
 /// Parse any comment (line or block)
@@ -34,9 +275,7 @@ fn comment<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>> + C
 fn ws<'a>() -> impl Parser<'a, &'a str, (), extra::Err<Rich<'a, char>>> + Clone {
     // Match zero or more of: (whitespace | comment)
     // This avoids generating confusing "expected '/'" errors
-    choice((text::whitespace().at_least(1).ignored(), comment()))
-        .repeated()
-        .ignored()
+    choice((whitespace1(), comment())).repeated().ignored()
 }
 
 /// Extension trait to add comment-aware padding to parsers
@@ -58,36 +297,30 @@ impl<'a, O, P> PaddedWithComments<'a, O> for P where
 fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, char>>> + Clone {
     recursive(|value| {
         // Double-quoted string with escape support: "hello \"world\""
-        let dq_char = just('\\').ignore_then(any()).or(none_of('"'));
         let dq_string = just('"')
-            .then(dq_char.repeated().collect::<Vec<_>>())
-            .then(just('"').labelled("closing quote '\"'"))
+            .then(string_body('"'))
             .to_slice()
-            .map(|s: &str| Value::String(s.to_string()))
-            .labelled("double-quoted string");
+            .map(|s: &str| Value::String(s.to_string()));
 
         // Single-quoted string: 'hello "world"'
-        let sq_char = just('\\').ignore_then(any()).or(none_of('\''));
         let sq_string = just('\'')
-            .then(sq_char.repeated().collect::<Vec<_>>())
-            .then(just('\'').labelled("closing quote \"'\""))
+            .then(string_body('\''))
             .to_slice()
-            .map(|s: &str| Value::String(s.to_string()))
-            .labelled("single-quoted string");
+            .map(|s: &str| Value::String(s.to_string()));
 
-        let string = dq_string.or(sq_string).labelled("string literal");
+        let string = dq_string.or(sq_string).labelled("string");
 
         // Boolean: true or false
-        let boolean = text::keyword("true")
+        let boolean = keyword("true")
             .to(Value::Boolean(true))
-            .or(text::keyword("false").to(Value::Boolean(false)))
-            .labelled("boolean (true or false)");
+            .or(keyword("false").to(Value::Boolean(false)))
+            .labelled("boolean");
 
         // Number: 123, 123.45, -123, -123.45
         let number = just('-')
             .or_not()
-            .then(text::int(10))
-            .then(just('.').then(text::digits(10)).or_not())
+            .then(int())
+            .then(just('.').labelled(CONTINUE_LABEL).then(digits()).or_not())
             .to_slice()
             .try_map(|s: &str, span| {
                 let n: f64 = s.parse().unwrap();
@@ -103,20 +336,21 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
             .labelled("number");
 
         // Identifier that allows hyphens (for resource names like "plus-square")
-        let hyphenated_ident = text::ascii::ident()
-            .then(just('-').then(text::ascii::ident()).repeated())
-            .to_slice();
+        let hyphenated_ident = ident().then(just('-').then(ident()).repeated()).to_slice();
 
         // Reference: @state.user, @actions.login, @resources.plus-square
         let reference = just('@')
             .ignore_then(
-                text::ascii::ident()
-                    .labelled("reference path (e.g., state.user)")
+                // The `@{` check goes first: when errors at the same position
+                // merge, the first one's span is kept, and the custom message
+                // should span both `@` and `{`.
+                interpolation_outside_string().or(ident()
+                    .labelled("reference path (e.g. state.user)")
                     .then(just('.').ignore_then(hyphenated_ident).repeated())
-                    .to_slice(),
+                    .to_slice()),
             )
             .map(|s: &str| Value::Reference(s.to_string()))
-            .labelled("reference (@state.*, @actions.*, @resources.*, @provider.*)");
+            .labelled("reference");
 
         // Data source references now use @ prefix like everything else.
         // e.g., @spacetime.messages, @firebase.user.name
@@ -127,29 +361,31 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
         // The separator is padded so a trailing comma followed by
         // whitespace/newlines/comments still closes — element padding only
         // runs when an element is actually parsed, so "[1, 2,\n]" otherwise
-        // left the '\n' unconsumed and failed on ']'.
+        // left the '\n' unconsumed and failed on ']'. The closing bracket is
+        // padded on its own so it is expected at the same position as an
+        // element after the separator ("expected value or ']'").
         let list = value
             .clone()
             .padded_with_comments()
             .separated_by(just(',').padded_with_comments())
             .allow_trailing()
             .collect()
-            .delimited_by(just('['), just(']').labelled("closing bracket ']'"))
+            .delimited_by(just('['), ws().ignore_then(just(']')))
             .map(Value::List)
-            .labelled("list [...]");
+            .labelled("list");
 
         // Map: {key1: value1, key2: value2}
-        let map_entry = text::ascii::ident()
+        let map_entry = ident()
             .labelled("map key")
             .padded_with_comments()
-            .then_ignore(just(':').labelled("':' after map key"))
-            .then(value.clone().padded_with_comments().labelled("map value"));
+            .then_ignore(just(':'))
+            .then(value.clone().padded_with_comments());
 
         let map = map_entry
             .separated_by(just(',').padded_with_comments())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(just('{'), just('}').labelled("closing brace '}'"))
+            .delimited_by(just('{'), ws().ignore_then(just('}')))
             .map(|entries: Vec<(&str, Value)>| {
                 Value::Map(
                     entries
@@ -158,15 +394,26 @@ fn value_parser<'a>() -> impl Parser<'a, &'a str, Value, extra::Err<Rich<'a, cha
                         .collect(),
                 )
             })
-            .labelled("map {...}");
+            .labelled("map");
 
         // Bare identifier (unquoted string for simple cases)
-        let identifier = text::ascii::ident()
-            .map(|s: &str| Value::String(s.to_string()))
-            .labelled("identifier");
+        let identifier = ident().map(|s: &str| Value::String(s.to_string()));
 
         choice((string, reference, boolean, number, list, map, identifier)).labelled("value")
     })
+}
+
+/// Build an argument list from parsed `(key?, value)` pairs.
+fn to_argument_list(args: Vec<(Option<String>, Value)>) -> ArgumentList {
+    ArgumentList::new(
+        args.into_iter()
+            .enumerate()
+            .map(|(i, (key, value))| match key {
+                Some(k) => Argument::Named { key: k, value },
+                None => Argument::Positioned { position: i, value },
+            })
+            .collect(),
+    )
 }
 
 /// Parse a complete component with optional children
@@ -176,14 +423,13 @@ pub fn component_parser<'a>(
         // Optional declaration keyword: "module" or "component". The keyword
         // token's start offset is captured (before padding, like the name
         // span) so `MetaData::expr_range` can begin at the keyword.
-        let declaration_keyword = text::keyword("module")
+        let declaration_keyword = keyword("module")
             .to(DeclarationType::Module)
-            .or(text::keyword("component").to(DeclarationType::ComponentKeyword))
+            .or(keyword("component").to(DeclarationType::ComponentKeyword))
             .map_with(|decl, e| {
                 let span: chumsky::span::SimpleSpan = e.span();
                 (decl, span.start)
             })
-            .labelled("declaration keyword (module or component)")
             .padded_with_comments()
             .or_not();
 
@@ -193,7 +439,8 @@ pub fn component_parser<'a>(
         // point at file:line:col.
         let name = just('.')
             .or_not()
-            .then(text::ascii::ident())
+            // Only reachable after a leading '.', i.e. a folded applicator.
+            .then(ident().labelled("applicator name"))
             .to_slice()
             .map_with(|s: &str, e| {
                 let span: chumsky::span::SimpleSpan = e.span();
@@ -205,51 +452,34 @@ pub fn component_parser<'a>(
         // Parse single argument (named or positional)
         let value = value_parser();
 
-        let arg = text::ascii::ident()
+        let arg = ident()
             .then_ignore(just(':').padded_with_comments())
             .then(value.clone())
             .map(|(key, value)| (Some(key.to_string()), value))
-            .labelled("named argument (key: value)")
-            .or(value
-                .map(|value| (None, value))
-                .labelled("positional argument"));
+            .or(value.map(|value| (None, value)))
+            .labelled("argument");
 
-        // Arguments parser - only parses (arg1, arg2, ...) when present
-        let args_with_parens = arg
-            .clone()
+        // `( arg, arg, ... )`. The closing parenthesis is padded on its own
+        // (rather than relying on the argument padding, which is rewound when
+        // an argument fails) so that after `(` or `,` both an argument and
+        // ')' are expected at the first non-blank character.
+        let arg_list = arg
             .padded_with_comments()
-            .separated_by(
-                just(',')
-                    .labelled("',' between arguments")
-                    .padded_with_comments(),
-            )
+            .separated_by(just(',').padded_with_comments())
             .allow_trailing()
             .collect::<Vec<_>>()
-            .delimited_by(
-                just('(').labelled("'(' to start arguments"),
-                just(')').labelled("closing parenthesis ')'"),
-            )
-            .map(|args| {
-                let arguments = args
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (key, value))| match key {
-                        Some(k) => Argument::Named { key: k, value },
-                        None => Argument::Positioned { position: i, value },
-                    })
-                    .collect();
-                ArgumentList::new(arguments)
-            })
-            .labelled("argument list (...)");
+            .delimited_by(just('('), ws().ignore_then(just(')')))
+            .map(to_argument_list);
 
         // Arguments are optional - either we have (...) or nothing.
         // We use and_is(just('(').not()) on the empty case so that if a '(' is
-        // present, the parser must commit to parsing args_with_parens rather than
-        // silently falling through. This ensures errors from inside argument
-        // parsing (like unclosed strings) propagate correctly.
+        // present, the parser must commit to parsing the argument list rather
+        // than silently falling through. This ensures errors from inside
+        // argument parsing (like unclosed strings) propagate correctly.
         // The closing-paren end offset is kept for `MetaData::expr_range`; it
-        // is exact because the '(' ... ')' delimiters carry no padding.
-        let args = args_with_parens
+        // is exact because the ')' delimiter carries no trailing padding.
+        let args = arg_list
+            .clone()
             .map_with(|args, e| {
                 let span: chumsky::span::SimpleSpan = e.span();
                 (args, Some(span.end))
@@ -258,30 +488,8 @@ pub fn component_parser<'a>(
                 .and_is(just('(').not())
                 .to((ArgumentList::empty(), None)));
 
-        // Also keep arg_parser for applicators
-        let arg_parser = arg
-            .clone()
-            .padded_with_comments()
-            .separated_by(
-                just(',')
-                    .labelled("',' between arguments")
-                    .padded_with_comments(),
-            )
-            .allow_trailing()
-            .collect::<Vec<_>>()
-            .delimited_by(just('('), just(')').labelled("closing parenthesis ')'"))
-            .map(|args| {
-                let arguments = args
-                    .into_iter()
-                    .enumerate()
-                    .map(|(i, (key, value))| match key {
-                        Some(k) => Argument::Named { key: k, value },
-                        None => Argument::Positioned { position: i, value },
-                    })
-                    .collect();
-                ArgumentList::new(arguments)
-            })
-            .or(empty().to(ArgumentList::empty()));
+        // Applicator arguments are optional too: `.bold` == `.bold()`.
+        let applicator_args = arg_list.or(empty().to(ArgumentList::empty()));
 
         // Children block: { child1 child2 child3 }
         // Parse explicitly to handle empty braces { }
@@ -299,14 +507,12 @@ pub fn component_parser<'a>(
             )
             .then(
                 just('}')
-                    .labelled("closing brace '}' for children block")
                     .map_with(|_, e| {
                         let span: chumsky::span::SimpleSpan = e.span();
                         span.end
                     })
                     .padded_with_comments(),
             )
-            .labelled("children block {...}")
             .or_not();
 
         // Applicator children block: .states(...) { onState(a).size(48) }
@@ -325,15 +531,10 @@ pub fn component_parser<'a>(
                     .repeated()
                     .collect::<Vec<_>>(),
             )
-            .then(
-                just('}')
-                    .labelled("closing brace '}' for applicator block")
-                    .map_with(|_, e| {
-                        let span: chumsky::span::SimpleSpan = e.span();
-                        span.end
-                    }),
-            )
-            .labelled("applicator children block {...}");
+            .then(just('}').map_with(|_, e| {
+                let span: chumsky::span::SimpleSpan = e.span();
+                span.end
+            }));
 
         // Applicators: .applicator1() .applicator2(args) .applicator3(args) { children }
         // Each applicator's end offset is captured before padding (the block's
@@ -341,8 +542,8 @@ pub fn component_parser<'a>(
         // `MetaData::expr_range` ends for an applicator chain. The chain may
         // continue after a block: .states(...) { ... }.padding(4).
         let applicators = just('.')
-            .ignore_then(text::ascii::ident().labelled("applicator name"))
-            .then(arg_parser.clone())
+            .ignore_then(ident().labelled("applicator name"))
+            .then(applicator_args)
             .map_with(|(name, args), e| {
                 let span: chumsky::span::SimpleSpan = e.span();
                 (name, args, span.end)
@@ -363,7 +564,7 @@ pub fn component_parser<'a>(
                     end,
                 )
             })
-            .labelled("applicator (.name(...))")
+            .labelled("applicator (.name)")
             .padded_with_comments()
             .repeated()
             .collect::<Vec<_>>();
@@ -460,7 +661,7 @@ fn fold_applicators(components: Vec<ComponentSpecification>) -> Vec<ComponentSpe
 pub fn import_parser<'a>(
 ) -> impl Parser<'a, &'a str, ImportStatement, extra::Err<Rich<'a, char>>> + Clone {
     // Parse import keyword
-    let import_keyword = text::keyword("import")
+    let import_keyword = keyword("import")
         .labelled("'import' keyword")
         .padded_with_comments();
 
@@ -476,7 +677,7 @@ pub fn import_parser<'a>(
     let string_literal = dq_path.or(sq_path).labelled("import path string");
 
     // Parse named imports: { Component1, Component2, ... }
-    let named_imports = text::ascii::ident()
+    let named_imports = ident()
         .map(|s: &str| s.to_string())
         .labelled("component name")
         .padded_with_comments()
@@ -485,15 +686,13 @@ pub fn import_parser<'a>(
         .collect::<Vec<String>>()
         .delimited_by(
             just('{').padded_with_comments(),
-            just('}')
-                .labelled("closing brace '}' for named imports")
-                .padded_with_comments(),
+            just('}').padded_with_comments(),
         )
         .map(ImportClause::Named)
         .labelled("named imports { ... }");
 
     // Parse default import: ComponentName
-    let default_import = text::ascii::ident()
+    let default_import = ident()
         .map(|s: &str| s.to_string())
         .map(ImportClause::Default)
         .labelled("default import name");
@@ -502,7 +701,7 @@ pub fn import_parser<'a>(
     let import_clause = named_imports.or(default_import).padded_with_comments();
 
     // Parse "from" keyword
-    let from_keyword = text::keyword("from")
+    let from_keyword = keyword("from")
         .labelled("'from' keyword")
         .padded_with_comments();
 
@@ -554,6 +753,7 @@ pub fn parse_components(input: &str) -> Result<Vec<ComponentSpecification>, Vec<
         .then_ignore(end())
         .parse(input)
         .into_result()
+        .map_err(|errs| crate::diagnostic::refine_errors(input, errs))
 }
 
 /// Parse a single component from text
@@ -563,6 +763,7 @@ pub fn parse_component(input: &str) -> Result<ComponentSpecification, Vec<Rich<'
         .then_ignore(end())
         .parse(input)
         .into_result()
+        .map_err(|errs| crate::diagnostic::refine_errors(input, errs))
 }
 
 /// Parse a complete Hypen document (imports + components)
@@ -572,6 +773,7 @@ pub fn parse_document(input: &str) -> Result<Document, Vec<Rich<'_, char>>> {
         .then_ignore(end())
         .parse(input)
         .into_result()
+        .map_err(|errs| crate::diagnostic::refine_errors(input, errs))
 }
 
 /// Parse a single import statement
@@ -581,6 +783,7 @@ pub fn parse_import(input: &str) -> Result<ImportStatement, Vec<Rich<'_, char>>>
         .then_ignore(end())
         .parse(input)
         .into_result()
+        .map_err(|errs| crate::diagnostic::refine_errors(input, errs))
 }
 
 // Simple sequential ID generator for AST nodes

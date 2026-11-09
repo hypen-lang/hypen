@@ -1,0 +1,383 @@
+/**
+ * `hypen build` for component-based projects (hypen.json `entry` is a
+ * component name such as "App").
+ *
+ * Output is a self-contained static site:
+ *
+ *   <outDir>/index.html               shell (mounts #app, loads /main.js)
+ *   <outDir>/main.js                  page: DOM renderer + URL sync
+ *   <outDir>/worker.js                Web Worker: the app's modules and a
+ *                                     RemoteSession on the WASM engine
+ *   <outDir>/hypen/hypen_engine.js    engine WASM glue  } copied from the
+ *   <outDir>/hypen/hypen_engine_bg.wasm                  } project's web-engine
+ *   <outDir>/taffy_wasm_bg.wasm       layout WASM (canvas renderer)
+ *   <outDir>/server.js                zero-dependency static server with an
+ *                                     SPA fallback: `node dist/server.js`
+ *                                     (or `bun dist/server.js`), PORT env
+ *
+ * Nothing is fetched from a CDN at runtime, so a build is reproducible and
+ * works offline. Any static host works too, as long as unknown paths fall
+ * back to index.html (deep links such as `/counter`). The site must be
+ * served from the root of its origin (asset URLs are absolute).
+ *
+ * The worker runs the same `RemoteSession` the dev server runs, and the page
+ * the same client stack as the dev web client (see build-client.ts and
+ * build-worker.ts), so routing, nested modules, actions and URLs behave as
+ * they do under `hypen dev`. Like there, module code runs outside the page:
+ * it has no `window`/`document`/`localStorage` (fetch, timers and IndexedDB
+ * work).
+ */
+
+import { join, resolve, relative } from "path";
+import { createHypenSourceValidator } from "./dev-diagnostics.js";
+import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
+import { generateComponentsCode } from "@hypen-space/server";
+import { pink, yellow, dim, boldPink } from "./colors.js";
+import { findPackageRoot, resolveFromProject } from "./dev-resolve.js";
+// Bun inlines the runtime's sources as strings (also when bundling the CLI
+// into dist/), so they can be written next to the generated entries and
+// resolve their imports from the project. tsc types a text import as the
+// module itself, hence the casts.
+// @ts-ignore -- import attribute `type: "text"` is Bun-specific
+import clientSourceImport from "./build-client.ts" with { type: "text" };
+// @ts-ignore -- import attribute `type: "text"` is Bun-specific
+import workerSourceImport from "./build-worker.ts" with { type: "text" };
+const clientSource = clientSourceImport as unknown as string;
+const workerSource = workerSourceImport as unknown as string;
+
+export interface BuildOptions {
+  /** Path to the components directory. */
+  components: string;
+  /** Entry component name. */
+  entry: string;
+  /** Output directory. Default: "dist". */
+  outDir?: string;
+  /** Minify the bundle. Default: true. */
+  minify?: boolean;
+  /** Emit external source maps. Default: false. */
+  sourcemap?: boolean;
+  /** Project root (where node_modules lives). Default: process.cwd(). */
+  root?: string;
+  /** Print progress. Default: true. */
+  log?: boolean;
+}
+
+export interface BuildResult {
+  outDir: string;
+  files: string[];
+}
+
+export class BuildError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "BuildError";
+  }
+}
+
+export const ENGINE_ASSET_DIR = "hypen";
+const ENGINE_FILES = ["hypen_engine.js", "hypen_engine_bg.wasm"] as const;
+const TAFFY_WASM = "taffy_wasm_bg.wasm";
+
+/** Root dir of package `name` as the project would resolve it, or null. */
+function projectPackageRoot(name: string, root: string): string | null {
+  const entry = resolveFromProject(name, root);
+  return entry ? findPackageRoot(entry, name) : null;
+}
+
+/** First `node_modules/<rel>` found walking up from `start`, or null. */
+function findInNodeModules(start: string, rel: string): string | null {
+  let dir = resolve(start);
+  for (let i = 0; i < 16; i++) {
+    const candidate = join(dir, "node_modules", rel);
+    if (existsSync(candidate)) return candidate;
+    const parent = resolve(dir, "..");
+    if (parent === dir) break;
+    dir = parent;
+  }
+  return null;
+}
+
+export function htmlShell(): string {
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+  <title>Hypen App</title>
+  <link rel="icon" href="data:,">
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    #app { width: 100vw; min-height: 100vh; display: flex; flex-direction: column; }
+    #app > * { flex: 1; }
+  </style>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="/main.js"></script>
+</body>
+</html>
+`;
+}
+
+/** Page entry: renderer + URL sync, talking to the worker. */
+export function mainEntrySource(): string {
+  return `// Auto-generated by \`hypen build\`
+import { startHypenApp } from "./build-client.ts";
+
+await startHypenApp({ workerUrl: new URL("./worker.js", import.meta.url).href });
+`;
+}
+
+/** Worker entry: the app's modules, sessions and the WASM engine. */
+export function workerEntrySource(entry: string): string {
+  return `// Auto-generated by \`hypen build\`
+import { runHypenWorker } from "./build-worker.ts";
+import * as components from "./components.generated.ts";
+
+const asset = (path: string) => new URL(path, import.meta.url).href;
+
+runHypenWorker({
+  components,
+  entry: ${JSON.stringify(entry)},
+  wasm: {
+    jsUrl: asset("./${ENGINE_ASSET_DIR}/hypen_engine.js"),
+    wasmUrl: asset("./${ENGINE_ASSET_DIR}/hypen_engine_bg.wasm"),
+  },
+});
+`;
+}
+
+/**
+ * Static file server written next to the build. Plain `node:` modules only,
+ * so it runs under Node and Bun with no install. Unknown paths without a
+ * file extension get index.html (client-side routes / deep links).
+ */
+export function serverSource(): string {
+  return `// Auto-generated by \`hypen build\`. Serves this directory as a static
+// site with an SPA fallback. Usage: node server.js   (PORT, HOST env vars)
+import { createServer } from "node:http";
+import { readFile, stat } from "node:fs/promises";
+import { extname, join, normalize, sep } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const root = fileURLToPath(new URL(".", import.meta.url));
+const port = Number(process.env.PORT) || 3000;
+const host = process.env.HOST || "0.0.0.0";
+const types = {
+  ".html": "text/html; charset=utf-8",
+  ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+  ".map": "application/json; charset=utf-8",
+  ".wasm": "application/wasm",
+  ".svg": "image/svg+xml",
+  ".png": "image/png",
+  ".jpg": "image/jpeg",
+  ".jpeg": "image/jpeg",
+  ".gif": "image/gif",
+  ".webp": "image/webp",
+  ".ico": "image/x-icon",
+  ".txt": "text/plain; charset=utf-8",
+};
+
+async function file(path) {
+  try {
+    if ((await stat(path)).isFile()) return await readFile(path);
+  } catch {}
+  return null;
+}
+
+createServer(async (req, res) => {
+  let pathname = "/";
+  try {
+    pathname = decodeURIComponent(new URL(req.url || "/", "http://x").pathname);
+  } catch {}
+  const path = normalize(join(root, pathname));
+  if (!path.startsWith(root.endsWith(sep) ? root : root + sep)) {
+    res.writeHead(403).end();
+    return;
+  }
+  let body = pathname.endsWith("/") ? null : await file(path);
+  let type = types[extname(path).toLowerCase()] || "application/octet-stream";
+  if (!body && (pathname.endsWith("/") || !extname(pathname))) {
+    body = await file(join(root, "index.html"));
+    type = types[".html"];
+  }
+  if (!body) {
+    res.writeHead(404, { "content-type": "text/plain; charset=utf-8" }).end("Not found");
+    return;
+  }
+  res.writeHead(200, {
+    "content-type": type,
+    "cache-control": type.startsWith("text/html") ? "no-cache" : "public, max-age=300",
+  });
+  res.end(req.method === "HEAD" ? undefined : body);
+}).listen(port, host, () => {
+  console.log("Serving " + root + " at http://localhost:" + port);
+});
+`;
+}
+
+/**
+ * Build a component-based project into a static site. Requires Bun.
+ *
+ * @throws {BuildError} on a missing entry/runtime package or a failed bundle.
+ */
+export async function build(options: BuildOptions): Promise<BuildResult> {
+  if (typeof globalThis.Bun === "undefined") {
+    throw new BuildError("`hypen build` requires the Bun runtime. Install from https://bun.sh");
+  }
+  const {
+    components: componentsDir,
+    entry,
+    outDir = "dist",
+    minify = true,
+    sourcemap = false,
+    root = process.cwd(),
+    log = true,
+  } = options;
+  const say = log ? (...a: unknown[]) => console.log(...a) : () => {};
+
+  const projectRoot = resolve(root);
+  const resolvedComponentsDir = resolve(projectRoot, componentsDir);
+  const resolvedOutDir = resolve(projectRoot, outDir);
+
+  say(`\n  ${boldPink("Hypen Build")}\n`);
+  say(`  ${dim("Entry:")}      ${entry}`);
+  say(`  ${dim("Components:")} ${resolvedComponentsDir}`);
+  say(`  ${dim("Output:")}     ${resolvedOutDir}\n`);
+
+  if (!existsSync(resolvedComponentsDir)) {
+    throw new BuildError(`Components directory not found: ${resolvedComponentsDir}`);
+  }
+
+  // A template that doesn't parse would bundle fine and then render a blank
+  // page in production; fail the build instead.
+  const templateErrors = await createHypenSourceValidator({
+    componentsDir: resolvedComponentsDir,
+    projectRoot,
+  })();
+  if (templateErrors.length > 0) {
+    throw new BuildError(
+      "a template does not parse:\n" + templateErrors.map((l) => `    ${l}`).join("\n")
+    );
+  }
+
+  // The engine WASM ships inside @hypen-space/web-engine; copy the
+  // project's own copy so the build never depends on a CDN.
+  const webEngineRoot = projectPackageRoot("@hypen-space/web-engine", projectRoot);
+  const wasmDir = webEngineRoot ? join(webEngineRoot, "wasm-browser") : null;
+  if (!wasmDir || ENGINE_FILES.some((f) => !existsSync(join(wasmDir, f)))) {
+    throw new BuildError(
+      wasmDir
+        ? `${wasmDir} is missing the engine WASM (${ENGINE_FILES.join(", ")}).`
+        : "@hypen-space/web-engine is not installed in this project. Run: bun add @hypen-space/web-engine @hypen-space/web @hypen-space/core"
+    );
+  }
+  let webEngineVersion: string | undefined;
+  try {
+    const v = JSON.parse(readFileSync(join(webEngineRoot!, "package.json"), "utf8")).version;
+    if (typeof v === "string" && v) webEngineVersion = v;
+  } catch {
+    /* no readable package.json: the CDN fallback stays `latest` */
+  }
+  if (!resolveFromProject("@hypen-space/web", projectRoot)) {
+    throw new BuildError(
+      "@hypen-space/web is not installed in this project. Run: bun add @hypen-space/web"
+    );
+  }
+
+  // Generated sources live under the project (not the output dir, which
+  // may be anywhere) so their imports resolve from its node_modules.
+  const tempDir = join(projectRoot, ".hypen", "build");
+  rmSync(tempDir, { recursive: true, force: true });
+  mkdirSync(tempDir, { recursive: true });
+
+  try {
+    const componentsCode = await generateComponentsCode(resolvedComponentsDir, {
+      outputDir: tempDir,
+    });
+    if (!componentsCode.includes(`\nexport const ${entry} = {`)) {
+      throw new BuildError(`Entry component "${entry}" not found in ${resolvedComponentsDir}`);
+    }
+    writeFileSync(join(tempDir, "components.generated.ts"), componentsCode);
+    writeFileSync(join(tempDir, "build-client.ts"), clientSource);
+    writeFileSync(join(tempDir, "build-worker.ts"), workerSource);
+    const mainPath = join(tempDir, "main.ts");
+    writeFileSync(mainPath, mainEntrySource());
+    const workerPath = join(tempDir, "worker.ts");
+    writeFileSync(workerPath, workerEntrySource(entry));
+
+    mkdirSync(resolvedOutDir, { recursive: true });
+    const result = await Bun.build({
+      entrypoints: [mainPath, workerPath],
+      outdir: resolvedOutDir,
+      naming: { entry: "[name].[ext]", chunk: "chunk-[hash].[ext]", asset: "[name]-[hash].[ext]" },
+      minify,
+      sourcemap: sourcemap ? "external" : "none",
+      target: "browser",
+      format: "esm",
+      define: {
+        "process.env.NODE_ENV": JSON.stringify("production"),
+        // web-engine's CDN fallback URL (DEFAULT_WASM_CDN_BASE) reads this;
+        // bundled from source it is otherwise undefined and falls back to
+        // `@latest`. Pin it to the installed web-engine version.
+        ...(webEngineVersion
+          ? { __HYPEN_WEB_ENGINE_VERSION__: JSON.stringify(webEngineVersion) }
+          : {}),
+      },
+    });
+    if (!result.success) {
+      throw new BuildError(
+        "Bundling failed:\n" + result.logs.map((l) => `    ${String(l)}`).join("\n")
+      );
+    }
+
+    const files = result.outputs.map((o) => o.path);
+
+    const engineOut = join(resolvedOutDir, ENGINE_ASSET_DIR);
+    mkdirSync(engineOut, { recursive: true });
+    for (const f of ENGINE_FILES) {
+      copyFileSync(join(wasmDir, f), join(engineOut, f));
+      files.push(join(engineOut, f));
+    }
+
+    // The canvas renderer's layout engine fetches /taffy_wasm_bg.wasm from
+    // the page's origin first; ship it so that request doesn't 404.
+    const webRoot = projectPackageRoot("@hypen-space/web", projectRoot);
+    const taffy = webRoot ? findInNodeModules(webRoot, join("taffy-layout", "pkg", TAFFY_WASM)) : null;
+    if (taffy) {
+      copyFileSync(taffy, join(resolvedOutDir, TAFFY_WASM));
+      files.push(join(resolvedOutDir, TAFFY_WASM));
+    }
+
+    writeFileSync(join(resolvedOutDir, "index.html"), htmlShell());
+    files.push(join(resolvedOutDir, "index.html"));
+    writeFileSync(join(resolvedOutDir, "server.js"), serverSource());
+    files.push(join(resolvedOutDir, "server.js"));
+
+    say(`  ${pink("Build complete!")}\n`);
+    say(`  ${dim("Files:")}`);
+    // Paths inside the project print relative; an outDir elsewhere prints
+    // absolute rather than as a ../../.. chain.
+    const show = (f: string) => {
+      const rel = relative(projectRoot, f);
+      return !rel || rel.startsWith("..") ? f : rel;
+    };
+    for (const f of files) say(`    ${yellow(show(f))}`);
+    say(`\n  ${dim("Serve it:")} node ${show(join(resolvedOutDir, "server.js"))}\n`);
+
+    return { outDir: resolvedOutDir, files };
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+    const hypenDir = join(projectRoot, ".hypen");
+    try {
+      if (readdirSync(hypenDir).length === 0) rmSync(hypenDir, { recursive: true, force: true });
+    } catch {
+      /* already gone */
+    }
+  }
+}

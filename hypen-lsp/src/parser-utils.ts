@@ -79,6 +79,30 @@ export function offsetToPosition(text: string, offset: number): Position {
 }
 
 /**
+ * Convert a UTF-8 **byte** offset (the unit of every span the WASM parser
+ * returns: error `start`/`end`, `name_range`, `block_range`) to an LSP
+ * position (0-based line, UTF-16 `character`). `offsetToPosition` would
+ * drift by one column per extra UTF-8 byte of non-ASCII text before it.
+ */
+export function byteOffsetToPosition(text: string, byteOffset: number): Position {
+  let line = 0;
+  let character = 0;
+  let bytes = 0;
+  for (const ch of text) {
+    if (bytes >= byteOffset) break;
+    const cp = ch.codePointAt(0)!;
+    bytes += cp < 0x80 ? 1 : cp < 0x800 ? 2 : cp < 0x10000 ? 3 : 4;
+    if (ch === "\n") {
+      line++;
+      character = 0;
+    } else {
+      character += ch.length; // UTF-16 code units
+    }
+  }
+  return { line, character };
+}
+
+/**
  * Check if a position is inside a string literal (handles both quote types)
  */
 export function isInString(text: string, line: number, character: number): boolean {

@@ -52,7 +52,9 @@ complete app. Serve it and any Hypen client can render it immediately — no
 build step, no distribution.
 
 **Keep secrets on the server.** API keys, business rules, and pricing logic
-never reach the device, because the device only ever sees resolved UI.
+never reach the device, because the device only ever sees resolved UI. (The
+static site from `hypen build` is the exception: it runs the same session in a
+Web Worker inside the browser, so its module code does reach the device.)
 
 **Thin clients.** A client that only applies patches stays small and fast, and
 behaves identically across platforms.
@@ -62,25 +64,41 @@ behaves identically across platforms.
 Every [server SDK](/docs/servers) exposes the same shape. TypeScript:
 
 ```typescript
-import { app } from "@hypen-space/core";
+// server.ts — run with: bun server.ts
+import { app, hypen } from "@hypen-space/core";
 import { RemoteServer } from "@hypen-space/server";
 
-const appModule = app
+const counter = app
   .defineState({ count: 0 })
-  .onAction("inc", ({ state }) => { state.count += 1; });
+  .onAction("inc", ({ state }) => { state.count += 1; })
+  .ui(hypen`
+    Column {
+      Text("Count: @{state.count}")
+      Button { Text("+1") }.onClick(@actions.inc)
+    }
+  `);
 
 new RemoteServer()
-  .module("App", appModule)
-  .source("./components")
+  .module("App", counter)
   .listen(3000);
 ```
 
-Go:
+`.ui()` ends the chain and returns the built definition, and `RemoteServer` takes its template from it. Open `http://localhost:3000` for the built-in web client; native clients connect to `ws://localhost:3000`.
+
+For a project laid out as `src/components/<Name>/component.hypen` + `component.ts` (what `hypen init` creates), point the server at the folder instead. `.module()` is then optional: the module named `App` is the entry.
+
+```typescript
+new RemoteServer()
+  .source("./src/components")
+  .listen(3000);
+```
+
+Go (`Listen` blocks until the server stops):
 
 ```go
+// appDef := core.NewApp(...).UI(template)
 remote.NewRemoteServer().
     WithDefinition(appDef).
-    Source("./components").
     Listen(3000)
 ```
 

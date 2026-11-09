@@ -7,7 +7,7 @@ import { app, type ActionHandlerContext, type ActionContext } from "../packages/
 
 describe("ActionHandler Context API", () => {
   test("modern handler receives all context in single parameter", async () => {
-    let receivedContext: ActionHandlerContext<{ count: number }> | null = null;
+    let receivedContext = null as ActionHandlerContext<{ count: number }> | null;
 
     const module = app
       .defineState({ count: 0 })
@@ -26,6 +26,7 @@ describe("ActionHandler Context API", () => {
       action: { name: "test", payload: undefined },
       state: { count: 0 },
       context: null as any,
+      dataSources: {},
     };
 
     await handler(mockContext);
@@ -36,8 +37,8 @@ describe("ActionHandler Context API", () => {
   });
 
   test("handler can destructure only needed properties", async () => {
-    let stateReceived: { count: number } | null = null;
-    let actionReceived: { name: string } | null = null;
+    let stateReceived = null as { count: number } | null;
+    let actionReceived = null as { name: string } | null;
 
     const module = app
       .defineState({ count: 0 })
@@ -53,6 +54,7 @@ describe("ActionHandler Context API", () => {
       action: { name: "increment", payload: undefined },
       state: { count: 0 },
       context: null as any,
+      dataSources: {},
     };
 
     await handler(mockContext);
@@ -62,7 +64,7 @@ describe("ActionHandler Context API", () => {
   });
 
   test("handler receives payload correctly", async () => {
-    let receivedPayload: { amount: number } | null = null;
+    let receivedPayload = null as { amount: number } | null;
 
     const module = app
       .defineState({ total: 0 })
@@ -77,6 +79,7 @@ describe("ActionHandler Context API", () => {
       action: { name: "add", payload: { amount: 5 } },
       state: { total: 10 },
       context: null as any,
+      dataSources: {},
     };
 
     await handler(mockContext);
@@ -100,6 +103,7 @@ describe("ActionHandler Context API", () => {
       action: { name: "fetch", payload: undefined },
       state: { data: null },
       context: null as any,
+      dataSources: {},
     };
 
     await handler(mockContext);
@@ -142,6 +146,7 @@ describe("ActionHandler Context API", () => {
       action: { name: "failing", payload: undefined },
       state: { value: 0 },
       context: null as any,
+      dataSources: {},
     };
 
     try {
@@ -170,6 +175,7 @@ describe("ActionHandler Context API", () => {
       action: { name: "addItem", payload: "test-item" },
       state,
       context: null as any,
+      dataSources: {},
     };
 
     await handler(mockContext);
@@ -243,6 +249,7 @@ describe("Typed onAction<P>", () => {
       action: { name: "add", payload: { amount: 7 } },
       state: { total: 10 },
       context: null as any,
+      dataSources: {},
     };
 
     await handler(mockContext);
@@ -267,6 +274,7 @@ describe("Typed onAction<P>", () => {
       action: { name: "test", payload: "hello" },
       state: { count: 0 },
       context: null as any,
+      dataSources: {},
     });
 
     expect(receivedPayload).toBe("hello");
@@ -302,7 +310,9 @@ describe("context.router", () => {
         emit: () => {},
         on: () => () => {},
         router: null,
+        device: null as any,
       },
+      dataSources: {},
     };
 
     // Verify context.router exists and next does not
@@ -334,7 +344,9 @@ describe("context.router", () => {
         emit: () => {},
         on: () => () => {},
         router: mockRouter as any,
+        device: null as any,
       },
+      dataSources: {},
     });
 
     expect(routerValue).toBe(mockRouter);

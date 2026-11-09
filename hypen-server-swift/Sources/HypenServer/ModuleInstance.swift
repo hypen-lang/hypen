@@ -173,7 +173,10 @@ public final class ModuleInstance: @unchecked Sendable {
         self.registerActionHandlersWithEngine()
 
         // Call onCreated
-        if let handler = definition.onCreated {
+        if let handler = definition.onCreatedWithContext {
+            let context = globalContext
+            callLifecycle("created") { handler(state, context) }
+        } else if let handler = definition.onCreated {
             callLifecycle("created") { handler(state) }
         }
     }
@@ -534,7 +537,10 @@ public final class ModuleInstance: @unchecked Sendable {
         lock.unlock()
         plane?.ownerActivated(deviceInstanceId, activationId: activation)
 
-        if let handler = definition.onActivated {
+        if let handler = definition.onActivatedWithContext {
+            let context = globalContext
+            callLifecycle("activated") { handler(state, context) }
+        } else if let handler = definition.onActivated {
             callLifecycle("activated") { handler(state) }
         }
         if let asyncHandler = definition.onActivatedAsync {
@@ -568,7 +574,10 @@ public final class ModuleInstance: @unchecked Sendable {
         // every device request owned by this exact activation is cancelled.
         plane?.ownerDeactivated(deviceInstanceId, activationId: activation)
 
-        if let handler = definition.onDeactivated {
+        if let handler = definition.onDeactivatedWithContext {
+            let context = globalContext
+            callLifecycle("deactivated") { handler(state, context) }
+        } else if let handler = definition.onDeactivated {
             callLifecycle("deactivated") { handler(state) }
         }
     }
@@ -672,7 +681,10 @@ public final class ModuleInstance: @unchecked Sendable {
         // lifetimes) ends with it.
         plane?.ownerDestroyed(deviceInstanceId)
 
-        if let handler = definition.onDestroyed {
+        if let handler = definition.onDestroyedWithContext {
+            let context = globalContext
+            callLifecycle("destroyed") { handler(state, context) }
+        } else if let handler = definition.onDestroyed {
             callLifecycle("destroyed") { handler(state) }
         }
     }

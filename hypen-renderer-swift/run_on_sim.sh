@@ -6,10 +6,11 @@
 #   ./run_on_sim.sh [--url ws://host:port] [--tail] [--clean]
 #
 # Options:
-#   --url <url>      After launch, deep-link the app to a Hypen dev server.
-#                    Accepts either a ws:// URL (wrapped automatically into
-#                    hypenpreview://connect?url=...) or a full hypenpreview://
-#                    deep link. Example: --url ws://localhost:3000
+#   --url <url>      Connect the app to a Hypen dev server. A ws:// URL is
+#                    passed to the app at launch (DEVICE_LAB_URL), so it
+#                    connects without iOS's "Open in HypenGallery?" prompt;
+#                    a full hypenpreview:// deep link is opened after launch
+#                    (that one prompts). Example: --url ws://localhost:3000
 #   --tail           Stream the app's stdout after launch (blocking). Default
 #                    is non-blocking — the script exits once the app is up.
 #   --clean          Wipe DerivedData before building.
@@ -49,7 +50,7 @@ while [ $# -gt 0 ]; do
             shift
             ;;
         -h|--help)
-            sed -n '2,21p' "$0" | sed 's/^# \{0,1\}//'
+            sed -n '2,23p' "$0" | sed 's/^# \{0,1\}//'
             exit 0
             ;;
         *)
@@ -85,6 +86,9 @@ if [ -n "$DEEP_LINK_URL" ]; then
         hypenpreview://*)
             ;;
         ws://*|wss://*|http://*|https://*)
+            # The app reads DEVICE_LAB_URL at launch, which connects without
+            # the "Open in HypenGallery?" prompt a deep link triggers.
+            SERVER_URL="$DEEP_LINK_URL"
             # urlencode the connection URL — enough coverage for ws URLs.
             encoded="$DEEP_LINK_URL"
             encoded="${encoded//%/%25}"
@@ -191,11 +195,17 @@ if [ "$TAIL_LOGS" = true ]; then
         exec xcrun simctl launch --console-pty "$SIMULATOR_ID" "$BUNDLE_ID"
     fi
 else
-    if ! xcrun simctl launch "$SIMULATOR_ID" "$BUNDLE_ID" >/dev/null; then
+    if [ -n "${SERVER_URL:-}" ]; then
+        echo "Launching connected to $SERVER_URL"
+        if ! SIMCTL_CHILD_DEVICE_LAB_URL="$SERVER_URL" xcrun simctl launch "$SIMULATOR_ID" "$BUNDLE_ID" >/dev/null; then
+            echo "Launch failed." >&2
+            exit 4
+        fi
+    elif ! xcrun simctl launch "$SIMULATOR_ID" "$BUNDLE_ID" >/dev/null; then
         echo "Launch failed." >&2
         exit 4
     fi
-    if [ -n "$DEEP_LINK_URL" ]; then
+    if [ -n "$DEEP_LINK_URL" ] && [ -z "${SERVER_URL:-}" ]; then
         sleep 0.3
         echo "Opening deep link: $DEEP_LINK_URL"
         xcrun simctl openurl "$SIMULATOR_ID" "$DEEP_LINK_URL"

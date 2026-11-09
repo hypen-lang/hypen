@@ -7,7 +7,7 @@ Row {
         Text("@{item.name}")
             .tw("text-sm font-semibold")
 
-        Text("$@{item.price}")
+        Text("$@{item.priceLabel}")
             .tw("text-sm text-gray-500 mt-1")
 
         Row {
@@ -39,7 +39,7 @@ Row {
     .tw("flex-1 pl-3")
 
     Column {
-        Text("$@{item.lineTotal}")
+        Text("$@{item.lineTotalLabel}")
             .tw("text-sm font-bold")
 
         Button {

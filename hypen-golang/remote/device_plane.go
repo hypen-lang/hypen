@@ -16,9 +16,9 @@ import (
 	"sync/atomic"
 	"time"
 
-	core "github.com/hypen-space/core"
-	"github.com/hypen-space/core/device"
-	wire "github.com/hypen-space/core/remote/device"
+	core "github.com/hypen-lang/hypen/hypen-golang"
+	"github.com/hypen-lang/hypen/hypen-golang/device"
+	wire "github.com/hypen-lang/hypen/hypen-golang/remote/device"
 )
 
 // DeviceConfig holds the device plane's options (RemoteServer.

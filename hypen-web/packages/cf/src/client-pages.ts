@@ -28,6 +28,51 @@ export interface ClientPagesConfig {
 interface Served {
   contentType: string;
   body: string;
+  /** HTML shells only: the mount prefix ("" for "/") app routes live under. */
+  base?: string;
+  html?: boolean;
+}
+
+/** "/" → ""; "/canvas/" → "/canvas". */
+function pageBase(path: string): string {
+  const trimmed = path.replace(/\/+$/, "");
+  return trimmed === "" ? "" : trimmed.startsWith("/") ? trimmed : `/${trimmed}`;
+}
+
+function escapeAttr(value: string): string {
+  return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
+}
+
+/** Does the request's `Accept` header list `text/html` (a page navigation)? */
+function acceptsHtml(request: Request): boolean {
+  const accept = request.headers.get("accept");
+  return accept !== null && /(^|[,\s])text\/html(\s*[;,]|\s*$)/i.test(accept);
+}
+
+/**
+ * The shell answering a page navigation to `pathname` that no page matches
+ * exactly (SPA fallback, so deep links and reloads on `/about` work): the
+ * page mounted at the longest prefix of the path. A last segment that looks
+ * like a file (`/logo.png`) is never a page.
+ */
+function fallbackPage(
+  pages: Record<string, Served>,
+  pathname: string,
+): Served | undefined {
+  const last = pathname.slice(pathname.lastIndexOf("/") + 1);
+  if (/\.[a-z0-9]+$/i.test(last)) return undefined;
+  let best: Served | undefined;
+  let bestLen = -1;
+  for (const page of Object.values(pages)) {
+    if (!page.html) continue;
+    const base = page.base ?? "";
+    const inside = base === "" || pathname === base || pathname.startsWith(`${base}/`);
+    if (inside && base.length > bestLen) {
+      best = page;
+      bestLen = base.length;
+    }
+  }
+  return best;
 }
 
 // Default system font stack applied to the page and inherited by the renderer
@@ -45,13 +90,14 @@ const BASE_CSS = `
     #app, #app * { font-family: inherit; }
     button, input, textarea, select { font: inherit; }`;
 
-function domShell(title: string, scriptPath: string): string {
+function domShell(title: string, scriptPath: string, base: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${title}</title>
+  <link rel="icon" href="data:,">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; }
@@ -66,20 +112,21 @@ function domShell(title: string, scriptPath: string): string {
 ${BASE_CSS}
   </style>
 </head>
-<body data-hypen-renderer="dom">
+<body data-hypen-renderer="dom" data-hypen-base="${base}">
   <div id="app"></div>
   <script type="module" src="${scriptPath}"></script>
 </body>
 </html>`;
 }
 
-function canvasShell(title: string, scriptPath: string): string {
+function canvasShell(title: string, scriptPath: string, base: string): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>${title}</title>
+  <link rel="icon" href="data:,">
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { height: 100%; }
@@ -88,7 +135,7 @@ function canvasShell(title: string, scriptPath: string): string {
 ${BASE_CSS}
   </style>
 </head>
-<body data-hypen-renderer="canvas">
+<body data-hypen-renderer="canvas" data-hypen-base="${base}">
   <canvas id="app"></canvas>
   <script type="module" src="${scriptPath}"></script>
 </body>
@@ -107,11 +154,13 @@ export function buildClientPages(config: ClientPagesConfig): Record<string, Serv
   for (const [path, bundle] of Object.entries(config.routes)) {
     // Bundle URL: "/" → "/client.js"; "/canvas" → "/canvas/client.js".
     const jsPath = path === "/" ? "/client.js" : `${path.replace(/\/$/, "")}/client.js`;
+    // The client maps app routes under this prefix ("/canvas" + "/about").
+    const base = pageBase(path);
     const shell =
       (bundle.renderer ?? "dom") === "canvas"
-        ? canvasShell(title, jsPath)
-        : domShell(title, jsPath);
-    pages[path] = { contentType: "text/html; charset=utf-8", body: shell };
+        ? canvasShell(title, jsPath, escapeAttr(base))
+        : domShell(title, jsPath, escapeAttr(base));
+    pages[path] = { contentType: "text/html; charset=utf-8", body: shell, base, html: true };
     pages[jsPath] = {
       contentType: "application/javascript; charset=utf-8",
       body: bundle.js,
@@ -125,15 +174,12 @@ export function servePage(
   pages: Record<string, Served>,
   request: Request,
 ): Response | null {
-  if (request.method !== "GET") return null;
+  if (request.method !== "GET" && request.method !== "HEAD") return null;
   const pathname = new URL(request.url).pathname;
   let page = pages[pathname];
-  if (!page) {
-    const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? false;
-    page = acceptsHtml ? pages["/"] : undefined;
-  }
+  if (!page && acceptsHtml(request)) page = fallbackPage(pages, pathname);
   if (!page) return null;
-  return new Response(page.body, {
+  return new Response(request.method === "HEAD" ? null : page.body, {
     headers: {
       "content-type": page.contentType,
       "cache-control": pathname.endsWith(".js") ? "public, max-age=3600" : "no-cache",

@@ -10,7 +10,7 @@ import (
 )
 
 // dependentModules are the in-repo Go modules that consume this SDK through a
-// `replace github.com/hypen-space/core => <path to hypen-golang>` directive.
+// `replace github.com/hypen-lang/hypen/hypen-golang => <path to hypen-golang>` directive.
 // Paths are relative to the hypen-golang directory.
 //
 // Each one has its own go.mod/go.sum, so bumping this module's `go` directive

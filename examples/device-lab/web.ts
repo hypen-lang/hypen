@@ -2,7 +2,7 @@ import { RemoteEngine } from "../../hypen-web/packages/core/src/remote/client.ts
 import { DOMRenderer, CanvasRenderer } from "../../hypen-web/packages/web/src/index.ts";
 import { WebDeviceHost } from "../../hypen-web/packages/device-web/src/index.ts";
 const params = new URLSearchParams(location.search);
-const port = params.get("port") ?? "45101";
+const port = params.get("port") ?? (window as { DEVICE_LAB_TS_PORT?: string }).DEVICE_LAB_TS_PORT ?? "45101";
 const select = document.querySelector<HTMLSelectElement>("#server")!;
 select.value = port;
 select.onchange = () => { params.set("port", select.value); location.search = params.toString(); };

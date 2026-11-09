@@ -50,7 +50,7 @@ pub(super) fn apply_replacements(s: &str, mut replacements: Vec<Replacement>) ->
     }
 
     // Sort by start position ascending
-    replacements.sort_by(|a, b| a.start.cmp(&b.start));
+    replacements.sort_by_key(|r| r.start);
 
     // Filter invalid replacements and calculate result size
     let valid_replacements: Vec<_> = replacements
@@ -177,7 +177,7 @@ pub fn replace_item_bindings_with_name(
     index: usize,
     item_name: &str,
 ) -> Element {
-    replace_item_bindings_impl(element, item, index, item_name, None)
+    replace_item_bindings_impl(element, item, index, item_name, None, true)
 }
 
 /// [`replace_item_bindings_with_name`] plus DnD identity stamping.
@@ -195,13 +195,14 @@ fn replace_item_bindings_impl(
     index: usize,
     item_name: &str,
     dnd_key: Option<&str>,
+    parsed_item: bool,
 ) -> Element {
     // Replace bindings in props using the unified Value replacement logic
     let mut new_props = Props::new();
     for (key, value) in &element.props {
         new_props.insert(
             key.clone(),
-            replace_value_item_bindings(value, item, item_name),
+            replace_value_item_bindings_ext(value, item, item_name, parsed_item),
         );
     }
     if let Some(key) = dnd_key {
@@ -229,7 +230,17 @@ fn replace_item_bindings_impl(
     let ir_children = element
         .ir_children
         .iter()
-        .map(|child_ir| replace_ir_node_impl(child_ir, item, index, item_name, &child_key, dnd_key))
+        .map(|child_ir| {
+            replace_ir_node_impl(
+                child_ir,
+                item,
+                index,
+                item_name,
+                &child_key,
+                dnd_key,
+                parsed_item,
+            )
+        })
         .collect();
 
     Element {
@@ -257,7 +268,7 @@ pub(crate) fn replace_ir_node_item_bindings(
     item_name: &str,
     item_key: &str,
 ) -> IRNode {
-    replace_ir_node_impl(node, item, index, item_name, item_key, Some(item_key))
+    replace_ir_node_impl(node, item, index, item_name, item_key, Some(item_key), true)
 }
 
 /// Recursive worker for [`replace_ir_node_item_bindings`]. `item_key` is
@@ -265,6 +276,11 @@ pub(crate) fn replace_ir_node_item_bindings(
 /// derivation); `dnd_key` is the iteration's item key threaded unchanged to
 /// every descendant for DnD identity stamping (see
 /// [`replace_item_bindings_impl`]).
+///
+/// `parsed_item` says whether parsed `item`-source bindings (`@item.x`,
+/// `@{item.x}`) still refer to THIS loop's variable. It turns false below a
+/// nested ForEach that rebinds the default name `item` (the inner loop
+/// shadows it); refs to this loop's own custom `as:` name keep resolving.
 fn replace_ir_node_impl(
     node: &IRNode,
     item: &serde_json::Value,
@@ -272,11 +288,12 @@ fn replace_ir_node_impl(
     item_name: &str,
     item_key: &str,
     dnd_key: Option<&str>,
+    parsed_item: bool,
 ) -> IRNode {
     match node {
         IRNode::Element(element) => {
             let mut new_element =
-                replace_item_bindings_impl(element, item, index, item_name, dnd_key);
+                replace_item_bindings_impl(element, item, index, item_name, dnd_key, parsed_item);
             // Override key with the computed item key
             new_element.key = Some(item_key.to_string());
             IRNode::Element(new_element)
@@ -289,15 +306,48 @@ fn replace_ir_node_impl(
             props,
             module_scope,
         } => {
-            // Note: source binding is kept as-is; nested ForEach maintains its own iteration context
             // Replace in props
-            let new_props = replace_props_item_bindings(props, item, item_name);
+            // Props (incl. `items:`) are evaluated in the ENCLOSING scope.
+            let mut new_props = replace_props_item_bindings(props, item, item_name, parsed_item);
 
-            // Recursively replace in template (but inner ForEach has its own item context)
-            let new_template: Vec<IRNode> = template
-                .iter()
-                .map(|child| replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key))
-                .collect();
+            // The source binding is kept as-is (it is the node's identity for
+            // dependency purposes), but when it reads THIS loop's item —
+            // `ForEach(items: @category.products)` under `as: "category"`, or
+            // `@item.products` under the default name — the array is only
+            // knowable here. Bake it into the reserved items prop, which
+            // iteration prefers over evaluating `source` against state (see
+            // `foreach_items`). Without it the inner loop looked
+            // `products` up in module state and rendered nothing.
+            if let Some(items) = outer_item_source(source, item, item_name, parsed_item) {
+                new_props.insert(FOREACH_ITEMS_PROP.to_string(), Value::Static(items));
+            }
+
+            // Recursively replace in the template, honoring shadowing: the
+            // inner loop's variable hides an outer one of the same name. When
+            // both use the same name nothing in the inner template can refer
+            // to this loop, so it is left for the inner iteration entirely;
+            // when only the inner loop uses the default `item`, parsed
+            // `@item` refs belong to it while this loop's custom name still
+            // resolves (`as: "group"` → `@{group.name}`).
+            let new_template: Vec<IRNode> = if inner_item_name == item_name {
+                template.clone()
+            } else {
+                let inner_parsed = parsed_item && inner_item_name != "item";
+                template
+                    .iter()
+                    .map(|child| {
+                        replace_ir_node_impl(
+                            child,
+                            item,
+                            index,
+                            item_name,
+                            item_key,
+                            dnd_key,
+                            inner_parsed,
+                        )
+                    })
+                    .collect()
+            };
 
             IRNode::ForEach {
                 source: source.clone(),
@@ -315,18 +365,31 @@ fn replace_ir_node_impl(
             module_scope,
         } => {
             // Replace in condition value
-            let new_value = replace_value_item_bindings(value, item, item_name);
+            let new_value = replace_value_item_bindings_ext(value, item, item_name, parsed_item);
 
             // Replace in branches
             let new_branches: Vec<ConditionalBranch> = branches
                 .iter()
                 .map(|branch| {
-                    let new_pattern = replace_value_item_bindings(&branch.pattern, item, item_name);
+                    let new_pattern = replace_value_item_bindings_ext(
+                        &branch.pattern,
+                        item,
+                        item_name,
+                        parsed_item,
+                    );
                     let new_children: Vec<IRNode> = branch
                         .children
                         .iter()
                         .map(|child| {
-                            replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
+                            replace_ir_node_impl(
+                                child,
+                                item,
+                                index,
+                                item_name,
+                                item_key,
+                                dnd_key,
+                                parsed_item,
+                            )
                         })
                         .collect();
                     ConditionalBranch::new(new_pattern, new_children)
@@ -337,7 +400,15 @@ fn replace_ir_node_impl(
             let new_fallback = fallback.as_ref().map(|f| {
                 f.iter()
                     .map(|child| {
-                        replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
+                        replace_ir_node_impl(
+                            child,
+                            item,
+                            index,
+                            item_name,
+                            item_key,
+                            dnd_key,
+                            parsed_item,
+                        )
                     })
                     .collect()
             });
@@ -356,7 +427,8 @@ fn replace_ir_node_impl(
             module_scope,
         } => {
             // Replace in location value (rare — usually state.location which has no item refs)
-            let new_location = replace_value_item_bindings(location, item, item_name);
+            let new_location =
+                replace_value_item_bindings_ext(location, item, item_name, parsed_item);
 
             // Replace in each route's children
             let new_routes: Vec<crate::ir::RouterRoute> = routes
@@ -367,7 +439,15 @@ fn replace_ir_node_impl(
                         .children
                         .iter()
                         .map(|child| {
-                            replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
+                            replace_ir_node_impl(
+                                child,
+                                item,
+                                index,
+                                item_name,
+                                item_key,
+                                dnd_key,
+                                parsed_item,
+                            )
                         })
                         .collect(),
                 })
@@ -377,7 +457,15 @@ fn replace_ir_node_impl(
             let new_fallback = fallback.as_ref().map(|f| {
                 f.iter()
                     .map(|child| {
-                        replace_ir_node_impl(child, item, index, item_name, item_key, dnd_key)
+                        replace_ir_node_impl(
+                            child,
+                            item,
+                            index,
+                            item_name,
+                            item_key,
+                            dnd_key,
+                            parsed_item,
+                        )
                     })
                     .collect()
             });
@@ -392,13 +480,62 @@ fn replace_ir_node_impl(
     }
 }
 
+/// Reserved `IRNode::ForEach` prop carrying the array of a nested ForEach
+/// whose `items:` source reads an enclosing loop's item. Set only by
+/// substitution; never authored, never sent to renderers (control-flow
+/// containers are not materialized).
+pub(crate) const FOREACH_ITEMS_PROP: &str = "__items";
+
+/// Resolve a nested ForEach's `source` against the enclosing loop's `item`
+/// when the binding names that loop variable: `@item.x` for the default
+/// name, `@<as>.x` for a custom one (parsed as a data-source binding whose
+/// provider is the variable name).
+fn outer_item_source(
+    source: &Binding,
+    item: &serde_json::Value,
+    item_name: &str,
+    parsed_item: bool,
+) -> Option<serde_json::Value> {
+    let names_this_loop = match &source.source {
+        crate::reactive::BindingSource::Item => parsed_item && item_name == "item",
+        crate::reactive::BindingSource::DataSource(provider) => provider == item_name,
+        crate::reactive::BindingSource::State => false,
+    };
+    if !names_this_loop {
+        return None;
+    }
+    if source.path.is_empty() {
+        return Some(item.clone());
+    }
+    navigate_item_path(item, &source.full_path()).cloned()
+}
+
+/// The array a ForEach iterates: the substituted outer-item array when
+/// present (see [`FOREACH_ITEMS_PROP`]), else its source evaluated against
+/// state.
+pub(crate) fn foreach_items<'a>(
+    source: &Binding,
+    props: &'a Props,
+    state: &'a serde_json::Value,
+) -> Option<&'a serde_json::Value> {
+    match props.get(FOREACH_ITEMS_PROP) {
+        Some(Value::Static(items)) => Some(items),
+        _ => super::resolve::evaluate_binding_ref(source, state),
+    }
+}
+
 /// Replace item bindings in Props
-fn replace_props_item_bindings(props: &Props, item: &serde_json::Value, item_name: &str) -> Props {
+fn replace_props_item_bindings(
+    props: &Props,
+    item: &serde_json::Value,
+    item_name: &str,
+    parsed_item: bool,
+) -> Props {
     let mut new_props = Props::new();
     for (key, value) in props {
         new_props.insert(
             key.clone(),
-            replace_value_item_bindings(value, item, item_name),
+            replace_value_item_bindings_ext(value, item, item_name, parsed_item),
         );
     }
     new_props
@@ -416,9 +553,21 @@ pub(crate) fn replace_value_item_bindings(
     item: &serde_json::Value,
     item_name: &str,
 ) -> Value {
+    replace_value_item_bindings_ext(value, item, item_name, true)
+}
+
+/// [`replace_value_item_bindings`] with shadowing: `parsed_item == false`
+/// leaves parsed `item`-source bindings alone because a nested loop rebinds
+/// the default name (see [`replace_ir_node_impl`]).
+fn replace_value_item_bindings_ext(
+    value: &Value,
+    item: &serde_json::Value,
+    item_name: &str,
+    parsed_item: bool,
+) -> Value {
     match value {
         Value::Binding(binding) => {
-            if binding.is_item() {
+            if parsed_item && binding.is_item() {
                 if binding.path.is_empty() {
                     Value::Static(item.clone())
                 } else {
@@ -433,9 +582,14 @@ pub(crate) fn replace_value_item_bindings(
                 value.clone()
             }
         }
-        Value::TemplateString { template, bindings } => {
-            replace_template_string_item_bindings(template, bindings, item, item_name, value)
-        }
+        Value::TemplateString { template, bindings } => replace_template_string_item_bindings(
+            template,
+            bindings,
+            item,
+            item_name,
+            value,
+            parsed_item,
+        ),
         // Handle static strings containing @{item.xxx} pattern (legacy/fallback)
         Value::Static(serde_json::Value::String(s))
             if with_item_markers(item_name, |dot, bare| s.contains(dot) || s.contains(bare)) =>
@@ -453,10 +607,11 @@ fn replace_template_string_item_bindings(
     item: &serde_json::Value,
     item_name: &str,
     original: &Value,
+    parsed_item: bool,
 ) -> Value {
     use crate::reactive::evaluate_context_free_template;
 
-    let has_item_bindings = bindings.iter().any(|b| b.is_item());
+    let has_item_bindings = parsed_item && bindings.iter().any(|b| b.is_item());
 
     // Custom `as:` names (e.g. `as: "opt"`) are deliberately rejected by
     // `parse_binding` — unknown `@{...}` prefixes must not become data-source
@@ -484,7 +639,7 @@ fn replace_template_string_item_bindings(
     // PHASE 1: Collect all replacements for explicit bindings (single pass)
     let mut replacements = Vec::new();
     for binding in bindings {
-        if binding.is_item() {
+        if parsed_item && binding.is_item() {
             let pattern = format!("@{{{}}}", binding.full_path_with_source());
             if let Some(start) = template.find(&pattern) {
                 let replacement = if binding.path.is_empty() {
@@ -520,8 +675,13 @@ fn replace_template_string_item_bindings(
     let expr_replacements = collect_item_replacements_with_name(&result, item, true, item_name);
     result = apply_replacements(&result, expr_replacements);
 
-    // Filter out resolved item bindings, keep state bindings
-    let remaining_bindings: Vec<_> = bindings.iter().filter(|b| b.is_state()).cloned().collect();
+    // Filter out resolved item bindings, keep state bindings — and, when a
+    // nested loop shadows `item`, the item bindings that belong to it.
+    let remaining_bindings: Vec<_> = bindings
+        .iter()
+        .filter(|b| b.is_state() || (!parsed_item && b.is_item()))
+        .cloned()
+        .collect();
 
     if remaining_bindings.is_empty() {
         if result.contains("@{") {
@@ -628,8 +788,16 @@ fn collect_item_replacements_with_name(
         if let Some(rel_start) = s[pos..].find(item_name) {
             let abs_start = pos + rel_start;
             let after_item = abs_start + item_name.len();
+            // Only a whole identifier names the loop variable: `state.item.x`
+            // or `myitem.x` must not be rewritten as `item.x`.
+            let starts_identifier = abs_start == 0 || {
+                let prev = s.as_bytes()[abs_start - 1];
+                !(prev.is_ascii_alphanumeric() || prev == b'_' || prev == b'.')
+            };
 
-            if after_item < s.len() && s.as_bytes()[after_item] == b'.' {
+            if !starts_identifier {
+                pos = after_item;
+            } else if after_item < s.len() && s.as_bytes()[after_item] == b'.' {
                 let path_start = after_item + 1;
                 let path_end = find_path_end(s, path_start);
 

@@ -18,6 +18,14 @@ on:
   workflow_dispatch:
   release:
     types: [published]
+  # release.yml calls this after creating the release: a release created
+  # with GITHUB_TOKEN does not fire `release: published` for other workflows.
+  workflow_call:
+    inputs:
+      tag:
+        description: "Release tag to attach the installers to (e.g. v0.6.7)"
+        required: true
+        type: string
 
 permissions:
   contents: write
@@ -114,8 +122,9 @@ jobs:
           if-no-files-found: error
 
       - name: Attach to release
-        if: github.event_name == 'release'
+        if: inputs.tag != '' || github.event_name == 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release upload "${{ github.event.release.tag_name }}" ${{ matrix.artifacts }} --clobber
+          TAG: ${{ inputs.tag || github.event.release.tag_name }}
+        run: gh release upload "$TAG" ${{ matrix.artifacts }} --clobber

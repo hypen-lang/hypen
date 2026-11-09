@@ -26,7 +26,7 @@
 // lists), ValidateHello and ValidateAck (the strict decoders).
 //
 // Package remote pumps a socket through a Broker; package device
-// (github.com/hypen-space/core/device) is the handler API on top.
+// (github.com/hypen-lang/hypen/hypen-golang/device) is the handler API on top.
 //
 // # Typed surface
 //

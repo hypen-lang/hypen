@@ -19,7 +19,7 @@
 
 ## Why Hypen?
 - **Native UI Streaming and portable (coming soon)** - Hypen supports native UI streaming from different languages - Rust, TS, Go, Kotlin, Swift and more coming soon
-- **Crossplatform native rendering** - Render hypen in web, canvas, iOS or Android, all native.
+- **Crossplatform native rendering** - Render Hypen on the web (DOM or canvas), Android, desktop and iOS, all native. (iOS is in preview: try it with the `hypen run ios` Simulator runner, or add the `HypenSwift` package from [hypen-lang/hypen-swiftui](https://github.com/hypen-lang/hypen-swiftui) to your own app.)
 - **Declarative and familiar** — Hypen is a declarative language that will be familiar to both developers and machines.
 - **Highly portable** — Hypen clients are thin layers over native UI, enabling you to automatically support any platform that Hypen supports.
 - **Reactivity, Tailwind, routing, hot reload** — All of your favorite features, out of the box. Develop faster than ever with Hypen.
@@ -37,22 +37,22 @@ Learn more about using Hypen here:
 
 ## Quick Start
 
-```bash
-# Install the CLI
-bun add -g @hypen-space/cli
+The CLI runs on [Bun](https://bun.sh) 1.2 or newer (Node.js alone can't run it).
 
-# Create a new project
-hypen init my-app
+```bash
+# Create a new project (no global install needed)
+bunx @hypen-space/cli init my-app
 cd my-app
 
-# Start developing
-hypen dev
-
-# open studio for preview
-hypen studio
+# Start developing: web preview with hot reload at http://localhost:3000
+bun run dev
 ```
 
-This gives you a running app at `http://localhost:3000` with hot reload.
+Prefer an IDE? Run `bun run studio` instead of `bun run dev`. Hypen Studio starts the dev server for you and opens an editor with a live preview, state inspector and time-travel debugging at `http://localhost:5173`. You don't need both.
+
+To preview on a device, run `bunx hypen run android` or `bunx hypen run ios` (Simulator) while the project is open. You can also install the CLI globally with `bun add -g @hypen-space/cli`; a global `hypen` (0.6.7+) hands project commands to the project's own CLI, so `hypen dev` and `bun run dev` behave the same.
+
+See the [Getting Started guide](https://docs.hypen.space/docs/getting-started/installation) for the full walkthrough.
 
 ## What It Looks Like
 
@@ -65,6 +65,7 @@ View your app in any Hypen client, the Hypen gallery app, preview it in Hypen st
 <summary><b>TypeScript</b> — <code>@hypen-space/core</code> + <code>@hypen-space/server</code></summary>
 
 ```typescript
+// server.ts — run with `bun server.ts`
 import { HypenApp } from "@hypen-space/core";
 import { RemoteServer } from "@hypen-space/server/remote";
 
@@ -74,122 +75,207 @@ myApp.module("Counter")
   .defineState<{ count: number }>({ count: 0 })
   .onAction("increment", ({ state }) => { state.count += 1; })
   .onAction<{ amount: number }>("add", ({ action, state }) => {
-    state.count += action.payload.amount;
+    state.count += action.payload?.amount ?? 0;
   })
   .ui(`
     Column {
       Text("Count: @{state.count}")
-      Button("@actions.increment") { Text("+") }
+      Button { Text("+") }.onClick(@actions.increment)
+      Button { Text("+5") }.onClick(@actions.add, amount: 5)
     }
-  `)
-  .build();
+  `);
 
 new RemoteServer().app(myApp).listen(3000);
 ```
 
-And create a simple DOM client that will connect to the server:
+Open `http://localhost:3000`: the server ships a built-in web client. Native clients connect to `ws://localhost:3000`.
 
-```html
-<div id="app"></div>
+> `new RemoteServer().app(myApp)` (no `.module()` call) and named modules as the entry need `@hypen-space/server` 0.6.7 or newer.
 
-<script type="module">
-  import { RemoteEngine } from "@hypen-space/core";
-  import { DOMRenderer } from "@hypen-space/web";
+To render in your own page instead, write a small client and let Bun bundle it (browsers can't load bare package imports or TypeScript directly):
 
-  const app = document.getElementById("app");
-  const renderer = new DOMRenderer(app);
+```typescript
+// client.ts
+import { RemoteEngine } from "@hypen-space/core";
+import { DOMRenderer } from "@hypen-space/web";
 
-  const remote = new RemoteEngine("ws://localhost:3000");
+const container = document.getElementById("app")!;
+const engine = new RemoteEngine("ws://localhost:3000");
 
-  remote.onPatches((patches) => {
-    renderer.applyPatches(patches);
-  });
+// Pass the engine so the renderer can send clicks back to the server.
+const renderer = new DOMRenderer(container, engine);
 
-  await remote.connect();
-</script>
+// Each (re)connection streams a complete tree, so start from a clean slate.
+engine.onSessionEstablished(() => renderer.clear());
+engine.onPatches((patches) => renderer.applyPatches(patches));
 
+await engine.connect();
 ```
-Or attach it to a web canvas:
 
 ```html
-<canvas id="app" width="800" height="600"></canvas>
-<script>
+<!-- index.html -->
+<!DOCTYPE html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <!-- Same base styles as the built-in client -->
+    <style>
+      * { margin: 0; padding: 0; box-sizing: border-box; }
+      body { font-family: system-ui, -apple-system, sans-serif; }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="./client.ts"></script>
+  </body>
+</html>
+```
+
+```bash
+bun add @hypen-space/web
+bun --port=8080 ./index.html   # then open http://localhost:8080
+```
+
+`client.ts` uses `document`, so type-checking it needs the browser libs. The `tsconfig.json` that `bun init` writes has `"lib": ["ESNext"]`, which gives `TS2584: Cannot find name 'document'` in the editor or `bunx tsc`; change it to:
+
+```json
+{
+  "compilerOptions": {
+    "lib": ["ESNext", "DOM", "DOM.Iterable"]
+  }
+}
+```
+
+(only the `lib` line changes; keep the other options). Bun runs and bundles the page either way.
+
+Or render to a web canvas, with the same setup:
+
+```typescript
+// canvas.ts — load it from <canvas id="app" width="800" height="600"></canvas>
+//             plus <script type="module" src="./canvas.ts"></script>
 import { RemoteEngine } from "@hypen-space/core";
 import { CanvasRenderer } from "@hypen-space/web/canvas";
 
 const canvas = document.getElementById("app") as HTMLCanvasElement;
-const renderer = new CanvasRenderer(canvas);
-
 const engine = new RemoteEngine("ws://localhost:3000");
+const renderer = new CanvasRenderer(canvas, engine);
 
+engine.onSessionEstablished(() => renderer.clear());
 engine.onPatches((patches) => renderer.applyPatches(patches));
-await engine.connect();
-</script>
 
+await engine.connect();
 ```
+
+The canvas renderer fetches its layout engine from `/taffy_wasm_bg.wasm` on the page's origin. `bun ./canvas.html` answers that path with HTML, so the browser warns that `WebAssembly.instantiateStreaming` got the wrong MIME type and the renderer falls back to a CDN copy. To serve it locally, run the page from `Bun.serve` with a route for the file: `"/taffy_wasm_bg.wasm": Bun.file("node_modules/taffy-layout/pkg/taffy_wasm_bg.wasm")` next to `"/": page` (where `import page from "./canvas.html"`). The [remote app guide](https://docs.hypen.space/docs/getting-started/remote-app) has the full script.
+
 </details>
 
 <details>
-<summary><b>Go</b> — <code>github.com/hypen-space/core</code></summary>
+<summary><b>Go</b> — <code>github.com/hypen-lang/hypen/hypen-golang</code></summary>
 
-Go auto-registers every named module onto the package-level `core.App` singleton at `.Build()` time. Serve the primary with `RemoteServer.WithDefinition(...)`; nested modules are discovered from the registry.
+Go auto-registers every named module onto the package-level `core.App` singleton. Serve the entry module with `RemoteServer.WithDefinition(...)`; nested modules are discovered from the registry. Requires Go 1.25+ (on older toolchains, `GOTOOLCHAIN=go1.25.0`).
+
+```bash
+go get github.com/hypen-lang/hypen/hypen-golang@v0.6.7
+```
 
 ```go
-counter := core.NewApp(CounterState{Count: 0}).
-    Name("Counter").
-    OnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
-        ctx.State.Count++
-    }).
-    OnAction("decrement", func(ctx core.TypedActionContext[CounterState]) {
-        ctx.State.Count--
-    }).
-    UI(`
-        Column {
-            Text("@{state.count}").fontSize(48)
-            Row {
-                Button("@actions.decrement") { Text("-") }
-                Button("@actions.increment") { Text("+") }
-            }
-        }
-    `).
-    Build() // auto-registers "Counter" on core.App
+// main.go — run with `go run .`
+package main
 
-remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
+import (
+	core "github.com/hypen-lang/hypen/hypen-golang"
+	"github.com/hypen-lang/hypen/hypen-golang/remote"
+)
+
+type CounterState struct {
+	Count int `json:"count"`
+}
+
+func main() {
+	counter := core.NewApp(CounterState{Count: 0}).
+		Name("Counter").
+		OnAction("increment", func(ctx core.TypedActionContext[CounterState]) {
+			ctx.State.Count++
+		}).
+		OnAction("decrement", func(ctx core.TypedActionContext[CounterState]) {
+			ctx.State.Count--
+		}).
+		UI(`
+            Column {
+                Text("@{state.count}").fontSize(48)
+                Row {
+                    Button { Text("-") }.onClick(@actions.decrement)
+                    Button { Text("+") }.onClick(@actions.increment)
+                }
+            }
+        `)
+
+	// Blocks until stopped. Open http://localhost:3000 for the built-in web client.
+	remote.NewRemoteServer().WithDefinition(counter).Listen(3000)
+}
 ```
+
+> The Go SDK is the `hypen-golang/` subdirectory module, released as tags `hypen-golang/vX.Y.Z` in lockstep with Hypen; its package name is `core`, hence the import alias. To build against a local checkout instead:
+>
+> ```bash
+> go mod edit -replace=github.com/hypen-lang/hypen/hypen-golang=/path/to/hypen/hypen-golang
+> go mod tidy
+> ```
 
 </details>
 
 <details>
 <summary><b>Rust</b> — crate <code>hypen-server</code></summary>
 
-Rust uses `HypenApp::builder()` with route-based module registration.
+Rust uses `HypenApp::builder()` with route-based module registration. Add `hypen-server = "0.6.7"` and `serde = { version = "1", features = ["derive"] }` to `Cargo.toml`.
 
 ```rust
 use hypen_server::prelude::*;
+use serde::{Deserialize, Serialize};
 
-let app = HypenApp::builder()
-    .route("/", HypenApp::module::<Counter>("Counter")
-        .state(Counter { count: 0 })
-        .on_action::<()>("increment", |state, _, _| { state.count += 1; })
-        .on_action::<AddPayload>("add", |state, payload, _| {
-            state.count += payload.amount;
-        })
-        .ui(r#"
-            Column {
-                Text("Count: @{state.count}")
-                Button("@actions.increment") { Text("+") }
-            }
-        "#)
-        .build())
-    .build();
+#[derive(Clone, Default, Serialize, Deserialize)]
+struct Counter {
+    count: i32,
+}
 
-// Plug `app` into your Axum/Actix/etc. server via the framework integration.
+#[derive(Deserialize)]
+struct AddPayload {
+    amount: i32,
+}
+
+fn main() {
+    let app = HypenApp::builder()
+        .route("/", HypenApp::module::<Counter>("Counter")
+            .state(Counter { count: 0 })
+            .on_action::<()>("increment", |state, _, _| { state.count += 1; })
+            .on_action::<AddPayload>("add", |state, payload, _| {
+                state.count += payload.amount;
+            })
+            .ui(r#"
+                Column {
+                    Text("Count: @{state.count}")
+                    Button { Text("+") }.onClick(@actions.increment)
+                }
+            "#)
+            .build())
+        .build();
+
+    // `app` holds the routes and modules. Serve it from your HTTP framework's
+    // WebSocket route (see the hypen-server README, "Framework Integration").
+    let _ = app;
+}
 ```
+
+The crate is transport-agnostic: it doesn't open a socket itself. You plug its `RemoteSession` into your own WebSocket server (Axum, Actix, ...). See [Framework Integration](hypen-sdk-rs/README.md#framework-integration), and `examples/social/rust` for a complete Axum server.
 
 </details>
 
 <details>
 <summary><b>Swift</b> — <code>HypenServer</code></summary>
+
+> Add the package from its mirror repository: `.package(url: "https://github.com/hypen-lang/hypen-server-swift.git", from: "0.6.7")`, product `HypenServer`. It links the native engine (`libhypen_engine`), which you build from a Hypen checkout at the same version; see the [HypenServer README](hypen-server-swift/README.md#installation).
 
 ```swift
 struct CounterState: Codable { var count: Int = 0 }
@@ -223,6 +309,8 @@ try server.listen(3000)
 
 Kotlin uses a `HypenServer { ... }` DSL to register modules. Modules built with `name(...)` also auto-register on the global `HypenApp` singleton.
 
+The SDK is on Maven Central as `space.hypen:hypen-kotlin` (`implementation("space.hypen:hypen-kotlin:0.6.7")`). The jar bundles the native engine for Linux (x86-64, arm64), macOS (Apple Silicon, Intel) and Windows (x86-64), so no Rust toolchain or library path is needed.
+
 ```kotlin
 @Serializable
 data class CounterState(var count: Int = 0)
@@ -255,7 +343,7 @@ val server = HypenServer {
 
 </details>
 
-> **Just one module for a demo?** Every SDK also accepts a single-module shortcut (TS: `new RemoteServer().module(name, def).ui(template)`, Swift: `RemoteServer(moduleDefinition:)`, etc.). Prefer the `HypenApp` registry once you have more than one module or want routing/nesting.
+> **Just one module for a demo?** Every SDK also accepts a single-module shortcut (TS: `new RemoteServer().module(name, def)`, where `def` comes from `app.defineState(...).ui(template)`; Swift: `RemoteServer(moduleDefinition:)`, etc.). Prefer the `HypenApp` registry once you have more than one module or want routing/nesting.
 
 ## How It Works
 
@@ -268,7 +356,7 @@ Hypen DSL → Parser (AST) → Engine (IR) → Reconciler → Patches → Native
 1. You write UI in Hypen's declarative DSL.
 2. The **parser** (Rust) turns it into an AST.
 3. The **engine** (Rust, compiled to WASM) expands the AST into an intermediate representation, tracks reactive dependencies, and diffs against the previous tree.
-4. Minimal **patches** are sent to the platform renderer — DOM, SwiftUI, Compose, or Canvas.
+4. Minimal **patches** are sent to the platform renderer — DOM, Canvas, Compose, SwiftUI or the native desktop renderer.
 
 The engine is renderer-agnostic. All platforms receive the same patch format.
 
@@ -283,12 +371,14 @@ The engine is renderer-agnostic. All platforms receive the same patch format.
 | `hypen-cli/` | CLI tools (`init`, `dev`, `build`, `studio`) | TypeScript |
 | `hypen-renderer-swift/` | iOS/macOS native renderer | Swift |
 | `hypen-renderer-android/` | Android native renderer | Kotlin |
+| `hypen-renderer-desktop/` | Native desktop renderer | Rust |
+| `hypen-browser/` | Hypen Browser: native desktop shell and `hypen run desktop` runner | Rust |
+| `hypen-ios-streamer/` | Stream and control iOS Simulators over HTTP (macOS) | TypeScript |
 | `hypen-server-swift/` | Swift server SDK (`HypenServer`) | Swift |
 | `hypen-kotlin/` | Kotlin/JVM SDK with Kotlin DSL | Kotlin |
 | `hypen-golang/` | Go SDK (module system) | Go |
 | `hypen-lsp/` | Language Server Protocol implementation | TypeScript |
 | `tailwind-parse/` | Tailwind CSS class parser | Rust |
-| `hypen-landing/` | Landing page | TypeScript |
 | `hypen-docs/` | Documentation site (Fumadocs) | Markdown |
 | `engine-compatibility-tests/` | Cross-SDK compatibility test suite | Multi |
 | `examples/` | Example apps | Multi |
@@ -300,8 +390,9 @@ Hypen has SDKs for multiple platforms, all driven by the same engine:
 
 ### UI Renderers
 
-- **iOS/macOS** (`hypen-renderer-swift`) — SwiftUI native renderer
-- **Android** (`hypen-renderer-android`) — Jetpack Compose native renderer
+- **iOS/macOS** (`hypen-renderer-swift`) — SwiftUI native renderer (preview; Swift package `HypenSwift` from [hypen-lang/hypen-swiftui](https://github.com/hypen-lang/hypen-swiftui))
+- **Android** (`hypen-renderer-android`) — Jetpack Compose native renderer (`space.hypen:hypen-renderer:0.6.7` on Maven Central)
+- **Desktop** (`hypen-renderer-desktop`, `hypen-browser`) — native desktop renderer and shell (`hypen run desktop` downloads a prebuilt Hypen Browser for macOS, Windows x86-64 and Linux x86-64 from the [GitHub releases](https://github.com/hypen-lang/hypen/releases); the `hypen-renderer-desktop` crate is not on crates.io, use it from a checkout)
 - **Web** (`@hypen-space/web`) — DOM and Canvas renderers for the browser
 
 ### Server SDKs
@@ -309,18 +400,18 @@ Hypen has SDKs for multiple platforms, all driven by the same engine:
 All server SDKs share the same module system (typed state, typed actions, lifecycle hooks, nested modules, session persistence) and speak the same WebSocket patch protocol.
 
 - **Node.js / Bun** (`@hypen-space/server` + `@hypen-space/core`) — [README](hypen-web/packages/server/README.md)
-- **Go** (`github.com/hypen-space/core`) — [README](hypen-golang/README.md)
+- **Go** (`github.com/hypen-lang/hypen/hypen-golang@v0.6.7`) — [README](hypen-golang/README.md)
 - **Rust** (crate: `hypen-server`) — [README](hypen-sdk-rs/README.md)
-- **Swift** (`HypenServer`) — [README](hypen-server-swift/README.md)
-- **Kotlin / JVM** (`space.hypen:hypen-kotlin`) — [README](hypen-kotlin/README.md)
+- **Swift** (`HypenServer` from [hypen-lang/hypen-server-swift](https://github.com/hypen-lang/hypen-server-swift), 0.6.7) — [README](hypen-server-swift/README.md)
+- **Kotlin / JVM** (`space.hypen:hypen-kotlin:0.6.7` on Maven Central, native engine bundled) — [README](hypen-kotlin/README.md)
 
 ### Browser client
 
-- **Web client** (`@hypen-space/web-engine`) — Browser WASM engine, Hypen orchestrator
+- **Web client** (`@hypen-space/web-engine`) — Browser WASM engine. For shipping a browser app, use `hypen build`, which bundles the engine and your modules into a static site.
 
 ## Development
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development workflows and guidelines.
+See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development workflows and guidelines. To rebuild the engine WASM, run `bun run build:wasm` from the repository root. It needs `wasm-pack` and the `wasm32-wasip1` target, and exits with install instructions if they are missing (pass `--install-tools` to `hypen-engine-rs/build-wasm.sh` to install them automatically).
 
 ## Documentation
 
