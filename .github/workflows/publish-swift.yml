@@ -89,6 +89,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          # Use MIRROR_TOKEN for cross-repository pushes, not the checkout token.
+          persist-credentials: false
 
       - name: Split, push, and tag ${{ matrix.name }}
         env:
