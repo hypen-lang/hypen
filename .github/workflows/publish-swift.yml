@@ -39,16 +39,27 @@ jobs:
             name: HypenSwift
           - package: hypen-server-swift
             name: HypenServer
+            needs_engine: true
     steps:
       - uses: actions/checkout@v4
 
+      - uses: dtolnay/rust-toolchain@stable
+        if: ${{ matrix.needs_engine }}
+
+      - name: Build engine with UniFFI
+        if: ${{ matrix.needs_engine }}
+        run: cargo build --release --locked --features uniffi
+        working-directory: hypen-engine-rs
+
       - name: Build ${{ matrix.name }}
-        run: swift build
+        run: swift build ${{ matrix.needs_engine && format('-Xlinker -L{0}/target/release', github.workspace) || '' }}
         working-directory: ${{ matrix.package }}
 
       - name: Test ${{ matrix.name }}
-        run: swift test
+        run: swift test ${{ matrix.needs_engine && format('-Xlinker -L{0}/target/release', github.workspace) || '' }}
         working-directory: ${{ matrix.package }}
+        env:
+          DYLD_LIBRARY_PATH: ${{ github.workspace }}/target/release
 
   # SPM packages are consumed from mirror repos via git URL + tag.
   # This job syncs each subdirectory to its mirror repo and creates a version tag there.
