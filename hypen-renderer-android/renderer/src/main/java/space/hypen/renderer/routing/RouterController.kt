@@ -202,5 +202,5 @@ class RouterController(
             }.toMap()
     }
 
-    private fun decodeSegment(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8)
+    private fun decodeSegment(value: String): String = URLDecoder.decode(value, StandardCharsets.UTF_8.name())
 }
