@@ -73,6 +73,8 @@ jobs:
       publish-lsp: ${{ steps.config.outputs.publish-lsp }}
     steps:
       - id: config
+        env:
+          PR_BODY: ${{ github.event.pull_request.body }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             echo "version=${{ inputs.version }}" >> "$GITHUB_OUTPUT"
@@ -85,7 +87,7 @@ jobs:
             echo "publish-lsp=${{ inputs.publish-lsp }}" >> "$GITHUB_OUTPUT"
           else
             # Extract version from PR body: "Version: X.Y.Z"
-            VERSION=$(echo "${{ github.event.pull_request.body }}" | grep -oP 'Version:\s*\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
+            VERSION=$(printf '%s\n' "$PR_BODY" | grep -oP 'Version:\s*\K[0-9]+\.[0-9]+\.[0-9]+' | head -1)
             if [ -z "$VERSION" ]; then
               echo "::error::PR body must contain 'Version: X.Y.Z'"
               exit 1
@@ -240,6 +242,9 @@ jobs:
     runs-on: ubuntu-latest
     needs: [resolve, build-wasm, github-release]
     if: ${{ needs.resolve.outputs.publish-npm == 'true' }}
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - uses: actions/checkout@v4
 
@@ -249,8 +254,11 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
           registry-url: https://registry.npmjs.org
+
+      - name: Ensure npm supports trusted publishing
+        run: npm install --global npm@11
 
       - uses: actions/download-artifact@v4
         with:
@@ -314,7 +322,6 @@ jobs:
       # skipped so a failed run can be retried.
       - name: Publish npm packages
         env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           VERSION: ${{ needs.resolve.outputs.version }}
         run: |
           set -euo pipefail
@@ -437,12 +444,13 @@ jobs:
     name: Publish LSP Extension
     needs: [resolve, github-release]
     if: ${{ needs.resolve.outputs.publish-lsp == 'true' }}
+    permissions:
+      contents: write
+      id-token: write
     uses: ./.github/workflows/publish-lsp.yml
     with:
       version: ${{ needs.resolve.outputs.version }}
       dry-run: false
-    secrets:
-      VSCE_PAT: ${{ secrets.VSCE_PAT }}
 
   # ── Desktop runner (hypen-browser) installers ────────────────────
   # `hypen run desktop` downloads hypen-browser-<target>.tar.gz from
