@@ -21,9 +21,6 @@ on:
         required: false
         type: boolean
         default: true
-    secrets:
-      VSCE_PAT:
-        required: true
 
 jobs:
   build-and-test:
@@ -147,10 +144,11 @@ jobs:
     if: ${{ !inputs.dry-run }}
     permissions:
       contents: write
+      id-token: write
     steps:
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 24
 
       - uses: actions/download-artifact@v4
         with:
@@ -159,9 +157,7 @@ jobs:
       # --skip-duplicate: a re-run after a partial release succeeds instead
       # of failing on the already-published version.
       - name: Publish
-        run: npx --yes @vscode/vsce@2.32.0 publish --skip-duplicate --packagePath "hypen-lsp-${{ inputs.version }}.vsix"
-        env:
-          VSCE_PAT: ${{ secrets.VSCE_PAT }}
+        run: npx --yes @vscode/vsce@4.1.0 publish --oidc --skip-duplicate --packagePath "hypen-lsp-${{ inputs.version }}.vsix"
 
       # Editors without Marketplace access (Cursor, VSCodium) install the
       # .vsix by hand, so attach it to the vX.Y.Z release when one exists.
