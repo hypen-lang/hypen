@@ -110,7 +110,7 @@ export default app
 
 ## Example apps
 
-Try the [Home Screen](https://hypen-home-screen.ian-dae.workers.dev/) to launch these apps in your browser. Each demo runs on Hypen; the launcher embeds the others with `HypenApp`. Click a screenshot to try it, or follow **Source** to see how it is built.
+Built with Hypen. Explore the apps below or launch them together from the [Home Screen](https://hypen-home-screen.ian-dae.workers.dev/).
 
 <table>
   <tr>
@@ -144,8 +144,6 @@ Try the [Home Screen](https://hypen-home-screen.ian-dae.workers.dev/) to launch 
     <td><a href="https://hypen-home-screen.ian-dae.workers.dev/"><b>Files</b></a> · <a href="examples/home-screen/cloudflare/src/files.ts">Source</a><br>Open Files in the launcher for folders, uploads, downloads and grid or list views.</td>
   </tr>
 </table>
-
-<sub>Actual browser screenshots of the hosted demos, captured at a 390 × 844 viewport. These are demo apps; the food-ordering sample does not place real orders.</sub>
 
 ## Documentation
 
