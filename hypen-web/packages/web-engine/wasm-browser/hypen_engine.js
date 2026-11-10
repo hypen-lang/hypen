@@ -510,6 +510,42 @@ export class WasmEngine {
         wasm.wasmengine_setRenderCallback(this.__wbg_ptr, callback);
     }
     /**
+     * Kebab-case ids of every template check rule this engine build knows
+     * (`ir::refs::ALL_CHECK_RULES`) — the drift-detection counterpart of
+     * `a11yRules()` for `templateRefs`.
+     * @returns {string[]}
+     */
+    templateCheckRules() {
+        const ret = wasm.wasmengine_templateCheckRules(this.__wbg_ptr);
+        var v1 = getArrayJsValueFromWasm0(ret[0], ret[1]).slice();
+        wasm.__wbindgen_free(ret[0], ret[1] * 4, 4);
+        return v1;
+    }
+    /**
+     * Extract every located reference a DSL source makes, for static
+     * template checks (`hypen check`). Returns
+     * `{ refs, diagnostics, declaredComponents, importedComponents }`:
+     * `refs` are `[{ kind: "state"|"action"|"item"|"dataSource"|"component",
+     * name, path, root?, inLoop, inScope?, builtin?, reserved?,
+     * fromExpression, moduleScope?, elementType, span?, line?, col?,
+     * ignoreAll?, ignoreRules? }]` — facts only; validity against a module
+     * is the host's call. `diagnostics` holds the rules the engine decides
+     * alone (`[{ rule, elementType, message, span?, line?, col?,
+     * suppressed? }]`). `line`/`col` follow the `checkAccessibility`
+     * convention (1-based, codepoint columns).
+     * @param {string} source
+     * @returns {any}
+     */
+    templateRefs(source) {
+        const ptr0 = passStringToWasm0(source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_templateRefs(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Return the total number of nodes currently in the instance tree.
      * @returns {number}
      */

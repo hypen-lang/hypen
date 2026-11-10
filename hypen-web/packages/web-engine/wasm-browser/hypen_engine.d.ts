@@ -271,6 +271,26 @@ export class WasmEngine {
      */
     setRenderCallback(callback: Function): void;
     /**
+     * Kebab-case ids of every template check rule this engine build knows
+     * (`ir::refs::ALL_CHECK_RULES`) — the drift-detection counterpart of
+     * `a11yRules()` for `templateRefs`.
+     */
+    templateCheckRules(): string[];
+    /**
+     * Extract every located reference a DSL source makes, for static
+     * template checks (`hypen check`). Returns
+     * `{ refs, diagnostics, declaredComponents, importedComponents }`:
+     * `refs` are `[{ kind: "state"|"action"|"item"|"dataSource"|"component",
+     * name, path, root?, inLoop, inScope?, builtin?, reserved?,
+     * fromExpression, moduleScope?, elementType, span?, line?, col?,
+     * ignoreAll?, ignoreRules? }]` — facts only; validity against a module
+     * is the host's call. `diagnostics` holds the rules the engine decides
+     * alone (`[{ rule, elementType, message, span?, line?, col?,
+     * suppressed? }]`). `line`/`col` follow the `checkAccessibility`
+     * convention (1-based, codepoint columns).
+     */
+    templateRefs(source: string): any;
+    /**
      * Return the total number of nodes currently in the instance tree.
      */
     treeSize(): number;
@@ -450,6 +470,8 @@ export interface InitOutput {
     readonly wasmengine_setListViewport: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmengine_setModule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => [number, number];
     readonly wasmengine_setRenderCallback: (a: number, b: any) => void;
+    readonly wasmengine_templateCheckRules: (a: number) => [number, number];
+    readonly wasmengine_templateRefs: (a: number, b: number, c: number) => [number, number, number];
     readonly wasmengine_treeSize: (a: number) => number;
     readonly wasmengine_unregisterModule: (a: number, b: number, c: number) => void;
     readonly wasmengine_updateState: (a: number, b: number, c: number, d: any, e: number) => [number, number];
