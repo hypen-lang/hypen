@@ -50,6 +50,26 @@ For a Remote UI server, register it on the server. Every session gets its own fo
 new RemoteServer().module("App", appModule).theme(theme).listen(3000);
 ```
 
+### Other SDKs
+
+The Go, Kotlin and Rust SDKs have the same theme with the same resolution rules (they share one fixture). Registration follows each SDK's own shape:
+
+```go
+theme := hypen.NewTheme(hypen.ThemeOptions{Tokens: tokens, Schemes: map[string]hypen.Tokens{"dark": dark}})
+remote.NewRemoteServer().Theme(theme) // one fork per session; handlers: ctx.Theme().Toggle()
+```
+
+```kotlin
+val theme = createTheme(tokens = tokens, schemes = mapOf("dark" to dark))
+HypenServer { theme(theme) }          // one fork per session; handlers: ctx.context?.theme?.toggle()
+```
+
+```rust
+let theme = Theme::builder().tokens(tokens).scheme_tokens("dark", dark).build();
+let app = HypenApp::builder().theme(theme.clone());           // in-process modules
+let session = RemoteSession::new(/* … */).with_theme(&theme); // one fork per session
+```
+
 ## The theme file
 
 Keep the tokens in a JSON file, `theme.json` in the project root (or wherever hypen.json's `"theme"` points), and pass it to `createTheme`. It is the JSON form of the options above:
@@ -188,4 +208,5 @@ The scheme preference is not stored for you in the browser; save `theme.preferen
 - There is no per-prop scheme variant (`.color({ default: ink, dark: paper })`); use tokens, or an expression on `appearance.scheme`.
 - The Android and iOS preview clients do not report their system scheme yet, so a `"system"` preference resolves to the theme's `systemScheme` (default `light`) for them until a handler calls `setSystemScheme`.
 - The Swift server SDK has no theme API.
+- Only the TypeScript server reads the client's reported system scheme (`hello.colorScheme` / `colorScheme`); Go, Kotlin and Rust servers call `SetSystemScheme` themselves. The Go and Rust servers also do not persist a session's scheme preference across a resume.
 - The language server does not follow aliases, so it accepts anything at or below one; `hypen check` resolves them.
