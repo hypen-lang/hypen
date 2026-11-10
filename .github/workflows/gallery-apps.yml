@@ -1,0 +1,151 @@
+name: Gallery Apps
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gallery-apps.yml'
+      - 'scripts/build-gallery.sh'
+      - 'scripts/upload-gallery-r2.py'
+      - 'scripts/tests/test_upload_gallery_r2.py'
+      - 'hypen-renderer-android/**'
+      - 'hypen-renderer-swift/**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to build and publish gallery apps from'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+    secrets:
+      ANDROID_GALLERY_DEBUG_KEYSTORE:
+        description: "Base64-encoded gallery debug keystore (androiddebugkey / android)"
+        required: true
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gallery-apps-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  upload-tests:
+    name: Test R2 upload behavior
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_upload_gallery_r2.py'
+
+  build:
+    name: Build ${{ matrix.platform }} gallery
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            os: ubuntu-latest
+            file: hypen-gallery.apk
+          - platform: ios
+            os: macos-latest
+            file: hypen-gallery-ios-simulator.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+          persist-credentials: false
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            VERSION="${RELEASE_TAG#v}"
+          else
+            VERSION=$(node -p "require('./hypen-cli/package.json').version")
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - name: Restore gallery signing key
+        if: matrix.platform == 'android' && inputs.tag != ''
+        env:
+          GALLERY_KEYSTORE: ${{ secrets.ANDROID_GALLERY_DEBUG_KEYSTORE }}
+        run: |
+          if [ -z "$GALLERY_KEYSTORE" ]; then
+            echo "::error::Set ANDROID_GALLERY_DEBUG_KEYSTORE before publishing gallery releases"
+            exit 1
+          fi
+          mkdir -p "$HOME/.android"
+          printf '%s' "$GALLERY_KEYSTORE" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: matrix.platform == 'android'
+
+      - name: Build gallery
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: bash scripts/build-gallery.sh --platform "$PLATFORM" --version "$VERSION" --output-dir "$GITHUB_WORKSPACE/dist/gallery"
+
+      - name: Package checksum
+        shell: bash
+        working-directory: dist/gallery
+        env:
+          FILE: ${{ matrix.file }}
+        run: shasum -a 256 "$FILE" > "$FILE.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gallery-${{ matrix.platform }}
+          path: |
+            dist/gallery/${{ matrix.file }}
+            dist/gallery/${{ matrix.file }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Publish gallery apps to R2
+    needs: [build, upload-tests]
+    if: inputs.tag != ''
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gallery-*
+          path: dist/gallery
+          merge-multiple: true
+
+      - name: Verify and publish
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || 'hypen' }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          python3 scripts/upload-gallery-r2.py --version "$RELEASE_TAG" --directory dist/gallery --bucket "$R2_BUCKET"
