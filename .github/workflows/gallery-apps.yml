@@ -43,6 +43,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: python3 -m unittest discover -s scripts/tests -p 'test_upload_gallery_r2.py'
 
   build:
@@ -62,6 +64,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.tag || github.sha }}
+          persist-credentials: false
 
       - name: Resolve version
         id: version
@@ -128,6 +131,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - uses: actions/download-artifact@v4
         with:

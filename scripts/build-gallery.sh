@@ -6,12 +6,21 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PLATFORM=""
 VERSION=""
 OUTPUT_DIR="$ROOT_DIR/dist/gallery"
+usage() {
+  echo "Usage: $0 --platform android|ios --version X.Y.Z [--output-dir DIR]" >&2
+  exit 1
+}
 while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --platform|--version|--output-dir)
+      [[ $# -ge 2 && -n "$2" && "$2" != --* ]] || usage
+      ;;
+    *) usage ;;
+  esac
   case "$1" in
     --platform) PLATFORM="$2"; shift 2 ;;
     --version) VERSION="${2#v}"; shift 2 ;;
     --output-dir) OUTPUT_DIR="$2"; shift 2 ;;
-    *) echo "Usage: $0 --platform android|ios --version X.Y.Z [--output-dir DIR]" >&2; exit 1 ;;
   esac
 done
 if [[ ! "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
