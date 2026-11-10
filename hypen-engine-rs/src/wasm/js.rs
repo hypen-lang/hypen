@@ -287,6 +287,39 @@ impl WasmEngine {
         crate::ir::conformance::all_rule_ids()
     }
 
+    /// Extract every located reference a DSL source makes, for static
+    /// template checks (`hypen check`). Returns
+    /// `{ refs, diagnostics, declaredComponents, importedComponents }`:
+    /// `refs` are `[{ kind: "state"|"action"|"item"|"dataSource"|"component",
+    /// name, path, root?, inLoop, inScope?, builtin?, reserved?,
+    /// fromExpression, moduleScope?, elementType, span?, line?, col?,
+    /// ignoreAll?, ignoreRules? }]` — facts only; validity against a module
+    /// is the host's call. `diagnostics` holds the rules the engine decides
+    /// alone (`[{ rule, elementType, message, span?, line?, col?,
+    /// suppressed? }]`). `line`/`col` follow the `checkAccessibility`
+    /// convention (1-based, codepoint columns).
+    #[wasm_bindgen(js_name = templateRefs)]
+    pub fn template_refs(&self, source: &str) -> Result<JsValue, JsValue> {
+        // Parse once here so syntax errors carry the same structured,
+        // pretty-printed shape as every other source-taking binding.
+        hypen_parser::parse_document(source)
+            .map_err(|e| structured_error("parseError", &format_parse_errors(&e)))?;
+        let report = crate::ir::template_refs_source(source)
+            .map_err(|e| structured_error("parseError", &e))?;
+        use serde::Serialize;
+        report
+            .serialize(&serde_wasm_bindgen::Serializer::json_compatible())
+            .map_err(|e| structured_error("serializeError", &format!("{}", e)))
+    }
+
+    /// Kebab-case ids of every template check rule this engine build knows
+    /// (`ir::refs::ALL_CHECK_RULES`) — the drift-detection counterpart of
+    /// `a11yRules()` for `templateRefs`.
+    #[wasm_bindgen(js_name = templateCheckRules)]
+    pub fn template_check_rules(&self) -> Vec<String> {
+        crate::ir::refs::all_check_rule_ids()
+    }
+
     /// Register resources from a JavaScript object (name -> SVG string map).
     #[wasm_bindgen(js_name = registerResources)]
     pub fn register_resources(&mut self, resources_js: JsValue) -> Result<(), JsValue> {

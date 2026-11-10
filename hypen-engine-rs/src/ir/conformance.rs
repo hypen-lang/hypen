@@ -358,21 +358,30 @@ impl IgnoreDirective {
 /// only the literal text `// hypen-a11y-ignore` inside a string can confuse
 /// it, which is pathological enough to accept.
 fn ignore_directive(line: &str) -> Option<IgnoreDirective> {
+    parse_ignore_directive(line, "hypen-a11y-ignore").map(|ids| match ids {
+        None => IgnoreDirective::All,
+        Some(ids) => IgnoreDirective::Rules(ids),
+    })
+}
+
+/// Parse a `// <token> [rule-id[, rule-id…]]` line-comment directive out of
+/// one source line. `None` when the line carries no such directive;
+/// `Some(None)` for the bare form (every rule); `Some(Some(ids))` for the
+/// rule-scoped form. Shared by the accessibility pass (`hypen-a11y-ignore`)
+/// and template reference checks (`hypen-check-ignore`, see
+/// [`crate::ir::refs`]) so both suppression syntaxes stay identical.
+pub(crate) fn parse_ignore_directive(line: &str, token: &str) -> Option<Option<Vec<String>>> {
     let mut rest = line;
     while let Some(pos) = rest.find("//") {
         let comment = rest[pos + 2..].trim_start();
-        if let Some(args) = comment.strip_prefix("hypen-a11y-ignore") {
+        if let Some(args) = comment.strip_prefix(token) {
             if args.is_empty() || args.starts_with(char::is_whitespace) {
                 let ids: Vec<String> = args
                     .split(|c: char| c == ',' || c.is_whitespace())
                     .filter(|s| !s.is_empty())
                     .map(str::to_string)
                     .collect();
-                return Some(if ids.is_empty() {
-                    IgnoreDirective::All
-                } else {
-                    IgnoreDirective::Rules(ids)
-                });
+                return Some(if ids.is_empty() { None } else { Some(ids) });
             }
         }
         rest = &rest[pos + 2..];
