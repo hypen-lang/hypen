@@ -54,6 +54,15 @@ class ClientState(
     @Volatile
     var devicePlane: DevicePlane? = null
 
+    /**
+     * This session's theme — a fork of the one registered with
+     * [HypenServerBuilder.theme] (own scheme preference, shared tokens) —
+     * or `null` when the server has none.
+     */
+    @Volatile
+    var theme: Theme? = null
+        internal set
+
     internal val flushScheduled = AtomicBoolean(false)
 
     /**
@@ -199,6 +208,16 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
     private var componentWatcher: ComponentWatcher? = null
     private val serverScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val resourceJsonList = mutableListOf<String>()
+
+    /** The app's theme ([HypenServerBuilder.theme]); every session forks it. */
+    private val theme: Theme?
+
+    /**
+     * Scheme preference of each session that changed it, so a session
+     * resumed within its TTL comes back in the scheme it was left in.
+     * Dropped when the session expires.
+     */
+    private val sessionSchemes = ConcurrentHashMap<String, String>()
     /**
      * When true, each new session (hello via [openConnection], or the legacy
      * [handleConnect]) builds a per-session [ManagedRouter]
@@ -282,6 +301,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         onConnectionCallback = builder.onConnectionCallback
         onDisconnectionCallback = builder.onDisconnectionCallback
         resourceJsonList.addAll(builder.resourceJsonList)
+        theme = builder.theme
         autoRouterEnabled = builder.autoRouterEnabled
         // The device plane is on by default; it never stops the server from
         // starting. Compression is independent of it: permessage-deflate
@@ -479,6 +499,18 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         engine.setRenderCallback { patches ->
             synchronized(clientState.pendingPatches) { clientState.pendingPatches.addAll(patches) }
             if (clientState.ready) scheduleFlush(clientState)
+        }
+
+        // Theme: a per-session scheme preference over the server's shared
+        // tokens, published to this session's engine as the `theme` /
+        // `appearance` data sources before any module exists or renders.
+        // Later changes (a handler calling `context.theme.setScheme(...)`)
+        // re-render through the render callback above like a state update.
+        theme?.let { appTheme ->
+            val sessionTheme = appTheme.fork(sessionSchemes[session.id] ?: appTheme.preference)
+            clientState.theme = sessionTheme
+            sessionTheme.attach(engine)
+            sessionTheme.onChange { meta -> sessionSchemes[session.id] = meta.preference }
         }
 
         clientState.sendMessage = sendMessage
@@ -1145,6 +1177,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                     client.nestedModules.clear()
                     client.engine.close()
                     client.scope.cancel()
+                    sessionSchemes.remove(client.sessionId)
                     log.info("Session ${client.sessionId} expired")
                 }
             }
@@ -1554,6 +1587,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         // route module the ManagedRouter mounts) bind to the connection's
         // device plane at construction.
         globalContext.devicePlane = client.devicePlane
+        globalContext.setTheme(client.theme)
         client.globalContext = globalContext
 
         // Attach the session's router so per-route modules can read
@@ -1692,6 +1726,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         // built against it bind to the connection's device plane.
         val globalContext = HypenGlobalContext()
         globalContext.devicePlane = client.devicePlane
+        globalContext.setTheme(client.theme)
         client.globalContext = globalContext
 
         // Create new module instance for this client (primary module)
@@ -1921,6 +1956,7 @@ class HypenServerBuilder {
     internal var watchConfig: ComponentWatchConfig? = null
     internal val resourceJsonList = mutableListOf<String>()
     internal var autoRouterEnabled: Boolean = true
+    internal var theme: Theme? = null
     internal val allowedOrigins = mutableListOf<String>()
     internal var authenticator: (suspend (UpgradeRequest) -> Boolean)? = null
     internal val deviceConfig = DeviceServerConfig()
@@ -2016,6 +2052,23 @@ class HypenServerBuilder {
      */
     fun disableAutoRouter() {
         autoRouterEnabled = false
+    }
+
+    /**
+     * Register the app's theme ([createTheme]). Every session gets its own
+     * fork — an independent scheme preference over the shared tokens —
+     * published as the `theme` / `appearance` data sources before the first
+     * render and reachable from handlers as `context.theme`.
+     *
+     * ```kotlin
+     * HypenServer {
+     *     module("App", appModule)
+     *     theme(createTheme(tokens = tokens, schemes = mapOf("dark" to dark)))
+     * }
+     * ```
+     */
+    fun theme(theme: Theme) {
+        this.theme = theme
     }
 
     /**

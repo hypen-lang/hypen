@@ -20,6 +20,7 @@ hypen-kotlin/src/main/kotlin/space/hypen/core/
 ├── Router.kt              # URL routing interface
 ├── ManagedRouter.kt       # Router with history management
 ├── GlobalContext.kt       # Cross-module communication
+├── Theme.kt               # Design tokens + color schemes (`theme` / `appearance` contexts)
 ├── ComponentLoader.kt     # Dynamic component loading
 ├── ComponentResolver.kt   # Component path resolution
 ├── ComponentWatcher.kt    # File watching for hot reload
