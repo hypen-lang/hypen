@@ -3188,6 +3188,12 @@ public enum PatchType: Equatable, Hashable {
      * at the end or every existing case shifts.
      */
     case batchAnimation
+    /**
+     * Remove every child of `id` and tear down their subtrees in one step;
+     * `id` itself stays. Equivalent to a plain `Remove` per child. Appended
+     * after `BatchAnimation` for the ordinal reason above.
+     */
+    case clearChildren
 
 
 
@@ -3230,6 +3236,8 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         case 10: return .setSemantics
         
         case 11: return .batchAnimation
+        
+        case 12: return .clearChildren
         
         default: throw UniffiInternalError.unexpectedEnumCase
         }
@@ -3281,6 +3289,10 @@ public struct FfiConverterTypePatchType: FfiConverterRustBuffer {
         
         case .batchAnimation:
             writeInt(&buf, Int32(11))
+        
+        
+        case .clearChildren:
+            writeInt(&buf, Int32(12))
         
         }
     }
