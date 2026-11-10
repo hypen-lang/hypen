@@ -296,17 +296,11 @@ pub(crate) fn plan_instantiation(template: &IRNode) -> Option<InstantiationPlan>
         *dfs += 1;
 
         let mut static_props = serde_json::Map::new();
-        let mut evaluator = None;
         for (key, value) in &element.props {
             if is_statically_resolvable(value) {
-                if let Some(v) = resolve_prop_value(
-                    key,
-                    value,
-                    &serde_json::Value::Null,
-                    None,
-                    None,
-                    &mut evaluator,
-                ) {
+                if let Some(v) =
+                    resolve_prop_value(key, value, &serde_json::Value::Null, None, None)
+                {
                     if !is_engine_internal_prop(key) {
                         static_props.insert(key.clone(), v);
                     }
@@ -503,7 +497,6 @@ pub(crate) fn apply_compiled_row(
     item: &serde_json::Value,
     item_name: &str,
 ) -> bool {
-    let mut evaluator = None;
     // Nodes whose props changed; semantics deltas run once per node after
     // all its entries are applied (mirrors the dirty-render path).
     let mut touched: Vec<NodeId> = Vec::new();
@@ -531,14 +524,8 @@ pub(crate) fn apply_compiled_row(
 
         // Same substitution + resolution the full pass performs.
         let new_raw = replace_value_item_bindings(&entry.value, item, item_name);
-        let new_resolved = resolve_prop_value(
-            &entry.prop,
-            &new_raw,
-            ctx.state,
-            None,
-            ctx.data_sources,
-            &mut evaluator,
-        );
+        let new_resolved =
+            resolve_prop_value(&entry.prop, &new_raw, ctx.state, None, ctx.data_sources);
 
         let Some(node) = ctx.tree.get_mut(node_id) else {
             return false;
@@ -672,7 +659,6 @@ pub(crate) fn build_row_prototype(
         let mut base = indexmap::IndexMap::new();
         let mut item_entries = Vec::new();
         let mut bindings = Vec::new();
-        let mut evaluator = None;
         for (key, value) in &element.props {
             match value {
                 Value::Binding(b)
@@ -690,14 +676,9 @@ pub(crate) fn build_row_prototype(
             }
             if value_depends_on_item(value, item_name) {
                 item_entries.push((Arc::from(key.as_str()), value.clone()));
-            } else if let Some(v) = resolve_prop_value(
-                key,
-                value,
-                effective_state,
-                None,
-                ctx.data_sources,
-                &mut evaluator,
-            ) {
+            } else if let Some(v) =
+                resolve_prop_value(key, value, effective_state, None, ctx.data_sources)
+            {
                 base.insert(key.clone(), v);
             }
         }
@@ -760,7 +741,6 @@ pub(crate) fn instantiate_row_from_proto(
     let mut ids: Vec<NodeId> = Vec::with_capacity(proto.nodes.len());
     let mut subs: Vec<(usize, String, serde_json::Value)> = Vec::new();
     let mut wire_semantics: Vec<(usize, crate::ir::Semantics)> = Vec::new();
-    let mut evaluator = None;
 
     for (index, proto_node) in proto.nodes.iter().enumerate() {
         let (props, raw) = if proto_node.item_entries.is_empty() {
@@ -781,14 +761,9 @@ pub(crate) fn instantiate_row_from_proto(
             let mut raw_overlay = Vec::with_capacity(proto_node.item_entries.len());
             for (prop, raw_value) in &proto_node.item_entries {
                 let new_raw = replace_value_item_bindings(raw_value, item, item_name);
-                if let Some(v) = resolve_prop_value(
-                    prop,
-                    &new_raw,
-                    ctx.state,
-                    None,
-                    ctx.data_sources,
-                    &mut evaluator,
-                ) {
+                if let Some(v) =
+                    resolve_prop_value(prop, &new_raw, ctx.state, None, ctx.data_sources)
+                {
                     resolved_overlay.push((Arc::clone(prop), v));
                 }
                 raw_overlay.push((Arc::clone(prop), new_raw));

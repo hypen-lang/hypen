@@ -340,7 +340,6 @@ impl InstanceNode {
         state: &serde_json::Value,
         data_sources: Option<&IndexMap<String, serde_json::Value>>,
     ) -> Option<Vec<PropDelta>> {
-        let mut evaluator: Option<exprimo::Evaluator> = None;
         let mut pending: Vec<(String, Option<serde_json::Value>)> = Vec::new();
         for (key, raw) in self.raw_props.iter() {
             if matches!(
@@ -349,7 +348,7 @@ impl InstanceNode {
             ) {
                 continue;
             }
-            match resolve_single_value(raw, state, None, data_sources, &mut evaluator) {
+            match resolve_single_value(raw, state, None, data_sources) {
                 Some(value) => match self.props.get(key) {
                     Some(current) if *current == value => {}
                     Some(_) => pending.push((key.to_string(), Some(value))),

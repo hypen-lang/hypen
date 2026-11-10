@@ -105,11 +105,9 @@ pub(crate) fn resolve_props_iter<'a>(
     data_sources: Option<&IndexMap<String, serde_json::Value>>,
 ) -> ResolvedProps {
     let mut resolved = IndexMap::new();
-    // Lazily built evaluator — only allocated when we hit a TemplateString prop.
-    let mut evaluator: Option<exprimo::Evaluator> = None;
 
     for (key, value) in props {
-        match resolve_prop_value(key, value, state, item, data_sources, &mut evaluator) {
+        match resolve_prop_value(key, value, state, item, data_sources) {
             Some(v) => {
                 resolved.insert(key.to_string(), v);
             }
@@ -137,20 +135,16 @@ pub(crate) fn resolve_prop_value(
     state: &serde_json::Value,
     item: Option<&serde_json::Value>,
     data_sources: Option<&IndexMap<String, serde_json::Value>>,
-    evaluator: &mut Option<exprimo::Evaluator>,
 ) -> Option<serde_json::Value> {
     if key == crate::ir::anim::ANIM_SHARED_KEY_PROP {
         if let Value::TemplateString { template, .. } = value {
-            let eval = evaluator
-                .get_or_insert_with(|| crate::reactive::build_evaluator(state, item, data_sources));
-            return crate::reactive::evaluate_template_string(template, eval)
+            return crate::reactive::evaluate_template(template, state, item, data_sources)
                 .ok()
                 .map(serde_json::Value::String);
         }
-        return resolve_single_value(value, state, item, data_sources, evaluator)
-            .filter(|v| !v.is_null());
+        return resolve_single_value(value, state, item, data_sources).filter(|v| !v.is_null());
     }
-    resolve_single_value(value, state, item, data_sources, evaluator)
+    resolve_single_value(value, state, item, data_sources)
 }
 
 /// Resolve ONE raw prop value against state/item/data-source context.
@@ -166,7 +160,6 @@ pub(crate) fn resolve_single_value(
     state: &serde_json::Value,
     item: Option<&serde_json::Value>,
     data_sources: Option<&IndexMap<String, serde_json::Value>>,
-    evaluator: &mut Option<exprimo::Evaluator>,
 ) -> Option<serde_json::Value> {
     let resolved_value = match value {
         Value::Static(v) => v.clone(),
@@ -201,16 +194,15 @@ pub(crate) fn resolve_single_value(
             }
         }
         Value::TemplateString { template, .. } => {
-            // Build evaluator once and reuse for all template strings
-            let eval = evaluator
-                .get_or_insert_with(|| crate::reactive::build_evaluator(state, item, data_sources));
             // With an i18n catalog present, `t.*` references to missing keys
             // become string literals of the key path before evaluation.
             let rewritten = data_sources
                 .and_then(|ds| ds.get(I18N_PROVIDER))
                 .and_then(|catalog| crate::reactive::i18n::rewrite_missing_keys(template, catalog));
             let template_to_eval = rewritten.as_deref().unwrap_or(template);
-            match crate::reactive::evaluate_template_string(template_to_eval, eval) {
+            // Evaluated against only the state this template reads; see
+            // `reactive::expression` ("Pruned evaluation contexts").
+            match crate::reactive::evaluate_template(template_to_eval, state, item, data_sources) {
                 Ok(result) => serde_json::Value::String(result),
                 Err(e) => {
                     // Surface the failure through the existing logger so devs

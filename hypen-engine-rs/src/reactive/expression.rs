@@ -308,6 +308,311 @@ pub fn build_evaluator(
     Evaluator::new(context, builtin_functions())
 }
 
+// ── Pruned evaluation contexts ──────────────────────────────────────────
+//
+// exprimo owns its context (`HashMap<String, Value>`) and clones on every
+// read: resolving the identifier `state` clones the whole value, and each
+// `.prop` step clones the property it lands on. Handing it the full state
+// therefore costs several deep copies of the entire state tree per
+// expression — `@{state.rows.length}` over a 1,000-row list copied all
+// 1,000 rows three times to produce one number, on every update.
+//
+// So expressions are evaluated against a context that holds only what the
+// expression can reach: for each `root.a.b` chain in its text, the subtree
+// at that path and nothing else. The scan is deliberately conservative —
+// whenever it cannot tell what an expression reads, it keeps more (up to the
+// whole root), never less — so evaluation is observationally identical to
+// evaluation against the full context.
+
+/// How much of a root (`state`, `item`, a data source) an expression reads.
+enum Reach {
+    /// Something the scan can't narrow (`length(state)`, a template literal).
+    Everything,
+    /// The subtrees at these paths. `len_only` marks a `….length` read, which
+    /// needs the array's size but none of its elements.
+    Paths(Vec<(Vec<String>, bool)>),
+}
+
+fn is_ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_' || c == '$'
+}
+
+fn is_ident_char(c: char) -> bool {
+    c.is_alphanumeric() || c == '_' || c == '$'
+}
+
+/// Scan `text` (an expression, or a whole template — text outside `@{…}`
+/// can only make the result keep more) for the paths it reads under each of
+/// `roots`.
+fn scan_reach(text: &str, roots: &[&str]) -> HashMap<String, Reach> {
+    let mut reach: HashMap<String, Reach> = HashMap::new();
+    // Template literals can interpolate arbitrary expressions; don't try.
+    if text.contains('`') {
+        for root in roots {
+            reach.insert((*root).to_string(), Reach::Everything);
+        }
+        return reach;
+    }
+
+    let chars: Vec<char> = text.chars().collect();
+    let len = chars.len();
+    let mut pos = 0;
+    // Last significant (non-whitespace) character before `pos`.
+    let mut prev: Option<char> = None;
+
+    while pos < len {
+        let c = chars[pos];
+        if c == '\'' || c == '"' {
+            // Skip a string literal, honouring backslash escapes.
+            pos += 1;
+            while pos < len && chars[pos] != c {
+                if chars[pos] == '\\' {
+                    pos += 1;
+                }
+                pos += 1;
+            }
+            pos += 1;
+            prev = Some(c);
+            continue;
+        }
+        if !is_ident_start(c) {
+            if !c.is_whitespace() {
+                prev = Some(c);
+            }
+            pos += 1;
+            continue;
+        }
+
+        let start = pos;
+        while pos < len && is_ident_char(chars[pos]) {
+            pos += 1;
+        }
+        let ident: String = chars[start..pos].iter().collect();
+        let is_property = prev == Some('.');
+        prev = Some(chars[pos - 1]);
+        if is_property || !roots.contains(&ident.as_str()) {
+            continue;
+        }
+
+        // Collect the `.a.b.c` chain written directly after the root.
+        let mut segments: Vec<String> = Vec::new();
+        while pos + 1 < len && chars[pos] == '.' && is_ident_start(chars[pos + 1]) {
+            let seg_start = pos + 1;
+            pos = seg_start;
+            while pos < len && is_ident_char(chars[pos]) {
+                pos += 1;
+            }
+            segments.push(chars[seg_start..pos].iter().collect());
+        }
+        // A chain that ends in a call (`state.tags.includes(x)`) names a
+        // method, not data: the receiver is what is read.
+        let mut next = pos;
+        while next < len && chars[next].is_whitespace() {
+            next += 1;
+        }
+        if next < len && chars[next] == '(' {
+            segments.pop();
+        }
+
+        let entry = reach
+            .entry(ident)
+            .or_insert_with(|| Reach::Paths(Vec::new()));
+        if segments.is_empty() {
+            // A bare root (`length(state)`, `state [k]`, `state . a`).
+            *entry = Reach::Everything;
+        } else if let Reach::Paths(paths) = entry {
+            let len_only = segments.last().map(String::as_str) == Some("length");
+            paths.push((segments, len_only));
+        }
+    }
+    reach
+}
+
+/// Copy the part of `source` reachable through `paths` into a fresh value.
+fn prune_value(source: &Value, paths: &[(Vec<String>, bool)]) -> Value {
+    // Full subtrees first, shortest first, so a path already covered by a
+    // kept ancestor is skipped and a `.length` stand-in never shadows real
+    // elements another chain reads.
+    let mut order: Vec<&(Vec<String>, bool)> = paths.iter().collect();
+    order.sort_by_key(|(segments, len_only)| (*len_only, segments.len()));
+
+    let mut out = Value::Object(serde_json::Map::new());
+    // Paths at which `out` already holds the complete source subtree.
+    let mut complete: Vec<&[String]> = Vec::new();
+
+    'paths: for (segments, len_only) in order {
+        // `….length` on an array needs only the array's size.
+        let (walk, stub_array) = if *len_only {
+            (&segments[..segments.len() - 1], true)
+        } else {
+            (&segments[..], false)
+        };
+        if complete.iter().any(|done| segments.starts_with(done)) {
+            continue;
+        }
+
+        // Walk the source. Reading through anything but an object ends the
+        // walk there: keep that value whole (it is an array, a primitive or
+        // null — whatever the expression does next, it does to exactly it).
+        let mut cursor = source;
+        let mut depth = 0;
+        while depth < walk.len() {
+            match cursor {
+                Value::Object(map) => match map.get(&walk[depth]) {
+                    Some(next) => {
+                        cursor = next;
+                        depth += 1;
+                    }
+                    // Absent key: absent in the pruned copy too — but the
+                    // objects leading up to it must exist, so the read
+                    // fails (or yields null) at the same step.
+                    None => {
+                        ensure_objects(&mut out, &walk[..depth]);
+                        continue 'paths;
+                    }
+                },
+                _ => break,
+            }
+        }
+        let reached_end = depth == walk.len();
+        let kept = if stub_array && reached_end {
+            match cursor {
+                // Same length, no elements: all `.length` can observe.
+                Value::Array(items) => Value::Array(vec![Value::Null; items.len()]),
+                // `.length` of an object is a key lookup; of anything else,
+                // an error that quotes the value. Keep what it needs.
+                Value::Object(map) => match map.get("length") {
+                    Some(v) => {
+                        insert_at(&mut out, segments, v.clone());
+                        continue;
+                    }
+                    None => {
+                        ensure_objects(&mut out, walk);
+                        continue;
+                    }
+                },
+                other => other.clone(),
+            }
+        } else {
+            cursor.clone()
+        };
+        let at = &segments[..depth];
+        if at.is_empty() {
+            // The root itself is not an object; nothing narrower exists.
+            return source.clone();
+        }
+        insert_at(&mut out, at, kept);
+        if !(stub_array && reached_end) {
+            complete.push(at);
+        }
+    }
+    out
+}
+
+/// Make sure `out[path]` exists and every step to it is an object, without
+/// disturbing anything already there.
+fn ensure_objects(out: &mut Value, path: &[String]) {
+    let mut cursor = out;
+    for segment in path {
+        let Value::Object(map) = cursor else { return };
+        cursor = map
+            .entry(segment.clone())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    }
+}
+
+/// Set `out[path] = value`, creating the objects on the way.
+fn insert_at(out: &mut Value, path: &[String], value: Value) {
+    let mut cursor = out;
+    for (i, segment) in path.iter().enumerate() {
+        let Value::Object(map) = cursor else { return };
+        if i + 1 == path.len() {
+            map.insert(segment.clone(), value);
+            return;
+        }
+        cursor = map
+            .entry(segment.clone())
+            .or_insert_with(|| Value::Object(serde_json::Map::new()));
+    }
+}
+
+/// Build an [`Evaluator`] whose context holds only what `text` can read from
+/// `state`, `item` and the data sources. Evaluating any expression in `text`
+/// with it gives the same result as with [`build_evaluator`], without copying
+/// state the expression never touches.
+pub fn build_evaluator_for(
+    text: &str,
+    state: &Value,
+    item: Option<&Value>,
+    data_sources: Option<&indexmap::IndexMap<String, Value>>,
+) -> Evaluator {
+    thread_local! {
+        static BUILTINS: HashMap<String, Arc<dyn CustomFunction>> = builtin_functions();
+    }
+
+    let mut roots: Vec<&str> = vec!["state"];
+    if item.is_some() {
+        roots.push("item");
+    }
+    if let Some(ds_map) = data_sources {
+        roots.extend(ds_map.keys().map(String::as_str));
+    }
+    let reach = scan_reach(text, &roots);
+
+    let mut context: HashMap<String, Value> = HashMap::with_capacity(roots.len());
+    let mut add = |name: &str, source: &Value| {
+        let value = match reach.get(name) {
+            Some(Reach::Everything) => source.clone(),
+            Some(Reach::Paths(paths)) => prune_value(source, paths),
+            // Never mentioned: the identifier must still resolve, to
+            // something of the same kind, in case a later lookup is by a
+            // name the scan does not model.
+            None => match source {
+                Value::Object(_) => Value::Object(serde_json::Map::new()),
+                other => other.clone(),
+            },
+        };
+        context.insert(name.to_string(), value);
+    };
+    add("state", state);
+    if let Some(item_value) = item {
+        add("item", item_value);
+    }
+    if let Some(ds_map) = data_sources {
+        for (provider, ds_state) in ds_map {
+            add(provider, ds_state);
+        }
+    }
+
+    Evaluator::new(context, BUILTINS.with(|b| b.clone()))
+}
+
+/// Evaluate every `@{…}` segment of `template` against state, item and data
+/// sources. Equivalent to [`build_evaluator`] + [`evaluate_template_string`],
+/// but copies only the state the template reads.
+pub fn evaluate_template(
+    template: &str,
+    state: &Value,
+    item: Option<&Value>,
+    data_sources: Option<&indexmap::IndexMap<String, Value>>,
+) -> Result<String, EngineError> {
+    let evaluator = build_evaluator_for(template, state, item, data_sources);
+    evaluate_template_string(template, &evaluator)
+}
+
+/// Evaluate one expression (no `@{…}` wrapper) against state, item and data
+/// sources, keeping the typed result. Copies only the state it reads.
+pub fn evaluate_expression_with(
+    expr: &str,
+    state: &Value,
+    item: Option<&Value>,
+    data_sources: Option<&indexmap::IndexMap<String, Value>>,
+) -> Result<Value, EngineError> {
+    build_evaluator_for(expr, state, item, data_sources)
+        .evaluate(expr)
+        .map_err(|e| EngineError::ExpressionError(e.to_string()))
+}
+
 /// Upper bound on memoized context-free expressions; the memo is cleared
 /// wholesale when it fills, so a pathological stream of unique expressions
 /// can't grow it without bound.
@@ -435,6 +740,152 @@ pub fn evaluate_template_string(
 mod tests {
     use super::*;
     use serde_json::json;
+
+    /// A pruned context must be invisible: every expression evaluates to
+    /// exactly what it does against the full state — value or error.
+    #[test]
+    fn pruned_context_matches_full_context() {
+        let state = json!({
+            "rows": [{"id": 1, "name": "a", "tags": ["x"]}, {"id": 2, "name": "b"}],
+            "empty": [],
+            "user": {"name": "Ada", "role": "admin", "length": 7, "prefs": {"dark": true}},
+            "title": "héllo",
+            "count": 3,
+            "flag": false,
+            "nothing": null,
+            "tags": ["a", "b"],
+            "state": {"nested": 1},
+            "item": "shadow",
+        });
+        let item = json!({"selected": true, "label": "row", "list": [1, 2, 3], "meta": {"k": "v"}});
+        let mut ds = indexmap::IndexMap::new();
+        ds.insert("feed".to_string(), json!({"posts": [1, 2], "status": {"ok": true}}));
+
+        let exprs = [
+            "state.rows.length",
+            "state.rows.length + ' rows'",
+            "state.rows.length > 1 ? state.user.name : state.title",
+            "state.rows.length == state.tags.length",
+            "state.rows.length + state.rows.includes(1)",
+            "state.empty.length == 0",
+            "state.user.length",
+            "state.title.length",
+            "state.count.length",
+            "state.nothing.length",
+            "state.missing.length",
+            "state.missing",
+            "state.missing.deeper",
+            "state.user.missing.deeper",
+            "state.user.name + ' (' + state.user.role + ')'",
+            "state.user.prefs.dark ? 'd' : 'l'",
+            "state.user.hasOwnProperty('name')",
+            "state.user.hasOwnProperty('nope')",
+            "state.hasOwnProperty('count')",
+            "state.tags.includes('a')",
+            "state.tags.includes (state.title)",
+            "state.rows.name",
+            "state.rows.name.first",
+            "state.count.foo",
+            "length(state.title)",
+            "length(state.rows)",
+            "length(state.user)",
+            "length(state)",
+            "length(item)",
+            "state.state.nested",
+            "state.item",
+            "state . count",
+            "state. count",
+            "state .count",
+            "state.user .name",
+            "state.count + 1",
+            "state.flag || state.user.prefs.dark",
+            "'state.count is ' + state.count",
+            "\"it's state.rows\" + state.rows.length",
+            "'a\\'b state.nope' + state.count",
+            "item.selected ? 'on' : 'off'",
+            "item.list.length",
+            "item.list.includes(2)",
+            "item.meta.k + state.title",
+            "item.nope.deeper",
+            "feed.posts.length",
+            "feed.status.ok",
+            "feed.posts.includes(2)",
+            "feed",
+            "unknown.thing",
+            "state.rows.length.foo",
+            "state.user.name.length",
+            "state.rows.length ? state.rows : 0",
+            "state",
+            "1 + 2",
+        ];
+
+        let full = build_evaluator(&state, Some(&item), Some(&ds));
+        for expr in exprs {
+            let expected = full.evaluate(expr).map_err(|e| e.to_string());
+            let got = build_evaluator_for(expr, &state, Some(&item), Some(&ds))
+                .evaluate(expr)
+                .map_err(|e| e.to_string());
+            assert_eq!(got, expected, "expression: {expr}");
+
+            let template = format!("[@{{{expr}}}] state.user.name @{{state.count}}");
+            let expected = evaluate_template_string(&template, &full).map_err(|e| e.to_string());
+            let got = evaluate_template(&template, &state, Some(&item), Some(&ds))
+                .map_err(|e| e.to_string());
+            assert_eq!(got, expected, "template: {template}");
+        }
+
+        // Without an item or data sources, those identifiers stay undefined.
+        let full = build_evaluator(&state, None, None);
+        for expr in ["item.selected", "feed.posts.length", "state.count"] {
+            assert_eq!(
+                build_evaluator_for(expr, &state, None, None)
+                    .evaluate(expr)
+                    .map_err(|e| e.to_string()),
+                full.evaluate(expr).map_err(|e| e.to_string()),
+                "expression: {expr}"
+            );
+        }
+
+        // A state that is not an object at all.
+        for odd in [json!(null), json!([1, 2]), json!("s"), json!(5)] {
+            let full = build_evaluator(&odd, None, None);
+            for expr in ["state.length", "state.a.b", "state", "length(state)"] {
+                assert_eq!(
+                    build_evaluator_for(expr, &odd, None, None)
+                        .evaluate(expr)
+                        .map_err(|e| e.to_string()),
+                    full.evaluate(expr).map_err(|e| e.to_string()),
+                    "state {odd}, expression: {expr}"
+                );
+            }
+        }
+    }
+
+    /// The point of pruning: `.length` of a big array copies none of it, and
+    /// untouched siblings are not copied at all.
+    #[test]
+    fn pruned_context_copies_only_what_is_read() {
+        let state = json!({
+            "rows": [{"big": "x"}, {"big": "y"}, {"big": "z"}],
+            "other": {"huge": [1, 2, 3]},
+            "name": "n",
+        });
+        let reach = scan_reach("state.rows.length + state.name", &["state"]);
+        let Some(Reach::Paths(paths)) = reach.get("state") else {
+            panic!("expected paths");
+        };
+        assert_eq!(
+            prune_value(&state, paths),
+            json!({"rows": [null, null, null], "name": "n"})
+        );
+
+        // …unless something else reads the elements.
+        let reach = scan_reach("state.rows.length + state.rows.includes(1)", &["state"]);
+        let Some(Reach::Paths(paths)) = reach.get("state") else {
+            panic!("expected paths");
+        };
+        assert_eq!(prune_value(&state, paths), json!({"rows": state["rows"]}));
+    }
 
     /// The memoized context-free path must be observationally identical
     /// to a fresh evaluator with an empty context — first call (fills the
