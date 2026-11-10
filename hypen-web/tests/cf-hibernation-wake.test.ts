@@ -122,6 +122,9 @@ class ClientTree {
         }
         case "detach": this.unlink(p.id); break;
         case "remove": this.unlink(p.id); break;
+        case "clearChildren":
+          for (const c of [...(this.children.get(p.id) ?? [])]) this.unlink(c);
+          break;
       }
     }
   }
