@@ -53,7 +53,7 @@ The first time you run the CLI interactively on a machine it shows a short tour.
 | [`hypen dev`](#hypen-dev) | Development server with hot reload |
 | [`hypen build`](#hypen-build) | Production build |
 | [`hypen generate`](#hypen-generate) | Write `.hypen/components.generated.ts` |
-| [`hypen check [path...]`](#hypen-check) | Accessibility checks (alias: `hypen a11y`) |
+| [`hypen check [path...]`](#hypen-check) | Accessibility + template checks (`hypen a11y`: accessibility only) |
 | [`hypen studio`](#hypen-studio) | Hypen Studio IDE |
 | [`hypen test`](#hypen-test) | Studio Test Mode |
 | [`hypen run <android\|ios\|desktop>`](#hypen-run) | Launch the app on a device, simulator or desktop runner |
@@ -242,21 +242,56 @@ Scans the components directory (`components` in `hypen.json`, default `./src/com
 
 ### `hypen check`
 
-Run the engine's accessibility conformance pass over your `.hypen` sources. `hypen a11y` is an alias.
+Statically check your `.hypen` sources: the engine's accessibility conformance pass, plus template checks that cross-check each template against its module and the rest of the project. `hypen a11y` runs the accessibility pass only.
 
 ```bash
 hypen check                                        # all project components
 hypen check src/components/App/component.hypen     # specific files or directories
+hypen a11y                                         # accessibility only
 ```
 
-Findings print per file. Suppress a finding with a trailing
-`// hypen-a11y-ignore [rule-id]` comment (or one on the line above), or
-project-wide via `hypen.json`: `"a11y": { "ignoreRules": ["rule-id"] }`.
+Findings print per file as `file:line:col: a11y[rule] …` or `file:line:col: check[rule] …`.
+
+#### Template checks
+
+These catch mistakes that otherwise fail silently at runtime (an empty text, a button that does nothing):
+
+| Rule | Fires when |
+|------|------------|
+| `unknown-state-path` | `@state.x` names a root key that is not in the module's initial state (`defineState(...)`), or a key missing under a plain, non-empty object in it |
+| `unknown-action` | `@actions.x` has no `.onAction("x", …)` handler |
+| `unknown-component` | An element is neither built in nor a component in the project (a `.hypen` file, a single-file `.ts` component, or a `component`/`module` declaration or `import` in the same file) |
+| `item-outside-loop` | `@item…` is used outside any `ForEach`/`List`/`Grid`, and the component is the entry or is only ever rendered outside loops |
+| `unknown-ignore-rule` | A `// hypen-check-ignore` directive names a rule that does not exist |
+
+The checks are conservative, because a check that fires on correct code gets switched off:
+
+- State paths are never judged through `null`, arrays, strings/numbers (`.length`, method calls) or empty objects, which are typically filled in later. A root key or action that *any* module in the project provides is not flagged, since some hosts share state and dispatch across modules.
+- A component template written as a row (`Text("@{item.title}")` with no loop of its own) is fine when some template renders it inside a loop, including through other components.
+- Data-source references (`@spacetime.messages`) are not checked: providers are registered at runtime. Applicator names are not checked either: renderers pass unknown applicators through (the DOM renderer as CSS properties), so there is no fixed list to check against.
+
+The module for `Name/component.hypen` is `Name/component.ts` (and `Name.ts` for `Name.hypen`), the same pairing component discovery uses; its default export is loaded to read the initial state and handlers. Templates with no module file of their own, modules that fail to load, and projects whose modules are not TypeScript (Go, Kotlin, …) get only the module-independent rules (`unknown-component`, `item-outside-loop`), and the report says which templates were affected. A skipped cross-check never reads as a clean pass.
+
+#### Suppressing findings
+
+Suppress an accessibility finding with a trailing `// hypen-a11y-ignore [rule-id]`
+comment, and a template finding with `// hypen-check-ignore [rule-id]`, either
+trailing the line or alone on the line above (for template checks, also the line
+above the element carrying the reference). A bare directive suppresses every rule.
+Project-wide, use `hypen.json`:
+
+```json
+{
+  "a11y": { "ignoreRules": ["non-portable-aria"] },
+  "check": { "ignoreRules": ["unknown-component"] }
+}
+```
+
 Suppressed findings are counted in the report but never in the exit code.
 
 Exit codes: `0` clean, `1` findings, `2` couldn't check (missing path or
 parse error; parse errors print as `file:line:col: parse error: ...`). Use
-`hypen dev --a11y` to get the same findings on every rebuild during
+`hypen dev --a11y` to get the accessibility findings on every rebuild during
 development.
 
 ### `hypen studio`

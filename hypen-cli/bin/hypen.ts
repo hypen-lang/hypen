@@ -79,7 +79,8 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${pink("dev")}             Start development server
     ${pink("build")}           Build for production
     ${pink("generate")}        Generate component imports
-    ${pink("check")} [path...] Accessibility checks over .hypen files (alias: ${pink("a11y")})
+    ${pink("check")} [path...] Accessibility + template checks over .hypen files
+    ${pink("a11y")} [path...]  Accessibility checks only
     ${pink("studio")}          Open Hypen Studio IDE
     ${pink("test")}            Open Studio Test Mode (live previews + device mirrors)
     ${pink("run")} <platform>  Install and launch on device (android|ios|desktop)
@@ -196,10 +197,39 @@ const COMMAND_HELP: Record<string, string> = {
   project root.
 `,
   check: `
-  ${boldPink("hypen check")} ${dim("-")} Run accessibility conformance over .hypen files
+  ${boldPink("hypen check")} ${dim("-")} Check .hypen files: accessibility + template references
 
   ${boldYellow("Usage:")}
-    hypen check [path...]      ${dim("(alias: hypen a11y)")}
+    hypen check [path...]      ${dim("(accessibility only: hypen a11y [path...])")}
+
+  Paths may be files or directories; with none, the project's components
+  directory is checked. Besides accessibility conformance, each template is
+  checked against its module and the project:
+    unknown-state-path   @state.x not in the module's initial state
+    unknown-action       @actions.x with no onAction handler
+    unknown-component    not built in and not a component in the project
+    item-outside-loop    @item… where no ForEach/List/Grid supplies a row
+  Templates without a TypeScript module get only the module-independent
+  rules, and the report says so.
+
+  Suppress a finding with a trailing ${dim("// hypen-a11y-ignore [rule-id, ...]")} or
+  ${dim("// hypen-check-ignore [rule-id, ...]")} comment (or one on the line above),
+  or project-wide via hypen.json ${dim('"a11y": { "ignoreRules": [...] }')} /
+  ${dim('"check": { "ignoreRules": [...] }')}. Suppressed findings are counted.
+
+  ${boldYellow("Exit codes:")}
+    0  clean    1  findings    2  could not check (missing path, parse error)
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen check
+    ${dim("$")} hypen check src/components/App/component.hypen
+    ${dim("$")} hypen a11y
+`,
+  a11y: `
+  ${boldPink("hypen a11y")} ${dim("-")} Run accessibility conformance over .hypen files
+
+  ${boldYellow("Usage:")}
+    hypen a11y [path...]       ${dim("(hypen check adds template checks)")}
 
   Paths may be files or directories; with none, the project's components
   directory is checked. Suppress a finding with a trailing
@@ -208,10 +238,6 @@ const COMMAND_HELP: Record<string, string> = {
 
   ${boldYellow("Exit codes:")}
     0  clean    1  findings    2  could not check (missing path, parse error)
-
-  ${boldYellow("Examples:")}
-    ${dim("$")} hypen check
-    ${dim("$")} hypen check src/components/App/component.hypen
 `,
   studio: `
   ${boldPink("hypen studio")} ${dim("-")} Open Hypen Studio IDE
@@ -253,7 +279,6 @@ const COMMAND_HELP: Record<string, string> = {
     ${dim("$")} hypen test --port 4000 --studio-port 5180 --no-open
 `,
 };
-COMMAND_HELP.a11y = COMMAND_HELP.check!;
 
 interface Config {
   components: string;
@@ -266,6 +291,8 @@ interface Config {
    * `hypen dev` rebuilds without the `--a11y` flag.
    */
   a11y?: { ignoreRules?: string[]; dev?: boolean };
+  /** Template checks: `ignoreRules` suppresses those rule ids project-wide. */
+  check?: { ignoreRules?: string[] };
 }
 
 async function loadConfig(): Promise<Config> {
@@ -294,6 +321,16 @@ async function loadConfig(): Promise<Config> {
                 // Anything but literal `true` stays off — dev-loop findings
                 // are strictly opt-in.
                 dev: config.a11y.dev === true,
+              }
+            : undefined,
+        check:
+          config.check && typeof config.check === "object"
+            ? {
+                ignoreRules: Array.isArray(config.check.ignoreRules)
+                  ? config.check.ignoreRules.filter(
+                      (rule: unknown): rule is string => typeof rule === "string",
+                    )
+                  : undefined,
               }
             : undefined,
       };
@@ -838,7 +875,9 @@ async function generateComponents() {
 }
 
 /**
- * Run the accessibility conformance check: `hypen check [path...]`.
+ * Run `hypen check [path...]` (accessibility conformance + template checks,
+ * see `src/check-template.ts`) or `hypen a11y [path...]` (accessibility
+ * only).
  *
  * With positional paths, checks exactly those targets (a file is checked
  * as-is, a directory is scanned for `.hypen` sources), resolved against the
@@ -853,26 +892,40 @@ async function generateComponents() {
  * silences rules project-wide. Suppressed findings are reported as a count,
  * never counted toward the exit code.
  */
-async function checkAccessibility(paths: string[]) {
+async function checkAccessibility(paths: string[], options: { templates: boolean }) {
   const { runCheck, resolveCheckTargets, COULD_NOT_CHECK } = await import(
     "../src/check.js"
   );
+  const { runTemplateCheck, combineOutcomes } = await import("../src/check-template.js");
 
   const projectRoot = resolve(".");
   const config = await loadConfig();
   const ignoreRules = config.a11y?.ignoreRules;
-  let count: number;
+  const componentsDir = resolve(config.components || "./src/components");
+  // A script entry (`./src/app.ts`) names no component.
+  const entry = config.entry && !/[./\\]/.test(config.entry) ? config.entry : undefined;
+  let files: string[] | undefined;
   let missingPaths: string[] = [];
   if (paths.length > 0) {
-    const { files, missing } = resolveCheckTargets(paths, projectRoot);
-    missingPaths = missing;
-    for (const path of missing) {
+    const resolved = resolveCheckTargets(paths, projectRoot);
+    files = resolved.files;
+    missingPaths = resolved.missing;
+    for (const path of missingPaths) {
       console.error(`  ${path}: no such file or directory`);
     }
-    count = await runCheck({ files, projectRoot, ignoreRules });
-  } else {
-    const componentsDir = resolve(config.components || "./src/components");
-    count = await runCheck({ componentsDir, projectRoot, ignoreRules });
+  }
+  let count = files
+    ? await runCheck({ files, projectRoot, ignoreRules })
+    : await runCheck({ componentsDir, projectRoot, ignoreRules });
+  if (options.templates) {
+    const templateCount = await runTemplateCheck({
+      projectRoot,
+      componentsDir,
+      files,
+      entry,
+      ignoreRules: config.check?.ignoreRules,
+    });
+    count = combineOutcomes(count, templateCount);
   }
 
   // Exit codes: 0 = ran & clean, 1 = ran & found issues, 2 = could not
@@ -1635,8 +1688,11 @@ switch (command) {
     break;
 
   case "check":
+    await checkAccessibility(positionals.slice(1), { templates: true });
+    break;
+
   case "a11y":
-    await checkAccessibility(positionals.slice(1));
+    await checkAccessibility(positionals.slice(1), { templates: false });
     break;
 
   case "studio":
