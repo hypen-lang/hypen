@@ -638,6 +638,33 @@ Button { Text("Submit") }
 
 **Platform Support:** Web, Android, iOS
 
+### Color Scheme Variants
+
+Use `light` and `dark` keys for a value that differs by color scheme:
+
+```hypen
+Text("Beta")
+    .color({default: "#8A6D00", dark: "#FFD54F"})
+
+// Combined with breakpoints and states
+Button { Text("Save") }
+    .backgroundColor({default: "#3B82F6", dark: "#1E40AF", hover: "#2563EB"})
+```
+
+| Key | Applies when |
+|-----|--------------|
+| `light` | The active scheme is `light` |
+| `dark` | The active scheme is `dark` |
+| `default` | Any other case, including an app with no theme |
+
+The active scheme comes from the app's [theme](/docs/guide/theming), so an app needs one (`createTheme()` with no tokens is enough) for `dark` to ever apply. The engine resolves these keys and sends the renderer an ordinary value, so they need no renderer support. `light` / `dark` set the base value; breakpoint and state keys still override it.
+
+Tailwind's `dark:` prefix does the same thing: `.tw("bg-white dark:bg-black")` renders `bg-black` while the scheme is `dark`. Combining it with another prefix (`dark:md:…`, `dark:hover:…`) is not supported.
+
+The `light` / `dark` values and the `default` beside them must be literals. For a value that comes from state or from a token, use a [theme token](/docs/guide/theming#using-tokens-in-templates), which already follows the scheme.
+
+**Platform Support:** All renderers
+
 ### Variant Limitations
 
 On the web, variants are emitted as CSS rules (a media query for a breakpoint, a

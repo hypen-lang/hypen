@@ -49,6 +49,35 @@ pub enum Value {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<serde_json::Value>,
     },
+    /// Color-scheme-switched value, produced only by the value-map applicator
+    /// form with `light` / `dark` keys — `.color({ default: "#111", dark:
+    /// "#fff" })` — never by the parser. The active scheme is read from the
+    /// theme's `appearance.scheme` data source ([`SCHEME_PROVIDER`] /
+    /// [`SCHEME_PATH`]) and picks the matching case; a miss — including no
+    /// theme registered at all — falls back to `default`, and with no default
+    /// the prop resolves to *absent*, exactly like [`Value::StateSwitch`].
+    ///
+    /// Engine-internal for the same reason: `cases` / `default` are plain
+    /// JSON literals, so resolved props and patches carry an ordinary value
+    /// and no renderer ever sees this variant.
+    SchemeSwitch {
+        /// Scheme name (`"light"` / `"dark"`) → value for this prop.
+        cases: IndexMap<String, serde_json::Value>,
+        /// The `default:` entry of the map, when it had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<serde_json::Value>,
+    },
+}
+
+/// Data-source provider a theme publishes its active scheme under.
+pub const SCHEME_PROVIDER: &str = "appearance";
+/// Key of the active scheme name inside [`SCHEME_PROVIDER`].
+pub const SCHEME_PATH: &str = "scheme";
+
+/// The binding a [`Value::SchemeSwitch`] depends on (`appearance.scheme`):
+/// registered in the dependency graph so a scheme change dirties the node.
+pub fn scheme_switch_binding() -> Binding {
+    Binding::data_source(SCHEME_PROVIDER, vec![SCHEME_PATH.to_string()])
 }
 
 /// First-class IR node - distinguishes between regular elements and control flow constructs

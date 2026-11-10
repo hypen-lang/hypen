@@ -72,6 +72,18 @@ pub const STATES: &[&str] = &[
 /// `.padding({ default: 8, md: 16 })`.
 pub const DEFAULT_KEY: &str = "default";
 
+/// Color-scheme tokens usable as keys in a value-map applicator
+/// (`.color({ default: "#111", dark: "#fff" })`). Unlike breakpoints and
+/// states they are resolved by the ENGINE, against the theme's active scheme
+/// (`appearance.scheme`), and never appear in a prop key — so they are not
+/// part of [`is_variant_token`] or of the prop-key grammar above.
+pub const SCHEMES: &[&str] = &["light", "dark"];
+
+/// True if `tok` is a color-scheme token (`light` / `dark`).
+pub fn is_scheme_token(tok: &str) -> bool {
+    SCHEMES.contains(&tok)
+}
+
 /// True if `tok` is a known breakpoint token (`sm`/`md`/`lg`/`xl`/`2xl`).
 pub fn is_breakpoint(tok: &str) -> bool {
     BREAKPOINTS.iter().any(|(name, _)| *name == tok)

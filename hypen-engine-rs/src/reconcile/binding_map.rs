@@ -672,6 +672,9 @@ pub(crate) fn build_row_prototype(
                 Value::StateSwitch { path, .. } => {
                     bindings.push(super::diff::state_switch_binding(path));
                 }
+                Value::SchemeSwitch { .. } => {
+                    bindings.push(crate::ir::node::scheme_switch_binding());
+                }
                 _ => {}
             }
             if value_depends_on_item(value, item_name) {

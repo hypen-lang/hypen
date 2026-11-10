@@ -609,7 +609,9 @@ impl Collector<'_> {
             // Lists/maps keep nested references as strings (`"@{item.id}"`,
             // `"@actions.x"`) — see `parser_value_to_ir`.
             Value::Static(json) => self.static_json(json, ctx, site),
-            Value::Resource(_) => {}
+            // Literal-only, and its one dependency (`appearance.scheme`) is
+            // engine-chosen rather than something the template wrote.
+            Value::Resource(_) | Value::SchemeSwitch { .. } => {}
         }
     }
 
@@ -940,7 +942,9 @@ mod tests {
         let ds = of_kind(&r, RefKind::DataSource);
         let names: Vec<&str> = ds.iter().map(|d| d.name.as_str()).collect();
         assert_eq!(names, ["theme.color.a", "theme.color.b"]);
-        assert!(ds.iter().all(|d| d.from_expression && d.root.as_deref() == Some("theme")));
+        assert!(ds
+            .iter()
+            .all(|d| d.from_expression && d.root.as_deref() == Some("theme")));
         assert_eq!(ds[0].line, Some(2));
         assert!(ds[0].col < ds[1].col);
     }

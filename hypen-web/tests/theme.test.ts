@@ -292,6 +292,38 @@ describe("engine integration", () => {
     expect(batches).toBe(1);
   });
 
+  test("light/dark keys in a value map follow the theme's scheme", async () => {
+    const { patches, theme } = await engineWith(
+      `Text("Hi").color({default: "#111111", dark: "#ffffff", hover: "#ff0000"}).opacity({default: 1, dark: 0.8})`
+    );
+    expect(props(patches)).toEqual(
+      expect.arrayContaining([
+        ["color.0", "#111111"],
+        ["color:hover.0", "#ff0000"],
+        ["opacity.0", 1],
+      ])
+    );
+    patches.length = 0;
+    theme.setScheme("dark");
+    await flushMicrotasks();
+    expect(props(patches).sort()).toEqual(
+      [
+        ["color.0", "#ffffff"],
+        ["opacity.0", 0.8],
+      ].sort()
+    );
+    // A custom scheme has no key of its own: back to `default`.
+    patches.length = 0;
+    theme.setScheme("sepia");
+    await flushMicrotasks();
+    expect(props(patches).sort()).toEqual(
+      [
+        ["color.0", "#111111"],
+        ["opacity.0", 1],
+      ].sort()
+    );
+  });
+
   test("a one-off per-scheme value is an expression on appearance.scheme", async () => {
     const { patches, theme } = await engineWith(
       `Text("Hi").color("@{appearance.scheme == 'dark' ? '#ffffff' : theme.color.ink}")`
