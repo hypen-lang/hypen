@@ -17,10 +17,10 @@
       "name": "hypen-bun-example",
       "version": "1.0.0",
       "dependencies": {
-        "@hypen-space/core": "^0.6.7",
-        "@hypen-space/server": "^0.6.7",
-        "@hypen-space/web": "^0.6.7",
-        "@hypen-space/web-engine": "^0.6.7",
+        "@hypen-space/core": "^0.6.5",
+        "@hypen-space/server": "^0.6.5",
+        "@hypen-space/web": "^0.6.5",
+        "@hypen-space/web-engine": "^0.6.5",
         "axios": "^1.7.2",
       },
       "devDependencies": {
@@ -31,7 +31,7 @@
       "name": "@hypen-space/agent",
       "version": "0.6.7",
       "dependencies": {
-        "@hypen-space/core": "^0.6.7",
+        "@hypen-space/core": "^0.6.3",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -42,9 +42,9 @@
       "name": "@hypen-space/cf",
       "version": "0.6.7",
       "dependencies": {
-        "@hypen-space/core": "^0.6.7",
-        "@hypen-space/device-web": "^0.6.7",
-        "@hypen-space/web": "^0.6.7",
+        "@hypen-space/core": "^0.6.4",
+        "@hypen-space/device-web": "^0.6.4",
+        "@hypen-space/web": "^0.6.4",
       },
       "devDependencies": {
         "@cloudflare/workers-types": "^4",
@@ -76,7 +76,7 @@
       "name": "@hypen-space/device-fake",
       "version": "0.6.7",
       "dependencies": {
-        "@hypen-space/core": "^0.6.7",
+        "@hypen-space/core": "^0.6.4",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -93,7 +93,7 @@
       "name": "@hypen-space/device-web",
       "version": "0.6.7",
       "dependencies": {
-        "@hypen-space/core": "^0.6.7",
+        "@hypen-space/core": "^0.6.4",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -110,7 +110,7 @@
       "name": "@hypen-space/server",
       "version": "0.6.7",
       "dependencies": {
-        "@hypen-space/core": "^0.6.7",
+        "@hypen-space/core": "^0.6.5",
       },
       "devDependencies": {
         "@types/bun": "latest",
@@ -130,7 +130,7 @@
       "version": "0.6.7",
       "dependencies": {
         "@chenglou/pretext": "^0.0.3",
-        "@hypen-space/core": "^0.6.7",
+        "@hypen-space/core": "^0.6.5",
         "taffy-layout": "^2.0.3",
       },
       "devDependencies": {
@@ -148,8 +148,8 @@
       "name": "@hypen-space/web-engine",
       "version": "0.6.7",
       "dependencies": {
-        "@hypen-space/core": "^0.6.7",
-        "@hypen-space/web": "^0.6.7",
+        "@hypen-space/core": "^0.6.5",
+        "@hypen-space/web": "^0.6.5",
       },
       "devDependencies": {
         "@types/bun": "latest",
