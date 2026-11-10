@@ -4,8 +4,9 @@
  * Written the way a competent React app would be written in 2026: function
  * components, `useState` + functional updates, stable `useCallback` handlers
  * and a `memo`-wrapped row so a single-row change doesn't re-render the other
- * 999. No virtualisation — the Hypen side isn't virtualised either, and the
- * point is to compare how each runtime gets a full list into the DOM.
+ * 999. The default build is not virtualised and puts every row in the DOM;
+ * `BENCH_VIRTUAL=1` builds the windowed twin used against Hypen versions that
+ * virtualise `List` out of the box.
  */
 
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -13,6 +14,12 @@ import { buildRows, ops, type Row } from "../../../shared/data";
 import { STATS } from "../../../shared/theme";
 import { CONTROLS, PARITY_ROWS } from "../../../shared/scenarios";
 import * as S from "./styles";
+import { VirtualRows } from "./VirtualRows";
+
+// `BENCH_VIRTUAL=1` builds the windowed twin (see VirtualRows.tsx). It is a
+// build-time constant (vite.config.ts `define`), so the plain build carries
+// no virtualizer code.
+declare const __BENCH_VIRTUAL__: boolean;
 
 const statusStyles = new Map<string, ReturnType<typeof S.statusTextFor>>();
 function statusStyle(color: string) {
@@ -30,7 +37,7 @@ interface RowProps {
   onRemove: (id: number) => void;
 }
 
-const RowCard = memo(function RowCard({ row, onSelect, onRemove }: RowProps) {
+export const RowCard = memo(function RowCard({ row, onSelect, onRemove }: RowProps) {
   return (
     <div style={row.selected ? S.cardSelected : S.card}>
       <div style={S.avatar}>
@@ -182,16 +189,20 @@ export default function App() {
       <div style={S.toolbar}>{controls}</div>
 
       <div style={S.listWrap}>
-        <div style={S.list}>
-          {rows.map((row) => (
-            <RowCard
-              key={row.id}
-              row={row}
-              onSelect={onSelect}
-              onRemove={onRemove}
-            />
-          ))}
-        </div>
+        {__BENCH_VIRTUAL__ ? (
+          <VirtualRows rows={rows} onSelect={onSelect} onRemove={onRemove} />
+        ) : (
+          <div style={S.list}>
+            {rows.map((row) => (
+              <RowCard
+                key={row.id}
+                row={row}
+                onSelect={onSelect}
+                onRemove={onRemove}
+              />
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );

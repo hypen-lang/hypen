@@ -64,6 +64,15 @@ const toolbarButtons = CONTROLS.map(
           .horizontalAlignment("center")`,
 ).join("\n");
 
+/**
+ * Extra `List` arguments for a build, e.g. `lazy: false` to opt a virtualizing
+ * SDK out of windowing so it renders every row like the plain React app does.
+ * Set at build time from `BENCH_LIST_ARGS` (vite.config.ts `define`). Empty by
+ * default: the list is written the way an app author would write it.
+ */
+declare const __BENCH_LIST_ARGS__: string;
+const listArgs = __BENCH_LIST_ARGS__ ? `, ${__BENCH_LIST_ARGS__}` : "";
+
 export const template = `
 module App {
   Column {
@@ -108,7 +117,7 @@ module App {
       .width("100%")
 
     Column {
-      List(@state.rows, key: "id") {
+      List(@state.rows, key: "id"${listArgs}) {
         Row {
           Column {
             Text("@{item.initials}")

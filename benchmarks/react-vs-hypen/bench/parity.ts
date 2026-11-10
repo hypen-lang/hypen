@@ -108,9 +108,25 @@ export interface ParityReport {
   identical: boolean;
 }
 
-export async function runParity(): Promise<ParityReport> {
-  const react = serveDir(resolve(import.meta.dirname, "../apps/react/dist"), 5321);
-  const hypen = serveDir(resolve(import.meta.dirname, "../apps/hypen/dist"), 5322);
+export interface ParityOptions {
+  /** Built React app to compare; defaults to `apps/react/dist`. */
+  reactDist?: string;
+  /** Built Hypen app to compare; defaults to `apps/hypen/dist`. */
+  hypenDist?: string;
+  /** Screenshot file prefix inside `results/`; defaults to `parity`. */
+  shotPrefix?: string;
+}
+
+export async function runParity(opts: ParityOptions = {}): Promise<ParityReport> {
+  const react = serveDir(
+    opts.reactDist ?? resolve(import.meta.dirname, "../apps/react/dist"),
+    5321,
+  );
+  const hypen = serveDir(
+    opts.hypenDist ?? resolve(import.meta.dirname, "../apps/hypen/dist"),
+    5322,
+  );
+  const prefix = opts.shotPrefix ?? "parity";
 
   const a = await load(react.url);
   const b = await load(hypen.url);
@@ -123,10 +139,10 @@ export async function runParity(): Promise<ParityReport> {
   const sha = (buf: Buffer) =>
     createHash("sha256").update(buf).digest("hex").slice(0, 16);
   const reactShot = sha(
-    await a.page.screenshot({ path: resolve(shots, "parity-react.png") }),
+    await a.page.screenshot({ path: resolve(shots, `${prefix}-react.png`) }),
   );
   const hypenShot = sha(
-    await b.page.screenshot({ path: resolve(shots, "parity-hypen.png") }),
+    await b.page.screenshot({ path: resolve(shots, `${prefix}-hypen.png`) }),
   );
 
   const mismatches: ParityReport["mismatches"] = [];
