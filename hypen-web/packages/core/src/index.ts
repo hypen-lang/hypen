@@ -195,6 +195,30 @@ export { HypenGlobalContext } from "./context.js";
 export type { ModuleReference } from "./context.js";
 
 // ============================================================================
+// I18N
+// ============================================================================
+
+export {
+  I18n,
+  createI18n,
+  textDirection,
+  pluralRuleTable,
+  formatMessage,
+  isPluralMessage,
+  I18N_MESSAGES_PROVIDER,
+  I18N_META_PROVIDER,
+} from "./i18n.js";
+export type {
+  I18nOptions,
+  I18nMeta,
+  I18nChangeListener,
+  Messages,
+  PluralMessage,
+  PluralCategory,
+  TextDirection,
+} from "./i18n.js";
+
+// ============================================================================
 // REMOTE UI
 // ============================================================================
 

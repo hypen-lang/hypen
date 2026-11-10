@@ -9,6 +9,7 @@ import { HypenModuleInstance } from "@hypen-space/core/app";
 import type { HypenModuleDefinition } from "@hypen-space/core/app";
 import { HypenRouter } from "@hypen-space/core/router";
 import { HypenGlobalContext } from "@hypen-space/core/context";
+import type { I18n } from "@hypen-space/core/i18n";
 import { Router, Route, Link } from "@hypen-space/core/components";
 import { frameworkLoggers, setDebugMode } from "@hypen-space/core/logger";
 import { DOMRenderer } from "@hypen-space/web/dom";
@@ -33,6 +34,12 @@ export interface HypenConfig {
   heatmapFadeOut?: number;
   /** Component loader instance for loading components */
   loader?: ComponentLoaderLike;
+  /**
+   * The app's i18n instance (`createI18n(...)`). Published to the engine as
+   * the `t` / `i18n` data sources before the first render, exposed to
+   * handlers as `context.i18n`, and drives `dir` / `lang` on the render root.
+   */
+  i18n?: I18n;
 }
 
 /**
@@ -57,6 +64,7 @@ export class Hypen {
   private globalContext: HypenGlobalContext;
   private moduleInstances = new Map<string, HypenModuleInstance<any>>();
   private componentLoader: ComponentLoaderLike | null = null;
+  private i18nCleanup: Array<() => void> = [];
 
   constructor(config: HypenConfig = {}) {
     this.config = {
@@ -73,6 +81,7 @@ export class Hypen {
     // Initialize router and global context
     this.router = new HypenRouter();
     this.globalContext = new HypenGlobalContext();
+    if (config.i18n) this.globalContext.setI18n(config.i18n);
 
     // Use provided loader or create an in-memory one
     this.componentLoader = config.loader ?? createInMemoryLoader();
@@ -172,6 +181,20 @@ export class Hypen {
     // Set context on renderer for component composition
     this.renderer.setContext(this.router, this.globalContext);
 
+    // i18n: publish the catalog before anything renders, and keep the
+    // render root's dir/lang in step with the active locale.
+    const i18n = this.config.i18n;
+    if (i18n) {
+      await i18n.ready;
+      for (const off of this.i18nCleanup) off();
+      const renderer = this.renderer;
+      this.i18nCleanup = [
+        i18n.attach(this.engine),
+        i18n.onChange((meta) => renderer.setDirection(meta.dir, meta.locale)),
+      ];
+      renderer.setDirection(i18n.dir, i18n.locale);
+    }
+
     // Extract module ID from component name or .id() applicator
     const moduleId = this.extractModuleId(componentName, component.template);
 
@@ -215,6 +238,9 @@ export class Hypen {
   async unmount(): Promise<void> {
     log.debug("Unmounting...");
 
+    for (const off of this.i18nCleanup) off();
+    this.i18nCleanup = [];
+
     if (this.moduleInstance) {
       await this.moduleInstance.destroy();
       this.moduleInstance = null;
@@ -249,6 +275,13 @@ export class Hypen {
    */
   getRouter(): HypenRouter {
     return this.router;
+  }
+
+  /**
+   * The app's i18n instance, if one was configured.
+   */
+  getI18n(): I18n | null {
+    return this.config.i18n ?? null;
   }
 
   /**

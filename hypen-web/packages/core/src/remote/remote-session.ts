@@ -32,6 +32,7 @@ import type {
 } from "../app.js";
 import { HypenModuleInstance, HypenApp as HypenAppClass } from "../app.js";
 import { HypenGlobalContext } from "../context.js";
+import type { I18n } from "../i18n.js";
 import { HypenRouter } from "../router.js";
 import { ManagedRouter } from "../managed-router.js";
 import type {
@@ -190,6 +191,12 @@ export interface SessionHost {
    */
   loadSnapshot?(sessionId: string): Promise<SessionSnapshot | null | undefined>;
   saveSnapshot?(sessionId: string, snapshot: SessionSnapshot): void | Promise<void>;
+  /**
+   * The app's i18n instance. Each session forks it (own active locale,
+   * shared catalogs) and publishes it to its engine as the `t` / `i18n`
+   * data sources; handlers reach the fork as `context.i18n`.
+   */
+  readonly i18n?: I18n | null;
   readonly discoveredComponents: Map<
     string,
     { template: string; module?: HypenModuleDefinition<any> }
@@ -418,6 +425,8 @@ export class RemoteSession {
    * `context` (RFC 001 §6 Phase 2). The auto-wired ManagedRouter reuses it.
    */
   private readonly _globalContext = new HypenGlobalContext();
+  /** This session's i18n instance (a fork of `host.i18n`), if the host has one. */
+  private _i18n: I18n | null = null;
   /**
    * True once the hello handshake, primary-module construction and the
    * initial render have all completed — the point at which the engine's
@@ -1401,6 +1410,7 @@ export class RemoteSession {
       savedAt: Date.now(),
       modules,
       ...(tree ? { tree } : {}),
+      ...(this._i18n ? { locale: this._i18n.locale } : {}),
       ...(this._sessionId && this.host.sessionManager.requiresResumeToken(this._sessionId)
         ? { device: true as const }
         : {}),
@@ -1772,6 +1782,21 @@ export class RemoteSession {
     // every resume; the previous one stops working). Always issued; it is
     // required on resume only once the session negotiated a device plane.
     this._resumeToken = sm.issueResumeToken(session.id);
+
+    // i18n: each session gets its own active locale over the host's shared
+    // catalogs, published before the module is created and the UI renders.
+    // A restored session (in-memory resume or a durable snapshot after
+    // hibernation) comes back in the locale it was using.
+    if (this.host.i18n && !this._i18n) {
+      const i18n = this.host.i18n.fork(snapshot?.locale);
+      this._i18n = i18n;
+      this._globalContext.setI18n(i18n);
+      await i18n.ready;
+      if (this._destroyed) return;
+      i18n.attach(this.engine);
+      // A locale switch is session state the durable snapshot must carry.
+      i18n.onChange(() => this.markSnapshotDirty());
+    }
 
     // The broker is built before the ack is sent: `device` is only
     // acknowledged when a broker actually stands behind it.

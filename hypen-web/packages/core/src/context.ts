@@ -6,6 +6,7 @@ import type { HypenModuleInstance } from "./app.js";
 import { getStateSnapshot } from "./state.js";
 import { TypedEventEmitter, type HypenFrameworkEvents } from "./events.js";
 import { frameworkLoggers } from "./logger.js";
+import type { I18n } from "./i18n.js";
 
 const log = frameworkLoggers.context;
 
@@ -33,6 +34,7 @@ export type EventHandler = (payload?: unknown) => void;
 export class HypenGlobalContext<TEvents extends Record<string, unknown> = HypenFrameworkEvents> {
   private modules = new Map<string, HypenModuleInstance>();
   private typedEvents: TypedEventEmitter<TEvents & Record<string, unknown>>;
+  private _i18n: I18n | null = null;
 
   constructor() {
     this.typedEvents = new TypedEventEmitter<TEvents & Record<string, unknown>>();
@@ -43,6 +45,19 @@ export class HypenGlobalContext<TEvents extends Record<string, unknown> = HypenF
    */
   get events(): TypedEventEmitter<TEvents & Record<string, unknown>> {
     return this.typedEvents;
+  }
+
+  /**
+   * The app's i18n instance (`createI18n`), or `null` when the app has none.
+   * Handlers reach it as `context.i18n`.
+   */
+  get i18n(): I18n | null {
+    return this._i18n;
+  }
+
+  /** Install the app's i18n instance (done by the Hypen / RemoteServer runtime). */
+  setI18n(i18n: I18n | null): void {
+    this._i18n = i18n;
   }
 
   /**

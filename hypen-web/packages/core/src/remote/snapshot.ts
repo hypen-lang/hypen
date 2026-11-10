@@ -50,6 +50,8 @@ export interface SessionSnapshot {
    * client-supplied id alone never restores such a session from storage.
    */
   device?: true;
+  /** The session's active i18n locale, when the host registered `i18n`. */
+  locale?: string;
 }
 
 /** Above this many nodes the tree is not snapshotted (re-targeting is skipped). */

@@ -36,6 +36,7 @@ import type {
   HypenApp,
 } from "@hypen-space/core/app";
 import { resolveModuleDefinition } from "@hypen-space/core/app";
+import type { I18n } from "@hypen-space/core/i18n";
 import type {
   RemoteMessage,
   RemoteClient,
@@ -226,6 +227,7 @@ export class RemoteServer {
   private _deviceOptions: RemoteDeviceOptions = {};
   private _deviceBrokerFactory: WasmDeviceBrokerFactory | null = null;
   private _resources: Record<string, string> = {};
+  private _i18n: I18n | null = null;
   private _app: HypenApp | null = null;
   private _host: SessionHost | null = null;
   /**
@@ -268,6 +270,7 @@ export class RemoteServer {
       get moduleName() { return server._moduleName; },
       get ui() { return server._ui; },
       get resources() { return server._resources; },
+      get i18n() { return server._i18n; },
       get app() { return server._app; },
       get syncActions() { return server._syncActions; },
       get deviceDisabled() { return server._deviceOffReason !== null; },
@@ -458,6 +461,25 @@ export class RemoteServer {
    */
   resources(map: Record<string, string>): this {
     Object.assign(this._resources, map);
+    return this;
+  }
+
+  /**
+   * Register the app's i18n instance (`createI18n(...)`). Every session gets
+   * its own fork — an independent active locale over the shared, lazily
+   * loaded catalogs — published as the `t` / `i18n` data sources before the
+   * first render and reachable from handlers as `context.i18n`.
+   *
+   * @example
+   * ```typescript
+   * new RemoteServer()
+   *   .module("App", appModule)
+   *   .i18n(createI18n({ locale: "en", messages: { en, hr } }))
+   *   .listen(3000);
+   * ```
+   */
+  i18n(i18n: I18n): this {
+    this._i18n = i18n;
     return this;
   }
 

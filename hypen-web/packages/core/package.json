@@ -57,6 +57,12 @@
       "import": "./dist/context.js",
       "default": "./dist/context.js"
     },
+    "./i18n": {
+      "types": "./dist/i18n.d.ts",
+      "bun": "./src/i18n.ts",
+      "import": "./dist/i18n.js",
+      "default": "./dist/i18n.js"
+    },
     "./remote": {
       "types": "./dist/remote/index.d.ts",
       "bun": "./src/remote/index.ts",

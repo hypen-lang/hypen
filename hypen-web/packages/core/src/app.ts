@@ -8,6 +8,7 @@ import type { Session } from "./remote/types.js";
 import { type Result, Ok, Err, fromPromise, ActionError, HypenError } from "./result.js";
 import { DataSourceManager, type DataSourcePlugin, type IDataSourceEngine } from "./datasource.js";
 import type { StateStore } from "./persistence.js";
+import type { I18n } from "./i18n.js";
 
 // Interface for engine compatibility (works with both engine.js and engine.browser.js)
 export interface IEngine {
@@ -122,6 +123,12 @@ export type GlobalContext = {
    * `streamUntyped` for names only known at runtime).
    */
   device: DeviceContext;
+  /**
+   * The app's i18n instance (`createI18n`), or `null` when none is
+   * registered: `context.i18n.setLocale("hr")`, `context.i18n.t("cart.title")`,
+   * `context.i18n.locale`, `context.i18n.dir`.
+   */
+  readonly i18n?: I18n | null;
 };
 
 export type LifecycleHandler<T> = (
@@ -1269,6 +1276,10 @@ export class HypenModuleInstance<T extends object = any> {
         ctx.on(event, handler),
       router: this.router,
       device: this.createDeviceContext(),
+      // Live getter: the runtime may install i18n after this module exists.
+      get i18n() {
+        return ctx.i18n;
+      },
     };
 
     // Expose hypen engine for built-in components (if available)

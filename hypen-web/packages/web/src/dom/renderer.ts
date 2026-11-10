@@ -588,6 +588,18 @@ export class DOMRenderer {
   }
 
   /**
+   * Set the writing direction (and optionally the language) of the render
+   * root: `dir` / `lang` attributes on the container, so text, flex rows and
+   * logical (`*-inline-start` / `*-inline-end`) properties follow the active
+   * locale. Call again on every locale change; the Hypen orchestrator does
+   * this automatically from its `i18n` instance.
+   */
+  setDirection(dir: "ltr" | "rtl", lang?: string): void {
+    this.container.setAttribute("dir", dir);
+    if (lang) this.container.setAttribute("lang", lang);
+  }
+
+  /**
    * Apply a batch of patches to the DOM.
    *
    * Uses two-pass routing: first discovers which nodes belong to a Canvas
