@@ -52,6 +52,9 @@ public enum PatchType: String, Codable, Sendable {
     case removeProp
     case attachEvent
     case detachEvent
+    /// Empty one element: a plain `remove` of each of `id`'s children.
+    /// See `hypen-web/docs/clear-children.md`.
+    case clearChildren
 }
 
 // MARK: - Message Types

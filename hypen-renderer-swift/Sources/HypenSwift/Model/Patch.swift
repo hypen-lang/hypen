@@ -34,6 +34,13 @@ public enum PatchType: String, Codable, Sendable {
     /// See `hypen-web/docs/animation.md` ("batchAnimation — the
     /// transaction prelude").
     case batchAnimation = "BatchAnimation"
+    /// Empty one element in a single step: exactly equivalent to a plain
+    /// `remove` (no transition) of each of `id`'s current children, in
+    /// order. Every child subtree is torn down; `id` itself stays with its
+    /// props and can receive children again in the same batch. An unknown
+    /// `id` is ignored. Wire shape: `{ "type": "clearChildren", "id": … }`.
+    /// See `hypen-web/docs/clear-children.md`.
+    case clearChildren = "ClearChildren"
 }
 
 /// Represents a single patch operation on the render tree
@@ -117,6 +124,7 @@ extension Patch {
         case "attach": type = .attach
         case "setsemantics": type = .setSemantics
         case "batchanimation": type = .batchAnimation
+        case "clearchildren": type = .clearChildren
         default:
             log.warn("Unknown patch type: %@", typeString)
             return nil
@@ -178,6 +186,8 @@ extension Patch: CustomDebugStringConvertible {
             return "SET_SEMANTICS(\(id ?? "?"), \(semantics == nil ? "clear" : "block"))"
         case .batchAnimation:
             return "BATCH_ANIMATION(\(spec == nil ? "no spec" : "spec"))"
+        case .clearChildren:
+            return "CLEAR_CHILDREN(\(id ?? "?"))"
         }
     }
 }
