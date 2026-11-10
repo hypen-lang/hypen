@@ -54,6 +54,17 @@ object PatchType {
     const val ATTACH = "attach"
 
     /**
+     * Empty the element [Patch.id] in one step: exactly equivalent to a
+     * plain (non-transition) `REMOVE` of each of its current children.
+     * Every child subtree is torn down; `id` itself keeps its props and
+     * may receive new children in the same batch (the engine orders this
+     * before them). An unknown `id` is ignored. Wire shape:
+     * `{ "type": "clearChildren", "id": "<id>" }`. See
+     * `hypen-web/docs/clear-children.md`.
+     */
+    const val CLEAR_CHILDREN = "clearChildren"
+
+    /**
      * Replace a node's accessibility semantics after a reactive change
      * (templated accessible name, bound self-state, bound checked). Carries
      * the node's complete re-resolved semantics block in [Patch.semantics];

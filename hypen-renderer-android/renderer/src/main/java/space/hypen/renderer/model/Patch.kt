@@ -77,6 +77,17 @@ enum class PatchType {
      */
     @Json(name = "batchAnimation")
     BATCH_ANIMATION,
+
+    /**
+     * Empty element [Patch.id] in one step: exactly equivalent to a plain
+     * (non-transition) REMOVE of each of its current children. Every
+     * child subtree is torn down; `id` keeps its props and may receive
+     * new children later in the same batch (the engine orders the clear
+     * first). An unknown `id` is ignored. See
+     * `hypen-web/docs/clear-children.md`.
+     */
+    @Json(name = "clearChildren")
+    CLEAR_CHILDREN,
 }
 
 /**
@@ -266,6 +277,16 @@ data class Patch(
         fun detach(id: String) =
             Patch(
                 type = PatchType.DETACH,
+                id = id,
+            )
+
+        /**
+         * Create a CLEAR_CHILDREN patch emptying [id] (a plain REMOVE of
+         * every current child).
+         */
+        fun clearChildren(id: String) =
+            Patch(
+                type = PatchType.CLEAR_CHILDREN,
                 id = id,
             )
 

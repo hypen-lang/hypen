@@ -228,7 +228,7 @@ private fun appHtml(): String = """
     //   - Flat node map: id -> HTMLElement
     //   - Component registry: elementType -> createElement function
     //   - Applicator registry: propName -> applyProp function
-    //   - Patch application: create, setProp, setText, insert, move, remove
+    //   - Patch application: create, setProp, setText, insert, move, remove, clearChildren
     // =========================================================================
 
     const rootEl = document.getElementById('hypen-root');
@@ -457,6 +457,7 @@ private fun appHtml(): String = """
             case 'insert':  onInsert(patch); break;
             case 'move':    onMove(patch); break;
             case 'remove':  onRemove(patch); break;
+            case 'clearChildren': onClearChildren(patch); break;
         }
     }
 
@@ -534,6 +535,22 @@ private fun appHtml(): String = """
             el.parentNode.removeChild(el);
         }
         nodes.delete(patch.id);
+    }
+
+    // Same as a plain remove of every current child of patch.id: unlink each
+    // child and drop every node of its subtree from the map; the element
+    // itself stays. Unknown id is ignored.
+    function onClearChildren(patch) {
+        const el = nodes.get(patch.id);
+        if (!el) return;
+        for (const child of Array.from(el.children)) {
+            if (child.dataset.hypenId === undefined) continue;
+            nodes.delete(child.dataset.hypenId);
+            for (const d of child.querySelectorAll('[data-hypen-id]')) {
+                nodes.delete(d.dataset.hypenId);
+            }
+            el.removeChild(child);
+        }
     }
 
     // ---- Clear all nodes (on route change) ----
