@@ -605,6 +605,22 @@ export class DOMRenderer {
   }
 
   /**
+   * Record the active color scheme on the render root: a
+   * `data-hypen-scheme` attribute (a hook for host CSS), and for `light` /
+   * `dark` the CSS `color-scheme` property so native form controls and
+   * scrollbars match. Call again on every scheme change; the Hypen
+   * orchestrator does this automatically from its `theme` instance.
+   */
+  setColorScheme(scheme: string): void {
+    this.container.setAttribute("data-hypen-scheme", scheme);
+    if (scheme === "light" || scheme === "dark") {
+      this.container.style.setProperty("color-scheme", scheme);
+    } else {
+      this.container.style.removeProperty("color-scheme");
+    }
+  }
+
+  /**
    * Apply a batch of patches to the DOM.
    *
    * Uses two-pass routing: first discovers which nodes belong to a Canvas

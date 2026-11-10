@@ -33,6 +33,7 @@ import type {
 import { HypenModuleInstance, HypenApp as HypenAppClass } from "../app.js";
 import { HypenGlobalContext } from "../context.js";
 import type { I18n } from "../i18n.js";
+import type { Theme } from "../theme.js";
 import { HypenRouter } from "../router.js";
 import { ManagedRouter } from "../managed-router.js";
 import type {
@@ -215,6 +216,12 @@ export interface SessionHost {
    * data sources; handlers reach the fork as `context.i18n`.
    */
   readonly i18n?: I18n | null;
+  /**
+   * The app's theme. Each session forks it (own scheme preference, shared
+   * tokens) and publishes it to its engine as the `theme` / `appearance`
+   * data sources; handlers reach the fork as `context.theme`.
+   */
+  readonly theme?: Theme | null;
   readonly discoveredComponents: Map<
     string,
     { template: string; module?: HypenModuleDefinition<any> }
@@ -445,6 +452,8 @@ export class RemoteSession {
   private readonly _globalContext = new HypenGlobalContext();
   /** This session's i18n instance (a fork of `host.i18n`), if the host has one. */
   private _i18n: I18n | null = null;
+  /** This session's theme (a fork of `host.theme`), if the host has one. */
+  private _theme: Theme | null = null;
   /**
    * True once the hello handshake, primary-module construction and the
    * initial render have all completed — the point at which the engine's
@@ -1429,6 +1438,7 @@ export class RemoteSession {
       modules,
       ...(tree ? { tree } : {}),
       ...(this._i18n ? { locale: this._i18n.locale } : {}),
+      ...(this._theme ? { scheme: this._theme.preference } : {}),
       ...(this._sessionId && this.host.sessionManager.requiresResumeToken(this._sessionId)
         ? { device: true as const }
         : {}),
@@ -1814,6 +1824,17 @@ export class RemoteSession {
       i18n.attach(this.engine);
       // A locale switch is session state the durable snapshot must carry.
       i18n.onChange(() => this.markSnapshotDirty());
+    }
+
+    // Theme: same shape as i18n — a per-session scheme preference over the
+    // host's shared tokens, published before the first render and restored
+    // from the snapshot.
+    if (this.host.theme && !this._theme) {
+      const theme = this.host.theme.fork(snapshot?.scheme);
+      this._theme = theme;
+      this._globalContext.setTheme(theme);
+      theme.attach(this.engine);
+      theme.onChange(() => this.markSnapshotDirty());
     }
 
     // The broker is built before the ack is sent: `device` is only

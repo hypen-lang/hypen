@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- **Theming and design tokens (TypeScript SDK)** — `createTheme({ tokens, schemes, scheme })` in `@hypen-space/core` publishes the resolved tokens as the `theme` data source and `{ scheme, preference, system, schemes }` as `appearance`, so templates read `.color(@theme.color.primary)` and a scheme switch re-renders only the props whose token changed. Per-scheme overrides merge over the base tokens, `"{path}"` aliases resolve after the merge, and the default `"system"` preference follows `prefers-color-scheme` in the browser. Handlers reach it as `context.theme`; `new Hypen({ theme })` and `RemoteServer.theme(theme)` wire it in (one fork per Remote UI session, preference carried in the session snapshot), and the DOM renderer sets `color-scheme` on the render root. See the Theming guide.
+
 ### Fixed
 - **iOS renderer: remote images decode off the main actor at display size** — Remote images were decoded lazily on first draw, on the UI thread (measured up to 28 ms for a story-sized photo). `HypenImageCache` now decodes with ImageIO in a detached task at the requested display size, caches by URL and pixel dimensions, and `Image` / video-poster views pass their display bounds so the first draw uses already-decoded pixels. Synced from hypen-engine-rs PR #195.
 
