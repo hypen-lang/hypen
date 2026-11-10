@@ -9,3 +9,9 @@ results/smoke-*.png
 
 # Regenerable CPU-profile dumps (bench/profile.ts, bench/profile-tree.ts)
 results/profile-*.json
+
+# Per-version builds and SDK tarballs (scripts/build-variants.ts)
+variants/
+.vendor/
+results/parity-hypen-*.png
+results/*-local.*
