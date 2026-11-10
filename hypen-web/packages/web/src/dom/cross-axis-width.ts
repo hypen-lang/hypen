@@ -219,6 +219,10 @@ function reconcileElement(element: HTMLElement): boolean {
  * removes re-walked the same unchanged chain to the document root.
  */
 export function reconcileColumnWidthDemandFrom(element: HTMLElement | null): void {
+  if (pendingBatch !== null) {
+    if (element) pendingBatch.add(element);
+    return;
+  }
   let current: HTMLElement | null = element;
   let depth = 0;
   while (current) {
@@ -226,5 +230,59 @@ export function reconcileColumnWidthDemandFrom(element: HTMLElement | null): voi
     if (depth >= 1 && !changed) return;
     current = current.parentNode instanceof HTMLElement ? current.parentNode : null;
     depth++;
+  }
+}
+
+/**
+ * Mutation sites collected while a patch batch is being applied, or `null`
+ * outside one. Module-level because the reconcile entry point is a free
+ * function called from applicators as well as the renderer.
+ */
+let pendingBatch: Set<HTMLElement> | null = null;
+
+/**
+ * Start collecting reconcile requests instead of running them. Returns
+ * `false` when a batch is already open (a nested renderer applying patches
+ * inside another's batch): the outer owner flushes for both.
+ *
+ * Why batch: every row inserted into a list asks for the row AND the list
+ * to be recomputed, so a 1,000-row create recomputed the same list element
+ * 1,000 times. A marker is a pure function of the element's own props and
+ * its children's markers, so recomputing each touched element once, bottom
+ * up, after the whole batch has landed reaches the identical final state.
+ */
+export function beginWidthDemandBatch(): boolean {
+  if (pendingBatch !== null) return false;
+  pendingBatch = new Set();
+  return true;
+}
+
+/** Run the batch's collected reconciles: sites, then each distinct ancestor once. */
+export function flushWidthDemandBatch(): void {
+  const sites = pendingBatch;
+  pendingBatch = null;
+  if (sites === null || sites.size === 0) return;
+
+  // Depth 0: every mutation site. Depth 1: their parents, always (a parent's
+  // child set or a child's width props can change without the child's own
+  // marker moving). Beyond that an ancestor is revisited only when the
+  // marker beneath it changed — the same rule the unbatched walk applies.
+  let level = new Set<HTMLElement>();
+  for (const element of sites) {
+    reconcileElement(element);
+    const parent = element.parentNode;
+    if (parent instanceof HTMLElement) level.add(parent);
+  }
+  while (level.size > 0) {
+    const next = new Set<HTMLElement>();
+    for (const element of level) {
+      const changed = reconcileElement(element);
+      // Recomputed unconditionally at depth 1 (above); the climb continues
+      // only where a marker actually changed.
+      if (!changed) continue;
+      const parent = element.parentNode;
+      if (parent instanceof HTMLElement) next.add(parent);
+    }
+    level = next;
   }
 }

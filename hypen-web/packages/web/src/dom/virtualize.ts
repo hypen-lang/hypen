@@ -493,9 +493,12 @@ export class DomVirtualizer {
       claimRole(child, "listitem");
       next.add(child);
     }
-    // A child moved out of the list keeps no stale position.
+    // A child moved out of the list keeps no stale position. A child that
+    // was removed outright (no parent at all) is garbage: scrubbing its
+    // attributes would be three DOM writes per dead row, on every window
+    // move, replace and clear.
     for (const old of state.stamped) {
-      if (!next.has(old) && old.parentNode !== state.element) {
+      if (!next.has(old) && old.parentNode && old.parentNode !== state.element) {
         old.removeAttribute("aria-setsize");
         old.removeAttribute("aria-posinset");
         releaseRole(old);

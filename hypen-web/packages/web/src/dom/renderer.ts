@@ -257,7 +257,11 @@ import type { SafeAreaInsetOverrides } from "../safe-area.js";
 import { createSafeAreaHandler } from "./components/safearea.js";
 import { createImageHandler } from "./components/image.js";
 import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
-import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
+import {
+  beginWidthDemandBatch,
+  flushWidthDemandBatch,
+  reconcileColumnWidthDemandFrom,
+} from "./cross-axis-width.js";
 import { DomVirtualizer, VIRT_WINDOW_PROP } from "./virtualize.js";
 import { classifyBindEcho, noteEngineValuedField } from "../bind-echo.js";
 
@@ -651,6 +655,15 @@ export class DOMRenderer {
           if (canvasRootId) {
             this.registerCanvasMember(childId, parentId, canvasRootId);
           }
+        } else if (patch.type === "clearChildren" && patch.id) {
+          // Emptying a canvas node: its children never come back, so drop
+          // their routing entries. Done here, in batch order, because the
+          // rows a wholesale replace inserts under the same parent later in
+          // this batch register as members in this same scan and must stay.
+          const members = this.canvasNodeChildren.get(patch.id);
+          if (members) {
+            for (const childId of [...members]) this.pruneCanvasSubtree(childId);
+          }
         } else if (patch.type === "registerTemplate") {
           // Skeleton must be known before a same-batch canvas-targeted
           // instantiate below is lowered. `onRegisterTemplate` registers
@@ -767,11 +780,15 @@ export class DOMRenderer {
     // below, after every insert/move/remove of the batch has landed.
     const ownsChildrenBatch = this.pendingChildrenChanged === null;
     if (ownsChildrenBatch) this.pendingChildrenChanged = new Set();
+    // Width-demand reconciles are collected too and run once per touched
+    // element when the batch has landed (see `beginWidthDemandBatch`).
+    const ownsWidthBatch = beginWidthDemandBatch();
     try {
       for (const patch of domPatches) {
         this.applyPatch(patch);
       }
     } finally {
+      if (ownsWidthBatch) flushWidthDemandBatch();
       if (ownsChildrenBatch) this.flushChildrenChanged();
     }
 
@@ -863,6 +880,13 @@ export class DOMRenderer {
         if (!parentId) return undefined;
         if (this.canvasRenderers.has(parentId)) return parentId;
         return this.canvasSubtreeMap.get(parentId);
+      }
+      case "clearChildren": {
+        // Addresses the parent being emptied, which may be the canvas root
+        // itself (not a member of its own subtree map).
+        if (!id) return undefined;
+        if (this.canvasRenderers.has(id)) return id;
+        return this.canvasSubtreeMap.get(id);
       }
       case "create": {
         // create patches are routed if the node was pre-registered in phase 1
@@ -1088,6 +1112,9 @@ export class DOMRenderer {
         break;
       case "remove":
         this.onRemove(id!, patch.transition === true);
+        break;
+      case "clearChildren":
+        this.onClearChildren(id!);
         break;
       case "detach":
         this.onDetach(id!);
@@ -2166,11 +2193,74 @@ export class DOMRenderer {
   }
 
   /**
-   * Tear an element down for real: shared by the instant path and the
-   * deferred (exit-animated) path.
+   * Empty an element: every child goes, each exactly as by a plain `remove`
+   * (contract: hypen-web/docs/clear-children.md). The engine sends this
+   * instead of a `remove` per child when a list pass takes away all of the
+   * list element's children, so the children are unlinked with ONE DOM
+   * operation and the parent-level follow-ups (native-host notification,
+   * column width demand, virtualization) run once rather than per row.
    */
-  private finalizeRemove(id: string, element: HTMLElement): void {
-    // Clean up canvas renderer if this is a canvas root
+  private onClearChildren(id: string): void {
+    const parent = this.nodes.get(id);
+    if (!parent) return;
+
+    const children: Array<[string, HTMLElement]> = [];
+    // The one-shot unlink is only sound when everything under the parent is
+    // a live engine child. A row still playing out an earlier exit (dead to
+    // the engine, kept on screen by the animator) or a node this renderer
+    // does not track must survive, so those cases take the per-child path.
+    let wholesale = true;
+    for (
+      let child = parent.firstElementChild as HTMLElement | null;
+      child !== null;
+      child = child.nextElementSibling as HTMLElement | null
+    ) {
+      const childId = (child as ElementWithId)[ELEMENT_ID] ?? child.dataset?.hypenId;
+      if (childId === undefined || this.nodes.get(childId) !== child) {
+        wholesale = false;
+      } else if (this.animator.isExitingRoot(child)) {
+        wholesale = false;
+      } else {
+        children.push([childId, child]);
+      }
+    }
+    if (children.length === 0) return;
+    const nodeCount = (parent as { childNodes?: { length: number } }).childNodes?.length;
+    if (nodeCount !== undefined && nodeCount !== children.length) wholesale = false;
+
+    if (!wholesale) {
+      for (const [childId] of children) this.onRemove(childId);
+      return;
+    }
+
+    for (const [childId, child] of children) {
+      // Same order as `onRemove` → `finalizeRemove`: live gestures first,
+      // then listeners, while the subtree is still attached.
+      this.scrubber.cancel(childId);
+      this.dnd.cancel(childId);
+      this.destroyCanvasRoot(childId);
+      disposeHypenElement(child);
+      this.applicators.release(child);
+    }
+
+    if (typeof parent.replaceChildren === "function") {
+      parent.replaceChildren();
+    } else {
+      for (const [, child] of children) parent.removeChild(child);
+    }
+    if (isHostElement(parent)) {
+      this.queueChildrenChanged(parent);
+      reconcileColumnWidthDemandFrom(parent);
+    }
+    this.virt.noteChildrenChanged(parent);
+
+    for (const [childId, child] of children) {
+      this.forgetRemoved(childId, child, parent);
+    }
+  }
+
+  /** Tear down the CanvasRenderer a removed node hosted, if it was a canvas root. */
+  private destroyCanvasRoot(id: string): void {
     if (this.canvasRenderers.has(id)) {
       this.canvasRenderers.get(id)!.destroy();
       this.canvasRenderers.delete(id);
@@ -2184,6 +2274,14 @@ export class DOMRenderer {
         }
       }
     }
+  }
+
+  /**
+   * Tear an element down for real: shared by the instant path and the
+   * deferred (exit-animated) path.
+   */
+  private finalizeRemove(id: string, element: HTMLElement): void {
+    this.destroyCanvasRoot(id);
 
     // Dispose event listeners and other resources before removing from DOM
     disposeHypenElement(element);
@@ -2201,6 +2299,16 @@ export class DOMRenderer {
     }
     this.virt.noteChildrenChanged(previousParent);
 
+    this.forgetRemoved(id, element, previousParent);
+  }
+
+  /**
+   * Drop every piece of bookkeeping for a subtree root that has just been
+   * unlinked from `previousParent`, and for its descendants. Shared by the
+   * per-node remove and by `clearChildren`, which unlinks all of a parent's
+   * children in one DOM operation and then forgets each of them here.
+   */
+  private forgetRemoved(id: string, element: HTMLElement, previousParent: Node | null): void {
     // Restore-to-trigger for any open dialog in the removed subtree, before
     // the node map forgets it. The removed subtree is gone for good, so the
     // dialog id is dropped too.
