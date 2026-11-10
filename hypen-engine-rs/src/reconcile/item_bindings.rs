@@ -717,10 +717,13 @@ fn replace_template_string_item_bindings(
     }
 
     // Filter out resolved item bindings, keep state bindings — and, when a
-    // nested loop shadows `item`, the item bindings that belong to it.
+    // nested loop shadows `item`, the item bindings that belong to it — plus
+    // data-source bindings (a row template like `@{plural(item.n, t.items)}`
+    // still needs the `t` provider at evaluation time, and its dependency
+    // for re-rendering).
     let remaining_bindings: Vec<_> = bindings
         .iter()
-        .filter(|b| b.is_state() || (!parsed_item && b.is_item()))
+        .filter(|b| b.is_state() || b.is_data_source() || (!parsed_item && b.is_item()))
         .cloned()
         .collect();
 

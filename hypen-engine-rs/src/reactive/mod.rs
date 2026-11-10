@@ -9,6 +9,7 @@
 pub mod binding;
 pub mod expression;
 pub mod graph;
+pub mod i18n;
 pub mod scheduler;
 
 pub use binding::{parse_binding, Binding, BindingSource};

@@ -63,6 +63,11 @@ impl CustomFunction for LengthFn {
 fn builtin_functions() -> HashMap<String, Arc<dyn CustomFunction>> {
     let mut funcs: HashMap<String, Arc<dyn CustomFunction>> = HashMap::new();
     funcs.insert("length".to_string(), Arc::new(LengthFn));
+    // i18n message helpers — pure functions of their arguments (the active
+    // locale's plural rule table travels inside the message object), so
+    // the context-free memo below stays sound.
+    funcs.insert("fmt".to_string(), Arc::new(super::i18n::FmtFn));
+    funcs.insert("plural".to_string(), Arc::new(super::i18n::PluralFn));
     funcs
 }
 
@@ -314,7 +319,8 @@ const CONTEXT_FREE_MEMO_CAP: usize = 1024;
 /// `@{false ? '#1d2433' : '#12151d'}`.
 ///
 /// Evaluating one is a pure function of its text: the empty context has
-/// nothing to look up and the only builtin (`length`) is pure. So the
+/// nothing to look up and every builtin (`length`, `fmt`, `plural`) is pure —
+/// any builtin added to `builtin_functions` must stay pure. So the
 /// result is memoized per thread, keyed by the template. That matters
 /// because exprimo re-parses the expression through a full JavaScript
 /// parser on every `evaluate` call: a 1,000-row list whose rows carry two
@@ -408,28 +414,11 @@ pub fn evaluate_template_string(
             .evaluate(&expr_content)
             .map_err(|e| EngineError::ExpressionError(e.to_string()))?;
 
-        // Convert to string
-        let replacement = match &value {
-            Value::String(s) => s.clone(),
-            // Match JS number formatting: exprimo does its arithmetic in f64,
-            // so integral results come back as e.g. 3.0 — render them as "3"
-            // (`@{state.tasks.length} tasks` must not say "3.0 tasks").
-            Value::Number(n) => match n.as_f64() {
-                Some(f)
-                    if n.as_i64().is_none()
-                        && n.as_u64().is_none()
-                        && f.is_finite()
-                        && f.fract() == 0.0
-                        && f.abs() < 9_007_199_254_740_992.0 =>
-                {
-                    format!("{}", f as i64)
-                }
-                _ => n.to_string(),
-            },
-            Value::Bool(b) => b.to_string(),
-            Value::Null => "null".to_string(),
-            _ => serde_json::to_string(&value).unwrap_or_default(),
-        };
+        // Convert to string. Matches JS number formatting: exprimo does its
+        // arithmetic in f64, so integral results come back as e.g. 3.0 —
+        // render them as "3" (`@{state.tasks.length} tasks` must not say
+        // "3.0 tasks").
+        let replacement = super::i18n::display_value(&value);
 
         // `}` is ASCII so close_byte + 1 is a valid char boundary past it.
         let end_byte = close_byte + 1;

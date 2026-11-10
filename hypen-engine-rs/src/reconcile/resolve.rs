@@ -7,6 +7,7 @@
 
 use super::tree::ResolvedProps;
 use crate::ir::Value;
+use crate::reactive::i18n::I18N_PROVIDER;
 use crate::reactive::Binding;
 use indexmap::IndexMap;
 use std::sync::Arc;
@@ -181,7 +182,13 @@ pub(crate) fn resolve_single_value(
                 // Evaluate data source binding against its provider's state
                 if let (Some(provider), Some(ds_map)) = (binding.provider(), data_sources) {
                     if let Some(ds_state) = ds_map.get(provider) {
-                        evaluate_binding_path(binding, ds_state).unwrap_or(serde_json::Value::Null)
+                        if provider == I18N_PROVIDER {
+                            // Missing message keys render their key path.
+                            crate::reactive::i18n::resolve_message_binding(ds_state, &binding.path)
+                        } else {
+                            evaluate_binding_path(binding, ds_state)
+                                .unwrap_or(serde_json::Value::Null)
+                        }
                     } else {
                         serde_json::Value::Null
                     }
@@ -197,7 +204,13 @@ pub(crate) fn resolve_single_value(
             // Build evaluator once and reuse for all template strings
             let eval = evaluator
                 .get_or_insert_with(|| crate::reactive::build_evaluator(state, item, data_sources));
-            match crate::reactive::evaluate_template_string(template, eval) {
+            // With an i18n catalog present, `t.*` references to missing keys
+            // become string literals of the key path before evaluation.
+            let rewritten = data_sources
+                .and_then(|ds| ds.get(I18N_PROVIDER))
+                .and_then(|catalog| crate::reactive::i18n::rewrite_missing_keys(template, catalog));
+            let template_to_eval = rewritten.as_deref().unwrap_or(template);
+            match crate::reactive::evaluate_template_string(template_to_eval, eval) {
                 Ok(result) => serde_json::Value::String(result),
                 Err(e) => {
                     // Surface the failure through the existing logger so devs
