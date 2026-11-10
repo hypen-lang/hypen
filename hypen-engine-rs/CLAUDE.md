@@ -33,7 +33,7 @@ hypen-engine-rs/src/
 ├── reconcile/                # Virtual DOM Diffing
 │   ├── tree.rs               # Virtual instance tree; ControlFlowKind::Router carries the per-route subtree cache
 │   ├── diff.rs               # Keyed children diffing; Router reconcile emits Detach/Attach on nav
-│   ├── patch.rs              # Patch enum (Create, SetProp, RemoveProp, SetText, Insert, Move, Remove — optional transition flag roots an animated exit, Detach, Attach)
+│   ├── patch.rs              # Patch enum (Create, SetProp, RemoveProp, SetText, Insert, Move, Remove — optional transition flag roots an animated exit, ClearChildren — one patch for a list pass that removes every child of its element, Detach, Attach)
 │   ├── resolve.rs            # Value resolution during reconciliation
 │   ├── conditionals.rs       # When/If matching; Router matching via portable::route::match_path
 │   ├── keyed.rs              # Keyed list reconciliation

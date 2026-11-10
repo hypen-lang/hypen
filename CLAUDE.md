@@ -158,12 +158,16 @@ enum Patch {
     Insert { parent_id, id, before_id },
     Move { parent_id, id, before_id },
     Remove { id, transition },                        // transition: true (serde skip-if-false) roots an animated exit
+    ClearChildren { id },                             // empty `id` in one step: a plain Remove per child (list cleared/replaced)
     Detach { id },                                    // unlink but keep alive (Router cache)
     Attach { parent_id, id, before_id },              // reinsert a previously-detached subtree
 }
 // Note: Event handling is done at the renderer level, not via patches.
 // Detach/Attach back the Router subtree cache — navigating back to a visited route
 // reuses the same NodeId subtree instead of rebuilding it.
+// ClearChildren replaces the per-row Removes when a list pass takes away EVERY child
+// of the list's element; it precedes any new rows in the batch and is never used for
+// rows with an exit transition. Contract: hypen-web/docs/clear-children.md.
 // Remove.transition flags the root of a subtree whose node carried an "__anim.exit"
 // prop (from the .exit() applicator): the flagged root Remove is emitted FIRST,
 // then its descendants as plain Removes, and the renderer may defer teardown to

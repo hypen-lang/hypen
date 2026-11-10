@@ -121,6 +121,14 @@ impl Screen {
                     self.types.remove(&id);
                     self.children.remove(&id);
                 }
+                Patch::ClearChildren { id } => {
+                    // Every child goes, each exactly as a plain Remove.
+                    for child in self.children.remove(&**id).unwrap_or_default() {
+                        self.props.remove(&child);
+                        self.types.remove(&child);
+                        self.children.remove(&child);
+                    }
+                }
                 _ => {}
             }
         }

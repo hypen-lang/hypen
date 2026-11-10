@@ -269,9 +269,21 @@ fn test_list_clears_when_array_becomes_empty() {
         &mut dependencies,
     );
 
-    // THEN: Should have Remove patches for all children
-    let removes = count_removes(&update_patches);
-    assert_eq!(removes, 2, "Should remove all 2 children when cart empties");
+    // THEN: the list is emptied with a single ClearChildren, which stands in
+    // for a Remove per child when every child of the element leaves at once.
+    assert_eq!(count_removes(&update_patches), 0);
+    let clears: Vec<_> = update_patches
+        .iter()
+        .filter_map(|p| match p {
+            Patch::ClearChildren { id } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        clears,
+        vec![hypen_engine::reconcile::node_id_str(list_node_id)],
+        "Should clear the list element when cart empties"
+    );
 
     // And the list node should have no children
     let final_children = tree.get(list_node_id).unwrap().children.len();
