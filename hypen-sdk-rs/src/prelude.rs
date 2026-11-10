@@ -21,8 +21,9 @@ pub use crate::theme::{
 };
 
 pub use crate::remote::{
-    AgentHandle, ModuleSessionConfig, OutboundSink, RemoteMessage, RemoteSession, SessionConfig,
-    SessionInfo, SessionManager, SessionManagerConfig, SessionRegistry,
+    AgentHandle, ColorSchemeMessage, ModuleSessionConfig, OutboundSink, RemoteMessage,
+    RemoteSession, SessionConfig, SessionInfo, SessionManager, SessionManagerConfig,
+    SessionRegistry,
 };
 
 // Re-export engine types that users commonly need

@@ -24,7 +24,7 @@ use crate::module::{ActionHandler, ModuleDefinition};
 use crate::router::HypenRouter;
 use crate::state::State;
 
-use super::types::RemoteMessage;
+use super::types::{ColorSchemeMessage, RemoteMessage};
 
 /// Configuration for creating a [`RemoteSession`].
 pub struct SessionConfig {
@@ -427,6 +427,8 @@ struct HelloDevice {
     /// The exact `hello.device` JSON text (`None`: absent or ambiguous).
     raw: Option<String>,
     resume_token: Option<String>,
+    /// `hello.colorScheme`: the client's system color scheme, when valid.
+    color_scheme: Option<crate::theme::SystemScheme>,
 }
 
 struct SessionInner {
@@ -879,11 +881,45 @@ impl RemoteSession {
     /// ```rust,ignore
     /// let session = RemoteSession::connect(def, components, transport).with_theme(&app_theme);
     /// ```
+    ///
+    /// The client's system color scheme reaches the fork on its own: from
+    /// the hello's `colorScheme` member before the first render, and from
+    /// `colorScheme` messages afterwards (see
+    /// [`ColorSchemeMessage`](super::ColorSchemeMessage)). A host that calls
+    /// [`handle_hello`](Self::handle_hello) itself instead of passing the
+    /// hello text to [`handle_message`](Self::handle_message) forwards it
+    /// with `session.theme().unwrap().set_system_scheme(..)` first.
     pub fn with_theme(self, theme: &crate::theme::Theme) -> Self {
-        let fork = theme.fork(None);
+        self.with_theme_preference(theme, None)
+    }
+
+    /// [`with_theme`](Self::with_theme) for a session that is being
+    /// rebuilt for a returning client: the fork starts with `preference`
+    /// (a scheme name or `"system"`) instead of the app theme's own.
+    /// `None`, or a name the theme does not know, behaves like `with_theme`
+    /// / follows the system scheme.
+    ///
+    /// Sessions are built by the host, so keeping the preference across a
+    /// suspension is the host's move: read
+    /// [`theme_preference`](Self::theme_preference) when the client goes
+    /// away, keep it with the saved state
+    /// ([`SessionManager::suspend_session_with_theme`](super::SessionManager::suspend_session_with_theme)
+    /// does, and drops it on expiry), and pass it here on resume.
+    pub fn with_theme_preference(
+        self,
+        theme: &crate::theme::Theme,
+        preference: Option<&str>,
+    ) -> Self {
+        let fork = theme.fork(preference);
         fork.attach(self.context_sink());
         self.context.set_theme(fork);
         self
+    }
+
+    /// The scheme preference of this session's theme (a scheme name or
+    /// `"system"`); `None` without a theme. What to save for a resume.
+    pub fn theme_preference(&self) -> Option<String> {
+        self.context.theme().map(|theme| theme.preference())
     }
 
     /// This session's theme (the fork made by [`with_theme`](Self::with_theme)).
@@ -1240,6 +1276,13 @@ impl RemoteSession {
         emit: &mut dyn FnMut(&str),
     ) {
         let _dispatch = DispatchGuard::enter();
+        // The client's system scheme applies before the first render, so a
+        // `"system"` preference paints the right scheme from the first
+        // frame. (Inside the dispatch guard the theme only queues its
+        // contexts; they are applied below, before the render.)
+        if let (Some(scheme), Some(theme)) = (hello.color_scheme, self.context.theme()) {
+            theme.set_system_scheme(scheme);
+        }
         let mut inner = self.inner.lock().unwrap();
 
         let server = self.server();
@@ -1555,7 +1598,15 @@ impl RemoteSession {
             // connection stays UI-only), never guessed from.
             Err(_) => match Self::hello_without_device(json) {
                 Some(m) => m,
-                None => return,
+                None => {
+                    // Not part of the `RemoteMessage` union (see
+                    // [`ColorSchemeMessage`]); anything else unknown or
+                    // malformed is ignored, as before.
+                    if let Some(message) = ColorSchemeMessage::from_json(json) {
+                        self.handle_color_scheme(message.scheme, emit);
+                    }
+                    return;
+                }
             },
         };
 
@@ -1576,7 +1627,11 @@ impl RemoteSession {
                 };
                 self.hello_with(
                     session_id.as_deref(),
-                    HelloDevice { raw, resume_token },
+                    HelloDevice {
+                        raw,
+                        resume_token,
+                        color_scheme: ColorSchemeMessage::from_hello(json),
+                    },
                     emit,
                 )
             }
@@ -1646,6 +1701,29 @@ impl RemoteSession {
         if let Ok(json) = msg.to_json() {
             emit(&json);
         }
+        // `inner` is released here, after the emit (revision order).
+    }
+
+    /// A client's `colorScheme` report: its system color scheme changed.
+    ///
+    /// Per client, like `viewport`: only this session's theme hears it.
+    /// Ignored before `hello` and on a session without a theme. The
+    /// resulting patches go out as an ordinary `patch` message with the
+    /// next revision; while the session's preference is explicit the report
+    /// is only remembered — nothing is sent and the revision is kept.
+    fn handle_color_scheme(&self, scheme: crate::theme::SystemScheme, emit: &mut dyn FnMut(&str)) {
+        let Some(theme) = self.context.theme() else {
+            return;
+        };
+        if self.inner.lock().unwrap().acked_session_id.is_none() {
+            return;
+        }
+        // Inside the guard the theme queues its contexts instead of
+        // pushing them through the transport: they are this message's reply.
+        let _dispatch = DispatchGuard::enter();
+        theme.set_system_scheme(scheme);
+        let mut inner = self.inner.lock().unwrap();
+        self.contexts.flush_locked(&mut inner, emit);
         // `inner` is released here, after the emit (revision order).
     }
 
