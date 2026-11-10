@@ -6,8 +6,6 @@
  * against `Intl.PluralRules` for every locale the runtime knows.
  */
 import { describe, expect, test } from "bun:test";
-import { resolve } from "path";
-import { pathToFileURL } from "url";
 import { Engine } from "../packages/server/src/engine";
 import { app, HypenModuleInstance } from "../packages/core/src/app";
 import {
@@ -292,14 +290,13 @@ describe("direction", () => {
 
   test("Hypen applies dir from the active locale and re-applies on change", async () => {
     const { Hypen } = await import("../packages/web-engine/src/hypen");
-    const dir = resolve(import.meta.dir, "../packages/web-engine/wasm-browser");
     const i18n = createI18n({ locale: "ar", fallbackLocale: "en", messages: { en, ar } });
-    const hypen = new Hypen({
-      i18n,
-      jsUrl: pathToFileURL(resolve(dir, "hypen_engine.js")).href,
-      wasmUrl: pathToFileURL(resolve(dir, "hypen_engine_bg.wasm")).href,
-    });
-    await hypen.init();
+    const hypen = new Hypen({ i18n });
+    // Hypen.init() loads the browser WASM glue by URL (and other suites
+    // mock that module globally); the Node engine shares the BaseEngine API.
+    const engine = new Engine();
+    await engine.init();
+    (hypen as unknown as { engine: Engine }).engine = engine;
     hypen.registerComponent("App", app.defineState({}).build(), `Text(@t.cart.title)`);
     const container = document.createElement("div") as unknown as FakeElement;
     await hypen.render("App", container as unknown as HTMLElement);
