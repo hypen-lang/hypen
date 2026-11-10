@@ -4595,6 +4595,83 @@
       ]
     }
   },
-  "scaling": {},
-  "parity": {}
+  "scaling": {
+    "react": {
+      "ms": 2286.2000000000007,
+      "rows": 10000,
+      "domRows": 10000
+    },
+    "hypen-0.6.4": {
+      "ms": 10516.1,
+      "rows": 10000,
+      "domRows": 10000
+    },
+    "hypen-0.6.5": {
+      "ms": 2560.399999999998,
+      "rows": 10000,
+      "domRows": 10000
+    },
+    "hypen-0.6.6": {
+      "ms": 2477.7000000000007,
+      "rows": 10000,
+      "domRows": 10000
+    },
+    "hypen-0.6.7": {
+      "ms": 2202.7000000000007,
+      "rows": 10000,
+      "domRows": 10000
+    },
+    "hypen-develop-eager": {
+      "ms": 2410.600000000002,
+      "rows": 10000,
+      "domRows": 10000
+    },
+    "hypen-develop": {
+      "ms": 190.1999999999971,
+      "rows": 10000,
+      "domRows": 30
+    },
+    "react-virtual": {
+      "ms": 23.5,
+      "rows": 10000,
+      "domRows": 26
+    }
+  },
+  "parity": {
+    "hypen-0.6.4": {
+      "elements": [
+        899,
+        899
+      ],
+      "mismatches": 0
+    },
+    "hypen-0.6.5": {
+      "elements": [
+        899,
+        899
+      ],
+      "mismatches": 0
+    },
+    "hypen-0.6.6": {
+      "elements": [
+        899,
+        899
+      ],
+      "mismatches": 0
+    },
+    "hypen-0.6.7": {
+      "elements": [
+        899,
+        899
+      ],
+      "mismatches": 0
+    },
+    "hypen-develop-eager": {
+      "elements": [
+        899,
+        899
+      ],
+      "mismatches": 0
+    }
+  }
 }

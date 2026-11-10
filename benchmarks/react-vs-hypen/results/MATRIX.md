@@ -123,16 +123,28 @@ Nodes added / removed / attribute writes / text writes, from a MutationObserver.
 
 | build | ready (ms) | heap empty | heap @1k rows | heap after clear | create 10k (ms) | rows in DOM |
 |---|---:|---:|---:|---:|---:|---:|
-| `react` | 56.9 | 1.6 MB | 5.6 MB | 2.3 MB | – | – |
-| `hypen-0.6.4` | 116 | 2.2 MB | 6.3 MB | 2.6 MB | – | – |
-| `hypen-0.6.5` | 125 | 2.4 MB | 6.2 MB | 2.9 MB | – | – |
-| `hypen-0.6.6` | 128 | 2.5 MB | 6.2 MB | 3.0 MB | – | – |
-| `hypen-0.6.7` | 120 | 2.5 MB | 6.2 MB | 2.9 MB | – | – |
-| `hypen-develop-eager` | 119 | 2.5 MB | 6.1 MB | 3.0 MB | – | – |
-| `hypen-develop` | 122 | 2.5 MB | 3.1 MB | 2.9 MB | – | – |
-| `react-virtual` | 55.1 | 1.7 MB | 2.3 MB | 2.2 MB | – | – |
+| `react` | 56.9 | 1.6 MB | 5.6 MB | 2.3 MB | 2286 | 10000 |
+| `hypen-0.6.4` | 116 | 2.2 MB | 6.3 MB | 2.6 MB | 10516 | 10000 |
+| `hypen-0.6.5` | 125 | 2.4 MB | 6.2 MB | 2.9 MB | 2560 | 10000 |
+| `hypen-0.6.6` | 128 | 2.5 MB | 6.2 MB | 3.0 MB | 2478 | 10000 |
+| `hypen-0.6.7` | 120 | 2.5 MB | 6.2 MB | 2.9 MB | 2203 | 10000 |
+| `hypen-develop-eager` | 119 | 2.5 MB | 6.1 MB | 3.0 MB | 2411 | 10000 |
+| `hypen-develop` | 122 | 2.5 MB | 3.1 MB | 2.9 MB | 190 | 30 |
+| `react-virtual` | 55.1 | 1.7 MB | 2.3 MB | 2.2 MB | 23.5 | 26 |
 
 Heap is the JS heap after a forced GC; Hypen keeps its node tree in WASM linear memory, which this does not see. The 10k render is a single sample.
+
+## Parity with the React app
+
+50 rows rendered in both, every node compared (tag, text, 39 computed styles, rectangle). Windowed builds are not compared: they render a different number of rows by design.
+
+| build | elements (react / hypen) | mismatches |
+|---|---:|---:|
+| `hypen-0.6.4` | 899 / 899 | 0 |
+| `hypen-0.6.5` | 899 / 899 | 0 |
+| `hypen-0.6.6` | 899 / 899 | 0 |
+| `hypen-0.6.7` | 899 / 899 | 0 |
+| `hypen-develop-eager` | 899 / 899 | 0 |
 
 ## Spread
 
