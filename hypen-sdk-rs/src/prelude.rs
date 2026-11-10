@@ -7,6 +7,7 @@
 pub use crate::action::{ActionContext, ActionSender};
 pub use crate::app::HypenApp;
 pub use crate::context::GlobalContext;
+pub use crate::data_source::ContextSink;
 pub use crate::discovery::ComponentRegistry;
 pub use crate::error::{Result, SdkError};
 pub use crate::events::EventEmitter;
@@ -15,6 +16,9 @@ pub use crate::module::BoxFuture;
 pub use crate::module::{create_nested_instance, ModuleBuilder, ModuleDefinition, ModuleInstance};
 pub use crate::router::HypenRouter;
 pub use crate::state::State;
+pub use crate::theme::{
+    SystemScheme, Theme, ThemeAttachment, ThemeMeta, ThemeOptions, ThemeSubscription,
+};
 
 pub use crate::remote::{
     AgentHandle, ModuleSessionConfig, OutboundSink, RemoteMessage, RemoteSession, SessionConfig,

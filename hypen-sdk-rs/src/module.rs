@@ -10,6 +10,7 @@ use std::future::Future;
 use std::pin::Pin;
 
 use crate::context::GlobalContext;
+use crate::data_source::{ContextSink, EngineSink, SharedEngine};
 use crate::error::{Result, SdkError};
 use crate::state::{State, StateContainer};
 
@@ -597,7 +598,11 @@ pub struct ModuleInstance<S: State> {
     /// `engine.on_action(...)` in `new` / `new_with_components`) can
     /// capture and mutate the state without holding the engine mutex.
     state: Arc<Mutex<StateContainer<S>>>,
-    engine: Mutex<hypen_engine::Engine>,
+    /// The engine and the data-source contexts queued for it. Handlers run
+    /// while it is locked, so contexts set from a handler (a theme switch)
+    /// wait in the queue until the dispatch releases it — see
+    /// [`crate::data_source`].
+    engine: Arc<SharedEngine>,
     mounted: Mutex<bool>,
     /// IR parsed from the module's UI source at construction time, held
     /// until the first `mount()` / `mount_async()` call. Rendering on
@@ -659,15 +664,14 @@ impl<S: State> ModuleInstance<S> {
             Arc::clone(&bind_error),
         );
 
-        Ok(Self {
+        Ok(Self::assemble(
             definition,
             state,
-            engine: Mutex::new(engine),
-            mounted: Mutex::new(false),
-            pending_ir: Mutex::new(pending_ir),
+            engine,
+            pending_ir,
             global_context,
             bind_error,
-        })
+        ))
     }
 
     /// Create a new module instance with a component registry for resolving
@@ -763,15 +767,40 @@ impl<S: State> ModuleInstance<S> {
             Arc::clone(&bind_error),
         );
 
-        Ok(Self {
+        Ok(Self::assemble(
             definition,
             state,
-            engine: Mutex::new(engine),
+            engine,
+            pending_ir,
+            global_context,
+            bind_error,
+        ))
+    }
+
+    /// Shared tail of the constructors. A theme registered on the global
+    /// context is attached here, so its tokens are in the engine before the
+    /// first render.
+    fn assemble(
+        definition: Arc<ModuleDefinition<S>>,
+        state: Arc<Mutex<StateContainer<S>>>,
+        engine: hypen_engine::Engine,
+        pending_ir: Option<hypen_engine::ir::IRNode>,
+        global_context: Option<Arc<GlobalContext>>,
+        bind_error: Arc<Mutex<Option<SdkError>>>,
+    ) -> Self {
+        let instance = Self {
+            definition,
+            state,
+            engine: Arc::new(SharedEngine::new(engine)),
             mounted: Mutex::new(false),
             pending_ir: Mutex::new(pending_ir),
             global_context,
             bind_error,
-        })
+        };
+        if let Some(theme) = instance.global_context.as_ref().and_then(|c| c.theme()) {
+            instance.attach_theme(&theme);
+        }
+        instance
     }
 
     /// Register all sync action handlers from the definition with the engine
@@ -882,7 +911,7 @@ impl<S: State> ModuleInstance<S> {
             slot.take()
         };
         if let Some(ir) = ir {
-            let mut engine = self.engine.lock().unwrap();
+            let mut engine = self.engine.lock();
             engine.render_ir_node(&ir);
         }
     }
@@ -966,7 +995,7 @@ impl<S: State> ModuleInstance<S> {
         let (name, payload) = if name == hypen_engine::action_routing::UI_ACTION {
             let mut action = hypen_engine::dispatch::Action::new(name);
             action.payload = payload;
-            let action = self.engine.lock().unwrap().resolve_ui_action(action)?;
+            let action = self.engine.lock().resolve_ui_action(action)?;
             (action.name, action.payload)
         } else {
             (name, payload)
@@ -1017,7 +1046,7 @@ impl<S: State> ModuleInstance<S> {
             action = action.with_payload(p);
         }
         {
-            let mut engine = self.engine.lock().unwrap();
+            let mut engine = self.engine.lock();
             engine.dispatch_action(action).map_err(SdkError::Engine)?;
         }
 
@@ -1046,7 +1075,7 @@ impl<S: State> ModuleInstance<S> {
     where
         F: Fn(&[hypen_engine::Patch]) + Send + Sync + 'static,
     {
-        let mut engine = self.engine.lock().unwrap();
+        let mut engine = self.engine.lock();
         engine.set_render_callback(callback);
     }
 
@@ -1064,8 +1093,37 @@ impl<S: State> ModuleInstance<S> {
     pub fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
         self.engine
             .lock()
-            .unwrap()
             .set_list_viewport_wire(list_id, start, end);
+    }
+
+    /// Set (or replace) a data-source context on this module's engine:
+    /// templates read it as `@name.path`, and nodes bound to a changed path
+    /// re-render (patches go to [`on_patches`](Self::on_patches)).
+    ///
+    /// Safe to call from this module's own handlers: the engine is busy
+    /// then, so the context is applied when the dispatch finishes — like the
+    /// handler's state changes. Otherwise it is applied before this returns.
+    pub fn set_context(&self, name: &str, data: Value) {
+        self.engine.set_contexts([(name.to_string(), data)]);
+    }
+
+    /// A handle that sets data-source contexts on this module's engine, for
+    /// publishers that outlive a borrow of the instance (e.g.
+    /// [`Theme::attach`](crate::theme::Theme::attach)). It holds the engine
+    /// weakly and goes inert when the instance is dropped.
+    pub fn context_sink(&self) -> Arc<dyn ContextSink> {
+        Arc::new(EngineSink(Arc::downgrade(&self.engine)))
+    }
+
+    /// Publish `theme`'s tokens and scheme to this module's engine (as the
+    /// `theme` and `appearance` data sources) now and on every change.
+    ///
+    /// Not needed when the theme is registered on the instance's
+    /// [`GlobalContext`] before the instance is created — that attaches it
+    /// automatically. Call it before [`mount`](Self::mount) so the first
+    /// render already resolves `@theme.*`.
+    pub fn attach_theme(&self, theme: &crate::theme::Theme) -> crate::theme::ThemeAttachment {
+        theme.attach(self.context_sink())
     }
 
     /// Check if the module is currently mounted.
@@ -1096,7 +1154,7 @@ impl<S: State> ModuleInstance<S> {
     /// (like [`dispatch_action`](Self::dispatch_action)) runs sync handlers
     /// only.
     pub fn list_actions(&self) -> Vec<hypen_engine::AgentAction> {
-        self.engine.lock().unwrap().list_actions()
+        self.engine.lock().list_actions()
     }
 
     /// Every route this module's UI declares, in declaration order.
@@ -1104,7 +1162,7 @@ impl<S: State> ModuleInstance<S> {
     /// Empty until [`mount`](Self::mount) has fired the initial render —
     /// the route table is read from the expanded IR.
     pub fn list_routes(&self) -> Vec<hypen_engine::AgentRoute> {
-        self.engine.lock().unwrap().list_routes()
+        self.engine.lock().list_routes()
     }
 
     /// Every `.bind()`-declared writable input. The only fields
@@ -1113,7 +1171,7 @@ impl<S: State> ModuleInstance<S> {
     /// Empty until [`mount`](Self::mount), for the same reason as
     /// [`list_routes`](Self::list_routes).
     pub fn list_bindings(&self) -> Vec<hypen_engine::BoundInput> {
-        self.engine.lock().unwrap().list_bindings()
+        self.engine.lock().list_bindings()
     }
 
     /// Dispatch an action on behalf of a caller that is not the rendered UI.
@@ -1149,7 +1207,7 @@ impl<S: State> ModuleInstance<S> {
             action = action.with_payload(p);
         }
         {
-            let mut engine = self.engine.lock().unwrap();
+            let mut engine = self.engine.lock();
             engine.dispatch_external(action).map_err(SdkError::Engine)?;
         }
 
@@ -1177,7 +1235,7 @@ impl<S: State> ModuleInstance<S> {
     /// clear is any module registered by name on the same engine, which is
     /// what makes the router's destroy path correct for hosts that share one.
     pub fn unregister_external(&self) {
-        self.engine.lock().unwrap().unregister_module(self.name());
+        self.engine.lock().unregister_module(self.name());
     }
 
     /// Mount the module asynchronously. Runs whichever variant of
@@ -1255,7 +1313,7 @@ impl<S: State> ModuleInstance<S> {
         let (name, payload) = if name == hypen_engine::action_routing::UI_ACTION {
             let mut action = hypen_engine::dispatch::Action::new(name);
             action.payload = payload;
-            let action = self.engine.lock().unwrap().resolve_ui_action(action)?;
+            let action = self.engine.lock().resolve_ui_action(action)?;
             let name = hypen_engine::action_routing::split_scoped_action(&action.name)
                 .map(|(_, name)| name.to_string())
                 .unwrap_or(action.name);
@@ -1338,7 +1396,7 @@ impl<S: State> ModuleInstance<S> {
             let patch = state.diff_patch()?;
             drop(state); // release lock before engine lock
 
-            let mut engine = self.engine.lock().unwrap();
+            let mut engine = self.engine.lock();
             engine.update_state(None, patch);
         }
 
@@ -1946,7 +2004,7 @@ mod tests {
         // smoking-gun check for the fix. Before the fix, the registry was
         // empty here because new_with_components skipped the registration
         // loop that `new` has.
-        let engine = instance.engine.lock().unwrap();
+        let engine = instance.engine.lock();
         let resolved = engine.resource_registry().resolve("heart");
         assert!(
             resolved.is_some(),

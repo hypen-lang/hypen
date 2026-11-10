@@ -77,6 +77,8 @@
 //!   `.hypen` component files from the filesystem.
 //! - **[`EventEmitter`](events::EventEmitter)** — Pub/sub event system for
 //!   decoupled communication.
+//! - **[`Theme`](theme::Theme)** — Design tokens and color schemes, published
+//!   to templates as `@theme.*` / `@appearance.*`.
 //!
 //! ## Action Handling
 //!
@@ -113,6 +115,7 @@
 pub mod action;
 pub mod app;
 pub mod context;
+pub mod data_source;
 pub mod device;
 pub mod discovery;
 pub mod error;
@@ -123,3 +126,4 @@ pub mod prelude;
 pub mod remote;
 pub mod router;
 pub mod state;
+pub mod theme;
