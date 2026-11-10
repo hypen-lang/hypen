@@ -209,4 +209,5 @@ The scheme preference is not stored for you in the browser; save `theme.preferen
 - The Android and iOS preview clients do not report their system scheme yet, so a `"system"` preference resolves to the theme's `systemScheme` (default `light`) for them until a handler calls `setSystemScheme`.
 - The Swift server SDK has no theme API.
 - Only the TypeScript server reads the client's reported system scheme (`hello.colorScheme` / `colorScheme`); Go, Kotlin and Rust servers call `SetSystemScheme` themselves. The Go and Rust servers also do not persist a session's scheme preference across a resume.
+- `hypen check` judges direct references and interpolations (`@theme.x`, `"@{theme.x}"`), not a `theme.x` inside a larger expression (`@{a ? theme.x : theme.y}`); the language server checks those too.
 - The language server does not follow aliases, so it accepts anything at or below one; `hypen check` resolves them.
