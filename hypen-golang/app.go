@@ -120,6 +120,9 @@ type GlobalContext interface {
 	Emit(event string, payload any)
 	On(event string, handler EventHandler) func()
 	GetRouter() *HypenRouter
+	// GetTheme returns the app's theme (NewTheme), or nil when none is
+	// registered.
+	GetTheme() *Theme
 }
 
 // ActionHandlerContext contains all context for an action handler
@@ -143,6 +146,12 @@ func (c ActionHandlerContext) Device() *device.Device {
 		return device.Unavailable("device-disabled")
 	}
 	return c.device
+}
+
+// Theme returns the app's theme, or nil when none is registered (or the
+// handler has no global context). Shorthand for Context.GetTheme().
+func (c ActionHandlerContext) Theme() *Theme {
+	return themeOf(c.Context)
 }
 
 // WithDevice returns a copy of the context carrying d. Hosts (the remote

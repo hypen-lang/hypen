@@ -105,6 +105,13 @@ type SessionHost interface {
 	OnSessionDestroyed(session *RemoteSession, client *Client)
 }
 
+// ThemeHost is implemented by SessionHosts that carry an app theme
+// (RemoteServer.Theme). Optional, so other SessionHost implementations
+// keep compiling; a nil theme means none is registered.
+type ThemeHost interface {
+	Theme() *core.Theme
+}
+
 // SessionOption tweaks a session's construction. Use the WithXxx helpers.
 type SessionOption func(*sessionOptions)
 
@@ -228,6 +235,11 @@ type RemoteSession struct {
 	// build a fresh empty context and `GetModule("app")` / sibling
 	// reads from routed children would always return nil.
 	globalCtx *core.HypenGlobalContext
+
+	// theme is this session's fork of the host's theme (nil without one);
+	// detachTheme stops it publishing to the session's engine.
+	theme       *core.Theme
+	detachTheme func()
 
 	// ---- device plane (RFC 001) ----
 
@@ -369,6 +381,15 @@ func (s *RemoteSession) Engine() *core.WasmEngine {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.engine
+}
+
+// Theme returns this session's theme — a fork of the host's, with its own
+// scheme preference — or nil when the host has none or the engine hasn't
+// been built yet (before hello).
+func (s *RemoteSession) Theme() *core.Theme {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.theme
 }
 
 // UpdatePrimaryState merges a patch into the primary module's state
@@ -538,11 +559,18 @@ func (s *RemoteSession) Destroy() error {
 	sessionID := s.sessionID
 	engine := s.engine
 	s.engine = nil
+	detachTheme := s.detachTheme
+	s.detachTheme = nil
 	stateCopy := make(map[string]any, len(s.state))
 	for k, v := range s.state {
 		stateCopy[k] = v
 	}
 	s.mu.Unlock()
+
+	// Stop the theme publishing into an engine that is going away.
+	if detachTheme != nil {
+		detachTheme()
+	}
 
 	// The device plane dies with the connection: live requests settle
 	// connectionLost; app state may resume, device work never does.
@@ -1081,7 +1109,23 @@ func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 	if s.globalCtx == nil {
 		s.globalCtx = core.NewHypenGlobalContext()
 	}
+	globalCtx := s.globalCtx
 	s.mu.Unlock()
+
+	// Theme: a per-session scheme preference over the host's shared
+	// tokens, published before the first render so `@theme.*` resolves in
+	// it (and before the patch callback exists, so nothing is sent early).
+	if th, ok := s.host.(ThemeHost); ok {
+		if hostTheme := th.Theme(); hostTheme != nil {
+			theme := hostTheme.Fork("")
+			globalCtx.SetTheme(theme)
+			detach := theme.Attach(engine)
+			s.mu.Lock()
+			s.theme = theme
+			s.detachTheme = detach
+			s.mu.Unlock()
+		}
+	}
 
 	engine.SetModule(moduleName, allActions, stateKeys, initialStateCopy)
 

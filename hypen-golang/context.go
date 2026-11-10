@@ -34,6 +34,7 @@ type HypenGlobalContext struct {
 	typedEvents    *TypedEventEmitter
 	legacyEventBus map[string]map[*EventHandler]struct{}
 	router         *HypenRouter
+	theme          *Theme
 }
 
 // NewHypenGlobalContext creates a new global context
@@ -261,4 +262,19 @@ func (c *HypenGlobalContext) GetRouter() *HypenRouter {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return c.router
+}
+
+// SetTheme installs the app's theme (nil clears it). Hosts call it once
+// per context; the remote server does it for every session.
+func (c *HypenGlobalContext) SetTheme(theme *Theme) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.theme = theme
+}
+
+// GetTheme returns the app's theme, or nil when none is registered.
+func (c *HypenGlobalContext) GetTheme() *Theme {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.theme
 }

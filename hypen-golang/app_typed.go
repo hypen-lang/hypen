@@ -35,6 +35,12 @@ func (c TypedActionContext[T]) Device() *device.Device {
 	return c.device
 }
 
+// Theme returns the app's theme, or nil when none is registered; see
+// ActionHandlerContext.Theme.
+func (c TypedActionContext[T]) Theme() *Theme {
+	return themeOf(c.Context)
+}
+
 // TypedActionHandler is the signature of an action handler for a typed module.
 type TypedActionHandler[T any] func(ctx TypedActionContext[T])
 
