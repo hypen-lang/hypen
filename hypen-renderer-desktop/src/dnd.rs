@@ -892,6 +892,21 @@ impl DesktopDnd {
                     self.forget_subtree(tree, id);
                     kept.push(patch);
                 }
+                Patch::ClearChildren { id } => {
+                    // A plain Remove of each current child (the tree is
+                    // still pre-batch here, so the children are listed).
+                    // Nothing to do while no node carries a channel and
+                    // no drag is in flight — the common case for a big
+                    // list clear.
+                    if !self.nodes.is_empty() || self.drag.is_some() {
+                        for child in tree.children_of(id).to_vec() {
+                            self.note_structural(tree, None, &child);
+                            self.cancel_subtree(tree, &child);
+                            self.forget_subtree(tree, &child);
+                        }
+                    }
+                    kept.push(patch);
+                }
                 Patch::Detach { id } => {
                     self.note_structural(tree, None, id);
                     self.cancel_subtree(tree, id);

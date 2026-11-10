@@ -4517,6 +4517,17 @@ pub(crate) fn structural_fragment_invalidation(
             | Patch::Attach { id, .. } => {
                 dropped.insert(id.to_string());
             }
+            // The cleared children are already gone from `tree` (it is
+            // post-batch), so their ids can't be listed. Drop the
+            // parent's fragments instead: every fragment that encoded a
+            // cleared child under the parent also encoded the parent. A
+            // fragment rooted AT a cleared child (the parent is a
+            // scrollable) can never be looked up again — its id is dead
+            // and its membership key misses — and ages out of the
+            // bounded cache like any other unused entry.
+            Patch::ClearChildren { id } => {
+                dropped.insert(id.to_string());
+            }
             // Not yet in any fragment (Create / Instantiate / template
             // registration) or paints nothing (semantics, animation stamp).
             Patch::Create { .. }

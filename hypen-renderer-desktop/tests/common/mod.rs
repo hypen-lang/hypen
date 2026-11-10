@@ -5,6 +5,7 @@ use hypen_engine::Patch;
 use hypen_renderer_desktop::device::{DialogUnavailable, FileDialogs, PickDialog, SaveDialog};
 use hypen_renderer_desktop::module::HypenModule;
 use hypen_renderer_desktop::remote::RemoteModule;
+use hypen_renderer_desktop::Tree;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -64,48 +65,47 @@ pub fn write_file(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
 }
 
 /// The rendered `Text` strings of a patch stream (prop `"0"` by node id).
+///
+/// Mirrors the stream into the renderer's own [`Tree`], so every patch
+/// type — subtree `Remove`, `ClearChildren`, Router `Detach`/`Attach` —
+/// is applied with exactly the renderer's semantics (a removed row's
+/// descendants stop counting as rendered text).
 #[derive(Clone, Default)]
-pub struct Texts(Arc<Mutex<HashMap<String, String>>>);
+pub struct Texts(Arc<Mutex<Tree>>);
 
 impl Texts {
     pub fn attach(&self, module: &RemoteModule) {
-        let texts = Arc::clone(&self.0);
+        let tree = Arc::clone(&self.0);
         module.on_patches(Arc::new(move |patches: &[Patch]| {
-            let mut t = texts.lock().unwrap();
-            for p in patches {
-                match p {
-                    Patch::Create { id, props, .. } => {
-                        if let Some(s) = props.get("0").and_then(|v| v.as_str()) {
-                            t.insert(id.to_string(), s.to_string());
-                        }
-                    }
-                    Patch::SetProp { id, name, value } if name == "0" => {
-                        if let Some(s) = value.as_str() {
-                            t.insert(id.to_string(), s.to_string());
-                        }
-                    }
-                    Patch::Remove { id, .. } => {
-                        t.remove(id.as_ref());
-                    }
-                    _ => {}
-                }
-            }
+            tree.lock().unwrap().apply_batch(patches);
         }));
+    }
+
+    fn texts(&self) -> HashMap<String, String> {
+        self.0
+            .lock()
+            .unwrap()
+            .nodes()
+            .filter_map(|n| {
+                n.props
+                    .get("0")
+                    .and_then(|v| v.as_str())
+                    .map(|s| (n.id.clone(), s.to_string()))
+            })
+            .collect()
     }
 
     /// The value rendered as `key:<value>`.
     pub fn get(&self, key: &str) -> Option<String> {
         let prefix = format!("{key}:");
-        self.0
-            .lock()
-            .unwrap()
+        self.texts()
             .values()
             .find_map(|s| s.strip_prefix(&prefix).map(str::to_string))
     }
 
     /// The text rendered by node `id`.
     pub fn node(&self, id: &str) -> Option<String> {
-        self.0.lock().unwrap().get(id).cloned()
+        self.texts().get(id).cloned()
     }
 
     /// Wait until `key` renders something other than `unset`.
@@ -120,7 +120,7 @@ impl Texts {
             if start.elapsed() > timeout {
                 panic!(
                     "timed out waiting for {key}; texts = {:?}",
-                    self.0.lock().unwrap().values().collect::<Vec<_>>()
+                    self.texts().values().collect::<Vec<_>>()
                 );
             }
             std::thread::sleep(Duration::from_millis(20));

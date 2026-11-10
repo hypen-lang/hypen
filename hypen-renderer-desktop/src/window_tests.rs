@@ -194,6 +194,27 @@ mod paint_only_gate {
             "semantics name their node only"
         );
     }
+
+    #[test]
+    fn clear_children_is_structural_and_drops_the_parents_fragments() {
+        let mut tree = gate_tree();
+        let clear = Patch::ClearChildren { id: "col".into() };
+        assert!(
+            paint_only_affected_ids(std::slice::from_ref(&clear), &[], &tree, false, false, false)
+                .is_none(),
+            "a clear is never paint-only"
+        );
+        // The invalidation runs on the post-batch tree.
+        tree.apply(&clear);
+        let dropped = structural_fragment_invalidation(
+            std::slice::from_ref(&clear),
+            &[],
+            &tree,
+            crate::style::vp(800.0),
+        )
+        .expect("membership change stays scoped");
+        assert!(dropped.contains("col"), "fragments holding the parent go");
+    }
 }
 
 #[test]

@@ -2731,3 +2731,139 @@ fn completion_merges_static_applicator_args_under_the_animation_field() {
     assert_eq!(action, "done");
     assert_eq!(payload, json!({ "source": "hero", "animation": "enter" }));
 }
+
+// ---------------------------------------------------------------
+// ClearChildren — a plain Remove of every child, in one patch
+// ---------------------------------------------------------------
+
+fn clear(id: &str) -> Patch {
+    Patch::ClearChildren { id: id.into() }
+}
+
+/// Three rows under `col`, each holding a looping `.animate` dot with a
+/// `.transition` spec — records in `specs`, `ambients` and `anims`.
+fn animated_rows(animator: &mut DesktopAnimator, tree: &mut Tree) {
+    let mut batch = Vec::new();
+    for i in 0..3 {
+        let (row, dot) = (format!("row{i}"), format!("dot{i}"));
+        batch.push(create(&row, "Row", &[]));
+        batch.push(insert("col", &row));
+        batch.push(create(
+            &dot,
+            "Container",
+            &[
+                ("opacity", json!(1.0)),
+                ("__anim.transition", json!({ "duration": 100, "curve": "linear" })),
+                (
+                    "__anim.animate",
+                    json!({ "preset": "pulse", "duration": 100, "repeat": "loop", "curve": "linear" }),
+                ),
+            ],
+        ));
+        batch.push(insert(&row, &dot));
+    }
+    animator.ingest(&batch, tree);
+    animator.set_manual_time_ms(30.0);
+    animator.tick(tree);
+}
+
+#[test]
+fn clear_children_forgets_every_record_in_the_cleared_subtrees() {
+    let (mut animator, mut tree) = armed();
+    let baseline = animator.tracked_record_count();
+    animated_rows(&mut animator, &mut tree);
+    assert!(animator.tracked_record_count() > baseline);
+
+    let out = animator.ingest(&[clear("col")], &mut tree);
+    assert!(
+        matches!(&out.forwarded[..], [Patch::ClearChildren { id }] if id.as_ref() == "col"),
+        "the common path forwards ONE patch: {:?}",
+        out.forwarded
+    );
+    assert!(tree.children_of("col").is_empty());
+    assert!(tree.get("col").is_some(), "the parent stays");
+    assert_eq!(
+        animator.tracked_record_count(),
+        baseline,
+        "no record of a cleared node (descendants included) survives"
+    );
+    assert!(!animator.has_active(&tree), "no ambient keeps ticking");
+}
+
+#[test]
+fn plain_remove_forgets_the_descendants_records_too() {
+    let (mut animator, mut tree) = armed();
+    let baseline = animator.tracked_record_count();
+    animated_rows(&mut animator, &mut tree);
+    for i in 0..3 {
+        animator.ingest(&[remove(&format!("row{i}"), false)], &mut tree);
+    }
+    assert_eq!(animator.tracked_record_count(), baseline);
+}
+
+#[test]
+fn clear_children_matches_a_plain_remove_per_child() {
+    let (mut cleared, mut tree_a) = armed();
+    let (mut removed, mut tree_b) = armed();
+    animated_rows(&mut cleared, &mut tree_a);
+    animated_rows(&mut removed, &mut tree_b);
+    let refill = [create("n0", "Text", &[]), insert("col", "n0")];
+    let mut a = vec![clear("col")];
+    a.extend(refill.iter().cloned());
+    let mut b: Vec<Patch> = (0..3).map(|i| remove(&format!("row{i}"), false)).collect();
+    b.extend(refill.iter().cloned());
+    cleared.ingest(&a, &mut tree_a);
+    removed.ingest(&b, &mut tree_b);
+    assert_eq!(tree_a.children_of("col"), tree_b.children_of("col"));
+    assert_eq!(tree_a.nodes().count(), tree_b.nodes().count());
+    assert_eq!(cleared.tracked_record_count(), removed.tracked_record_count());
+}
+
+#[test]
+fn clear_children_lets_an_earlier_exit_finish() {
+    let (mut animator, mut tree) = armed();
+    animator.ingest(&[create("row", "Row", &[]), insert("col", "row")], &mut tree);
+    // `card` is mid-exit from an earlier flagged Remove: engine-dead,
+    // still in the tree (and still a child of `col`).
+    exiting_card(&mut animator, &mut tree);
+    assert_eq!(tree.children_of("col").len(), 2);
+
+    let out = animator.ingest(&[clear("col")], &mut tree);
+    // Lowered to per-child plain Removes: `row` goes now, `card`'s
+    // folds into its pending teardown.
+    assert!(
+        matches!(&out.forwarded[..], [Patch::Remove { id, transition: false }] if id.as_ref() == "row"),
+        "{:?}",
+        out.forwarded
+    );
+    assert!(tree.get("row").is_none());
+    assert!(tree.get("card").is_some(), "the exit keeps playing");
+    animator.set_manual_time_ms(150.0);
+    let tick = animator.tick(&mut tree);
+    assert!(!tick.finalized.is_empty());
+    assert!(tree.get("card").is_none() && tree.get("label").is_none());
+    assert!(tree.children_of("col").is_empty());
+    assert!(tree.get("col").is_some());
+}
+
+#[test]
+fn clear_children_under_an_exiting_root_folds_into_its_teardown() {
+    let (mut animator, mut tree) = armed();
+    exiting_card(&mut animator, &mut tree);
+    let out = animator.ingest(&[clear("card")], &mut tree);
+    assert!(out.forwarded.is_empty(), "withheld with the exiting root");
+    assert!(tree.get("label").is_some(), "the corpse stays intact mid-exit");
+    animator.set_manual_time_ms(150.0);
+    animator.tick(&mut tree);
+    assert!(tree.get("card").is_none() && tree.get("label").is_none());
+}
+
+#[test]
+fn clear_children_of_an_unknown_node_is_a_noop() {
+    let (mut animator, mut tree) = armed();
+    animated_rows(&mut animator, &mut tree);
+    let before = animator.tracked_record_count();
+    animator.ingest(&[clear("ghost")], &mut tree);
+    assert_eq!(animator.tracked_record_count(), before);
+    assert_eq!(tree.children_of("col").len(), 3);
+}

@@ -1427,21 +1427,10 @@ impl DesktopAnimator {
                     }
                 }
                 Patch::Remove { id, transition } => {
-                    if let Some(record) = self.exits.get_mut(id.as_ref()) {
-                        // Duplicate remove for an already-exiting id
-                        // (defensive): fold into the pending teardown.
-                        record.patches.push(patch.clone());
-                    } else if *transition && self.begin_exit(tree, id, patch) {
-                        // Withheld: teardown deferred until settle.
-                    } else if self.defer_to_exiting_ancestor(tree, id, patch) {
-                        // Descendant plain remove under an exiting root
-                        // (flagged-root-first wire ordering): defers
-                        // with it so the subtree stays intact.
-                    } else {
-                        self.forget(id);
-                        tree.apply(patch);
-                        forwarded.push(patch.clone());
-                    }
+                    self.ingest_remove(patch, id, *transition, tree, &mut forwarded);
+                }
+                Patch::ClearChildren { id } => {
+                    self.ingest_clear_children(patch, id, tree, &mut forwarded);
                 }
                 Patch::Attach { id, .. } => {
                     // Router cache re-entry: nodes at-or-under this root are
@@ -1470,6 +1459,82 @@ impl DesktopAnimator {
             restyle: flushed.restyle,
             finalized_any,
         }
+    }
+
+    /// One `Remove` through the animator: a flagged root with a playable
+    /// exit is withheld until it settles, a remove at-or-under an
+    /// exiting root folds into that root's teardown, anything else
+    /// reaches the tree now.
+    fn ingest_remove(
+        &mut self,
+        patch: &Patch,
+        id: &str,
+        transition: bool,
+        tree: &mut Tree,
+        forwarded: &mut Vec<Patch>,
+    ) {
+        if let Some(record) = self.exits.get_mut(id) {
+            // Duplicate remove for an already-exiting id
+            // (defensive): fold into the pending teardown.
+            record.patches.push(patch.clone());
+        } else if transition && self.begin_exit(tree, id, patch) {
+            // Withheld: teardown deferred until settle.
+        } else if self.defer_to_exiting_ancestor(tree, id, patch) {
+            // Descendant plain remove under an exiting root
+            // (flagged-root-first wire ordering): defers
+            // with it so the subtree stays intact.
+        } else {
+            // The engine sends a plain Remove for the subtree root
+            // only, so every record under it goes too — not just the
+            // root's — or descendants' specs/ambients outlive them.
+            let doomed = subtree_ids(tree, std::slice::from_ref(&id.to_string()));
+            self.forget_all(&doomed);
+            tree.apply(patch);
+            forwarded.push(patch.clone());
+        }
+    }
+
+    /// `ClearChildren`: exactly a plain `Remove` of each current child.
+    ///
+    /// - The parent itself exiting, or under an exiting root: the clear
+    ///   folds into that teardown like a descendant remove would.
+    /// - A child still playing an exit from an EARLIER flagged Remove:
+    ///   lower to per-child plain Removes, which lets that exit finish
+    ///   (its remove folds into the pending teardown) while the other
+    ///   children go now. The contract allows either; this keeps exact
+    ///   per-child-Remove behaviour on the rare path.
+    /// - Otherwise (the common path): forget every record in the
+    ///   cleared subtrees in one pass and apply the clear as ONE patch,
+    ///   which the Taffy mirror also replays as one operation.
+    fn ingest_clear_children(
+        &mut self,
+        patch: &Patch,
+        id: &str,
+        tree: &mut Tree,
+        forwarded: &mut Vec<Patch>,
+    ) {
+        if let Some(record) = self.exits.get_mut(id) {
+            record.patches.push(patch.clone());
+            return;
+        }
+        if self.defer_to_exiting_ancestor(tree, id, patch) {
+            return;
+        }
+        let children: Vec<String> = tree.children_of(id).to_vec();
+        if children.iter().any(|c| self.exits.contains_key(c)) {
+            for child in children {
+                let remove = Patch::Remove {
+                    id: child.as_str().into(),
+                    transition: false,
+                };
+                self.ingest_remove(&remove, &child, false, tree, forwarded);
+            }
+            return;
+        }
+        let doomed = subtree_ids(tree, &children);
+        self.forget_all(&doomed);
+        tree.apply(patch);
+        forwarded.push(patch.clone());
     }
 
     /// Parse and cache a freshly-created node's `__anim.*` props, mark
@@ -3153,6 +3218,41 @@ impl DesktopAnimator {
         self.state_settles.remove(id);
     }
 
+    /// [`DesktopAnimator::forget`] for a whole set of ids at once: the
+    /// keyed maps drop each id, and every list / composite-key map is
+    /// filtered ONCE instead of once per id (a cleared 1,000-row list
+    /// would otherwise rescan `anims` and the pending lists per node).
+    /// Must stay in step with `forget`.
+    fn forget_all(&mut self, ids: &HashSet<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        for id in ids {
+            self.specs.remove(id);
+            self.motion_essential.remove(id);
+            self.created_this_batch.remove(id);
+            self.created_nodes_this_batch.remove(id);
+            self.pending_flips.remove(id);
+            self.ambients.remove(id); // no restore — the node is going away
+            self.finished_ambients.remove(id);
+            self.enter_groups.remove(id);
+            self.exits.remove(id);
+            self.shared.remove(id);
+            self.shared_created_this_batch.remove(id);
+            self.group_completion.remove(id);
+            self.state_labels.remove(id);
+            self.state_settles.remove(id);
+        }
+        self.pending_enters.retain(|p| !ids.contains(p));
+        self.removal_flip_candidates.retain(|c| !ids.contains(c));
+        if !self.anims.is_empty() {
+            self.anims.retain(|(anim_id, _), _| !ids.contains(anim_id));
+        }
+        self.pending_ambient_restarts
+            .retain(|(p, _)| !ids.contains(p));
+        self.pending_essential_snaps.retain(|p| !ids.contains(p));
+    }
+
     /// Test hook: total per-id records held across every internal map,
     /// so leak regression tests can assert that `forget` (and the
     /// window's eviction backstop calling it) fully drops a node.
@@ -3280,6 +3380,20 @@ fn apply_stored(tree: &mut Tree, id: &str, key: &str, stored: &Stored) {
 /// Is `id` at-or-under any of `roots` (walking the parent index)? Used
 /// for shared-element detach-root scoping (source side) and re-attached
 /// root membership (incoming side).
+/// Every id at-or-under each of `roots` (linked children only — a
+/// Router-detached subtree below is not part of a removal, matching
+/// `Tree`'s own teardown walk).
+fn subtree_ids(tree: &Tree, roots: &[String]) -> HashSet<String> {
+    let mut out = HashSet::new();
+    let mut stack: Vec<&str> = roots.iter().map(String::as_str).collect();
+    while let Some(id) = stack.pop() {
+        if out.insert(id.to_string()) {
+            stack.extend(tree.children_of(id).iter().map(String::as_str));
+        }
+    }
+    out
+}
+
 fn is_at_or_under(tree: &Tree, id: &str, roots: &[String]) -> bool {
     if roots.is_empty() {
         return false;
@@ -3910,6 +4024,17 @@ impl DesktopScrubber {
                 Patch::Remove { id, .. } => {
                     self.cancel_subtree(id, tree);
                     self.forget_subtree(id, tree);
+                    kept.push(patch);
+                }
+                Patch::ClearChildren { id } => {
+                    // A plain Remove of each current child (the tree is
+                    // still pre-batch here, so the children are listed).
+                    if !self.entries.is_empty() {
+                        for child in tree.children_of(id).to_vec() {
+                            self.cancel_subtree(&child, tree);
+                            self.forget_subtree(&child, tree);
+                        }
+                    }
                     kept.push(patch);
                 }
                 Patch::Detach { id } => {

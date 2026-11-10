@@ -8979,3 +8979,164 @@ fn button_under_stretching_parent_stays_content_width() {
         "button stretched: {btn:?} in {stack:?}"
     );
 }
+
+/// `col` (under root, beside `header`) holding three `Row`s, each with a
+/// nested `Column` -> `Text`, so a cleared child has a two-level subtree.
+fn clear_children_fixture() -> Vec<Patch> {
+    let mut batch = vec![
+        create_patch("col", "Column", &[("padding", json!(4))]),
+        insert_patch("root", "col"),
+        create_patch("header", "Text", &[("0", json!("header"))]),
+        insert_patch("root", "header"),
+    ];
+    for i in 0..3 {
+        let (row, inner, text) = (format!("r{i}"), format!("in{i}"), format!("t{i}"));
+        batch.push(create_patch(&row, "Row", &[]));
+        batch.push(insert_patch("col", &row));
+        batch.push(create_patch(&inner, "Column", &[]));
+        batch.push(insert_patch(&row, &inner));
+        batch.push(create_patch(&text, "Text", &[("0", json!(format!("row {i}")))]));
+        batch.push(insert_patch(&inner, &text));
+    }
+    batch
+}
+
+/// Mount `clear_children_fixture`, lay it out once (so the retained Taffy
+/// mirror is live), then apply `update` incrementally and lay out again.
+fn mount_then_apply(update: &[Patch]) -> (Tree, TaffyState, LayoutPass) {
+    let base = clear_children_fixture();
+    let mut tree = Tree::new();
+    tree.apply_batch(&base);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&base, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let scrolls = HashMap::new();
+    let _ = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (800, 600), 1.0, 0.0, &scrolls, 3,
+    );
+    tree.apply_batch(update);
+    assert!(
+        taffy.apply_patches(update, &tree, 1.0, vp(800.0)),
+        "the update must apply incrementally (no bulk-rebuild fallback)"
+    );
+    let pass = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (800, 600), 1.0, 0.0, &scrolls, 3,
+    );
+    (tree, taffy, pass)
+}
+
+/// Taffy nodes a never-patched `TaffyState` builds for `tree` — the
+/// leak-free baseline the incremental mirror must match.
+fn cold_node_count(tree: &Tree) -> usize {
+    let mut cold = TaffyState::new();
+    let mut text = TextEngine::new();
+    let _ = LayoutPass::compute_with_state(
+        &mut cold,
+        tree,
+        &mut text,
+        (800, 600),
+        1.0,
+        0.0,
+        &HashMap::new(),
+        3,
+    );
+    cold.total_node_count()
+}
+
+fn rect_of(pass: &LayoutPass, id: &str) -> (f32, f32, f32, f32) {
+    let r = find_item(pass, id).rect;
+    (r.x, r.y, r.w, r.h)
+}
+
+#[test]
+fn taffy_clear_children_frees_every_descendant_node() {
+    let clear = vec![Patch::ClearChildren { id: "col".into() }];
+    let (tree, taffy, pass) = mount_then_apply(&clear);
+    for i in 0..3 {
+        for id in [format!("r{i}"), format!("in{i}"), format!("t{i}")] {
+            assert!(!taffy.node_map.contains_key(&id), "{id} left node_map");
+            assert!(pass.item_by_id(&id).is_none(), "{id} not laid out");
+        }
+    }
+    assert!(taffy.node_map.contains_key("col"), "the cleared parent stays");
+    assert!(pass.item_by_id("col").is_some());
+    assert_eq!(taffy.node_map.len(), tree.nodes().count());
+    assert_eq!(
+        taffy.total_node_count(),
+        cold_node_count(&tree),
+        "no orphaned Taffy node survives the clear"
+    );
+}
+
+#[test]
+fn taffy_plain_remove_frees_the_whole_subtree() {
+    // The engine sends a plain Remove for the subtree ROOT only; the
+    // descendants' Taffy nodes must not outlive it.
+    let remove = vec![Patch::Remove {
+        id: "r1".into(),
+        transition: false,
+    }];
+    let (tree, taffy, _) = mount_then_apply(&remove);
+    assert!(!taffy.node_map.contains_key("in1"));
+    assert!(!taffy.node_map.contains_key("t1"));
+    assert_eq!(taffy.node_map.len(), tree.nodes().count());
+    assert_eq!(taffy.total_node_count(), cold_node_count(&tree));
+}
+
+#[test]
+fn taffy_clear_children_then_insert_lays_out_only_the_new_children() {
+    let update = vec![
+        Patch::ClearChildren { id: "col".into() },
+        create_patch("n0", "Text", &[("0", json!("new 0"))]),
+        insert_patch("col", "n0"),
+        // A reused id is a fresh node, not the old subtree.
+        create_patch("r1", "Text", &[("0", json!("new 1"))]),
+        insert_patch("col", "r1"),
+    ];
+    let (tree, taffy, pass) = mount_then_apply(&update);
+    assert_eq!(tree.children_of("col"), ["n0".to_string(), "r1".to_string()]);
+    assert!(pass.item_by_id("in1").is_none() && pass.item_by_id("t1").is_none());
+    let n0 = rect_of(&pass, "n0");
+    let r1 = rect_of(&pass, "r1");
+    assert!(r1.1 > n0.1, "new children stack in order: {n0:?} {r1:?}");
+    assert_eq!(taffy.total_node_count(), cold_node_count(&tree));
+}
+
+#[test]
+fn taffy_clear_children_of_an_unknown_node_is_a_noop() {
+    let (tree, taffy, pass) =
+        mount_then_apply(&[Patch::ClearChildren { id: "ghost".into() }]);
+    assert_eq!(tree.children_of("col").len(), 3);
+    assert!(pass.item_by_id("t2").is_some());
+    assert_eq!(taffy.total_node_count(), cold_node_count(&tree));
+}
+
+#[test]
+fn taffy_clear_children_matches_a_plain_remove_per_child() {
+    let clear = vec![
+        Patch::ClearChildren { id: "col".into() },
+        create_patch("n0", "Text", &[("0", json!("new"))]),
+        insert_patch("col", "n0"),
+    ];
+    let mut per_child: Vec<Patch> = (0..3)
+        .map(|i| Patch::Remove {
+            id: format!("r{i}").into(),
+            transition: false,
+        })
+        .collect();
+    per_child.extend(clear[1..].iter().cloned());
+    let (tree_a, taffy_a, pass_a) = mount_then_apply(&clear);
+    let (tree_b, taffy_b, pass_b) = mount_then_apply(&per_child);
+    assert_eq!(tree_a.children_of("col"), tree_b.children_of("col"));
+    assert_eq!(tree_a.nodes().count(), tree_b.nodes().count());
+    let mut keys_a: Vec<_> = taffy_a.node_map.keys().cloned().collect();
+    let mut keys_b: Vec<_> = taffy_b.node_map.keys().cloned().collect();
+    keys_a.sort();
+    keys_b.sort();
+    assert_eq!(keys_a, keys_b);
+    assert_eq!(taffy_a.total_node_count(), taffy_b.total_node_count());
+    for id in ["col", "header", "n0"] {
+        assert_eq!(rect_of(&pass_a, id), rect_of(&pass_b, id), "{id}");
+    }
+    assert_eq!(pass_a.items.len(), pass_b.items.len());
+}
