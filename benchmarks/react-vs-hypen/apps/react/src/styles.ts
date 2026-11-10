@@ -25,7 +25,7 @@ export const rowBase: CSSProperties = {
 export const colBase: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  alignItems: "stretch",
+  alignItems: "flex-start",
 };
 
 /** `Text` handler base. */
@@ -55,7 +55,7 @@ export const buttonBase: CSSProperties = {
 export const listBase: CSSProperties = {
   display: "flex",
   flexDirection: "column",
-  alignItems: "flex-start",
+  alignItems: "stretch",
   overflow: "auto",
 };
 
