@@ -716,31 +716,20 @@ fn replace_subtree_impl(
         .remove_subtree_with(old_node_id, |id| ctx.dependencies.remove_node(id));
 
     let is_root = parent_id.is_none();
-    // The parent may be a transparent control-flow container (a When/If
-    // branch switching element types, a ForEach row): insert under the
-    // nearest real element, or "root" when there is none.
+    // The parent may be a transparent control-flow container (a ForEach row
+    // whose template changed type): render under its real ancestor.
     let render_parent = nearest_render_parent(ctx.tree, parent_id);
-    let mark = ctx.patches.len();
+    ctx.tree.place_before_slot = next_sibling;
     let new_node_id = create_element_node(
         ctx,
         new_element,
         parent_id,
         render_parent,
-        render_parent.is_none(),
+        is_root || render_parent.is_none(),
     );
 
     if is_root {
         ctx.tree.set_root(new_node_id);
-    } else if let (Some(pid), Some(pos)) = (parent_id, old_position) {
-        // Restore the logical slot, then anchor the (appending) Insert before
-        // whatever renders after it.
-        if let Some(parent) = ctx.tree.get_mut(pid) {
-            if pos + 1 < parent.children.len() && parent.children.back() == Some(&new_node_id) {
-                parent.children.pop_back();
-                parent.children.insert(pos, new_node_id);
-            }
-        }
-        anchor_region_appends(ctx, mark, new_node_id);
     }
 }
 
@@ -1025,9 +1014,8 @@ fn create_foreach_ir_tree(
     let module_scope_ref = ctx.effective_scope(raw_scope);
     let effective_state = ctx.effective_state(raw_scope);
 
-    // Borrowed out of state, not cloned — the array is only iterated here.
-    let array = super::item_bindings::foreach_items(source, props, effective_state);
-    let outer_item_source = props.contains_key(super::item_bindings::FOREACH_ITEMS_PROP);
+    // Borrowed, not cloned — the array is only iterated here.
+    let array = foreach_items(props, source, effective_state, ctx.data_sources);
 
     let resolved_props = resolve_props_full(props, effective_state, None, ctx.data_sources);
 
@@ -1054,15 +1042,9 @@ fn create_foreach_ir_tree(
         node.clone(),
     );
 
-    // An outer-item source is not a state path: the enclosing loop
-    // re-substitutes (and re-reconciles) this node when its item changes.
-    if !outer_item_source {
+    if !props.contains_key(FOREACH_ITEMS_PROP) {
         ctx.dependencies
             .add_dependency(node_id, source, module_scope_ref);
-    }
-
-    if let Some(parent) = parent_id {
-        ctx.tree.add_child(parent, node_id, None);
     }
 
     link_new_node(ctx, parent_id, node_id);
@@ -1614,150 +1596,8 @@ fn rebuild_foreach_children(
     }
 }
 
-/// First node a renderer knows about at or under `id`, in render order.
-///
-/// An element is its own first rendered node; a control-flow container
-/// (transparent to renderers) contributes its first rendered descendant, or
-/// nothing when it currently renders nothing (an If whose condition is false,
-/// an empty ForEach).
-fn first_rendered_node(tree: &InstanceTree, id: NodeId) -> Option<NodeId> {
-    let node = tree.get(id)?;
-    if node.control_flow.is_none() {
-        return Some(id);
-    }
-    node.children
-        .iter()
-        .find_map(|&child| first_rendered_node(tree, child))
-}
-
-/// Every node a renderer knows about at the top of `id`'s region, in render
-/// order: `id` itself for an element; for a transparent control-flow
-/// container, the rendered nodes of each of its children, flattened through
-/// nested control flow (nothing when it currently renders nothing).
-pub(crate) fn collect_rendered_nodes(tree: &InstanceTree, id: NodeId, out: &mut Vec<NodeId>) {
-    let Some(node) = tree.get(id) else {
-        return;
-    };
-    if node.control_flow.is_none() {
-        out.push(id);
-        return;
-    }
-    for &child in &node.children {
-        collect_rendered_nodes(tree, child, out);
-    }
-}
-
-/// The rendered node that must stay immediately AFTER everything `id`
-/// renders, within `id`'s render parent — i.e. the insert-before anchor for
-/// content a transparent control-flow node adds after its siblings already
-/// exist in the renderer.
-///
-/// Walks `id`'s later siblings for their first rendered node; when they
-/// render nothing and the logical parent is itself transparent, continues
-/// with the parent's later siblings, stopping at the first real element
-/// ancestor (the render parent). `None` means the content belongs at the end
-/// of the render parent, so an append is already correct.
-fn render_anchor_after(tree: &InstanceTree, id: NodeId) -> Option<NodeId> {
-    let mut current = id;
-    loop {
-        let parent_id = tree.get(current)?.parent?;
-        let parent = tree.get(parent_id)?;
-        let pos = parent.children.iter().position(|&c| c == current)?;
-        if let Some(anchor) = parent
-            .children
-            .iter()
-            .skip(pos + 1)
-            .find_map(|&sib| first_rendered_node(tree, sib))
-        {
-            return Some(anchor);
-        }
-        parent.control_flow.as_ref()?;
-        current = parent_id;
-    }
-}
-
-/// Re-anchor the appends a transparent control-flow node emitted.
-///
-/// ForEach / If / When / Router children are inserted straight into the
-/// render parent, interleaved with the siblings that follow the container.
-/// Creation paths emit `Insert`/`Instantiate`/`Attach` (and the keyed
-/// placement pass a trailing `Move`) with `before_id: None`, which is only
-/// right when nothing follows the container. Every such append into the
-/// container's render parent emitted since `mark` really means "at the end
-/// of this container's region", so give it the region's trailing anchor —
-/// otherwise a message appended to a chat ForEach lands below a following
-/// `If { Text("Thinking...") }`. Relative order among the rewritten patches
-/// is unchanged: they all insert before the same anchor, in emission order.
-fn anchor_region_appends(ctx: &mut ReconcileCtx, mark: usize, node_id: NodeId) {
-    if mark >= ctx.patches.len() {
-        return;
-    }
-    let Some(parent) = ctx.tree.get(node_id).map(|n| n.parent) else {
-        return;
-    };
-    let render_parent: std::sync::Arc<str> = match nearest_render_parent(ctx.tree, parent) {
-        Some(rp) => super::patch::node_id_str(rp),
-        None => "root".into(),
-    };
-    let is_region_append = |p: &Patch| match p {
-        Patch::Insert {
-            parent_id,
-            before_id: None,
-            ..
-        }
-        | Patch::Move {
-            parent_id,
-            before_id: None,
-            ..
-        }
-        | Patch::Attach {
-            parent_id,
-            before_id: None,
-            ..
-        }
-        | Patch::Instantiate {
-            parent_id,
-            before_id: None,
-            ..
-        } => *parent_id == render_parent,
-        _ => false,
-    };
-    // Steady-state passes emit no appends — don't pay for the anchor walk.
-    if !ctx.patches[mark..].iter().any(is_region_append) {
-        return;
-    }
-    let Some(anchor) = render_anchor_after(ctx.tree, node_id) else {
-        return;
-    };
-    let anchor = super::patch::node_id_str(anchor);
-    for patch in &mut ctx.patches[mark..] {
-        if !is_region_append(patch) {
-            continue;
-        }
-        if let Patch::Insert { before_id, .. }
-        | Patch::Move { before_id, .. }
-        | Patch::Attach { before_id, .. }
-        | Patch::Instantiate { before_id, .. } = patch
-        {
-            *before_id = Some(anchor.clone());
-        }
-    }
-}
-
 /// Reconcile an existing tree against a new IRNode using a `ReconcileCtx`.
 pub(crate) fn reconcile_ir_node_impl(ctx: &mut ReconcileCtx, node_id: NodeId, node: &IRNode) {
-    if matches!(node, IRNode::Element(_)) {
-        reconcile_ir_node_inner(ctx, node_id, node);
-        return;
-    }
-    // Control flow: whatever the container adds lands inside its own region
-    // of the render parent, not after the siblings that follow it.
-    let mark = ctx.patches.len();
-    reconcile_ir_node_inner(ctx, node_id, node);
-    anchor_region_appends(ctx, mark, node_id);
-}
-
-fn reconcile_ir_node_inner(ctx: &mut ReconcileCtx, node_id: NodeId, node: &IRNode) {
     // Existence check only. Each arm reads the handful of fields it needs
     // straight off the node — cloning the whole `InstanceNode` here (and
     // then AGAIN inside `reconcile_element_node`) was the single most
@@ -1776,7 +1616,7 @@ fn reconcile_ir_node_inner(ctx: &mut ReconcileCtx, node_id: NodeId, node: &IRNod
             item_name,
             key_path,
             template,
-            props,
+            props: _,
             module_scope,
             lazy,
         } => {
@@ -1793,14 +1633,30 @@ fn reconcile_ir_node_inner(ctx: &mut ReconcileCtx, node_id: NodeId, node: &IRNod
             let module_scope_ref = ctx.effective_scope(module_scope.as_deref());
             let effective_state = ctx.effective_state(module_scope.as_deref());
 
-            // See `create_foreach_ir_tree`: outer-item sources aren't state.
-            if !props.contains_key(super::item_bindings::FOREACH_ITEMS_PROP) {
+            let props = match node {
+                IRNode::ForEach { props, .. } => props,
+                _ => unreachable!(),
+            };
+            // Keep the stored template current: dirty passes and viewport
+            // reports re-run the list from it, so a hot-reloaded template or
+            // a nested loop's freshly substituted copy (its `__items`) must
+            // replace it. A pass already running from it skips the copy.
+            if let Some(n) = ctx.tree.get_mut(node_id) {
+                if !n
+                    .ir_node_template
+                    .as_deref()
+                    .is_some_and(|stored| std::ptr::eq(stored, node))
+                {
+                    n.ir_node_template = Some(std::sync::Arc::new(node.clone()));
+                }
+            }
+            if !props.contains_key(FOREACH_ITEMS_PROP) {
                 ctx.dependencies
                     .add_dependency(node_id, source, module_scope_ref);
             }
 
-            // Borrowed out of state — see `create_foreach_ir_tree`.
-            let array = super::item_bindings::foreach_items(source, props, effective_state);
+            // Borrowed — see `create_foreach_ir_tree`.
+            let array = foreach_items(props, source, effective_state, ctx.data_sources);
 
             if let Some(serde_json::Value::Array(items)) = array {
                 let old_children: Vec<NodeId> = match ctx.tree.get(node_id) {
@@ -2209,9 +2065,8 @@ pub(crate) fn root_remove_patch(tree: &mut InstanceTree, id: NodeId) -> Patch {
 /// the dependency graph. The exit spec must be read (`root_remove_patch`)
 /// before the removal drops the node's props.
 pub(crate) fn remove_child_subtree(ctx: &mut ReconcileCtx, child_id: NodeId) {
-    if is_control_flow(ctx.tree, child_id) {
-        // A control-flow row (e.g. an `If` per item) has no renderer node of
-        // its own — see `emit_subtree_removal`.
+    if control_flow_roots(ctx.tree, child_id).is_some() {
+        // A row rooted at a control-flow node (an `If` per item).
         emit_subtree_removal(ctx.tree, child_id, ctx.patches);
         ctx.tree
             .remove_subtree_with(child_id, |id| ctx.dependencies.remove_node(id));
@@ -2272,19 +2127,12 @@ pub(crate) fn emit_plain_removal(tree: &InstanceTree, id: NodeId, patches: &mut 
 ///   one patch per descendant meant ~17k patches to clear a 1,000-row list
 ///   that the renderer discards in a single subtree unlink.
 fn emit_subtree_removal(tree: &mut InstanceTree, root_id: NodeId, patches: &mut Vec<Patch>) {
-    if is_control_flow(tree, root_id) {
-        // Control-flow containers are transparent: the renderer never saw a
-        // `Create` for them, so a `Remove` addressed to one is dropped and
-        // everything it rendered would stay on screen (an `If` nested in an
-        // `If`, a ForEach inside a branch that switches off). Remove what it
-        // actually rendered — its children, recursively through nested
-        // control flow.
-        let children: Vec<NodeId> = tree
-            .get(root_id)
-            .map(|n| n.children.iter().copied().collect())
-            .unwrap_or_default();
-        for child in children {
-            emit_subtree_removal(tree, child, patches);
+    // See `emit_plain_removal`: a control-flow container is transparent, so
+    // each of its renderer-visible roots is removed in its own right (and
+    // plays its own exit transition, if it has one).
+    if let Some(roots) = control_flow_roots(tree, root_id) {
+        for root in roots {
+            emit_subtree_removal(tree, root, patches);
         }
         return;
     }
@@ -2307,8 +2155,31 @@ fn emit_subtree_removal(tree: &mut InstanceTree, root_id: NodeId, patches: &mut 
     }
 }
 
-fn is_control_flow(tree: &InstanceTree, id: NodeId) -> bool {
-    tree.get(id).is_some_and(|n| n.control_flow.is_some())
+/// Replace `old_id` with a freshly created control-flow node (the IR at
+/// this slot changed kind, e.g. a hot reload turning a `Text` into a
+/// `ForEach`). The old id is unlinked from its parent, and a lone child
+/// keeps its sole-child slot so a lazy list windows from its first pass.
+fn replace_with_control_flow(
+    ctx: &mut ReconcileCtx,
+    old_id: NodeId,
+    parent_id: Option<NodeId>,
+    node: &IRNode,
+) {
+    let sole_child = parent_id
+        .and_then(|p| ctx.tree.get(p))
+        .is_some_and(|p| p.children.len() == 1);
+    // Keep the old node's slot (see `replace_subtree_impl`).
+    let next_sibling = parent_id.and_then(|p| ctx.tree.get(p)).and_then(|p| {
+        let pos = p.children.iter().position(|&id| id == old_id)?;
+        p.children.get(pos + 1).copied()
+    });
+    remove_subtree(ctx.tree, old_id, ctx.patches, ctx.dependencies);
+    if let Some(parent) = parent_id.and_then(|p| ctx.tree.get_mut(p)) {
+        parent.children.retain(|&id| id != old_id);
+    }
+    ctx.tree.sole_child_slot = sole_child;
+    ctx.tree.place_before_slot = next_sibling;
+    create_ir_node_tree_impl(ctx, node, parent_id, parent_id.is_none());
 }
 
 /// Remove a subtree and generate Remove patches

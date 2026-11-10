@@ -80,6 +80,24 @@ import { BaseEngine } from "../engine-base.js";
 
 const log = frameworkLoggers.remote;
 
+const U32_MAX = 0xffff_ffff;
+
+/**
+ * Validate an inbound `viewport` message (docs/virtualization.md §4):
+ * `listId` a non-empty string, `start`/`end` non-negative integers, clamped
+ * to `u32` (the engine's index type — `>>> 0` alone would wrap). Anything
+ * else is malformed and yields `null`.
+ */
+function parseViewport(
+  msg: unknown
+): { listId: string; start: number; end: number } | null {
+  const { listId, start, end } = msg as Partial<ViewportMessage>;
+  if (typeof listId !== "string" || listId.length === 0) return null;
+  const ok = (n: unknown): n is number =>
+    typeof n === "number" && Number.isInteger(n) && n >= 0;
+  if (!ok(start) || !ok(end)) return null;
+  return { listId, start: Math.min(start, U32_MAX), end: Math.min(end, U32_MAX) };
+}
 /** Upper bound on how long the router → `state.location` mirror waits for
  *  the target module to activate before rendering the route anyway. */
 const LOCATION_MIRROR_WAIT_MS = 250;

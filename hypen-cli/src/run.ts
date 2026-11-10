@@ -329,8 +329,7 @@ export async function fetchToFile(url: string, destPath: string): Promise<Downlo
 
 export async function downloadFile(
   url: string,
-  destPath: string,
-  quiet = false
+  destPath: string
 ): Promise<boolean> {
   const result = await fetchToFile(url, destPath);
   if (!result.ok) {

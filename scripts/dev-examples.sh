@@ -225,7 +225,18 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-inspector="${HYPEN_EXAMPLES_INSPECTOR_BASE:-9230}"
+# Ask the OS for an unused inspector port for each Wrangler process. Keep the
+# selected ports distinct even if an ephemeral port is returned twice.
+inspector_ports=" "
+next_inspector_port() {
+  local candidate
+  while true; do
+    candidate="$(node -e 'const server = require("node:net").createServer(); server.listen(0, "127.0.0.1", () => { console.log(server.address().port); server.close(); });')"
+    [[ "$inspector_ports" == *" $candidate "* ]] || break
+  done
+  inspector_ports+="$candidate "
+  inspector="$candidate"
+}
 for name in "${SELECTED[@]}"; do
   read -r rel port <<<"$(example_entry "$name")"
   dir="$REPO_ROOT/$rel"

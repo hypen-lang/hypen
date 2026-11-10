@@ -899,6 +899,19 @@ impl Default for EngineCore {
     }
 }
 
+/// Whether a strict dotted ancestor of `path` (`user` of `user.name`;
+/// never `user` of `username`) is in `present`.
+fn has_present_ancestor(path: &str, present: &std::collections::HashSet<&str>) -> bool {
+    let mut current = path;
+    while let Some(dot) = current.rfind('.') {
+        current = &current[..dot];
+        if present.contains(current) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Keep one scope's declarations bounded, dropping the oldest template first.
 fn bound_scope<T>(
     map: &mut IndexMap<DeclarationKey, T>,

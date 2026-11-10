@@ -512,20 +512,6 @@ fn outer_item_source(
     navigate_item_path(item, &source.full_path()).cloned()
 }
 
-/// The array a ForEach iterates: the substituted outer-item array when
-/// present (see [`FOREACH_ITEMS_PROP`]), else its source evaluated against
-/// state.
-pub(crate) fn foreach_items<'a>(
-    source: &Binding,
-    props: &'a Props,
-    state: &'a serde_json::Value,
-) -> Option<&'a serde_json::Value> {
-    match props.get(FOREACH_ITEMS_PROP) {
-        Some(Value::Static(items)) => Some(items),
-        _ => super::resolve::evaluate_binding_ref(source, state),
-    }
-}
-
 /// Is `binding` a reference to the loop alias `item_name`?
 ///
 /// `parse_binding` admits only `state.`/`item.`, so `@todo.x` (and, after

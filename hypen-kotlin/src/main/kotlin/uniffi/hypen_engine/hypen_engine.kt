@@ -736,6 +736,8 @@ internal object IntegrityCheckingUniffiLib {
     ): Short
     external fun uniffi_hypen_engine_checksum_method_hypenengine_set_context(
     ): Short
+    external fun uniffi_hypen_engine_checksum_method_hypenengine_set_list_viewport(
+    ): Short
     external fun uniffi_hypen_engine_checksum_method_hypenengine_set_module(
     ): Short
     external fun uniffi_hypen_engine_checksum_method_hypenengine_unregister_module(
@@ -891,6 +893,8 @@ external fun uniffi_hypen_engine_fn_method_hypenengine_remove_context(`ptr`: Lon
 external fun uniffi_hypen_engine_fn_method_hypenengine_render_source(`ptr`: Long,`source`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_hypen_engine_fn_method_hypenengine_set_context(`ptr`: Long,`name`: RustBuffer.ByValue,`dataJson`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
+): RustBuffer.ByValue
+external fun uniffi_hypen_engine_fn_method_hypenengine_set_list_viewport(`ptr`: Long,`listId`: RustBuffer.ByValue,`start`: Int,`end`: Int,uniffi_out_err: UniffiRustCallStatus, 
 ): RustBuffer.ByValue
 external fun uniffi_hypen_engine_fn_method_hypenengine_set_module(`ptr`: Long,`config`: RustBuffer.ByValue,uniffi_out_err: UniffiRustCallStatus, 
 ): Unit
@@ -1297,6 +1301,9 @@ private fun uniffiCheckApiChecksums(lib: IntegrityCheckingUniffiLib) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_context() != 49927.toShort()) {
+        throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
+    }
+    if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_list_viewport() != 23916.toShort()) {
         throw RuntimeException("UniFFI API checksum mismatch: try cleaning and rebuilding your project")
     }
     if (lib.uniffi_hypen_engine_checksum_method_hypenengine_set_module() != 9330.toShort()) {
@@ -3175,6 +3182,14 @@ public interface HypenEngineInterface {
     fun `setContext`(`name`: kotlin.String, `dataJson`: kotlin.String): List<Patch>
     
     /**
+     * Report the item range `[start, end)` (visible rows plus overscan) of
+     * the lazy list whose element id is `list_id` and return the patches
+     * that move its window. Ids naming no windowed list return none.
+     * Mirrors WASI's `hypen_set_list_viewport` and JS's `setListViewport`.
+     */
+    fun `setListViewport`(`listId`: kotlin.String, `start`: kotlin.UInt, `end`: kotlin.UInt): List<Patch>
+    
+    /**
      * Set module configuration
      */
     fun `setModule`(`config`: ModuleConfig)
@@ -3775,6 +3790,26 @@ open class HypenEngine: Disposable, AutoCloseable, HypenEngineInterface
     UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_set_context(
         it,
         FfiConverterString.lower(`name`),FfiConverterString.lower(`dataJson`),_status)
+}
+    }
+    )
+    }
+    
+
+    
+    /**
+     * Report the item range `[start, end)` (visible rows plus overscan) of
+     * the lazy list whose element id is `list_id` and return the patches
+     * that move its window. Ids naming no windowed list return none.
+     * Mirrors WASI's `hypen_set_list_viewport` and JS's `setListViewport`.
+     */
+    @Throws(HypenException::class)override fun `setListViewport`(`listId`: kotlin.String, `start`: kotlin.UInt, `end`: kotlin.UInt): List<Patch> {
+            return FfiConverterSequenceTypePatch.lift(
+    callWithHandle {
+    uniffiRustCallWithError(HypenException) { _status ->
+    UniffiLib.uniffi_hypen_engine_fn_method_hypenengine_set_list_viewport(
+        it,
+        FfiConverterString.lower(`listId`),FfiConverterUInt.lower(`start`),FfiConverterUInt.lower(`end`),_status)
 }
     }
     )

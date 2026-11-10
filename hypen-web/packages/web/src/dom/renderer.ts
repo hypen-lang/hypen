@@ -258,6 +258,7 @@ import { createSafeAreaHandler } from "./components/safearea.js";
 import { createImageHandler } from "./components/image.js";
 import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
 import { reconcileColumnWidthDemandFrom } from "./cross-axis-width.js";
+import { DomVirtualizer, VIRT_WINDOW_PROP } from "./virtualize.js";
 import { classifyBindEcho, noteEngineValuedField } from "../bind-echo.js";
 
 // Interface for the engine that renderer needs

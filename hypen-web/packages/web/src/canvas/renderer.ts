@@ -59,6 +59,7 @@ import { CanvasDnd, ANIM_STATE_POSES_PROP } from "./dnd.js";
 import { ANIM_PROP_PREFIX } from "@hypen-space/core/animation";
 import { DND_PROP_PREFIX, DND_SOURCE_PROP } from "@hypen-space/core/dnd";
 import { setSafeAreaInsetOverrides } from "../safe-area.js";
+import { VirtListController, VIRT_WINDOW_PROP } from "./virt-list.js";
 import { classifyBindEcho } from "../bind-echo.js";
 
 const DEFAULT_OPTIONS: CanvasRendererOptions = {
