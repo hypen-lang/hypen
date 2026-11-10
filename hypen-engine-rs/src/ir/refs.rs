@@ -62,6 +62,9 @@ pub enum CheckRule {
     UnknownComponent,
     /// `@item…` used where no ForEach/List/Grid can supply a row.
     ItemOutsideLoop,
+    /// `@theme.x.y` naming a token the project's theme file does not define
+    /// (in every scheme, or only in some).
+    UnknownThemeToken,
     /// A `// hypen-check-ignore` directive names a rule id that does not
     /// exist, so that entry suppresses nothing.
     UnknownIgnoreRule,
@@ -74,6 +77,7 @@ pub const ALL_CHECK_RULES: &[CheckRule] = &[
     CheckRule::UnknownAction,
     CheckRule::UnknownComponent,
     CheckRule::ItemOutsideLoop,
+    CheckRule::UnknownThemeToken,
     CheckRule::UnknownIgnoreRule,
 ];
 
@@ -893,6 +897,7 @@ mod tests {
             CheckRule::UnknownAction,
             CheckRule::UnknownComponent,
             CheckRule::ItemOutsideLoop,
+            CheckRule::UnknownThemeToken,
             CheckRule::UnknownIgnoreRule,
         ];
         for rule in every {
@@ -902,6 +907,7 @@ mod tests {
                 | CheckRule::UnknownAction
                 | CheckRule::UnknownComponent
                 | CheckRule::ItemOutsideLoop
+                | CheckRule::UnknownThemeToken
                 | CheckRule::UnknownIgnoreRule => {}
             }
             assert!(ALL_CHECK_RULES.contains(&rule));
@@ -914,6 +920,7 @@ mod tests {
                 "unknown-action",
                 "unknown-component",
                 "item-outside-loop",
+                "unknown-theme-token",
                 "unknown-ignore-rule",
             ]
         );

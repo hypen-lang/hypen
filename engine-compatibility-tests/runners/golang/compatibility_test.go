@@ -106,7 +106,7 @@ func findFixtures(dir string) ([]string, error) {
 		}
 		// device/ is the Device Capability Protocol corpus, replayed by the
 		// engine crate and every SDK's device suite.
-		if info.IsDir() && (info.Name() == "portable" || info.Name() == "variant" || info.Name() == "device") {
+		if info.IsDir() && (info.Name() == "portable" || info.Name() == "variant" || info.Name() == "device" || info.Name() == "theme") {
 			return filepath.SkipDir
 		}
 		if !info.IsDir() && strings.HasSuffix(info.Name(), ".json") {

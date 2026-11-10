@@ -148,6 +148,7 @@ For tests that require multiple interactions:
 | `lifecycle` | Module onCreated, onDestroyed | P1 |
 | `portable` | Pure helpers: diff, path, route, session, url | P0 |
 | `variant` | Responsive/state variant key parse + resolve precedence | P0 |
+| `theme` | Theme token resolution: scheme merge + alias resolution, replayed by each SDK's own `Theme` tests (TypeScript, Go, Kotlin, Rust SDK, CLI) | P1 |
 
 `portable` and `variant` fixtures use a different shape from the DSL→patch
 categories above: each names a pure `function` plus `input`/`expected`. They are

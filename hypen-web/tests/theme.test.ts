@@ -292,6 +292,17 @@ describe("engine integration", () => {
     expect(batches).toBe(1);
   });
 
+  test("a one-off per-scheme value is an expression on appearance.scheme", async () => {
+    const { patches, theme } = await engineWith(
+      `Text("Hi").color("@{appearance.scheme == 'dark' ? '#ffffff' : theme.color.ink}")`
+    );
+    expect(props(patches)).toContainEqual(["color.0", "#111111"]);
+    patches.length = 0;
+    theme.setScheme("dark");
+    await flushMicrotasks();
+    expect(props(patches)).toEqual([["color.0", "#ffffff"]]);
+  });
+
   test("handlers reach the instance as context.theme", async () => {
     const engine = new Engine();
     await engine.init();
