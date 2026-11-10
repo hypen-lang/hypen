@@ -213,6 +213,14 @@ private class TokenStore(var base: Tokens, val schemes: LinkedHashMap<String, To
  * handler: [NativeEngine] runs handlers after the native dispatch call has
  * returned (the same reason [ObservableState] writes go straight to the
  * engine), so there is nothing to re-enter and nothing to defer.
+ *
+ * No lock of this class is held while an engine or a listener is called, so
+ * a render callback (or any code running inside an engine) may read or
+ * change the theme freely. When changes race, or one is made while a
+ * publish is in progress (from another thread, or from a render callback of
+ * that very publish), the thread already publishing sends the newest
+ * snapshot again once it is done: every engine ends on the latest tokens,
+ * and such a call may return just before they are delivered.
  */
 class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
     /** Create a theme from [options]. Prefer [createTheme]. */
@@ -229,6 +237,15 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
     private val listeners = CopyOnWriteArrayList<ThemeChangeListener>()
     private val warned = HashSet<String>()
     private val onMissingToken = options.onMissingToken
+
+    /** Bumped (under `lock`) on every change to what gets published. */
+    private var version = 0L
+
+    /** True while one thread is delivering snapshots to the engines. */
+    private var publishing = false
+
+    /** A change arrived while [publishing]; the publisher goes round again. */
+    private var republish = false
 
     init {
         if (isSelectable(options.scheme)) {
@@ -288,6 +305,7 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
             currentPreference = preference
             changed(before)
         }
+        publish()
         notifyListeners(meta)
     }
 
@@ -307,6 +325,7 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
             system = scheme
             changed(before)
         }
+        publish()
         notifyListeners(meta)
     }
 
@@ -327,8 +346,10 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
             }
             if (scheme != null && scheme != effectiveScheme()) return
             rebuild()
-            publish()
+            version++
+            meta
         }
+        publish()
         notifyListeners(meta)
     }
 
@@ -358,10 +379,16 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
      * contexts).
      */
     fun attach(engine: IEngine): () -> Unit {
-        synchronized(lock) {
+        val first = synchronized(lock) {
             engines.add(engine)
-            publishTo(engine)
+            snapshot()
         }
+        // Delivered here, not left to a publish that may be running on
+        // another thread: the caller renders right after this returns.
+        publishTo(engine, first)
+        // A change that raced the delivery above may have reached this
+        // engine first; publishing again leaves it on the newest snapshot.
+        if (synchronized(lock) { version != first.version }) publish()
         return { synchronized(lock) { engines.remove(engine) } }
     }
 
@@ -394,7 +421,8 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
 
     private fun changed(schemeBefore: String): ThemeMeta {
         if (effectiveScheme() != schemeBefore) rebuild()
-        return publish()
+        version++
+        return meta
     }
 
     private fun rebuild() {
@@ -410,25 +438,61 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
         aliasProblems = found
     }
 
-    private fun publishTo(engine: IEngine) {
-        engine.setContext(THEME_META_PROVIDER, meta.toMap())
-        engine.setContext(THEME_TOKENS_PROVIDER, resolved)
+    /** What one publish delivers: both payloads as of [version]. */
+    private class Snapshot(val meta: Map<String, Any?>, val tokens: Tokens, val version: Long)
+
+    private fun snapshot() = Snapshot(meta.toMap(), resolved, version)
+
+    /** Called WITHOUT `lock`: the engine may call back into this theme. */
+    private fun publishTo(engine: IEngine, snapshot: Snapshot) {
+        engine.setContext(THEME_META_PROVIDER, snapshot.meta)
+        engine.setContext(THEME_TOKENS_PROVIDER, snapshot.tokens)
     }
 
     /**
-     * Push the current contexts to every attached engine, in attach order,
-     * and return the meta to hand to listeners. Runs under `lock` so two
-     * concurrent changes cannot publish out of order.
+     * Deliver the current snapshot to every attached engine, in attach
+     * order. Called WITHOUT `lock`, after the change it publishes.
+     *
+     * One thread publishes at a time, and none waits for another: a caller
+     * that finds a publish in progress only asks for another round, and the
+     * publishing thread re-reads the snapshot until no change arrived during
+     * its last round. So engines never go back to an older snapshot, and a
+     * thread that is inside an engine (holding whatever that engine holds)
+     * can change the theme without waiting on a publisher that is itself
+     * waiting for that engine.
      */
-    private fun publish(): ThemeMeta {
-        for (engine in engines.toList()) {
-            try {
-                publishTo(engine)
-            } catch (e: Exception) {
-                themeLog.error("Failed to publish theme context: ${e.message ?: e.toString()}")
+    private fun publish() {
+        synchronized(lock) {
+            if (publishing) {
+                republish = true
+                return
             }
+            publishing = true
         }
-        return meta
+        try {
+            while (true) {
+                val (snapshot, targets) = synchronized(lock) {
+                    republish = false
+                    snapshot() to engines.toList()
+                }
+                for (engine in targets) {
+                    try {
+                        publishTo(engine, snapshot)
+                    } catch (e: Exception) {
+                        themeLog.error("Failed to publish theme context: ${e.message ?: e.toString()}")
+                    }
+                }
+                synchronized(lock) {
+                    if (!republish) {
+                        publishing = false
+                        return
+                    }
+                }
+            }
+        } catch (e: Throwable) {
+            synchronized(lock) { publishing = false }
+            throw e
+        }
     }
 
     /** Called without `lock`, so a listener may freely call back into the theme. */
@@ -443,8 +507,8 @@ class Theme private constructor(options: ThemeOptions, shared: TokenStore?) {
     }
 }
 
-/** Create the app's theme. Register it once (e.g. `HypenServer { theme(theme) }`). */
-fun createTheme(options: ThemeOptions = ThemeOptions()): Theme = Theme(options)
+/** Create the app's theme from [options]. Register it once (e.g. `HypenServer { theme(theme) }`). */
+fun createTheme(options: ThemeOptions): Theme = Theme(options)
 
 /**
  * Create the app's theme:

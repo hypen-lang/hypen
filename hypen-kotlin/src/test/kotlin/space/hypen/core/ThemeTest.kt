@@ -252,6 +252,181 @@ class ThemeTest {
     }
 
     @Test
+    fun `createTheme can be called with no arguments, named arguments, or options`() {
+        val bare = createTheme()
+        assertEquals("system", bare.preference)
+        assertEquals(emptyMap(), bare.tokens)
+
+        assertEquals("#0066ff", createTheme(tokens = tokens).token("color.brand"))
+        assertEquals("dark", createTheme(scheme = "dark").scheme)
+        assertEquals("dark", createTheme(ThemeOptions(tokens = tokens, scheme = "dark")).scheme)
+        assertEquals("system", Theme().preference)
+    }
+
+    // ── Locking ────────────────────────────────────────────────────────
+
+    /**
+     * An engine that, like any host wrapper that serialises engine access,
+     * holds its own lock while it applies a call and runs the render
+     * callback.
+     */
+    private class LockingEngine(private val inner: MockEngine = MockEngine()) : IEngine by inner {
+        private val engineLock = Any()
+        private var callback: RenderCallback? = null
+        val contexts = mutableListOf<Pair<String, Map<String, Any?>>>()
+
+        override fun setRenderCallback(callback: RenderCallback) {
+            this.callback = callback
+        }
+
+        override fun setContext(name: String, data: Map<String, Any?>): List<Patch> = synchronized(engineLock) {
+            contexts.add(name to data)
+            callback?.invoke(emptyList())
+            emptyList()
+        }
+
+        override fun updateState(scope: String, paths: List<String>, values: Map<String, Any?>) {
+            synchronized(engineLock) { callback?.invoke(emptyList()) }
+        }
+
+        fun lastScheme(): Any? = synchronized(engineLock) { contexts.last { it.first == THEME_META_PROVIDER }.second["scheme"] }
+        fun lastTokens(): Map<String, Any?> = synchronized(engineLock) { contexts.last { it.first == THEME_TOKENS_PROVIDER }.second }
+    }
+
+    /** Run [block] on a daemon thread, so a deadlocked one cannot hang the JVM. */
+    private fun daemon(name: String, block: () -> Unit): Thread =
+        Thread(block, name).apply { isDaemon = true; start() }
+
+    private fun assertFinished(vararg threads: Thread) {
+        threads.forEach { it.join(5_000) }
+        val stuck = threads.filter { it.isAlive }
+        assertTrue(stuck.isEmpty(), "deadlock: ${stuck.map { "${it.name} is ${it.state}" }}")
+    }
+
+    /**
+     * Thread A switches scheme while thread B is inside the engine, in a
+     * render callback that reads the theme. If the theme held its own lock
+     * while publishing, A would wait for the engine (held by B) holding the
+     * lock B needs: a deadlock.
+     */
+    @Test
+    fun `a render callback can read the theme while another thread switches scheme`() {
+        val theme = createTheme(tokens = tokens, schemes = mapOf("dark" to dark))
+        val engine = LockingEngine()
+        theme.attach(engine)
+
+        val insideCallback = java.util.concurrent.CountDownLatch(1)
+        val switching = java.util.concurrent.CountDownLatch(1)
+        val armed = java.util.concurrent.atomic.AtomicBoolean(true)
+        var seen: Any? = null
+        engine.setRenderCallback {
+            if (armed.compareAndSet(true, false)) {
+                insideCallback.countDown()
+                switching.await()
+                Thread.sleep(300) // let the switcher reach the engine and block on it
+                seen = theme.scheme to theme.token("color.surface")
+            }
+        }
+
+        val reader = daemon("reader") { engine.updateState("", emptyList(), emptyMap()) }
+        assertTrue(insideCallback.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val switcher = daemon("switcher") {
+            switching.countDown()
+            theme.setScheme("dark")
+        }
+        assertFinished(reader, switcher)
+
+        assertEquals("dark" to "#111111", seen, "the reader saw the new scheme, without waiting")
+        assertEquals("dark", engine.lastScheme())
+        assertEquals(theme.tokens, engine.lastTokens())
+    }
+
+    /**
+     * The same shape, with the callback changing the theme instead of
+     * reading it: the thread inside the engine must not wait for a publish
+     * that is itself waiting for the engine. The publisher delivers the
+     * newer snapshot when it gets through.
+     */
+    @Test
+    fun `a render callback can change the theme while another thread is publishing`() {
+        val theme = createTheme(tokens = tokens, schemes = mapOf("dark" to dark, "sepia" to mapOf("space" to mapOf("md" to 20))))
+        val engine = LockingEngine()
+        theme.attach(engine)
+
+        val insideCallback = java.util.concurrent.CountDownLatch(1)
+        val switching = java.util.concurrent.CountDownLatch(1)
+        val armed = java.util.concurrent.atomic.AtomicBoolean(true)
+        engine.setRenderCallback {
+            if (armed.compareAndSet(true, false)) {
+                insideCallback.countDown()
+                switching.await()
+                Thread.sleep(300)
+                theme.setScheme("sepia")
+            }
+        }
+
+        val inEngine = daemon("in-engine") { engine.updateState("", emptyList(), emptyMap()) }
+        assertTrue(insideCallback.await(5, java.util.concurrent.TimeUnit.SECONDS))
+        val switcher = daemon("switcher") {
+            switching.countDown()
+            theme.setScheme("dark")
+        }
+        assertFinished(inEngine, switcher)
+
+        assertEquals("sepia", theme.scheme)
+        assertEquals("sepia", engine.lastScheme(), "the engine ends on the newest snapshot")
+        assertEquals(20, (engine.lastTokens()["space"] as Map<*, *>)["md"])
+    }
+
+    @Test
+    fun `a change made from inside a publish is delivered after it, not recursively`() {
+        val theme = createTheme(tokens = tokens, schemes = mapOf("dark" to dark))
+        val engine = LockingEngine()
+        theme.attach(engine)
+        var depth = 0
+        var maxDepth = 0
+        engine.setRenderCallback {
+            depth++
+            maxDepth = maxOf(maxDepth, depth)
+            if (theme.scheme == "dark") theme.setScheme("light")
+            depth--
+        }
+
+        theme.setScheme("dark")
+
+        assertEquals("light", theme.scheme)
+        assertEquals("light", engine.lastScheme())
+        assertEquals("#ffffff", (engine.lastTokens()["color"] as Map<*, *>)["surface"])
+        assertEquals(1, maxDepth, "the follow-up publish ran after the first, not inside it")
+    }
+
+    @Test
+    fun `racing scheme changes leave every engine on the newest snapshot`() {
+        val theme = createTheme(tokens = tokens, schemes = mapOf("dark" to dark))
+        val engines = List(3) { LockingEngine() }
+        engines.forEach { theme.attach(it) }
+
+        val start = java.util.concurrent.CountDownLatch(1)
+        val threads = List(8) { n ->
+            daemon("racer-$n") {
+                start.await()
+                repeat(200) { i -> theme.setScheme(if ((i + n) % 2 == 0) "dark" else "light") }
+            }
+        }
+        start.countDown()
+        assertFinished(*threads.toTypedArray())
+
+        // A racer whose change found a publish in progress returns before
+        // it is delivered; the publisher is at most one round behind.
+        val deadline = System.currentTimeMillis() + 5_000
+        while (System.currentTimeMillis() < deadline && engines.any { it.lastScheme() != theme.scheme }) Thread.sleep(5)
+        for (engine in engines) {
+            assertEquals(theme.scheme, engine.lastScheme())
+            assertEquals(theme.tokens, engine.lastTokens())
+        }
+    }
+
+    @Test
     fun `resolveTokenAliases leaves its input untouched`() {
         val input = mapOf("a" to 1, "b" to "{a}", "g" to mapOf("c" to "{b}"))
         val problems = mutableListOf<String>()

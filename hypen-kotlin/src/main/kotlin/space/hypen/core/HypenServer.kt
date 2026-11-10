@@ -420,6 +420,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         sendMessage: suspend (String) -> Unit,
         ackExtras: (Session, JsonObjectBuilder) -> Unit = { _, _ -> },
         afterAck: suspend (ClientState) -> Unit = {},
+        colorScheme: SystemColorScheme? = null,
     ): Established {
         // Try to resume existing session
         var isRestored = false
@@ -508,6 +509,10 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         // re-render through the render callback above like a state update.
         theme?.let { appTheme ->
             val sessionTheme = appTheme.fork(sessionSchemes[session.id] ?: appTheme.preference)
+            // The client's own system scheme (`hello.colorScheme`) applies
+            // before the first publish, so a "system" preference paints the
+            // right scheme from the first frame.
+            colorScheme?.let { sessionTheme.setSystemScheme(it) }
             clientState.theme = sessionTheme
             sessionTheme.attach(engine)
             sessionTheme.onChange { meta -> sessionSchemes[session.id] = meta.preference }
@@ -723,6 +728,8 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         val requested = (msg["sessionId"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotEmpty() }
         val props = (msg["props"] as? JsonObject)?.mapValues { (_, v) -> v.toKotlinValue() } ?: emptyMap()
         val token = (msg["resumeToken"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        // Optional; anything but "light" / "dark" is ignored.
+        val colorScheme = parseColorScheme(msg["colorScheme"])
 
         // Device handshake selection (RFC 001 §2.2) is pure and computed
         // before any side effect. The member is strictly decoded from its
@@ -790,6 +797,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                 conn.client = client
                 deviceAck?.let { attachDevicePlane(conn, client, it) }
             },
+            colorScheme = colorScheme,
         )
         when (result) {
             is Established.Rejected -> conn.out.close(1008, "session in use")
@@ -1091,6 +1099,22 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                 applyViewport(client, req, sendMessage)
             }
 
+            "colorScheme" -> {
+                // The client's system color scheme changed (the initial
+                // value travels in `hello.colorScheme`). Per client, like
+                // `viewport`: only THIS session's theme hears it — not an
+                // action, never replayed to other sessions. Ignored when
+                // malformed or when the server has no theme; a session with
+                // an explicit scheme preference only remembers it.
+                val client = clients[connectionKey] ?: return
+                val scheme = parseColorScheme(msg["scheme"])
+                if (scheme == null) {
+                    log.debug("Malformed colorScheme message ignored")
+                    return
+                }
+                applyColorScheme(client, scheme, sendMessage)
+            }
+
             "dispatchAction", "action" -> {
                 val actionName = msg.stringMember("action")
                     ?: msg.stringMember("name")
@@ -1246,6 +1270,31 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         // The render callback queues the patches on pendingPatches (with any
         // async-handler deltas not yet flushed); drain them all, in order.
         client.engine.setListViewport(req.listId, req.start, req.end)
+        val patches = synchronized(client.pendingPatches) {
+            client.pendingPatches.toList().also { client.pendingPatches.clear() }
+        }
+        if (patches.isEmpty()) return@withLock patches
+        client.revision++
+        sendPatchBatch(client, patches, send)
+        patches
+    }
+
+    /**
+     * Report a client's system color scheme to its session theme and stream
+     * the re-render as an ordinary `patch` message. Same bookkeeping as
+     * [applyViewport]: under [ClientState.mutex], and a report that changes
+     * nothing on screen (no theme, same scheme, an explicit preference)
+     * sends nothing and bumps no revision.
+     */
+    internal suspend fun applyColorScheme(
+        client: ClientState,
+        scheme: SystemColorScheme,
+        send: (suspend (String) -> Unit)? = null,
+    ): List<Patch> = client.mutex.withLock {
+        val theme = client.theme ?: return@withLock emptyList()
+        // The theme publishes to the session's engine before this returns;
+        // the render callback queues the patches on pendingPatches.
+        theme.setSystemScheme(scheme)
         val patches = synchronized(client.pendingPatches) {
             client.pendingPatches.toList().also { client.pendingPatches.clear() }
         }
@@ -1914,6 +1963,14 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
             val end = msg.u32Member("end") ?: return null
             return ViewportRequest(listId, start, end)
         }
+
+        /**
+         * A client-reported system color scheme — the JSON string `"light"`
+         * or `"dark"` (`hello.colorScheme`, or `scheme` of a `colorScheme`
+         * message) — or `null` for anything else. Never throws.
+         */
+        internal fun parseColorScheme(value: JsonElement?): SystemColorScheme? =
+            (value as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { SystemColorScheme.of(it) }
 
         /** A non-negative JSON integer (`40`, `40.0`, `4e1`) clamped to `u32`, or `null`. */
         private fun JsonObject.u32Member(key: String): UInt? {
