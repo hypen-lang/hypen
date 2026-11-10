@@ -459,6 +459,22 @@ export class WasmEngine {
      */
     updateStateSparse(scope: string | null | undefined, paths_js: any, values_js: any, animation?: any | null): void;
     /**
+     * [`update_state_sparse`](Self::update_state_sparse) with the paths
+     * and values handed over as JSON text.
+     *
+     * `paths_json` is a JSON array of path strings, `values_json` a JSON
+     * object mapping each path to its new value. Semantics are identical;
+     * only the transport differs. Converting a `JsValue` tree with
+     * `serde_wasm_bindgen` calls back into JavaScript for every object and
+     * copies every key and string across the boundary one at a time, which
+     * for a list-sized update (a thousand rows appended) cost more than
+     * the reconcile it fed. One string crosses once and is parsed here.
+     *
+     * Hosts feature-detect this method and fall back to
+     * `updateStateSparse` on an engine build without it.
+     */
+    updateStateSparseJson(scope: string | null | undefined, paths_json: string, values_json: string, animation?: any | null): void;
+    /**
      * Validate that the engine is in a consistent state.
      */
     validate(): any;
