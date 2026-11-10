@@ -1697,6 +1697,25 @@ fn test_complex_template_with_list_and_applicators() {
 // ============================================================================
 
 #[test]
+fn test_reference_with_digits_in_segments() {
+    // Provider names and path segments may contain digits after the first
+    // character, like any identifier (`@i18n.locale`, `@t.step2.title`).
+    for (input, expected) in [
+        ("Text(@i18n.locale)", "i18n.locale"),
+        ("Text(@t.step2.title)", "t.step2.title"),
+        ("Text(@firebase2.users)", "firebase2.users"),
+    ] {
+        let component = parse_component(input)
+            .unwrap_or_else(|e| panic!("{input} should parse: {e:?}"));
+        let arg = component.arguments.get_positioned(0);
+        assert!(
+            matches!(arg, Some(Value::Reference(s)) if s == expected),
+            "{input}: {arg:?}"
+        );
+    }
+}
+
+#[test]
 fn test_data_source_reference_simple() {
     let input = "ForEach(items: @spacetime.messages)";
     let result = parse_component(input);
