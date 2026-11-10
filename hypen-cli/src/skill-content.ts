@@ -227,6 +227,8 @@ List(@state.tasks) {
 
 **Important:** Always provide \`key\` for dynamic lists (a unique identifier field). \`@item\` references the current iteration element. Inside ForEach, use \`@{item.fieldName}\` to access item properties.
 
+An \`as: "msg"\` alias works everywhere \`item\` does (\`"@{msg.x}"\`, bare \`@msg.x\`, expressions, applicators, action payloads, \`If\`/\`When\`), on \`ForEach\`, \`List\` and \`Grid\`. In nested loops give each loop its own alias and read the outer row through it (\`ForEach(items: @msg.attachments, as: "file")\`); an inner loop reusing a name shadows the outer one.
+
 ### If - Boolean Conditionals
 
 \`\`\`hypen

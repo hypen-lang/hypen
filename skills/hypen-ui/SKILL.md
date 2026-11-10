@@ -245,7 +245,15 @@ ForEach(items: @state.messages, key: "id", as: "msg") {
   Text("@{msg.content}")
 }
 
-// Shorthand with List component
+// Nested: the inner list comes from the outer row; both names stay in scope
+ForEach(items: @state.groups, key: "id", as: "group") {
+  Text("@{group.name}")
+  ForEach(items: @group.entries, key: "id", as: "entry") {
+    Text("@{group.name}: @{entry.label}")
+  }
+}
+
+// Shorthand with List component (also takes as:/key:)
 List(@state.tasks) {
   Text("@{item.name}")
 }
@@ -253,11 +261,11 @@ List(@state.tasks) {
 
 **Important:** Always provide `key` for dynamic lists (a unique identifier field). `@item` references the current iteration element. Inside ForEach, use `@{item.fieldName}` to access item properties.
 
-**Known iteration limits (current engine):**
+**Iteration variables:**
 
-- **`List(@state.x) { ... }` shorthand only accepts module-state bindings.** Writing `List(@item.entries)` — an item-scoped source inside an outer iteration — does not resolve. Use an explicit `ForEach(items: @item.entries, key: "id")` if you need that shape.
-- **Nested `ForEach` against an outer iteration's item** (e.g. an inner `ForEach(items: @item.entries, ...)`) **parses but does not resolve at runtime** — the inner scope doesn't reliably see the outer item. Workaround: pre-flatten into per-group top-level state arrays (`state.breakfastEntries`, `state.lunchEntries`, …) and emit one outer ForEach per group.
-- **`as: "alias"` is parsed but the runtime iteration variable stays as `item`.** Templates that write `@{alias.x}` bindings render as literal text. Stick with the default `item` name. The property is documented as planned; don't rely on it until the engine wires alias resolution through.
+- **`as: "todo"` names the row.** Every spelling `item` supports works with the alias: `"@{todo.title}"`, bare `@todo.title` / `@todo` arguments, expressions (`"@{todo.done ? 'a' : 'b'}"`, `"@{todo.count + 1}"`), applicators, action payloads (`.onClick(@actions.toggle, id: "@{todo.id}")`), `If`/`When` conditions, and children/arguments of a custom row component. Works on `ForEach`, `List` and `Grid`, and rows re-render on keyed reorders and per-item state edits.
+- **`@item` still means the row of a single aliased loop** — an alias adds a name, it doesn't remove `item`.
+- **Nested loops: give every loop its own `as:` name** and read the outer row through it. An inner loop can iterate the outer row's array — `ForEach(items: @group.entries, ...)`, `List(@group.entries)`, or `@item.entries` when the outer loop uses the default name — and updates when that row changes. An inner loop that reuses a name shadows the outer one (two default loops: `@item` is the inner row). Don't use `@item` inside nested *aliased* loops: it doesn't name the inner row there, and `@item.entries` as an inner source under an aliased outer loop renders nothing.
 
 ### If - Boolean Conditionals
 
