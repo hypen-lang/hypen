@@ -7,10 +7,12 @@
  * squiggles `@theme.color.primry` while typing, mirroring `hypen check`'s
  * `unknown-theme-token` rule (`hypen-cli/src/check-template.ts`).
  *
- * It is deliberately a little more lenient than the CLI: aliases
- * (`"{color.brand}"`) are not followed, so anything at or below an alias is
- * accepted rather than resolved. The CLI stays the authority; this only has
- * to be right when it speaks.
+ * Tokens are resolved the way `createTheme` does it — scheme overrides
+ * merged over the base set, then `"{color.brand}"` aliases followed — so a
+ * path through an alias to a group is judged against the group it points at.
+ * An alias that cannot be resolved (missing target, cycle) is left as
+ * written and anything at or below it is accepted: `hypen check` reports the
+ * broken alias itself.
  */
 
 import * as fs from "fs";
@@ -24,7 +26,7 @@ const CHECK_IGNORE = "hypen-check-ignore";
 type Tokens = { [key: string]: unknown };
 
 export interface LspTheme {
-  /** Raw (alias-unresolved) tokens for every scheme an app can be in. */
+  /** Resolved tokens for every scheme an app can be in. */
   schemes: Array<{ scheme: string; tokens: Tokens }>;
 }
 
@@ -51,14 +53,59 @@ export function themeFromJson(json: unknown): LspTheme | null {
   return {
     schemes: names.map((scheme) => ({
       scheme,
-      tokens: merge(tokens, isPlainObject(schemes[scheme]) ? (schemes[scheme] as Tokens) : undefined),
+      tokens: resolveAliases(
+        merge(tokens, isPlainObject(schemes[scheme]) ? (schemes[scheme] as Tokens) : undefined),
+      ),
     })),
   };
 }
 
-const ALIAS = /^\{[A-Za-z0-9_.]+\}$/;
+const ALIAS = /^\{([A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*)\}$/;
+const MAX_ALIAS_DEPTH = 32;
 
-/** Whether `segments` resolves in `tokens`; anything at or below an alias counts as defined. */
+function lookup(tokens: Tokens, segments: string[]): unknown {
+  let cur: unknown = tokens;
+  for (const seg of segments) {
+    if (!isPlainObject(cur)) return undefined;
+    cur = cur[seg];
+  }
+  return cur ?? undefined;
+}
+
+/**
+ * Copy of `tokens` with every resolvable alias replaced by its target (same
+ * rules as `resolveTokenAliases` in `@hypen-space/core`); unresolvable ones
+ * stay as written.
+ */
+function resolveAliases(tokens: Tokens): Tokens {
+  const follow = (value: unknown, at: string): unknown => {
+    const seen = [at];
+    let cur = value;
+    for (let depth = 0; depth < MAX_ALIAS_DEPTH; depth++) {
+      const match = typeof cur === "string" ? ALIAS.exec(cur) : null;
+      if (!match) return cur;
+      const target = match[1];
+      if (seen.includes(target) || at.startsWith(`${target}.`)) return value;
+      const next = lookup(tokens, target.split("."));
+      if (next === undefined) return value;
+      seen.push(target);
+      cur = next;
+    }
+    return value;
+  };
+  const walk = (group: Tokens, prefix: string, depth: number): Tokens => {
+    const out: Tokens = {};
+    for (const [k, v] of Object.entries(group)) {
+      const at = prefix ? `${prefix}.${k}` : k;
+      const resolved = isPlainObject(v) ? v : follow(v, at);
+      out[k] = isPlainObject(resolved) && depth < MAX_ALIAS_DEPTH ? walk(resolved, at, depth + 1) : resolved;
+    }
+    return out;
+  };
+  return walk(tokens, "", 0);
+}
+
+/** Whether `segments` resolves in `tokens`; anything at or below an unresolved alias counts as defined. */
 function defined(tokens: Tokens, segments: string[]): boolean {
   let cur: unknown = tokens;
   for (const seg of segments) {

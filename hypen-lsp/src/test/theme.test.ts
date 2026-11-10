@@ -61,8 +61,16 @@ test("references inside expressions are checked; other identifiers are not", () 
   assert.match(diags[0].message, /theme\.color\.nope/);
 });
 
-test("anything at or below an alias is accepted", () => {
-  assert.deepEqual(themeDiagnostics("Text(@theme.all.brand) Text(@theme.color.primary.x)", theme), []);
+test("aliases are followed: a path through an alias to a group is judged against that group", () => {
+  assert.deepEqual(themeDiagnostics("Text(@theme.all.brand) Text(@theme.color.primary)", theme), []);
+  const diags = themeDiagnostics("Text(@theme.all.nope) Text(@theme.color.primary.x)", theme);
+  assert.equal(diags.length, 2);
+  assert.match(diags[0].message, /theme\.all\.nope/);
+});
+
+test("anything at or below a broken alias is accepted (hypen check reports the alias)", () => {
+  const broken = themeFromJson({ tokens: { a: "{nope}", b: "{c}", c: "{b}" } })!;
+  assert.deepEqual(themeDiagnostics("Text(@theme.a) Text(@theme.a.x) Text(@theme.b)", broken), []);
 });
 
 test("comments are skipped and hypen-check-ignore is honoured", () => {
