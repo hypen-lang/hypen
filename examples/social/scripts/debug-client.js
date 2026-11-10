@@ -66,6 +66,10 @@ function printPatch(p) {
     case 'remove':
       console.log(`${tag} ${YELLOW}REMOVE${RESET} ${p.id}`);
       break;
+    case 'ClearChildren':
+    case 'clearChildren':
+      console.log(`${tag} ${YELLOW}CLEAR${RESET}  ${p.id} (all children)`);
+      break;
     default:
       console.log(`${tag} ${JSON.stringify(p)}`);
   }
