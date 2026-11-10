@@ -125,6 +125,25 @@
     {
       "type": "object",
       "properties": {
+        "type": { "const": "clearChildren" },
+        "id": { "type": "string", "description": "Element to empty. It stays (props, semantics, listeners) and may receive new children later in the same batch; never \"root\"." },
+        "target": {
+          "type": "object",
+          "description": "Fixture-assertion-only field (never on the wire): the element `id` must name, matched against that element's create patch (elementType, subset of props). Pins WHICH element is cleared (e.g. the List, or the Column a sole ForEach renders into), which the id-agnostic match cannot see. Resolved by the Rust and Go runners.",
+          "properties": {
+            "elementType": { "type": "string" },
+            "props": { "type": "object", "additionalProperties": true }
+          },
+          "additionalProperties": false
+        }
+      },
+      "required": ["type", "id"],
+      "additionalProperties": false,
+      "description": "Empty an element in one step: exactly equivalent to a plain remove (no transition) of each of its current children — every child is unlinked and its whole subtree torn down; an unknown id is ignored. Emitted instead of per-child removes only when a list pass takes away EVERY child of the list's element (list emptied, replaced wholesale, or a virtualized window jumping clear of every materialized row); never for \"root\", for rows with an exit transition, or for fewer than two children. Positioned before any create/instantiate/insert of new children under `id` in the same batch. Contract: hypen-web/docs/clear-children.md."
+    },
+    {
+      "type": "object",
+      "properties": {
         "type": { "const": "batchAnimation" },
         "spec": {
           "type": "object",

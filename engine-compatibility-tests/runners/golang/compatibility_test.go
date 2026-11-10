@@ -188,9 +188,6 @@ func TestEngineCompatibility(t *testing.T) {
 			continue
 		}
 
-		// Get relative path for test name
-		relPath, _ := filepath.Rel(fixturesDir, fixturePath)
-
 		t.Run(tc.Category+"/"+tc.Name, func(t *testing.T) {
 			// Check if test should be skipped
 			if skip, reason := shouldSkip(tc); skip {
@@ -208,10 +205,11 @@ func TestEngineCompatibility(t *testing.T) {
 				runLifecycleTest(t, tc)
 			case "state":
 				runStateTest(t, tc)
-			case "rendering", "reconciliation", "control-flow":
-				// These require a full engine implementation
-				// Currently the Go SDK provides module system but not parser/renderer
-				t.Skipf("Test category '%s' requires full engine (parser/renderer) - fixture: %s", tc.Category, relPath)
+			case "rendering", "reconciliation", "control-flow", "animation":
+				// The real WASI engine the Go SDK embeds, with a renderer
+				// model applying every patch (engine_test.go). Animation
+				// fixtures the Go SDK cannot honour yet carry a golang skip.
+				runEngineFixture(t, fixturePath)
 			default:
 				t.Skipf("Unknown test category: %s", tc.Category)
 			}

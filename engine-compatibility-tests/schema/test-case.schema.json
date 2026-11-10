@@ -165,7 +165,7 @@
               "properties": {
                 "type": {
                   "type": "string",
-                  "enum": ["create", "setProp", "setText", "insert", "move", "remove", "attachEvent", "detachEvent"]
+                  "enum": ["create", "setProp", "setText", "insert", "move", "remove", "clearChildren", "attachEvent", "detachEvent"]
                 }
               },
               "additionalProperties": true

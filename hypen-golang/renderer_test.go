@@ -282,4 +282,48 @@ func TestPatchConstants(t *testing.T) {
 	if PatchDetachEvent != "detachEvent" {
 		t.Errorf("expected PatchDetachEvent='detachEvent', got %s", PatchDetachEvent)
 	}
+	if PatchClearChildren != "clearChildren" {
+		t.Errorf("expected PatchClearChildren='clearChildren', got %s", PatchClearChildren)
+	}
+}
+
+// clearChildren == a plain remove of every current child of id: children
+// and their whole subtrees go, id itself stays and can be refilled in the
+// same batch; an unknown id is ignored.
+func TestTestRenderer_ClearChildren(t *testing.T) {
+	r := NewTestRenderer()
+	r.ApplyPatches([]Patch{
+		{Type: PatchCreate, ID: "list", ElementType: "List", Props: map[string]any{"gap": 4}},
+		{Type: PatchInsert, ParentID: "root", ID: "list"},
+		{Type: PatchCreate, ID: "a", ElementType: "Row", Props: map[string]any{}},
+		{Type: PatchCreate, ID: "a1", ElementType: "Text", Props: map[string]any{}},
+		{Type: PatchInsert, ParentID: "a", ID: "a1"},
+		{Type: PatchInsert, ParentID: "list", ID: "a"},
+		{Type: PatchCreate, ID: "b", ElementType: "Text", Props: map[string]any{}},
+		{Type: PatchInsert, ParentID: "list", ID: "b"},
+	})
+	if got := r.ChildIDs("list"); !reflect.DeepEqual(got, []string{"a", "b"}) {
+		t.Fatalf("children before clear = %v", got)
+	}
+
+	r.ApplyPatches([]Patch{
+		{Type: PatchClearChildren, ID: "list"},
+		{Type: PatchCreate, ID: "c", ElementType: "Text", Props: map[string]any{}},
+		{Type: PatchInsert, ParentID: "list", ID: "c"},
+		{Type: PatchClearChildren, ID: "no-such-node"},
+	})
+	for _, id := range []string{"a", "a1", "b"} {
+		if r.GetNode(id) != nil {
+			t.Errorf("node %q survived clearChildren", id)
+		}
+	}
+	if r.GetNode("list") == nil {
+		t.Fatal("clearChildren must keep the cleared element")
+	}
+	if got := r.ChildIDs("list"); !reflect.DeepEqual(got, []string{"c"}) {
+		t.Errorf("children after clear + refill = %v, want [c]", got)
+	}
+	if got := r.ChildIDs("root"); !reflect.DeepEqual(got, []string{"list"}) {
+		t.Errorf("root children = %v, want [list]", got)
+	}
 }

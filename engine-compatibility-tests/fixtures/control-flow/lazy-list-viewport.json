@@ -240,17 +240,22 @@
       "allowExtraPatches": true
     },
     {
-      "description": "A viewport report moves the window: rows leave without exit transitions",
+      "description": "A viewport report moves the window: the window jumps clear of every materialized row, so the old rows leave in one clearChildren on the List (never an exit transition)",
       "action": "setViewport",
       "viewport": {
         "elementType": "List",
         "start": 20,
         "end": 30
       },
+      "forbiddenPatchTypes": [
+        "remove"
+      ],
       "expectedPatches": [
         {
-          "type": "remove",
-          "transition": false
+          "type": "clearChildren",
+          "target": {
+            "elementType": "List"
+          }
         },
         {
           "type": "setProp",

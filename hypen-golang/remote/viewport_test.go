@@ -184,14 +184,23 @@ func TestViewport_MovesWindowOnThisSessionOnly(t *testing.T) {
 	if got := countCreated(pm.Patches, "Text"); got != 15 {
 		t.Errorf("rows created = %d, want 15", got)
 	}
-	removed := 0
+	// The window jumps clear of every materialized row: the 10 old rows go
+	// in one clearChildren on the list (relayed to the client unchanged),
+	// not 10 per-row removes.
+	removed, cleared := 0, 0
 	for _, p := range pm.Patches {
-		if p.Type == "remove" {
+		switch p.Type {
+		case "remove":
 			removed++
+		case "clearChildren":
+			cleared++
+			if p.ID != listA {
+				t.Errorf("clearChildren id = %q, want the list %q", p.ID, listA)
+			}
 		}
 	}
-	if removed != 10 {
-		t.Errorf("rows removed = %d, want 10", removed)
+	if removed != 0 || cleared != 1 {
+		t.Errorf("rows removed = %d, clearChildren = %d; want 0 and 1", removed, cleared)
 	}
 
 	// Nothing else: no stateUpdate on this session, nothing at all on the

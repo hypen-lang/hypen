@@ -67,6 +67,17 @@ const (
 	PatchRemoveProp  = "removeProp"
 	PatchAttachEvent = "attachEvent"
 	PatchDetachEvent = "detachEvent"
+	// PatchClearChildren empties the element ID in one step
+	// ({"type":"clearChildren","id":"…"}): exactly equivalent to a plain
+	// "remove" (no transition) of each of its current children — every
+	// child is unlinked and its whole subtree torn down, while ID itself
+	// (props, listeners) stays and may receive new children later in the
+	// same batch. An unknown ID is ignored. The engine emits it only when a
+	// list pass removes every child of the list's element (never for
+	// "root", rows with an exit transition, or fewer than two children)
+	// and places it before any new children of ID in the batch. See
+	// hypen-web/docs/clear-children.md.
+	PatchClearChildren = "clearChildren"
 	// PatchBatchAnimation is the batch-scoped animation prelude — always
 	// the FIRST patch of a stamped batch; carries only Spec.
 	PatchBatchAnimation = "batchAnimation"

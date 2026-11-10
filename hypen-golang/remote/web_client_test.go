@@ -107,6 +107,21 @@ func TestWebClient_BundleSyncsTheURL(t *testing.T) {
 	}
 }
 
+// Every renderer must apply the clearChildren patch
+// (hypen-web/docs/clear-children.md): the embedded bundle's DOM renderer,
+// its canvas-island renderer and the canvas-island patch routing all
+// handle it. A `go generate ./remote` from a hypen-web whose DOM renderer
+// lacks it would silently leave cleared lists on screen.
+func TestWebClient_BundleAppliesClearChildren(t *testing.T) {
+	js := string(webClientBundle)
+	if n := strings.Count(js, `case"clearChildren":`); n < 3 {
+		t.Errorf("embedded client.js handles clearChildren in %d switches, want >= 3 (DOM, canvas, canvas routing) — rerun `go generate ./remote` against a hypen-web that implements it", n)
+	}
+	if !strings.Contains(js, "replaceChildren(") {
+		t.Error("embedded client.js never empties an element with replaceChildren()")
+	}
+}
+
 func TestAcceptsHTML(t *testing.T) {
 	for accept, want := range map[string]bool{
 		browserAccept:                       true,
