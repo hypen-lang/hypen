@@ -1,30 +1,37 @@
 # Gallery app releases
 
-The Release workflow builds the Android gallery APK and the iOS Simulator app
-for every release and attaches them to the same GitHub release as the desktop
-installers. The CLI downloads these assets with `hypen run android` and
-`hypen run ios`:
+The Release workflow builds the Android gallery APK and a universal iOS Simulator
+app for every release, then publishes both to the `hypen` Cloudflare R2 bucket:
 
-- `hypen-gallery.apk`
-- `hypen-gallery-ios-simulator.zip` (Apple Silicon and Intel simulators)
-- A `.sha256` file for each download
-- `hypen-gallery-version.txt`
+- `android/hypen-gallery-X.Y.Z.apk`
+- `ios/hypen-gallery-X.Y.Z.zip`
+- A `.sha256` sidecar for each download
 
-The iOS ZIP is a Simulator app, not an IPA for physical devices or the App Store.
-The Android APK uses the gallery's debug signing identity.
+The existing `/android/latest` and `/ios/latest` download routes continue to work
+with published CLI versions. Desktop installers remain on GitHub Releases.
+The iOS ZIP supports Apple Silicon and Intel simulators; it is not a physical-device
+IPA. The Android APK uses the gallery's debug signing identity.
 
 ## CI configuration
 
-Set the repository Actions secret `ANDROID_GALLERY_DEBUG_KEYSTORE` to the base64
-encoding of the existing gallery debug keystore. It must use the standard Android
-debug alias/password (`androiddebugkey` / `android`). Keep this key stable so users
-can update an installed gallery without uninstalling it. Pull request builds use
-a temporary debug identity and never upload to a release.
+Repository Actions secrets:
 
-The Gallery Apps workflow also accepts an existing release tag for a gallery-only
-run. Both builds must succeed before publishing. Existing release assets are
-compared before upload; differing files are never overwritten. To retry an
-interrupted upload, rerun the failed publish job so it uses the same build artifacts.
+- `ANDROID_GALLERY_DEBUG_KEYSTORE`: the existing debug keystore encoded as base64,
+  using alias `androiddebugkey` and password `android`. Keep the key stable so users
+  can update an installed gallery without uninstalling it.
+- `R2_ACCESS_KEY_ID` and `R2_SECRET_ACCESS_KEY`: an R2 S3 API credential with Object
+  Read & Write access limited to the `hypen` bucket.
+
+Repository Actions variables:
+
+- `R2_ENDPOINT_URL`: the account's S3 endpoint from R2 settings.
+- `R2_BUCKET`: defaults to `hypen`.
+
+PR checks build both apps without publishing or using release credentials. The
+Gallery Apps workflow also accepts a release tag for a gallery-only run. Both
+builds must pass before uploading. Existing objects are compared by hash and never
+overwritten with different bytes. Retry an interrupted publish job using its same
+build artifacts.
 
 ## Local builds
 
@@ -34,5 +41,4 @@ scripts/build-gallery.sh --platform ios --version 0.6.8 --output-dir dist/galler
 ```
 
 Android requires Java and the Android SDK. iOS requires Xcode on macOS.
-The separate `publish-gallery.sh` script remains available for manual R2 uploads;
-it is not used by the GitHub release workflow.
+The separate `publish-gallery.sh` remains available for manual R2 publishing.

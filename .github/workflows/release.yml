@@ -471,3 +471,5 @@ jobs:
       tag: "v${{ needs.resolve.outputs.version }}"
     secrets:
       ANDROID_GALLERY_DEBUG_KEYSTORE: ${{ secrets.ANDROID_GALLERY_DEBUG_KEYSTORE }}
+      R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+      R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}

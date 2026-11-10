@@ -5,12 +5,14 @@ on:
     paths:
       - '.github/workflows/gallery-apps.yml'
       - 'scripts/build-gallery.sh'
+      - 'scripts/upload-gallery-r2.py'
+      - 'scripts/tests/test_upload_gallery_r2.py'
       - 'hypen-renderer-android/**'
       - 'hypen-renderer-swift/**'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Existing release tag to build and attach gallery apps to'
+        description: 'Release tag to build and publish gallery apps from'
         required: true
         type: string
   workflow_call:
@@ -23,6 +25,10 @@ on:
       ANDROID_GALLERY_DEBUG_KEYSTORE:
         description: "Base64-encoded gallery debug keystore (androiddebugkey / android)"
         required: true
+      R2_ACCESS_KEY_ID:
+        required: true
+      R2_SECRET_ACCESS_KEY:
+        required: true
 
 permissions:
   contents: read
@@ -32,6 +38,13 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  upload-tests:
+    name: Test R2 upload behavior
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: python3 -m unittest discover -s scripts/tests -p 'test_upload_gallery_r2.py'
+
   build:
     name: Build ${{ matrix.platform }} gallery
     strategy:
@@ -69,9 +82,6 @@ jobs:
         with:
           distribution: temurin
           java-version: 17
-
-      - uses: android-actions/setup-android@v3
-        if: matrix.platform == 'android'
 
       - name: Restore gallery signing key
         if: matrix.platform == 'android' && inputs.tag != ''
@@ -112,13 +122,13 @@ jobs:
           if-no-files-found: error
 
   publish:
-    name: Attach gallery apps to release
-    needs: build
+    name: Publish gallery apps to R2
+    needs: [build, upload-tests]
     if: inputs.tag != ''
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
+      - uses: actions/checkout@v4
+
       - uses: actions/download-artifact@v4
         with:
           pattern: gallery-*
@@ -126,25 +136,11 @@ jobs:
           merge-multiple: true
 
       - name: Verify and publish
-        working-directory: dist/gallery
         env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ENDPOINT_URL: ${{ vars.R2_ENDPOINT_URL }}
+          R2_BUCKET: ${{ vars.R2_BUCKET || 'hypen' }}
           RELEASE_TAG: ${{ inputs.tag }}
         run: |
-          set -euo pipefail
-          shasum -a 256 -c ./*.sha256
-          printf '%s\n' "${RELEASE_TAG#v}" > hypen-gallery-version.txt
-          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > /tmp/gallery-existing-assets
-          mkdir /tmp/gallery-existing
-          for file in hypen-gallery.apk hypen-gallery-ios-simulator.zip *.sha256 hypen-gallery-version.txt; do
-            if grep -Fxq "$file" /tmp/gallery-existing-assets; then
-              gh release download "$RELEASE_TAG" --pattern "$file" --dir /tmp/gallery-existing
-              cmp "$file" "/tmp/gallery-existing/$file" || {
-                echo "::error::Existing release asset differs: $file; refusing to overwrite"
-                exit 1
-              }
-            else
-              gh release upload "$RELEASE_TAG" "$file"
-            fi
-          done
+          python3 scripts/upload-gallery-r2.py --version "$RELEASE_TAG" --directory dist/gallery --bucket "$R2_BUCKET"
