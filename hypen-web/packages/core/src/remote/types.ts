@@ -18,6 +18,7 @@ export type RemoteMessage =
   | SubscribeStateMessage
   | DispatchActionMessage
   | ViewportMessage
+  | ColorSchemeMessage
   | HelloMessage
   | SessionAckMessage
   | SessionExpiredMessage
@@ -84,6 +85,22 @@ export interface ViewportMessage {
 }
 
 /**
+ * Client → Server: the client's system color scheme changed (the user
+ * flipped the OS between light and dark). The initial value travels in
+ * `hello.colorScheme`.
+ *
+ * Per client: the server feeds it to this session's theme
+ * (`Theme.setSystemScheme`), which re-renders only while the session's
+ * preference is `"system"`. Ignored when the host registered no theme, before
+ * `hello`, or when `scheme` is not `"light"` / `"dark"`. Servers that predate
+ * it ignore the unknown message type.
+ */
+export interface ColorSchemeMessage {
+  type: "colorScheme";
+  scheme: "light" | "dark";
+}
+
+/**
  * Client → Server: Override the module's state (e.g. for time-travel)
  * Server will update the module instance and re-render, sending back
  * patch + stateUpdate messages.
@@ -145,6 +162,13 @@ export interface HelloMessage {
    * access is simply disabled.
    */
   device?: DeviceHello;
+  /**
+   * The client's system color scheme, when it can tell. Seeds the session
+   * theme's system scheme before the first render, so a `"system"`
+   * preference paints the right scheme from the first frame. Absent ⇒ the
+   * theme's own default; ignored by servers without a theme.
+   */
+  colorScheme?: "light" | "dark";
 }
 
 /**

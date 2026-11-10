@@ -441,3 +441,77 @@ describe("cross-SDK fixtures", () => {
     });
   }
 });
+
+describe("RemoteServer: client color scheme", () => {
+  const PORT = 19932;
+
+  test("hello.colorScheme seeds the session theme; a colorScheme message re-renders it", async () => {
+    const { RemoteServer } = await import("../packages/server/src/remote/server");
+    const { RemoteEngine } = await import("../packages/core/src/remote/client");
+    const server = new RemoteServer()
+      .module(
+        "App",
+        app
+          .defineState({})
+          .onAction("pinLight", ({ context }) => context.theme!.setScheme("light"))
+          .build()
+      )
+      .ui(`module App { Button { Text("x") }.onClick(@actions.pinLight).backgroundColor(@theme.color.surface) }`)
+      .theme(makeTheme());
+    await server.listen(PORT);
+    const client = new RemoteEngine(`ws://localhost:${PORT}`, { colorScheme: "dark", autoReconnect: false });
+    const seen: Array<[string, unknown]> = [];
+    client.onPatches((patches) => seen.push(...props(patches as Patch[])));
+    const settle = () => new Promise((r) => setTimeout(r, 100));
+    try {
+      await client.connect();
+      await settle();
+      // First frame is already dark: no light paint followed by a flip.
+      expect(seen.filter(([name]) => name === "backgroundColor.0")).toEqual([["backgroundColor.0", "#111111"]]);
+
+      seen.length = 0;
+      client.setColorScheme("light");
+      await settle();
+      expect(seen).toEqual([["backgroundColor.0", "#ffffff"]]);
+
+      // An explicit preference stops following the client.
+      client.dispatchAction("pinLight");
+      await settle();
+      seen.length = 0;
+      client.setColorScheme("dark");
+      await settle();
+      expect(seen).toEqual([]);
+    } finally {
+      client.dispose();
+      await settle();
+      server.stop();
+    }
+  });
+
+  test("a malformed scheme is ignored in hello and as a message", async () => {
+    const { RemoteServer } = await import("../packages/server/src/remote/server");
+    const server = new RemoteServer()
+      .module("App", app.defineState({}).build())
+      .ui(`module App { Text("x").color(@theme.color.surface) }`)
+      .theme(makeTheme());
+    await server.listen(PORT + 1);
+    const messages: any[] = [];
+    const ws = new WebSocket(`ws://localhost:${PORT + 1}`);
+    ws.onmessage = (e) => messages.push(JSON.parse(e.data as string));
+    await new Promise<void>((resolve) => (ws.onopen = () => resolve()));
+    try {
+      ws.send(JSON.stringify({ type: "hello", colorScheme: "neon" }));
+      await new Promise((r) => setTimeout(r, 150));
+      const init = messages.find((m) => m.type === "initialTree");
+      expect(props(init.patches)).toContainEqual(["color.0", "#ffffff"]);
+      ws.send(JSON.stringify({ type: "colorScheme", scheme: 7 }));
+      ws.send(JSON.stringify({ type: "colorScheme" }));
+      await new Promise((r) => setTimeout(r, 150));
+      expect(messages.filter((m) => m.type === "patch")).toEqual([]);
+    } finally {
+      ws.close();
+      await new Promise((r) => setTimeout(r, 50));
+      server.stop();
+    }
+  });
+});
