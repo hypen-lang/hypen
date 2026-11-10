@@ -5,6 +5,7 @@
  *
  *   E2B_API_KEY=… bun scripts/e2b.ts template        # once: build the image
  *   E2B_API_KEY=… bun scripts/e2b.ts run [--rounds=8] [--replicas=2]
+ *                                    [--variants=a,b] [--name=develop]
  *
  * What "equal ground" means here, concretely:
  *
@@ -64,7 +65,7 @@ async function buildTemplate() {
   console.log(`built template ${TEMPLATE} (${built.templateId})`);
 }
 
-async function runReplica(label: string, tarball: Buffer, rounds: string, outFile: string) {
+async function runReplica(label: string, tarball: Buffer, matrixArgs: string, outFile: string) {
   const log = (line: string) => console.log(`[${label}] ${line}`);
   // Ask for three hours; plans capped at one hour reject that, so fall back.
   const sbx = await Sandbox.create(TEMPLATE, { timeoutMs: 3 * 60 * 60 * 1000 }).catch(() =>
@@ -82,7 +83,7 @@ async function runReplica(label: string, tarball: Buffer, rounds: string, outFil
 
     let buffered = "";
     await sbx.commands.run(
-      `bun bench/matrix.ts --rounds=${rounds}`,
+      `bun bench/matrix.ts ${matrixArgs}`,
       {
         cwd: "/home/user/bench",
         envs: {
@@ -111,16 +112,22 @@ const command = process.argv[2];
 if (command === "template") {
   await buildTemplate();
 } else if (command === "run") {
-  const rounds = arg("rounds", "8");
+  // `--variants=a,b` limits the run to some builds; `--name=x` writes
+  // results/matrix-x.json (and -x-b.json) instead of results/matrix.json.
+  const variants = arg("variants", "");
+  const name = arg("name", "");
+  const matrixArgs =
+    `--rounds=${arg("rounds", "8")}` + (variants ? ` --variants=${variants}` : "");
   const replicas = Number(arg("replicas", "2"));
   const tgz = resolve(root, ".vendor/bench-upload.tgz");
   await $`mkdir -p .vendor && tar czf ${tgz} bench shared scripts/build-variants.ts variants`.cwd(root);
   const tarball = await readFile(tgz);
   console.log(`uploading ${(tarball.byteLength / 1048576).toFixed(1)} MB to ${replicas} sandbox(es)`);
-  const outputs = ["results/matrix.json", "results/matrix-b.json", "results/matrix-c.json"];
+  const stem = `results/matrix${name ? `-${name}` : ""}`;
+  const outputs = [`${stem}.json`, `${stem}-b.json`, `${stem}-c.json`];
   const settled = await Promise.allSettled(
     Array.from({ length: replicas }, (_, i) =>
-      runReplica(String.fromCharCode(65 + i), tarball, rounds, outputs[i] ?? `results/matrix-${i}.json`),
+      runReplica(String.fromCharCode(65 + i), tarball, matrixArgs, outputs[i] ?? `${stem}-${i}.json`),
     ),
   );
   for (const s of settled) if (s.status === "rejected") console.error(s.reason);
