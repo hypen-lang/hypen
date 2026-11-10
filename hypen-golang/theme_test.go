@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 )
 
 func testThemeOptions() ThemeOptions {
@@ -570,6 +571,35 @@ func TestThemeEngine_HandlerSwitchesScheme(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(got, "\n"), `"n=1"`) {
 		t.Errorf("handler's state change was not rendered: %v", got)
+	}
+}
+
+// The theme preference recorded on a session survives suspend/resume and
+// is gone once the session expires.
+func TestSessionThemePreferenceLivesWithTheSession(t *testing.T) {
+	sm := NewSessionManager(&SessionConfig{TTL: 30 * time.Millisecond})
+	defer sm.Shutdown()
+
+	kept := sm.CreateSession(nil)
+	kept.SetThemePreference("dark")
+	sm.SuspendSession(kept.ID(), nil, nil)
+	resumed, _ := sm.ResumeSession(kept.ID())
+	if resumed == nil || resumed.ThemePreference() != "dark" {
+		t.Fatalf("resumed session lost its theme preference: %+v", resumed)
+	}
+
+	expired := make(chan struct{})
+	sm.SuspendSession(kept.ID(), nil, func() { close(expired) })
+	select {
+	case <-expired:
+	case <-time.After(5 * time.Second):
+		t.Fatal("session did not expire")
+	}
+	if again, _ := sm.ResumeSession(kept.ID()); again != nil {
+		t.Fatal("an expired session resumed")
+	}
+	if fresh := sm.CreateSession(nil); fresh.ThemePreference() != "" {
+		t.Fatalf("a new session has a theme preference: %q", fresh.ThemePreference())
 	}
 }
 

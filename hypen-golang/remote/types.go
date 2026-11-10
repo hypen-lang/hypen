@@ -39,6 +39,9 @@ const (
 	// MessageTypeViewport is the client → server list viewport report
 	// (virtualization contract §4).
 	MessageTypeViewport MessageType = "viewport"
+	// MessageTypeColorScheme is the client → server report that the
+	// client's system color scheme changed.
+	MessageTypeColorScheme MessageType = "colorScheme"
 )
 
 // Message is the base interface for all remote messages
@@ -103,6 +106,20 @@ type ViewportMessage struct {
 
 func (m *ViewportMessage) GetType() MessageType { return MessageTypeViewport }
 
+// ColorSchemeMessage is sent from a client when its system color scheme
+// changes (the user flipped the OS between light and dark); the initial
+// value travels in `hello.colorScheme`. Per client: the server feeds it to
+// the sending session's theme (Theme.SetSystemScheme), which re-renders
+// only while that session's preference is "system". Ignored when the host
+// registered no theme, before `hello`, or when Scheme is not "light" /
+// "dark". Servers that predate it ignore the unknown message type.
+type ColorSchemeMessage struct {
+	Type   MessageType `json:"type"`
+	Scheme string      `json:"scheme"`
+}
+
+func (m *ColorSchemeMessage) GetType() MessageType { return MessageTypeColorScheme }
+
 // RawMessage is used for parsing incoming messages
 type RawMessage struct {
 	Type      MessageType `json:"type"`
@@ -121,6 +138,11 @@ type RawMessage struct {
 	// ResumeToken is hello.resumeToken: the resume credential the server
 	// issued in an earlier sessionAck.
 	ResumeToken string `json:"resumeToken,omitempty"`
+	// ColorScheme is hello.colorScheme and Scheme is colorScheme.scheme:
+	// the client's system color scheme. Untyped so a malformed value is
+	// ignored instead of failing the whole message.
+	ColorScheme any `json:"colorScheme,omitempty"`
+	Scheme      any `json:"scheme,omitempty"`
 }
 
 // Client represents a connected remote client
@@ -182,6 +204,13 @@ type EngineOptions struct {
 	// A server that doesn't accept the extension simply answers without
 	// it and the connection stays uncompressed.
 	DisableCompression bool
+
+	// ColorScheme is the system color scheme reported to the server
+	// ("light" or "dark"), which a server-side theme follows while its
+	// preference is "system". When set, the client opens with a `hello`
+	// carrying it, so the first frame is already in that scheme; update it
+	// with RemoteEngine.SetColorScheme. Empty reports nothing.
+	ColorScheme string
 }
 
 // DefaultEngineOptions returns sensible defaults
