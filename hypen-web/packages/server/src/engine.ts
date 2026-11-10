@@ -15,7 +15,7 @@
 import { WasmEngine } from "../wasm-node/hypen_engine.js";
 import { BaseEngine } from "@hypen-space/core/engine-base";
 import type { Action } from "@hypen-space/core/types";
-import type { A11yDiagnostic } from "@hypen-space/core";
+import type { A11yDiagnostic, TemplateRefsReport } from "@hypen-space/core";
 
 // Side-effect import: installs the engine-backed PortableImpl into
 // `@hypen-space/core` as soon as the server package is loaded. After
@@ -75,6 +75,22 @@ export class Engine extends BaseEngine {
       return [];
     }
     return (this.wasmEngine as any).checkAccessibility(source) as A11yDiagnostic[];
+  }
+
+  /**
+   * Extract every located reference a DSL source makes (state paths,
+   * actions, row/item refs, data sources, components) for static template
+   * checks. Facts only — validity against a module is the caller's call.
+   *
+   * Returns `null` when the WASM binding predates `templateRefs` (rebuild
+   * with `bun run build:wasm`), so callers can report "couldn't check"
+   * rather than a clean pass. Throws on a parse error.
+   */
+  templateRefs(source: string): TemplateRefsReport | null {
+    if (typeof (this.wasmEngine as any)?.templateRefs !== "function") {
+      return null;
+    }
+    return (this.wasmEngine as any).templateRefs(source) as TemplateRefsReport;
   }
 
   /**

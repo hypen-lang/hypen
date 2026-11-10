@@ -353,6 +353,13 @@ export type { PatchValidationResult } from "./validate.js";
 // `checkAccessibility(source)` findings in a host dev console.
 export { logA11yDiagnostics, checkRuleDrift, EXPECTED_A11Y_RULES } from "./a11y.js";
 export type { A11yDiagnostic, A11ySourceSpan, A11yRuleDrift } from "./a11y.js";
+export { EXPECTED_TEMPLATE_CHECK_RULES } from "./template-refs.js";
+export type {
+  TemplateRef,
+  TemplateRefKind,
+  TemplateRefsReport,
+  TemplateCheckDiagnostic,
+} from "./template-refs.js";
 
 // ============================================================================
 // ANIMATION (__anim.* prop channel — shared renderer vocabulary)
