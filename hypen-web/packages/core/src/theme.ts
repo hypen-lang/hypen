@@ -212,6 +212,7 @@ export class Theme {
   private _preference: string;
   private _system: SystemColorScheme;
   private resolved: Tokens = {};
+  private aliasProblems: string[] = [];
   private engines = new Set<IDataSourceEngine>();
   private listeners = new Set<ThemeChangeListener>();
   private warned = new Set<string>();
@@ -272,6 +273,11 @@ export class Theme {
   /** The resolved tokens currently published as `theme`. */
   get tokens(): Tokens {
     return this.resolved;
+  }
+
+  /** Alias problems (missing target, cycle) in the active scheme's tokens. */
+  get problems(): string[] {
+    return this.aliasProblems;
   }
 
   /**
@@ -426,7 +432,9 @@ export class Theme {
   private rebuild(): void {
     const overrides = this.store.schemes.get(this.scheme);
     const merged = overrides ? mergeTokens(this.store.base, overrides) : this.store.base;
+    this.aliasProblems = [];
     this.resolved = resolveTokenAliases(merged, (problem) => {
+      this.aliasProblems.push(problem);
       if (this.warned.has(problem)) return;
       this.warned.add(problem);
       log.warn(problem);

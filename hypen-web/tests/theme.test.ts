@@ -415,3 +415,29 @@ describe("RemoteServer", () => {
     }
   });
 });
+
+describe("cross-SDK fixtures", () => {
+  const fixture = require("../../engine-compatibility-tests/fixtures/theme/resolve.json") as {
+    cases: Array<{
+      name: string;
+      tokens: Tokens;
+      schemes: Record<string, Tokens>;
+      preference: string;
+      system: "light" | "dark";
+      expected: { scheme: string; tokens: Tokens; problems: number };
+    }>;
+  };
+  for (const c of fixture.cases) {
+    test(c.name, () => {
+      const theme = createTheme({
+        tokens: c.tokens,
+        schemes: c.schemes,
+        scheme: c.preference,
+        systemScheme: c.system,
+      });
+      expect(theme.scheme).toBe(c.expected.scheme);
+      expect(theme.tokens).toEqual(c.expected.tokens);
+      expect(theme.problems).toHaveLength(c.expected.problems);
+    });
+  }
+});
