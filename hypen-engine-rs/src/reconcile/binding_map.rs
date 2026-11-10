@@ -79,7 +79,7 @@ pub struct CompiledCache {
 /// Does resolving this value read the iteration item?
 fn value_depends_on_item(value: &Value, item_name: &str) -> bool {
     match value {
-        Value::Binding(b) => b.is_item(),
+        Value::Binding(b) => b.is_item() || super::item_bindings::is_alias_binding(b, item_name),
         Value::TemplateString { template, bindings } => {
             bindings.iter().any(|b| b.is_item())
                 || super::item_bindings::with_item_markers(item_name, |dot, bare| {
@@ -675,7 +675,11 @@ pub(crate) fn build_row_prototype(
         let mut evaluator = None;
         for (key, value) in &element.props {
             match value {
-                Value::Binding(b) if !b.is_item() => bindings.push(b.clone()),
+                Value::Binding(b)
+                    if !b.is_item() && !super::item_bindings::is_alias_binding(b, item_name) =>
+                {
+                    bindings.push(b.clone())
+                }
                 Value::TemplateString { bindings: bs, .. } => {
                     bindings.extend(bs.iter().filter(|b| !b.is_item()).cloned());
                 }

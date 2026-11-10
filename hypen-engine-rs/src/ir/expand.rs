@@ -907,13 +907,26 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
                     let mut props = element.props.clone();
                     props.remove("0"); // Remove the array binding prop (uses COW)
 
-                    let template: Vec<IRNode> =
+                    // Same iteration args `ForEach`/`List` accept.
+                    let mut take_string = |name: &str| match props.remove(name) {
+                        Some(Value::Static(serde_json::Value::String(s))) => Some(s),
+                        Some(other) => {
+                            props.insert(name.to_string(), other);
+                            None
+                        }
+                        None => None,
+                    };
+                    let item_name = take_string("as").unwrap_or_else(|| "item".to_string());
+                    let key_path = take_string("key");
+
+                    let mut template: Vec<IRNode> =
                         component.children.iter().map(ast_to_ir_node).collect();
+                    bind_alias_refs(&mut template, &item_name);
 
                     return IRNode::ForEach {
                         source: binding,
-                        item_name: "item".to_string(),
-                        key_path: None,
+                        item_name,
+                        key_path,
                         template,
                         props,
                         module_scope: None,
@@ -1408,6 +1421,116 @@ fn parser_string_unquoted(value: &ParserValue) -> Option<String> {
 }
 
 /// Convert a parser value into an IR `Binding` if it resolves to one.
+/// `[A-Za-z_][A-Za-z0-9_]*`
+fn is_identifier(s: &str) -> bool {
+    let mut chars = s.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// The binding a whole-template reference to a loop alias stands for:
+/// `"@{todo}"` / `"@{todo.a.b}"` under `as: "todo"` → `todo` row binding
+/// (a data-source binding whose provider is the alias — the same IR the bare
+/// `@todo.a.b` reference lowers to). `None` for anything else.
+fn alias_ref_binding(template: &str, alias: &str) -> Option<Binding> {
+    let content = template.trim().strip_prefix("@{")?.strip_suffix('}')?;
+    let path = match content.strip_prefix(alias)? {
+        "" => Vec::new(),
+        rest => {
+            let rest = rest.strip_prefix('.')?;
+            let segments: Vec<String> = rest.split('.').map(str::to_string).collect();
+            if !segments.iter().all(|s| {
+                is_identifier(s) || (!s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()))
+            }) {
+                return None;
+            }
+            segments
+        }
+    };
+    Some(Binding::data_source(alias, path))
+}
+
+/// Give a loop alias the same IR its `item` spelling gets.
+///
+/// `parse_binding` only admits `state.`/`item.` inside `@{...}`, so
+/// `"@{item.title}"` lowers to a `Value::Binding` while `"@{todo.title}"`
+/// under `as: "todo"` stays a `TemplateString`. Anything that treats the two
+/// kinds differently (a custom component forwarding only binding arguments to
+/// its root, the agent manifest's row-path walk) would then see the alias as
+/// a second-class name. Rewrite whole-template alias references in the loop's
+/// template into row bindings, stopping at an inner loop that rebinds the
+/// same name (it shadows this one).
+fn bind_alias_refs(nodes: &mut [IRNode], alias: &str) {
+    if alias == "item" {
+        return;
+    }
+    fn fix_value(value: &mut Value, alias: &str) {
+        if let Value::TemplateString { template, .. } = value {
+            if let Some(binding) = alias_ref_binding(template, alias) {
+                *value = Value::Binding(binding);
+            }
+        }
+    }
+    fn fix_props(props: &mut Props, alias: &str) {
+        // Props is copy-on-write; only touch it when something matches.
+        let hit = props.values().any(|v| match v {
+            Value::TemplateString { template, .. } => alias_ref_binding(template, alias).is_some(),
+            _ => false,
+        });
+        if hit {
+            for v in props.make_mut().values_mut() {
+                fix_value(v, alias);
+            }
+        }
+    }
+    for node in nodes {
+        match node {
+            IRNode::Element(element) => {
+                fix_props(&mut element.props, alias);
+                bind_alias_refs(&mut element.ir_children, alias);
+            }
+            IRNode::ForEach {
+                item_name,
+                template,
+                props,
+                ..
+            } => {
+                fix_props(props, alias);
+                if item_name != alias {
+                    bind_alias_refs(template, alias);
+                }
+            }
+            IRNode::Conditional {
+                value,
+                branches,
+                fallback,
+                ..
+            } => {
+                fix_value(value, alias);
+                for branch in branches {
+                    fix_value(&mut branch.pattern, alias);
+                    bind_alias_refs(&mut branch.children, alias);
+                }
+                if let Some(fb) = fallback {
+                    bind_alias_refs(fb, alias);
+                }
+            }
+            IRNode::Router {
+                routes, fallback, ..
+            } => {
+                for route in routes {
+                    bind_alias_refs(&mut route.children, alias);
+                }
+                if let Some(fb) = fallback {
+                    bind_alias_refs(fb, alias);
+                }
+            }
+        }
+    }
+}
+
 fn parser_to_binding(value: &ParserValue) -> Option<Binding> {
     match parser_value_to_ir(value) {
         Value::Binding(b) => Some(b),
@@ -1471,6 +1594,7 @@ fn convert_foreach(component: &ComponentSpecification) -> IRNode {
         return error_element(message);
     }
     let mut template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
+    bind_alias_refs(&mut template, &item_name);
     crate::ir::dnd::propagate_pin_config(&mut template, &props);
 
     let Some(source) = source else {
@@ -1535,6 +1659,7 @@ fn convert_list(component: &ComponentSpecification) -> IRNode {
 
     // Build the ForEach IR node for iteration
     let mut template: Vec<IRNode> = component.children.iter().map(ast_to_ir_node).collect();
+    bind_alias_refs(&mut template, &item_name);
     let mut foreach_props = Props::new();
     if let Some(message) =
         process_applicators(&component.applicators, &mut foreach_props, element_type)
@@ -1863,6 +1988,15 @@ pub(crate) fn parser_value_to_ir(value: &ParserValue) -> Value {
                     .map(|s| s.to_string())
                     .collect();
                 Value::Binding(Binding::data_source(provider, path))
+            } else if !matches!(
+                ref_str.as_str(),
+                "state" | "actions" | "router" | "resources"
+            ) && is_identifier(ref_str)
+            {
+                // Bare `@name`: the whole value of `name` — the row of a
+                // `ForEach(..., as: "name")` (substituted at iteration), or
+                // a data-source provider's whole payload.
+                Value::Binding(Binding::data_source(ref_str.as_str(), Vec::new()))
             } else {
                 Value::Static(serde_json::Value::String(ref_str.clone()))
             }

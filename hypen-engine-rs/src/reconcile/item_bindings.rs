@@ -526,6 +526,21 @@ pub(crate) fn foreach_items<'a>(
     }
 }
 
+/// Is `binding` a reference to the loop alias `item_name`?
+///
+/// `parse_binding` admits only `state.`/`item.`, so `@todo.x` (and, after
+/// the loop's expansion, `"@{todo.x}"`) under `as: "todo"` reaches the IR
+/// as a data-source binding whose provider is the alias. Never true for the
+/// default name: `item` refs are item-source bindings, owned per
+/// `parsed_item`.
+pub(crate) fn is_alias_binding(binding: &Binding, item_name: &str) -> bool {
+    item_name != "item"
+        && matches!(
+            &binding.source,
+            crate::reactive::BindingSource::DataSource(provider) if provider == item_name
+        )
+}
+
 /// Replace item bindings in Props
 fn replace_props_item_bindings(
     props: &Props,
@@ -568,6 +583,21 @@ fn replace_value_item_bindings_ext(
     parsed_item: bool,
 ) -> Value {
     match value {
+        // `@todo.x` / `@todo` under `as: "todo"` (and `"@{todo.x}"`, which
+        // the loop's expansion lowers to the same binding): the loop always
+        // owns its own alias. A path missing from the row is `null`, never
+        // left behind as a data-source binding on a provider called `todo`.
+        Value::Binding(binding) if is_alias_binding(binding, item_name) => {
+            if binding.path.is_empty() {
+                Value::Static(item.clone())
+            } else {
+                Value::Static(
+                    navigate_item_path(item, &binding.full_path())
+                        .cloned()
+                        .unwrap_or(serde_json::Value::Null),
+                )
+            }
+        }
         Value::Binding(binding) => {
             if parsed_item && binding.is_item() {
                 if binding.path.is_empty() {
@@ -676,6 +706,15 @@ fn replace_template_string_item_bindings(
     // Uses the configurable item_name for custom iteration variables
     let expr_replacements = collect_item_replacements_with_name(&result, item, true, item_name);
     result = apply_replacements(&result, expr_replacements);
+
+    // An aliased loop that owns `item` here (`has_item_bindings` implies
+    // `parsed_item`) resolves `@{item.x}` already; do the same for `item.x`
+    // inside expressions, or `@{item.done ? 'a' : 'b'}` reaches the
+    // evaluator unresolved.
+    if has_item_bindings && item_name != "item" {
+        let expr_replacements = collect_item_replacements_with_name(&result, item, true, "item");
+        result = apply_replacements(&result, expr_replacements);
+    }
 
     // Filter out resolved item bindings, keep state bindings — and, when a
     // nested loop shadows `item`, the item bindings that belong to it.
