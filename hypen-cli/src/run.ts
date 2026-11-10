@@ -33,10 +33,10 @@ const RUNNERS_DIR = join(homedir(), ".hypen", "runners");
 
 /** Download URLs for runner apps */
 export const RUNNER_URLS = {
-  android: "https://red-water-3890.ian-dae.workers.dev/android/latest",
-  ios: "https://red-water-3890.ian-dae.workers.dev/ios/latest",
-  version: "https://red-water-3890.ian-dae.workers.dev/version",
-  // Bare-binary archives attached to hypen-engine-rs releases by the
+  android: "https://github.com/hypen-lang/hypen/releases/latest/download/hypen-gallery.apk",
+  ios: "https://github.com/hypen-lang/hypen/releases/latest/download/hypen-gallery-ios-simulator.zip",
+  version: "https://github.com/hypen-lang/hypen/releases/latest/download/hypen-gallery-version.txt",
+  // Bare-binary archives attached to hypen-lang/hypen releases by the
   // Desktop Installers workflow, under stable version-less names:
   // hypen-browser-<rust-target>.tar.gz
   desktop: "https://github.com/hypen-lang/hypen/releases/latest/download",

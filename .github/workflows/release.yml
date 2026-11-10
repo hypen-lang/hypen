@@ -461,3 +461,13 @@ jobs:
     uses: ./.github/workflows/desktop-installers.yml
     with:
       tag: "v${{ needs.resolve.outputs.version }}"
+
+  # Mobile demo runners consumed by `hypen run android` and `hypen run ios`.
+  gallery-apps:
+    name: Gallery Apps
+    needs: [resolve, github-release]
+    uses: ./.github/workflows/gallery-apps.yml
+    with:
+      tag: "v${{ needs.resolve.outputs.version }}"
+    secrets:
+      ANDROID_GALLERY_DEBUG_KEYSTORE: ${{ secrets.ANDROID_GALLERY_DEBUG_KEYSTORE }}

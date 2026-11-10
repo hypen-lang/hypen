@@ -1,0 +1,150 @@
+name: Gallery Apps
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/gallery-apps.yml'
+      - 'scripts/build-gallery.sh'
+      - 'hypen-renderer-android/**'
+      - 'hypen-renderer-swift/**'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing release tag to build and attach gallery apps to'
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      tag:
+        required: true
+        type: string
+
+    secrets:
+      ANDROID_GALLERY_DEBUG_KEYSTORE:
+        description: "Base64-encoded gallery debug keystore (androiddebugkey / android)"
+        required: true
+
+permissions:
+  contents: read
+
+concurrency:
+  group: gallery-apps-${{ inputs.tag || github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build ${{ matrix.platform }} gallery
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: android
+            os: ubuntu-latest
+            file: hypen-gallery.apk
+          - platform: ios
+            os: macos-latest
+            file: hypen-gallery-ios-simulator.zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.sha }}
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          if [ -n "$RELEASE_TAG" ]; then
+            VERSION="${RELEASE_TAG#v}"
+          else
+            VERSION=$(node -p "require('./hypen-cli/package.json').version")
+          fi
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || exit 1
+          echo "value=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/setup-java@v4
+        if: matrix.platform == 'android'
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: android-actions/setup-android@v3
+        if: matrix.platform == 'android'
+
+      - name: Restore gallery signing key
+        if: matrix.platform == 'android' && inputs.tag != ''
+        env:
+          GALLERY_KEYSTORE: ${{ secrets.ANDROID_GALLERY_DEBUG_KEYSTORE }}
+        run: |
+          if [ -z "$GALLERY_KEYSTORE" ]; then
+            echo "::error::Set ANDROID_GALLERY_DEBUG_KEYSTORE before publishing gallery releases"
+            exit 1
+          fi
+          mkdir -p "$HOME/.android"
+          printf '%s' "$GALLERY_KEYSTORE" | base64 --decode > "$HOME/.android/debug.keystore"
+          chmod 600 "$HOME/.android/debug.keystore"
+
+      - uses: gradle/actions/setup-gradle@v4
+        if: matrix.platform == 'android'
+
+      - name: Build gallery
+        shell: bash
+        env:
+          PLATFORM: ${{ matrix.platform }}
+          VERSION: ${{ steps.version.outputs.value }}
+        run: bash scripts/build-gallery.sh --platform "$PLATFORM" --version "$VERSION" --output-dir "$GITHUB_WORKSPACE/dist/gallery"
+
+      - name: Package checksum
+        shell: bash
+        working-directory: dist/gallery
+        env:
+          FILE: ${{ matrix.file }}
+        run: shasum -a 256 "$FILE" > "$FILE.sha256"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gallery-${{ matrix.platform }}
+          path: |
+            dist/gallery/${{ matrix.file }}
+            dist/gallery/${{ matrix.file }}.sha256
+          if-no-files-found: error
+
+  publish:
+    name: Attach gallery apps to release
+    needs: build
+    if: inputs.tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: gallery-*
+          path: dist/gallery
+          merge-multiple: true
+
+      - name: Verify and publish
+        working-directory: dist/gallery
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          shasum -a 256 -c ./*.sha256
+          printf '%s\n' "${RELEASE_TAG#v}" > hypen-gallery-version.txt
+          gh release view "$RELEASE_TAG" --json assets --jq '.assets[].name' > /tmp/gallery-existing-assets
+          mkdir /tmp/gallery-existing
+          for file in hypen-gallery.apk hypen-gallery-ios-simulator.zip *.sha256 hypen-gallery-version.txt; do
+            if grep -Fxq "$file" /tmp/gallery-existing-assets; then
+              gh release download "$RELEASE_TAG" --pattern "$file" --dir /tmp/gallery-existing
+              cmp "$file" "/tmp/gallery-existing/$file" || {
+                echo "::error::Existing release asset differs: $file; refusing to overwrite"
+                exit 1
+              }
+            else
+              gh release upload "$RELEASE_TAG" "$file"
+            fi
+          done
