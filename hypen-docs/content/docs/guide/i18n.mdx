@@ -1,0 +1,165 @@
+---
+title: Internationalization
+description: Translate your UI with message catalogs, parameters, plurals, locale switching and right-to-left layout
+---
+
+# Internationalization
+
+Hypen apps translate their UI with **one i18n instance per app**. It owns the message catalogs and the active locale, and publishes them to the engine the same way a [data source](/docs/guide/data-sources) does, so templates bind translated strings reactively and switching locale re-renders exactly the nodes that show them.
+
+```
+createI18n(...) → setContext("t", catalog) + setContext("i18n", { locale, dir }) → re-render
+```
+
+<Callout>
+v1 covers the engine, the TypeScript SDK and the web DOM renderer. The Kotlin, Go, Swift and Rust SDKs and the native renderers do not have an i18n API yet (see [Current limits](#current-limits)).
+</Callout>
+
+## Setup
+
+Create the instance once and hand it to the runtime:
+
+```typescript
+import { createI18n } from "@hypen-space/core";
+import { Hypen } from "@hypen-space/web-engine";
+
+const i18n = createI18n({
+  locale: "en",
+  fallbackLocale: "en",
+  messages: {
+    en: {
+      cart: { title: "Cart", checkout: "Checkout" },
+      greeting: "Hello, {0}!",
+      items: { one: "{count} item", other: "{count} items" },
+    },
+  },
+  // Locales not in `messages` are loaded on first use, once.
+  loadLocale: async (locale) => (await fetch(`/locales/${locale}.json`)).json(),
+});
+
+const hypen = new Hypen({ i18n });
+await hypen.init();
+await hypen.render("App", "#app");
+```
+
+For a Remote UI server, register it on the server. Every session gets its own fork of the instance: its own active locale over the shared (and shared-cache, lazily loaded) catalogs.
+
+```typescript
+new RemoteServer()
+  .module("App", appModule)
+  .i18n(i18n)
+  .listen(3000);
+```
+
+A session's locale is part of its session snapshot, so it survives a reconnect, a hot reload and (on hosts that persist snapshots, such as Cloudflare Durable Objects) hibernation.
+
+## Keys
+
+Catalogs are nested objects. Read a key with the reserved `t` provider:
+
+```hypen
+Text(@t.cart.title)
+Text("@{t.cart.title}")
+Text("Total — @{t.cart.checkout}")
+```
+
+The active locale's catalog is merged over the fallback locale's, so a key that `hr` lacks is shown in `en` until it is translated.
+
+The current locale and writing direction are published as `i18n`:
+
+```hypen
+Text(@i18n.locale)                       // "hr"
+Text("@{i18n.dir == 'rtl' ? '←' : '→'}")
+```
+
+## Parameters
+
+`fmt(message, …args)` fills `{0}`, `{1}`, … with positional arguments, and `{name}` with a field of an object argument:
+
+```json
+{ "greeting": "Hello, {0}!", "welcome": "Welcome back, {name}" }
+```
+
+```hypen
+Text("@{fmt(t.greeting, state.user.name)}")
+Text("@{fmt(t.welcome, state.user)}")
+```
+
+Inside `@{…}` the provider is written without `@` (`t.greeting`), like `state.x`. A placeholder with no matching argument is left as is, so a missing argument is visible.
+
+## Plurals
+
+A plural message is an object of [CLDR plural categories](https://cldr.unicode.org/index/cldr-spec/plural-rules) — `zero`, `one`, `two`, `few`, `many`, `other` (required) — and may add exact forms such as `"=0"`. `{count}` is the number:
+
+```json
+{
+  "en": { "items": { "=0": "Your cart is empty", "one": "{count} item", "other": "{count} items" } },
+  "hr": { "items": { "one": "{count} stavka", "few": "{count} stavke", "other": "{count} stavki" } }
+}
+```
+
+```hypen
+Text("@{plural(state.count, t.items)}")
+Text("@{plural(state.count, t.itemsFor, state.user.name)}")   // extra args fill {0}, {1}, …
+```
+
+The category is chosen with the platform's own CLDR rules for the active locale (`Intl.PluralRules` on the web): Croatian shows "1 stavka", "3 stavke", "5 stavki", "21 stavka". Plural messages are replaced whole when catalogs are merged, never mixed across languages.
+
+Both builtins re-render when the locale changes or when any state they read changes.
+
+## Switching locale
+
+From any handler, through `context.i18n`:
+
+```typescript
+export default app
+  .defineState({})
+  .onAction("setLanguage", async ({ action, context }) => {
+    await context.i18n?.setLocale(action.payload.locale);
+  });
+```
+
+```hypen
+Row {
+  Button { Text("English") }.onClick(@actions.setLanguage, locale: "en")
+  Button { Text("Hrvatski") }.onClick(@actions.setLanguage, locale: "hr")
+}
+```
+
+`setLocale` loads the catalog if needed and then republishes. If calls overlap, the last one wins. Handlers can also translate strings themselves (for a toast, a document title, an email):
+
+```typescript
+context.i18n?.t("cart.title");               // "Košarica"
+context.i18n?.t("greeting", "Ana");          // "Bok, Ana!"
+context.i18n?.plural(3, "items");            // "3 stavke"
+context.i18n?.locale;                        // "hr"
+context.i18n?.dir;                           // "ltr"
+```
+
+`i18n.onChange(listener)` notifies you of every switch, for example to persist the user's choice.
+
+## Missing keys
+
+A key that is in neither the active nor the fallback catalog renders as **its key path** — `Text(@t.cart.coupon)` shows `cart.coupon` — never as an empty string, `null` or an error. The engine logs a warning once per key, and `t()` / `plural()` in handlers do the same (pass `onMissingKey` to collect them). Once the catalog gains the key, the text updates.
+
+## Right-to-left
+
+With the web runtime, the render root's `dir` and `lang` attributes follow the active locale (`ar`, `he`, `fa`, `ur`, … are `rtl`) and are updated on every switch, so text alignment and `Row` order mirror automatically. When you render with your own `DOMRenderer`, call `renderer.setDirection(i18n.dir, i18n.locale)` and again from `i18n.onChange`.
+
+Use direction-aware styling where a side matters:
+
+```hypen
+Text("Hi").padding(start: 16, end: 8)          // padding-inline-start / -end
+Column {}.cornerRadius(topStart: 12, bottomEnd: 12)    // border-start-start-radius / …
+Text("Hi").textAlign(start)
+```
+
+Physical applicators (`.paddingLeft()`, `.marginRight()`, `.left()`, `.right()`, `borderLeftWidth`, …) stay physical in RTL.
+
+## Current limits
+
+- **SDKs and renderers.** Only the TypeScript SDK has `createI18n`. The engine side (`t` provider, `fmt`, `plural`, missing-key fallback) is shared by every SDK, but other SDKs must publish the `t` catalog themselves, including the `__plural` rule table (see below). Remote UI clients do not receive `dir` on their root yet; bind it yourself with `.dir(...)` where needed.
+- **Plural rule data.** The SDK attaches a compact `__plural` table to each plural message (categories for 0–199 and for multiples of 1,000,000). This is exact for integer counts in every CLDR locale except Cornish (`kw`) for some multiples of 1,000; use exact `"=N"` forms there. Non-integer counts always use `other`.
+- **Number and date formatting.** There is no locale-aware `formatNumber` / `formatDate` builtin yet. Format in a handler with `Intl.NumberFormat` / `Intl.DateTimeFormat` and store the string in state.
+- **Reserved names.** `t` and `i18n` are reserved provider names; don't register data source plugins under them. `{count}` inside `plural()` is reserved for the count.
+- **Catalog size.** The whole catalog travels as one data-source context: switching locale re-renders every `t.*`-bound node, and each template evaluation sees the full catalog. Very large catalogs are best split by route and loaded with `addMessages`.

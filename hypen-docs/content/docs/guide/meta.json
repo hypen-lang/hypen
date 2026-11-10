@@ -18,6 +18,7 @@
     "routing",
     "persistence",
     "data-sources",
+    "i18n",
     "error-handling"
   ]
 }

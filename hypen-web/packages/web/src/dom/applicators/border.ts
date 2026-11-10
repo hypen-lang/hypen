@@ -35,6 +35,28 @@ function applyVisibleBorderWidth(
   }
 }
 
+/** Logical corner key → CSS logical radius property (follows `dir`). */
+const LOGICAL_CORNERS: Array<[string, string]> = [
+  ["topStart", "border-start-start-radius"],
+  ["topEnd", "border-start-end-radius"],
+  ["bottomEnd", "border-end-end-radius"],
+  ["bottomStart", "border-end-start-radius"],
+];
+
+/**
+ * Per-corner radius object. Physical keys (`topLeft`, …) set physical
+ * corners; logical keys (`topStart`, `topEnd`, `bottomStart`, `bottomEnd`)
+ * set CSS logical radii, so they mirror under `dir="rtl"`. A logical key
+ * wins over the physical key for the same corner in LTR (it is written
+ * last). Unset corners are 0, as before.
+ */
+function applyCornerRadii(el: HTMLElement, obj: Record<string, any>): void {
+  el.style.borderRadius = `${toCssLength(obj.topLeft ?? 0)} ${toCssLength(obj.topRight ?? 0)} ${toCssLength(obj.bottomRight ?? 0)} ${toCssLength(obj.bottomLeft ?? 0)}`;
+  for (const [key, prop] of LOGICAL_CORNERS) {
+    if (obj[key] !== undefined) el.style.setProperty(prop, toCssLength(obj[key]));
+  }
+}
+
 export const borderHandlers: Record<string, ApplicatorHandler> = {
   // Compound border applicator - can take width, color, style, radius
   border: (el, value) => {
@@ -100,12 +122,7 @@ export const borderHandlers: Record<string, ApplicatorHandler> = {
   borderRadius: (el, value) => {
     if (typeof value === "object" && value !== null) {
       // Support for individual corners
-      const obj = value as Record<string, any>;
-      const topLeft = obj.topLeft ?? obj.topStart ?? 0;
-      const topRight = obj.topRight ?? obj.topEnd ?? 0;
-      const bottomRight = obj.bottomRight ?? obj.bottomEnd ?? 0;
-      const bottomLeft = obj.bottomLeft ?? obj.bottomStart ?? 0;
-      el.style.borderRadius = `${toCssLength(topLeft)} ${toCssLength(topRight)} ${toCssLength(bottomRight)} ${toCssLength(bottomLeft)}`;
+      applyCornerRadii(el, value as Record<string, any>);
     } else {
       el.style.borderRadius = toCssLength(value);
     }
@@ -114,12 +131,7 @@ export const borderHandlers: Record<string, ApplicatorHandler> = {
   // Alias for borderRadius (Compose naming)
   cornerRadius: (el, value) => {
     if (typeof value === "object" && value !== null) {
-      const obj = value as Record<string, any>;
-      const topLeft = obj.topLeft ?? obj.topStart ?? 0;
-      const topRight = obj.topRight ?? obj.topEnd ?? 0;
-      const bottomRight = obj.bottomRight ?? obj.bottomEnd ?? 0;
-      const bottomLeft = obj.bottomLeft ?? obj.bottomStart ?? 0;
-      el.style.borderRadius = `${toCssLength(topLeft)} ${toCssLength(topRight)} ${toCssLength(bottomRight)} ${toCssLength(bottomLeft)}`;
+      applyCornerRadii(el, value as Record<string, any>);
     } else {
       el.style.borderRadius = toCssLength(value);
     }

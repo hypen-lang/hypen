@@ -20,6 +20,7 @@ import {
 } from "../packages/core/src/i18n";
 import { HypenGlobalContext } from "../packages/core/src/context";
 import { DOMRenderer } from "../packages/web/src/dom/renderer";
+import { borderHandlers } from "../packages/web/src/dom/applicators/border";
 import type { Patch } from "../packages/core/src/types";
 import { ensureFakeDomGlobals, type FakeElement } from "./fake-dom";
 import { flushMicrotasks } from "./helpers";
@@ -279,6 +280,14 @@ describe("direction", () => {
     expect((container as unknown as FakeElement).attributes["lang"]).toBe("ar");
     renderer.setDirection("ltr", "en");
     expect((container as unknown as FakeElement).attributes["dir"]).toBe("ltr");
+  });
+
+  test("logical corner radii follow dir instead of being flattened to physical corners", () => {
+    const el = document.createElement("div") as unknown as HTMLElement;
+    borderHandlers.borderRadius!(el, { topStart: 8, bottomEnd: 4, topRight: 2 });
+    expect(el.style.getPropertyValue("border-start-start-radius")).toBe("8px");
+    expect(el.style.getPropertyValue("border-end-end-radius")).toBe("4px");
+    expect(el.style.borderRadius).toBe("0px 2px 0px 0px");
   });
 
   test("Hypen applies dir from the active locale and re-applies on change", async () => {
