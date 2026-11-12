@@ -81,7 +81,11 @@ import {
   DO_MAX_RETAINED_BYTES,
   isOversizeDeviceText,
 } from "@hypen-space/core/remote/device";
-import type { DurableObjectStorage, DurableObjectStateStore } from "./durable-object-store.js";
+import {
+  isDurableObjectStore,
+  type DurableObjectStorage,
+  type DurableObjectStateStore,
+} from "./durable-object-store.js";
 import {
   createCFDeviceBrokerFactory,
   hasDeviceBroker,
@@ -548,9 +552,10 @@ export abstract class HypenDurableObject {
       return;
     }
 
-    // Re-bind storage on every message — after a wake the storage handle may
-    // be freshly recreated, and the session we're about to (re)build needs it
-    // in place before any load/save runs.
+    // Re-run the storage hook on every message — after a wake the storage
+    // handle may be freshly recreated. (Session module instances do not
+    // depend on this binding: they persist through `stateStoreFor`, the
+    // store copy bound to this DO's own storage.)
     this.bindStorage();
 
     const session = this.ensureSession(ws);
@@ -664,6 +669,13 @@ export abstract class HypenDurableObject {
         (await self.ctx.storage.get(snapshotKey(sessionId))) as SessionSnapshot | undefined,
       saveSnapshot: async (sessionId: string, snapshot: SessionSnapshot) => {
         await self.ctx.storage.put(snapshotKey(sessionId), snapshot);
+      },
+      // Every module instance of this DO's sessions persists through the
+      // store copy bound to THIS DO's storage. The definition's store is
+      // shared by every DO of the class (one isolate), so a shared binding
+      // would let a save after an `await` land in another visitor's DO.
+      stateStoreFor(store) {
+        return isDurableObjectStore(store) ? store.__forStorage(self.ctx.storage) : store;
       },
       createEngine() {
         return self.createEngine();
@@ -831,10 +843,13 @@ export abstract class HypenDurableObject {
   }
 
   /**
-   * Bind this DO's storage to every `.persist(durableObjectStore(...))` state
-   * store — the primary module plus any named modules on the registry. Called
-   * on `fetch` and on every message so the store always references the
-   * current (possibly post-wake) storage instance.
+   * Set this DO's storage as the FALLBACK of every
+   * `.persist(durableObjectStore(...))` store — the primary module plus any
+   * named modules on the registry — for code that calls a store directly,
+   * then run `onStorageBound`. Called on `fetch` and on every message. The
+   * fallback is shared by every DO of the class, so the session's own module
+   * instances never use it: they persist through the per-DO copy
+   * `getHost().stateStoreFor` hands them.
    */
   private bindStorage(): void {
     const config = this.getConfig();

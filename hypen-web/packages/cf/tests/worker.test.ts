@@ -108,6 +108,55 @@ describe("createWorkerHandler", () => {
     expect(fetches[0].name).toBe("room:abc");
   });
 
+  test("default routing: bare /ws is not a path key (clients do not collapse into one DO)", async () => {
+    const handler = createWorkerHandler({ binding: "HYPEN_DO" });
+    const { env, fetches } = createMockEnv("HYPEN_DO");
+
+    await handler(wsRequest("http://localhost/ws"), env);
+    await handler(wsRequest("http://localhost/ws/"), env);
+
+    expect(fetches[0].name).not.toBe("ws");
+    expect(fetches[1].name).not.toBe("ws");
+    expect(fetches[0].name).not.toBe(fetches[1].name);
+  });
+
+  test("default routing: the hypen_session cookie matches by exact name", async () => {
+    const handler = createWorkerHandler({ binding: "HYPEN_DO" });
+    const { env, fetches } = createMockEnv("HYPEN_DO");
+
+    await handler(wsRequest("http://localhost/room/a", { Cookie: "not_hypen_session=x" }), env);
+
+    expect(fetches[0].name).toBe("room:a");
+  });
+
+  test('routing: "visitor" keys on the visitor cookie and mints one on the 101', async () => {
+    const handler = createWorkerHandler({ binding: "HYPEN_DO", routing: "visitor" });
+    const { env, fetches } = createMockEnv("HYPEN_DO");
+
+    const first = await handler(wsRequest("http://localhost/ws"), env);
+    const id = first.headers.get("Set-Cookie")?.match(/hypen_visitor=([^;]+)/)?.[1];
+    expect(id).toBeTruthy();
+    expect(fetches[0].name).toBe(`visitor:${id}`);
+
+    const second = await handler(wsRequest("http://localhost/ws", { Cookie: `hypen_visitor=${id}` }), env);
+    expect(fetches[1].name).toBe(`visitor:${id}`);
+    expect(second.headers.get("Set-Cookie")).toBeNull();
+
+    // A malformed cookie value is not trusted as a key.
+    await handler(wsRequest("http://localhost/ws", { Cookie: "hypen_visitor=../x" }), env);
+    expect(fetches[2].name).not.toBe("visitor:../x");
+  });
+
+  test('routing: "shared" sends every client to one DO', async () => {
+    const handler = createWorkerHandler({ binding: "HYPEN_DO", routing: "shared" });
+    const { env, fetches } = createMockEnv("HYPEN_DO");
+
+    await handler(wsRequest("http://localhost/ws?sessionId=a"), env);
+    await handler(wsRequest("http://localhost/room/b"), env);
+
+    expect(fetches.map((f) => f.name)).toEqual(["shared", "shared"]);
+  });
+
   test("default routing: generates UUID when no key found", async () => {
     const handler = createWorkerHandler({ binding: "HYPEN_DO" });
     const { env, fetches } = createMockEnv("HYPEN_DO");

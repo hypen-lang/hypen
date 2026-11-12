@@ -156,17 +156,39 @@ connect over the same URL.
 | `syncActions` | Mirror actions/state across sockets sharing a DO (default `false`) |
 | `doClassName` | Exported DO class name (default `"AppDO"`) |
 | `binding` | DO binding name (default `"HYPEN_DO"`) |
-| `getRoutingKey` | Pick the DO instance per request |
+| `routing` | `"visitor"` (default), `"connection"`, or `"shared"` — see [Session Routing](#session-routing) |
+| `visitorCookie` | Visitor cookie name / lifetime / `SameSite` for `routing: "visitor"` |
+| `getRoutingKey` | Pick the DO instance per request yourself (overrides `routing`) |
 | `onStorage` | Hook run after the DO's storage is bound |
 | `serveClient` / `clients` | Serve a browser UI |
 | `title` | `<title>` for served pages (default `"Hypen"`) |
 
 ## Session Routing
 
-By default the routing key is taken from `?sessionId`, then a cookie, then the
-path, falling back to a fresh UUID. Each distinct key gets its own Durable
-Object — its own engine instance and its own state. Override it to key sessions
-on your own identity:
+Each distinct routing key gets its own Durable Object — its own engine
+instance, its own storage and its own `.persist()` state. `routing` picks the
+key:
+
+| `routing` | Key | Use it for |
+|-----------|-----|------------|
+| `"visitor"` (default) | An HttpOnly `hypen_visitor` cookie, minted on the first page response **and** on the first WebSocket `101` that arrives without it. A cookieless client that sends `?sessionId=` (a native app) is keyed by that. | One DO per browser: reloads, extra tabs and same-site `HypenApp` embeds all reach the same DO, so persisted state survives a reload. |
+| `"connection"` | `?sessionId=`, then a `hypen_session` cookie, then the URL path (`/room/abc` → `room:abc`), else a fresh UUID. | Client-chosen sessions or rooms. The served page client sends a fresh `?sessionId` per load, so every load is a new DO. |
+| `"shared"` | The constant `"shared"`. | One state for the whole deployment (a public shared list, a lobby). Combine with `syncActions: true`. |
+
+The bare socket endpoint `/ws` is never used as a path key, so clients that
+connect without a session id (every `HypenApp` embed) never collapse into one
+shared DO unless you choose `"shared"`. The cookie is `SameSite=Lax` by
+default — sent by same-site pages and embeds only; set
+`visitorCookie: { sameSite: "None" }` to let cross-site embeds share it where
+browsers allow third-party cookies.
+
+Building your own fetch handler? The pieces are exported from
+`@hypen-space/cf`: `readVisitorId(request)`, `mintVisitorId()`,
+`visitorRoutingKey(id)` and `withVisitorCookie(response, id, request)` (which
+keeps a `101`'s `webSocket`), plus `createWorkerHandler({ binding, routing })`.
+
+Or key sessions on your own identity — `getRoutingKey` overrides `routing` and
+sets no cookie:
 
 ```typescript
 const worker = defineHypenWorker({
