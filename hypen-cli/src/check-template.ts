@@ -55,6 +55,7 @@ import { COULD_NOT_CHECK, findCheckFiles } from "./check.js";
 import {
   extractInlineTemplates,
   formatInlineParseError,
+  INTERPOLATION_IDENT,
   isInlineTemplateCandidate,
   mapToTs,
 } from "./check-inline.js";
@@ -454,7 +455,12 @@ export function evaluateTemplate(input: TemplateCheckInput): {
       }
       case "state": {
         if (!facts || !ownedBy(ref, component)) break;
-        const root = ref.path[0];
+        // A `${…}` interpolation inside an inline template's `@{…}` expression
+        // (`@{state.user.${F}}`) is a runtime-only key: only the path before
+        // it is knowable, so the check stops there.
+        const hole = ref.path.findIndex((seg) => seg.includes(INTERPOLATION_IDENT));
+        const path = hole < 0 ? ref.path : ref.path.slice(0, hole);
+        const root = path[0];
         if (!root || root.startsWith("__") || input.moduleNames?.has(root.toLowerCase())) break;
         // A non-object initial state says nothing about which keys exist.
         if (!isPlainObject(facts.initialState)) break;
@@ -471,14 +477,14 @@ export function evaluateTemplate(input: TemplateCheckInput): {
           );
           break;
         }
-        const verdicts = candidates.map((m) => classifyStatePath(m.initialState, ref.path));
+        const verdicts = candidates.map((m) => classifyStatePath(m.initialState, path));
         const first = verdicts[0];
         if (typeof first === "object" && verdicts.every((v) => typeof v === "object")) {
-          const parent = ref.path.slice(0, first.unknownAt).join(".");
+          const parent = path.slice(0, first.unknownAt).join(".");
           emit(
             ref,
             "unknown-state-path",
-            `@state.${ref.name}: "${ref.path[first.unknownAt]}" is not a key of ` +
+            `@state.${ref.name}: "${path[first.unknownAt]}" is not a key of ` +
               `state.${parent} in the initial state — check the spelling`,
           );
         }

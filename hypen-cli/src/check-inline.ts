@@ -13,8 +13,9 @@
  *   becomes a dynamic binding, `@{state.__ts_interpolation}` (or the bare
  *   identifier `__ts_interpolation` when it already sits inside an `@{…}`
  *   expression). Dynamic text is never flagged as a missing name or an
- *   unknown token, and `__`-prefixed state roots are never flagged as
- *   unknown state paths;
+ *   unknown token, and a state path is only judged up to the segment the
+ *   placeholder lands in (`@{state.user.${F}}` checks `user` alone), so an
+ *   interpolated key is never flagged as an unknown state path;
  * - anywhere else (`Today()${SCREEN}`, a whole `${PAGE}` element) it is
  *   dropped and recorded as a *hole*. Elements whose expression contains a
  *   hole may have lost a label, child or applicator to it, so accessibility
