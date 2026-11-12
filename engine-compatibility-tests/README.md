@@ -45,12 +45,20 @@ bun install
 bun test
 ```
 
-### Go (Native Engine)
+### Go (WASI Engine)
 
 ```bash
 cd runners/golang
 go test -v ./...
 ```
+
+`rendering`, `reconciliation`, `control-flow` and `animation` fixtures run on
+the real engine the Go SDK embeds (`hypen_engine.wasm`, `runners/golang/engine_test.go`);
+every batch is also applied to a renderer model that fails on protocol
+violations (a patch naming an already torn-down node, a `clearChildren` on
+`root`, on fewer than two children, or after children were added to the same
+element in the batch). Fixtures asserting accessibility `semantics` are skipped
+there: the Go SDK's `core.Patch` does not carry that field yet.
 
 ### Kotlin (JVM)
 
@@ -238,7 +246,8 @@ All SDKs must support these patch operations:
 | `setText` | `id`, `text` | Update text content |
 | `insert` | `parentId`, `id`, `beforeId?` | Insert element into parent |
 | `move` | `parentId`, `id`, `beforeId?` | Move element to new position |
-| `remove` | `id` | Remove element |
+| `remove` | `id`, `transition?` | Remove element |
+| `clearChildren` | `id` | Empty `id` in one step: exactly a plain `remove` of each current child (subtrees torn down, `id` kept). Emitted only when a list pass removes every child of the list's element; precedes any new children of `id` in the batch; never for `"root"`, exit-transition rows or fewer than two children. Fixtures pin which element is cleared with the assertion-only `target: { elementType, props? }` (resolved by the Rust and Go runners). Contract: `hypen-web/docs/clear-children.md` |
 | `attachEvent` | `id`, `eventName` | Attach event listener |
 | `detachEvent` | `id`, `eventName` | Detach event listener |
 

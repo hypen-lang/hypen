@@ -610,6 +610,37 @@ export class WasmEngine {
         }
     }
     /**
+     * [`update_state_sparse`](Self::update_state_sparse) with the paths
+     * and values handed over as JSON text.
+     *
+     * `paths_json` is a JSON array of path strings, `values_json` a JSON
+     * object mapping each path to its new value. Semantics are identical;
+     * only the transport differs. Converting a `JsValue` tree with
+     * `serde_wasm_bindgen` calls back into JavaScript for every object and
+     * copies every key and string across the boundary one at a time, which
+     * for a list-sized update (a thousand rows appended) cost more than
+     * the reconcile it fed. One string crosses once and is parsed here.
+     *
+     * Hosts feature-detect this method and fall back to
+     * `updateStateSparse` on an engine build without it.
+     * @param {string | null | undefined} scope
+     * @param {string} paths_json
+     * @param {string} values_json
+     * @param {any | null} [animation]
+     */
+    updateStateSparseJson(scope, paths_json, values_json, animation) {
+        var ptr0 = isLikeNone(scope) ? 0 : passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(paths_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ptr2 = passStringToWasm0(values_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len2 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_updateStateSparseJson(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, isLikeNone(animation) ? 0 : addToExternrefTable0(animation));
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * Validate that the engine is in a consistent state.
      * @returns {any}
      */

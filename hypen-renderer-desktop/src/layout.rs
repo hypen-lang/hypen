@@ -1545,6 +1545,27 @@ impl TaffyState {
         self.interaction = interaction;
     }
 
+    /// Free `root` and every Taffy node below it, dropping each one's
+    /// `node_map` entry and per-node records. The caller has already
+    /// unlinked `root` from its parent (marking that parent dirty).
+    fn free_subtree(&mut self, root: NodeId) {
+        let mut stack = vec![root];
+        while let Some(tid) = stack.pop() {
+            if let Ok(children) = self.tree.children(tid) {
+                stack.extend(children);
+            }
+            if let Some(rid) = self.renderer_for_taffy.get(&tid) {
+                // Only when the id still maps to THIS node: a re-Created
+                // id already points at its replacement.
+                if self.node_map.get(rid.as_str()) == Some(&tid) {
+                    self.node_map.remove(rid.as_str());
+                }
+            }
+            let _ = self.tree.remove(tid);
+            self.forget_node_records(tid);
+        }
+    }
+
     /// Free the Taffy node for renderer `id`, if present. Used to
     /// mirror [`Tree::evict_detached_over`] teardown: the caller
     /// passes every id in the evicted subtree, so each node's Taffy
@@ -1812,15 +1833,40 @@ impl TaffyState {
                 true
             }
             Patch::Remove { id, .. } => {
-                if let Some(tid) = self.node_map.remove(id.as_ref()) {
+                if let Some(&tid) = self.node_map.get(id.as_ref()) {
                     if let Some(parent) = self.tree.parent(tid) {
                         // Single-pass unlink + dirty-mark; `tree.remove`
-                        // below would unlink too but does NOT mark the
-                        // parent dirty, so the explicit remove_child stays.
+                        // would unlink too but does NOT mark the parent
+                        // dirty, so the explicit remove_child stays.
                         let _ = self.tree.remove_child(parent, tid);
                     }
-                    let _ = self.tree.remove(tid);
-                    self.forget_node_records(tid);
+                    // The engine sends a plain Remove for the subtree
+                    // root only: free the descendants' Taffy nodes too,
+                    // or they sit orphaned in the arena (and in
+                    // `node_map`) until the next bulk rebuild.
+                    self.free_subtree(tid);
+                }
+                true
+            }
+            Patch::ClearChildren { id } => {
+                // A plain Remove of every child, with ONE unlink and one
+                // dirty mark on the parent instead of N `remove_child`
+                // scans of its child list. The synthetic root is never
+                // cleared by the engine; if a host does it anyway, let
+                // the bulk rebuild handle it rather than special-case
+                // the outer wrapper node.
+                if id.as_ref() == ROOT_ID {
+                    return false;
+                }
+                let Some(&parent_tid) = self.node_map.get(id.as_ref()) else {
+                    return true;
+                };
+                let children = self.tree.children(parent_tid).unwrap_or_default();
+                if !children.is_empty() {
+                    let _ = self.tree.set_children(parent_tid, &[]);
+                    for child in children {
+                        self.free_subtree(child);
+                    }
                 }
                 true
             }

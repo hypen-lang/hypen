@@ -74,8 +74,7 @@ pub(crate) fn evaluate_value(
                 && !trimmed[2..trimmed.len() - 1].contains("@{")
             {
                 let expr = &trimmed[2..trimmed.len() - 1];
-                let context = crate::reactive::build_expression_context(state, None, data_sources);
-                match crate::reactive::evaluate_expression(expr, &context) {
+                match crate::reactive::evaluate_expression_with(expr, state, None, data_sources) {
                     Ok(result) => result,
                     Err(e) => {
                         warn_condition_error("condition expression", expr, e);
@@ -83,8 +82,7 @@ pub(crate) fn evaluate_value(
                     }
                 }
             } else {
-                let evaluator = build_evaluator(state, None, data_sources);
-                match evaluate_template_string(template, &evaluator) {
+                match crate::reactive::evaluate_template(template, state, None, data_sources) {
                     Ok(result) => serde_json::Value::String(result),
                     Err(e) => {
                         warn_condition_error("condition template", template, e);

@@ -69,6 +69,9 @@ export abstract class BaseRenderer implements Renderer {
       case "remove":
         this.onRemove(patch.id!);
         break;
+      case "clearChildren":
+        this.onClearChildren(patch.id!);
+        break;
       case "attachEvent":
         this.onAttachEvent(patch.id!, patch.eventName!);
         break;
@@ -87,6 +90,12 @@ export abstract class BaseRenderer implements Renderer {
   protected abstract onInsert(parentId: string, id: string, beforeId?: string): void;
   protected abstract onMove(parentId: string, id: string, beforeId?: string): void;
   protected abstract onRemove(id: string): void;
+  /**
+   * Empty element `id`: equivalent to `onRemove` of each of its current
+   * children (tear down every child subtree, keep `id` and its props).
+   * Ignore an unknown `id`. See `hypen-web/docs/clear-children.md`.
+   */
+  protected abstract onClearChildren(id: string): void;
   protected abstract onAttachEvent(id: string, eventName: string): void;
   protected abstract onDetachEvent(id: string, eventName: string): void;
 }

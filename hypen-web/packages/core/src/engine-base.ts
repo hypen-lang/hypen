@@ -422,12 +422,24 @@ export abstract class BaseEngine {
     }
 
     try {
-      engine.updateStateSparse(
-        scope ?? "",
-        paths,
-        this.unwrapForWasm(values),
-        animation == null ? null : this.unwrapForWasm(animation),
-      );
+      const anim = animation == null ? null : this.unwrapForWasm(animation);
+      if (typeof engine.updateStateSparseJson === "function") {
+        // One JSON string instead of a JS object tree: the object form is
+        // converted inside WASM one property at a time, calling back into
+        // JS for every object, and that dominated list-sized updates.
+        // `unwrapForWasm` first, so the text is exactly the JSON form the
+        // object path would have produced (and proxies never reach
+        // `JSON.stringify`, whose reads would run their traps).
+        engine.updateStateSparseJson(
+          scope ?? "",
+          JSON.stringify(paths),
+          JSON.stringify(this.unwrapForWasm(values)),
+          anim,
+        );
+      } else {
+        // An engine artifact from before `updateStateSparseJson` existed.
+        engine.updateStateSparse(scope ?? "", paths, this.unwrapForWasm(values), anim);
+      }
     } catch (err) {
       throw classifyEngineError(err);
     }

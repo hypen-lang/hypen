@@ -348,6 +348,7 @@ class ComposeRenderer(
             PatchType.ATTACH -> onAttach(patch)
             PatchType.SET_SEMANTICS -> onSetSemantics(patch)
             PatchType.BATCH_ANIMATION -> onBatchAnimation(patch)
+            PatchType.CLEAR_CHILDREN -> onClearChildren(patch, deferred)
         }
     }
 
@@ -598,8 +599,63 @@ class ComposeRenderer(
         evictSubtree(id, deferred)
     }
 
-    /** Immediate teardown: the pre-animation behaviour, unchanged. */
-    private fun evictSubtree(id: String, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
+    /**
+     * Empty element [Patch.id] (`clearChildren`, hypen-web/docs/clear-children.md):
+     * exactly a plain, non-transition [onRemove] of each current child, with
+     * the parent's child list dropped in ONE staged write instead of one
+     * unlink per row. The parent keeps its props and can receive children
+     * later in the same batch (the engine orders the clear first). Unknown
+     * id: ignored.
+     *
+     * A child still on screen only because an EARLIER `remove{transition}`
+     * is playing its exit is already engine-side dead; it is left to finish
+     * (keeps its slot until its own finalize evicts it), which the contract
+     * allows.
+     */
+    private fun onClearChildren(patch: Patch, deferred: MutableList<(List<RendererStateListener>) -> Unit>) {
+        val id = patch.id ?: return
+        val parent = elements[id] ?: run {
+            log.debug { "CLEAR_CHILDREN: element not found: $id" }
+            return
+        }
+        val childIds = parent.childIds
+        if (childIds.isEmpty()) return
+
+        // Children that stay linked for now: an exit already playing, or (as a
+        // plain remove would do) a row inside an exiting ancestor, whose
+        // teardown defers to that ancestor's finalize.
+        val kept = ArrayList<String>(0)
+        for (childId in childIds) {
+            if (elements[childId] == null) continue
+            if (animation.isExitingRoot(childId) ||
+                animation.deferToExitingAncestor(childId) { finalizeDeferredRemove(childId) }
+            ) {
+                kept.add(childId)
+                continue
+            }
+            evictSubtree(childId, deferred, unlinkFromParent = false)
+        }
+
+        stage(parent)
+        if (kept.isEmpty()) {
+            parent.clearChildren()
+        } else {
+            val keep = kept.toHashSet()
+            for (childId in childIds) if (childId !in keep) parent.removeChild(childId)
+        }
+        log.debug { "Cleared children of $id (${childIds.size - kept.size} removed, ${kept.size} still exiting)" }
+    }
+
+    /**
+     * Immediate teardown: the pre-animation behaviour, unchanged.
+     * [unlinkFromParent] is false only for [onClearChildren], which drops
+     * the parent's whole child list itself in one write.
+     */
+    private fun evictSubtree(
+        id: String,
+        deferred: MutableList<(List<RendererStateListener>) -> Unit>,
+        unlinkFromParent: Boolean = true,
+    ) {
         val element = elements.remove(id) ?: return
         detachedIds.remove(id)
         animation.forget(id)
@@ -608,8 +664,10 @@ class ComposeRenderer(
         dnd.noteRemove(id)
 
         // Remove from parent's children
-        element.parentId?.let { parentId ->
-            elements[parentId]?.let { stage(it); it.removeChild(id) }
+        if (unlinkFromParent) {
+            element.parentId?.let { parentId ->
+                elements[parentId]?.let { stage(it); it.removeChild(id) }
+            }
         }
 
         // A root child leaves the root container only now — an exiting one

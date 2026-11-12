@@ -1945,3 +1945,28 @@ fn file_drag_enter_envelope_resolves_against_the_real_engine() {
     assert_eq!(payload["type"], json!("filedragenter"));
     assert_eq!(payload["items"], json!(2));
 }
+
+#[test]
+fn a_clear_children_of_the_list_mid_drag_cancels_and_forgets_the_rows() {
+    let (mut dnd, mut tree, pass) = mount_sortable();
+    let to = (
+        center(&pass, "list-txt-t1").0,
+        center(&pass, "list-row-t3").1,
+    );
+    drag_to(&mut dnd, &mut tree, &pass, "list-txt-t1", to);
+    let _ = dnd.take_outcomes();
+    assert!(dnd.nodes.keys().any(|id| id.starts_with("list-txt-")));
+
+    feed(&mut dnd, &mut tree, &[Patch::ClearChildren { id: "list".into() }]);
+    // Exactly a plain Remove of every row: cancel with NO dispatch.
+    assert!(!dnd.is_active());
+    assert!(dnd.take_outcomes().is_empty());
+    assert!(tree.children_of("list").is_empty());
+    assert!(
+        !dnd.nodes.keys().any(|id| id.starts_with("list-")),
+        "row records go with the rows"
+    );
+    assert!(dnd.nodes.contains_key("list"), "the sortable itself stays");
+    dnd.pointer_move(&mut tree, Some(&pass), vp(), to.0, to.1 + 30.0);
+    assert_eq!(dnd.pointer_up(&mut tree, None), DndPointerUp::NoOp);
+}

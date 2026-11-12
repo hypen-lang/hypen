@@ -24,13 +24,17 @@ The engine never hands a renderer a finished screen. It emits a minimal set of
 tree edits:
 
 ```
-Create      — make a node of some type
-SetProp     — set a property on a node
-RemoveProp  — clear a property
-Insert      — attach a node to a parent at an index
-Move        — reorder a node
-Remove      — detach a node
+Create         — make a node of some type
+SetProp        — set a property on a node
+RemoveProp     — clear a property
+Insert         — attach a node to a parent at an index
+Move           — reorder a node
+Remove         — detach a node
+ClearChildren  — empty a node in one step (a Remove of each of its children)
 ```
+
+`ClearChildren` arrives when a list is emptied or replaced wholesale; its full
+contract is in `hypen-web/docs/clear-children.md`.
 
 Renderers apply these to a live tree they own. That has three consequences:
 
@@ -38,7 +42,7 @@ Renderers apply these to a live tree they own. That has three consequences:
 screen. Over a [remote](/docs/concepts/remote-ui) connection that is a handful
 of bytes.
 
-**Renderers stay simple.** An adapter implements six operations plus a paint
+**Renderers stay simple.** An adapter implements seven operations plus a paint
 pass — not a layout engine, a diffing algorithm, or a scripting runtime. That's
 why the surface is small enough to port.
 

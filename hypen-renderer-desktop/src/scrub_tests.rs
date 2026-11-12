@@ -1054,3 +1054,29 @@ fn a_detached_route_stops_scrubbing_via_the_persistent_scroller() {
     s.tick(&mut tree);
     assert!(s.take_binds().is_empty()); // no write into the inactive module
 }
+
+#[test]
+fn a_clear_children_of_the_parent_mid_drag_cancels_everything() {
+    let mut s = new_scrubber();
+    let mut tree = Tree::new();
+    feed(
+        &mut s,
+        &mut tree,
+        &[
+            create("host", "Column", vec![]),
+            insert(ROOT_ID, "host"),
+            create("sheet", "Column", gesture_props([0, 400])),
+            insert("host", "sheet"),
+        ],
+    );
+    s.pointer_down_on("sheet", 0.0, 0.0);
+    s.pointer_move(&mut tree, 0.0, 100.0);
+    assert!(s.owns_node("sheet"));
+
+    feed(&mut s, &mut tree, &[Patch::ClearChildren { id: "host".into() }]);
+    assert!(!s.owns_node("sheet"));
+    assert!(s.entries.is_empty(), "the cleared node's entry is forgotten");
+    s.pointer_move(&mut tree, 0.0, 300.0);
+    assert!(tree.get("sheet").is_none());
+    assert!(tree.get("host").is_some());
+}

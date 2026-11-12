@@ -61,7 +61,10 @@ describe("lazy List through the WASM engine", () => {
     engine.setListViewport(listId, 40, 55);
     const moved = batches.flat();
     expect(texts(moved)).toBe(15);
-    expect(moved.filter((p) => p.type === "remove").length).toBe(10);
+    // The window jumped clear of every materialized row: the ten old rows
+    // leave in one clearChildren on the list, not a remove each.
+    expect(moved.filter((p) => p.type === "remove").length).toBe(0);
+    expect(moved.filter((p) => p.type === "clearChildren").map((p) => p.id)).toEqual([listId]);
     expect(windowProp(moved, listId)).toEqual({ total: 100, start: 40, end: 55 });
 
     batches.length = 0;

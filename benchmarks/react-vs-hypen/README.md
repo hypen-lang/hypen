@@ -12,7 +12,8 @@ benchmarks/react-vs-hypen/
 │   └── scenarios.ts   the scenario list, control ids and action names
 ├── apps/react/        React 19 + Vite
 ├── apps/hypen/        Hypen DSL + WASM engine in the browser, + Vite
-├── bench/             harness: parity checker, driver, report generator
+├── bench/             harness: parity checker, drivers, report generators
+├── scripts/           build-variants.ts (one build per SDK version), e2b.ts
 └── results/           results.json, REPORT.md, parity.json, screenshots
 ```
 
@@ -38,6 +39,67 @@ bun bench/smoke.ts hypen create-1k     # render one app once and screenshot it
 bun run dev:react      # http://localhost:5301
 bun run dev:hypen      # http://localhost:5302
 ```
+
+## Comparing SDK versions (the matrix)
+
+`bun run bench` compares React with the Hypen SDK in this checkout. To compare
+several Hypen releases against React — and against each other — build one app
+per version and run them all through the matrix driver:
+
+```bash
+# one static build per variant, into variants/<name>/
+bun run variants react react-virtual \
+  hypen@0.6.4 hypen@0.6.5 hypen@0.6.6 hypen@0.6.7 \
+  "hypen-develop=../../../hypen-develop/hypen-web/packages" \
+  "hypen-develop-eager=../../../hypen-develop/hypen-web/packages?lazy: false"
+
+bun run matrix --rounds=8        # here, on this machine -> results/matrix.json
+bun run matrix:report            # -> results/MATRIX.md
+```
+
+`hypen@<version>` bundles `apps/hypen` against the published npm tarballs (the
+`dist/` and WASM a consumer installs). `<name>=<dir>` bundles it against a
+checkout's `hypen-web/packages` — a git worktree of another branch, say — and
+`?<args>` appends arguments to the benchmark's `List`. It is the same app
+source every time, so the SDK is the only thing that varies.
+
+SDKs that virtualize `List` by default render ~30 rows where React renders
+1,000, which is a different amount of work, not a faster reconciler. So the
+matrix keeps two comparisons apart: every-row-in-the-DOM builds against
+`react` (use `?lazy: false` to opt a virtualizing SDK into this group), and
+windowed builds against `react-virtual`, the same React app with TanStack
+Virtual, the window as the scroll container and the same overscan rule.
+
+### On a machine of a known shape (E2B)
+
+```bash
+export E2B_API_KEY=…
+bun run e2b template                       # once: 4 vCPU / 8 GB, Chromium, Bun
+bun run e2b run --rounds=8 --replicas=2    # -> results/matrix.json, matrix-b.json
+bun run matrix:report --replicate=results/matrix-b.json
+```
+
+How the matrix keeps the ground level:
+
+- **One machine per comparison.** Every build runs in the same process, on the
+  same browser, in the same sandbox. Nothing is compared across machines: a
+  sandbox template fixes the vCPU count and memory, but two sandboxes can still
+  land on different physical hosts.
+- **Interleaved, not batched.** A round visits each scenario and, within it,
+  each build back to back, rotating which build goes first. A slow minute on
+  the host costs every build about the same.
+- **A noise floor you can read.** Each round starts with a fixed workload that
+  involves no framework (a sort; building and laying out 20,000 elements). Its
+  spread across rounds is printed in the report; differences smaller than it
+  are not differences.
+- **A replicate.** `--replicas=2` runs the entire matrix in a second sandbox at
+  the same time. Absolute times differ between hosts; the ratios between
+  builds should not, and the report prints both.
+
+Besides latency the matrix records **main-thread CPU per interaction**
+(Chromium's `TaskDuration` counter, before and after). Latency is rounded up
+to a frame boundary, so once an interaction fits in one frame every build
+reads ~16 ms; the CPU figure keeps separating them.
 
 ## What is measured
 
@@ -93,8 +155,9 @@ report. The last recorded run: **897 elements each, 0 mismatches.**
 **Neither side is hobbled.** The React app is written the way a competent React
 app is written — function components, `useState` with functional updates,
 stable `useCallback` handlers, and a `memo`-wrapped row so changing one row
-does not re-render the other 999. Neither app is virtualised; both put every
-row in the DOM.
+does not re-render the other 999. In `bun run bench` neither app is
+virtualised; both put every row in the DOM. (The matrix adds a windowed pair —
+see above.)
 
 **The clock measures the same thing on both sides.** A scenario's duration is
 the interval from the click to the moment after layout and paint of the frame

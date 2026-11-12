@@ -1204,4 +1204,18 @@ mod tests {
         let got = received.lock().unwrap();
         assert_eq!(got.len(), 3, "{got:?}");
     }
+
+    #[test]
+    fn clear_children_decodes_from_the_wire() {
+        let patches = decode_patches_lenient(Some(&json!([
+            {"type":"clearChildren","id":"4294967301"},
+            {"type":"create","id":"n","elementType":"Text","props":{}},
+            {"type":"insert","parentId":"4294967301","id":"n"}
+        ])));
+        assert_eq!(patches.len(), 3, "{patches:?}");
+        assert!(matches!(
+            &patches[0],
+            Patch::ClearChildren { id } if id.as_ref() == "4294967301"
+        ));
+    }
 }

@@ -42,6 +42,10 @@ describe("BaseRenderer", () => {
       this.events.push({ type: "remove", args: [id] });
     }
 
+    protected onClearChildren(id: string): void {
+      this.events.push({ type: "clearChildren", args: [id] });
+    }
+
     protected onAttachEvent(id: string, eventName: string): void {
       this.events.push({ type: "attachEvent", args: [id, eventName] });
     }
@@ -75,6 +79,18 @@ describe("BaseRenderer", () => {
       "remove",
     ]);
     expect(renderer.getNode("root")).toBeUndefined();
+  });
+
+  test("dispatches clearChildren to onClearChildren", () => {
+    const renderer = new TestRenderer();
+    renderer.applyPatches([
+      { type: "create", id: "list", elementType: "Column", props: {} },
+      { type: "clearChildren", id: "list" },
+    ]);
+    expect(renderer.events.map((e) => e.type)).toEqual(["create", "clearChildren"]);
+    expect(renderer.events[1]!.args).toEqual(["list"]);
+    // The emptied element itself survives.
+    expect(renderer.getNode("list")).toBeDefined();
   });
 
   test("clear removes all nodes", () => {

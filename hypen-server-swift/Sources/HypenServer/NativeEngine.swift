@@ -4,8 +4,6 @@ import Foundation
 // The UniFFI-generated class `HypenEngine` collides with the module name,
 // so we use the disambiguation typealiases from the HypenEngine module.
 private typealias FFIEngine = HypenEngineInstance
-private typealias FFIPatch = HypenEnginePatch
-private typealias FFIPatchType = HypenEnginePatchType
 private typealias FFIModuleConfig = HypenEngineModuleConfig
 private typealias FFIComponentDef = HypenEngineComponentDef
 
@@ -89,7 +87,7 @@ public final class NativeEngine: @unchecked Sendable {
     /// Render Hypen DSL source and return patches in the server's wire format.
     public func renderSource(_ source: String) throws -> [[String: Any]] {
         let nativePatches = try engine.renderSource(source: source)
-        return nativePatches.map { convertPatch($0) }
+        return nativePatches.map { Self.convertPatch($0) }
     }
 
     /// Update engine state and return any resulting patches.
@@ -108,7 +106,7 @@ public final class NativeEngine: @unchecked Sendable {
             throw NativeEngineError.stateSerializationFailed("Failed to encode state as UTF-8")
         }
         let nativePatches = try engine.updateState(scope: scope, stateJson: json)
-        return nativePatches.map { convertPatch($0) }
+        return nativePatches.map { Self.convertPatch($0) }
     }
 
     // MARK: - List virtualization
@@ -119,7 +117,7 @@ public final class NativeEngine: @unchecked Sendable {
     /// no windowed list yield no patches (docs/virtualization.md §3).
     public func setListViewport(listId: String, start: UInt32, end: UInt32) throws -> [[String: Any]] {
         let nativePatches = try engine.setListViewport(listId: listId, start: start, end: end)
-        return nativePatches.map { convertPatch($0) }
+        return nativePatches.map { Self.convertPatch($0) }
     }
 
     // MARK: - Route discovery
@@ -424,7 +422,9 @@ public final class NativeEngine: @unchecked Sendable {
     // MARK: - Patch Conversion
 
     /// Convert a UniFFI Patch to the server's wire-format dictionary.
-    private func convertPatch(_ patch: FFIPatch) -> [String: Any] {
+    /// Internal (not private) so tests can pin the wire shape of every
+    /// patch type without a native engine round-trip.
+    static func convertPatch(_ patch: HypenEnginePatch) -> [String: Any] {
         var dict: [String: Any] = [
             "type": patchTypeName(patch.patchType),
             "id": patch.id
@@ -488,7 +488,7 @@ public final class NativeEngine: @unchecked Sendable {
         return dict
     }
 
-    private func patchTypeName(_ type: FFIPatchType) -> String {
+    static func patchTypeName(_ type: HypenEnginePatchType) -> String {
         switch type {
         case .create: return "create"
         case .setProp: return "setProp"
@@ -513,6 +513,12 @@ public final class NativeEngine: @unchecked Sendable {
         // `convertPatch`. Wire name must match the DOM/Compose/iOS
         // strings.
         case .batchAnimation: return "batchAnimation"
+        // Empty one element in a single step — exactly a plain `remove`
+        // of each of `id`'s children; `id` itself stays. Carries only
+        // `id` (every other record field is at its default, so nothing
+        // else is attached). Contract: `hypen-web/docs/clear-children.md`.
+        // Wire name must match the DOM/Compose/iOS strings.
+        case .clearChildren: return "clearChildren"
         }
     }
 }

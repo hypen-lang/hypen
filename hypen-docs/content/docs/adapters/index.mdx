@@ -7,7 +7,7 @@ description: Every platform Hypen renders to, and how the adapters work
 
 An **adapter** is the piece that turns Hypen's patch stream into real UI on a
 given platform. The engine produces `Create / SetProp / RemoveProp / Insert /
-Move / Remove` patches; the adapter applies them to that platform's native
+Move / Remove / ClearChildren` patches; the adapter applies them to that platform's native
 widget tree. Nothing about your module changes between platforms — the adapter
 is the only layer that differs.
 

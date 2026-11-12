@@ -183,6 +183,7 @@ fn local_vs_deploy_patches_are_structurally_identical() {
                 hypen_engine::Patch::Insert { .. } => "Insert",
                 hypen_engine::Patch::Move { .. } => "Move",
                 hypen_engine::Patch::Remove { .. } => "Remove",
+                hypen_engine::Patch::ClearChildren { .. } => "ClearChildren",
                 hypen_engine::Patch::Detach { .. } => "Detach",
                 hypen_engine::Patch::Attach { .. } => "Attach",
                 hypen_engine::Patch::SetSemantics { .. } => "SetSemantics",

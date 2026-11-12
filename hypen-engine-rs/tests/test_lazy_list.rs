@@ -89,6 +89,14 @@ impl Screen {
                     self.types.remove(&id);
                     self.children.remove(&id);
                 }
+                Patch::ClearChildren { id } => {
+                    // Every child goes, each exactly as a plain Remove.
+                    for child in self.children.remove(&**id).unwrap_or_default() {
+                        self.props.remove(&child);
+                        self.types.remove(&child);
+                        self.children.remove(&child);
+                    }
+                }
                 _ => {}
             }
         }
@@ -198,6 +206,15 @@ fn creates(batch: &[Patch]) -> usize {
         .count()
 }
 
+/// `ClearChildren` patches: one stands in for a `Remove` per child when a
+/// pass empties the list's element (see `Patch::ClearChildren`).
+fn clears(batch: &[Patch]) -> usize {
+    batch
+        .iter()
+        .filter(|p| matches!(p, Patch::ClearChildren { .. }))
+        .count()
+}
+
 fn removes(batch: &[Patch]) -> usize {
     batch
         .iter()
@@ -265,7 +282,10 @@ fn viewport_moves_the_window() {
     let batch = h.viewport(&list, 40, 55);
     assert_eq!(h.screen.rows(&list), names(40..55));
     assert_eq!(creates(&batch), 15);
-    assert_eq!(removes(&batch), 10);
+    // The window jumped clear of every materialized row: the ten old rows
+    // go in one ClearChildren, ahead of the rows that replace them.
+    assert_eq!((removes(&batch), clears(&batch)), (0, 1));
+    assert!(matches!(batch.first(), Some(Patch::ClearChildren { .. })));
     assert_eq!(
         h.screen.window(&list),
         Some(json!({ "total": 100, "start": 40, "end": 55 }))
@@ -876,4 +896,105 @@ fn losing_a_sibling_windows_the_list() {
         h.screen.window(&column),
         Some(json!({ "total": 20, "start": 0, "end": 5 }))
     );
+}
+
+// ── ClearChildren ───────────────────────────────────────────────────────
+//
+// When a list pass removes every child of the list's element, the removals
+// travel as one `ClearChildren` (see `Patch::ClearChildren`). The renderer
+// model above applies it, so each test also checks what ends up on screen.
+
+const EAGER_LIST: &str =
+    r#"List(@state.items, key: "id", lazy: false) { Text("@{item.name}") }"#;
+
+#[test]
+fn emptying_a_list_clears_its_element_in_one_patch() {
+    let mut h = Harness::new(EAGER_LIST, json!({ "items": items(0..50) }));
+    let list = h.screen.find("List");
+    assert_eq!(h.screen.rows(&list).len(), 50);
+
+    let batch = h.set_items(json!([]));
+    assert_eq!((removes(&batch), clears(&batch), creates(&batch)), (0, 1, 0));
+    assert!(matches!(&batch[0], Patch::ClearChildren { id } if **id == *list));
+    assert!(h.screen.rows(&list).is_empty());
+    // Nothing of the old rows is left behind in the renderer.
+    assert_eq!(h.screen.types.len(), 1);
+
+    // The list still works afterwards.
+    h.set_items(items(3..6));
+    assert_eq!(h.screen.rows(&list), names(3..6));
+}
+
+#[test]
+fn replacing_every_row_clears_before_the_new_rows_arrive() {
+    let mut h = Harness::new(EAGER_LIST, json!({ "items": items(0..20) }));
+    let list = h.screen.find("List");
+
+    let batch = h.set_items(items(100..125));
+    assert_eq!((removes(&batch), clears(&batch), creates(&batch)), (0, 1, 25));
+    let clear_at = batch
+        .iter()
+        .position(|p| matches!(p, Patch::ClearChildren { .. }))
+        .unwrap();
+    let first_create = batch
+        .iter()
+        .position(|p| matches!(p, Patch::Create { .. } | Patch::Insert { .. }))
+        .unwrap();
+    assert!(clear_at < first_create, "clear must precede the new rows");
+    assert_eq!(h.screen.rows(&list), names(100..125));
+    assert_eq!(h.screen.types.len(), 26);
+}
+
+#[test]
+fn a_surviving_row_keeps_per_row_removes() {
+    let mut h = Harness::new(EAGER_LIST, json!({ "items": items(0..10) }));
+    let list = h.screen.find("List");
+
+    let batch = h.set_items(items(9..10));
+    assert_eq!((removes(&batch), clears(&batch)), (9, 0));
+    assert_eq!(h.screen.rows(&list), names(9..10));
+}
+
+#[test]
+fn a_single_leaving_row_is_a_plain_remove() {
+    let mut h = Harness::new(EAGER_LIST, json!({ "items": items(0..1) }));
+    let batch = h.set_items(json!([]));
+    assert_eq!((removes(&batch), clears(&batch)), (1, 0));
+}
+
+#[test]
+fn a_list_sharing_its_parent_is_never_cleared() {
+    // The Column also holds a header: emptying it would take the header too.
+    let mut h = Harness::new(
+        r#"Column { Text("header") ForEach(items: @state.items, key: "id") { Text("@{item.name}") } }"#,
+        json!({ "items": items(0..10) }),
+    );
+    let column = h.screen.find("Column");
+    let batch = h.set_items(json!([]));
+    assert_eq!((removes(&batch), clears(&batch)), (10, 0));
+    assert_eq!(h.screen.rows(&column), vec!["header".to_string()]);
+}
+
+#[test]
+fn rows_with_an_exit_transition_are_never_cleared() {
+    let mut h = Harness::new(
+        r#"List(@state.items, key: "id", lazy: false) { Text("@{item.name}").exit(fade) }"#,
+        json!({ "items": items(0..5) }),
+    );
+    let batch = h.set_items(json!([]));
+    assert_eq!(clears(&batch), 0);
+    assert_eq!(animated_removes(&batch), 5);
+}
+
+#[test]
+fn a_sole_foreach_under_an_element_is_cleared_through_it() {
+    let mut h = Harness::new(
+        r#"Column { ForEach(items: @state.items, key: "id") { Text("@{item.name}") } }"#,
+        json!({ "items": items(0..10) }),
+    );
+    let column = h.screen.find("Column");
+    let batch = h.set_items(json!([]));
+    assert_eq!((removes(&batch), clears(&batch)), (0, 1));
+    assert!(matches!(&batch[0], Patch::ClearChildren { id } if **id == *column));
+    assert!(h.screen.rows(&column).is_empty());
 }

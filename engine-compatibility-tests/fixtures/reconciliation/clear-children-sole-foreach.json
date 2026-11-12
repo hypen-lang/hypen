@@ -1,0 +1,76 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "clear-children-sole-foreach",
+  "description": "A ForEach that is the only child of a real element clears that element (the Column), not the ForEach",
+  "category": "reconciliation",
+  "priority": "P1",
+  "input": {
+    "source": "Column { ForEach(items: @state.items, key: \"id\") { Text(\"@{item.name}\") } }",
+    "initialState": {
+      "items": [
+        {
+          "id": 0,
+          "name": "row 0"
+        },
+        {
+          "id": 1,
+          "name": "row 1"
+        },
+        {
+          "id": 2,
+          "name": "row 2"
+        },
+        {
+          "id": 3,
+          "name": "row 3"
+        }
+      ]
+    },
+    "module": {
+      "name": "ClearChildrenModule",
+      "actions": [],
+      "stateKeys": [
+        "items"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Column"
+        }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "Emptying the list clears the Column",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": []
+        }
+      },
+      "expectedPatchTypes": [
+        "clearChildren"
+      ],
+      "expectedPatches": [
+        {
+          "type": "clearChildren",
+          "target": {
+            "elementType": "Column"
+          }
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "remove"
+      ]
+    }
+  ]
+}

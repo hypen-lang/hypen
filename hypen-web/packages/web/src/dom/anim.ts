@@ -1076,6 +1076,15 @@ export class DomAnimator {
     return true;
   }
 
+  /** Whether `element` is the root of an exit that is still playing. */
+  isExitingRoot(element: HTMLElement): boolean {
+    if (this.exitingRoots.size === 0) return false;
+    for (const record of this.exitingRoots.values()) {
+      if (record.element === element) return true;
+    }
+    return false;
+  }
+
   /**
    * Defer a plain (unflagged) remove whose element sits under an exiting
    * root: queue its finalize on that root so the subtree stays intact until

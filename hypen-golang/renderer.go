@@ -24,15 +24,21 @@ type BaseRenderer struct {
 	nodes map[string]any
 
 	// Platform-specific handlers (must be set by embedding struct)
-	OnCreate      func(id string, elementType string, props map[string]any)
-	OnSetProp     func(id string, name string, value any)
-	OnSetText     func(id string, text string)
-	OnInsert      func(parentID string, id string, beforeID string)
-	OnMove        func(parentID string, id string, beforeID string)
-	OnRemove      func(id string)
-	OnRemoveProp  func(id string, name string)
-	OnAttachEvent func(id string, eventName string)
-	OnDetachEvent func(id string, eventName string)
+	OnCreate  func(id string, elementType string, props map[string]any)
+	OnSetProp func(id string, name string, value any)
+	OnSetText func(id string, text string)
+	OnInsert  func(parentID string, id string, beforeID string)
+	OnMove    func(parentID string, id string, beforeID string)
+	OnRemove  func(id string)
+	// OnClearChildren handles a "clearChildren" patch: unlink every child
+	// of id and tear down each child's subtree exactly as OnRemove would
+	// for each child (no exit transition), keeping id itself. Renderers
+	// that set OnRemove must set this too, or a cleared list stays on
+	// screen.
+	OnClearChildren func(id string)
+	OnRemoveProp    func(id string, name string)
+	OnAttachEvent   func(id string, eventName string)
+	OnDetachEvent   func(id string, eventName string)
 }
 
 // NewBaseRenderer creates a new BaseRenderer
@@ -75,6 +81,10 @@ func (r *BaseRenderer) applyPatch(patch Patch) {
 	case PatchRemove:
 		if r.OnRemove != nil {
 			r.OnRemove(patch.ID)
+		}
+	case PatchClearChildren:
+		if r.OnClearChildren != nil {
+			r.OnClearChildren(patch.ID)
 		}
 	case PatchRemoveProp:
 		if r.OnRemoveProp != nil {
@@ -144,6 +154,11 @@ func (r *ConsoleRenderer) Clear() {}
 type TestRenderer struct {
 	*BaseRenderer
 	Events []RendererEvent
+
+	// Tree bookkeeping (parent → ordered child ids, child → parent) so
+	// "remove" and "clearChildren" can tear down whole subtrees.
+	children map[string][]string
+	parentOf map[string]string
 }
 
 // RendererEvent records a renderer operation
@@ -157,6 +172,8 @@ func NewTestRenderer() *TestRenderer {
 	tr := &TestRenderer{
 		BaseRenderer: NewBaseRenderer(),
 		Events:       []RendererEvent{},
+		children:     map[string][]string{},
+		parentOf:     map[string]string{},
 	}
 
 	tr.OnCreate = func(id string, elementType string, props map[string]any) {
@@ -198,6 +215,7 @@ func NewTestRenderer() *TestRenderer {
 			Type: "insert",
 			Args: []any{parentID, id, beforeID},
 		})
+		tr.link(parentID, id, beforeID)
 	}
 
 	tr.OnMove = func(parentID string, id string, beforeID string) {
@@ -205,6 +223,7 @@ func NewTestRenderer() *TestRenderer {
 			Type: "move",
 			Args: []any{parentID, id, beforeID},
 		})
+		tr.link(parentID, id, beforeID)
 	}
 
 	tr.OnRemove = func(id string) {
@@ -212,7 +231,23 @@ func NewTestRenderer() *TestRenderer {
 			Type: "remove",
 			Args: []any{id},
 		})
-		tr.DeleteNode(id)
+		tr.unlink(id)
+		tr.dropSubtree(id)
+	}
+
+	// clearChildren == a plain remove of each current child of id; id
+	// itself (and its props) stays. Unknown ids have no children: no-op.
+	tr.OnClearChildren = func(id string) {
+		tr.Events = append(tr.Events, RendererEvent{
+			Type: "clearChildren",
+			Args: []any{id},
+		})
+		kids := tr.children[id]
+		delete(tr.children, id)
+		for _, child := range kids {
+			delete(tr.parentOf, child)
+			tr.dropSubtree(child)
+		}
 	}
 
 	tr.OnAttachEvent = func(id string, eventName string) {
@@ -230,6 +265,59 @@ func NewTestRenderer() *TestRenderer {
 	}
 
 	return tr
+}
+
+// ChildIDs returns the ordered child ids currently linked under id
+// ("root" for the root container).
+func (tr *TestRenderer) ChildIDs(id string) []string {
+	return append([]string(nil), tr.children[id]...)
+}
+
+// link places id under parentID (before beforeID when it is a sibling,
+// else last), unlinking it from any previous parent first.
+func (tr *TestRenderer) link(parentID, id, beforeID string) {
+	tr.unlink(id)
+	kids := tr.children[parentID]
+	at := len(kids)
+	if beforeID != "" {
+		for i, k := range kids {
+			if k == beforeID {
+				at = i
+				break
+			}
+		}
+	}
+	kids = append(kids, "")
+	copy(kids[at+1:], kids[at:])
+	kids[at] = id
+	tr.children[parentID] = kids
+	tr.parentOf[id] = parentID
+}
+
+// unlink removes id from its parent's child list (the subtree stays).
+func (tr *TestRenderer) unlink(id string) {
+	parent, ok := tr.parentOf[id]
+	if !ok {
+		return
+	}
+	delete(tr.parentOf, id)
+	kids := tr.children[parent]
+	for i, k := range kids {
+		if k == id {
+			tr.children[parent] = append(kids[:i:i], kids[i+1:]...)
+			break
+		}
+	}
+}
+
+// dropSubtree forgets id and every descendant.
+func (tr *TestRenderer) dropSubtree(id string) {
+	for _, child := range tr.children[id] {
+		delete(tr.parentOf, child)
+		tr.dropSubtree(child)
+	}
+	delete(tr.children, id)
+	tr.DeleteNode(id)
 }
 
 // EventTypes returns the types of all recorded events

@@ -355,6 +355,9 @@ class RemoteWireConformanceTest {
                 "insert", "move", "attach" -> link(str(p, "parentId")!!, id, str(p, "beforeId"))
                 "detach" -> unlink(id)
                 "remove" -> drop(id)
+                // Equivalent to a plain `remove` of every current child.
+                "clearChildren" ->
+                    (if (id == "root") roots.toList() else nodes[id]?.children?.toList())?.forEach(::drop)
             }
         }
 

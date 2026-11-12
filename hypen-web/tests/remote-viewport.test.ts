@@ -295,7 +295,9 @@ describe("viewport over a real WebSocket (RemoteServer + RemoteEngine)", () => {
     expect(newRows).toContain("row-80");
     expect(newRows).toContain("row-99");
     expect(newRows).not.toContain("row-79");
-    expect(update.some((p) => p.type === "remove")).toBe(true);
+    // The old window leaves the client: per-row removes when the windows
+    // overlap, a single clearChildren when (as here) none of its rows stay.
+    expect(update.some((p) => p.type === "remove" || p.type === "clearChildren")).toBe(true);
     await sleep(50);
     expect(stateUpdates).toBe(stateBaseline);
   });

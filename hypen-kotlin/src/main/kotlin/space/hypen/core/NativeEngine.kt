@@ -562,6 +562,10 @@ private fun NativePatch.toPatch(): Patch {
             // batch index 0 only (protocol invariant 3, see
             // `hypen-web/docs/animation.md`).
             NativePatchType.BATCH_ANIMATION -> PatchType.BATCH_ANIMATION
+            // Bulk child removal — see the Rust engine's
+            // `Patch::ClearChildren` (`reconcile/patch.rs`). Only `id` is
+            // set; equivalent to a plain `remove` of every child of `id`.
+            NativePatchType.CLEAR_CHILDREN -> PatchType.CLEAR_CHILDREN
         },
         id = id,
         elementType = elementType,

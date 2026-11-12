@@ -3060,4 +3060,82 @@ mod tests {
         // is a no-op there.
         assert!(b.handle_message(&viewport_json(&id_b, 0, 10)).is_empty());
     }
+
+    // ── ClearChildren: forwarded untouched over the remote protocol ──
+
+    #[test]
+    fn a_wholesale_list_clear_ships_one_clear_children_patch() {
+        let session = RemoteSession::new(SessionConfig {
+            module_name: "App".to_string(),
+            ui_source: r#"Column { ForEach(@state.items, key: "id") { Text("@{item.name}") } }"#
+                .to_string(),
+            initial_state: serde_json::json!({
+                "items": [
+                    { "id": 1, "name": "a" },
+                    { "id": 2, "name": "b" },
+                    { "id": 3, "name": "c" }
+                ]
+            }),
+            action_names: vec!["clear".to_string()],
+            ..SessionConfig::default()
+        });
+        session.set_action_handler(|_action, _payload, state| {
+            let mut s = state.clone();
+            s["items"] = serde_json::json!([]);
+            s
+        });
+        let hello = session.handle_hello(None);
+        let tree: Value = serde_json::from_str(&hello[1]).unwrap();
+        let column = tree["patches"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["type"] == "create" && p["elementType"] == "Column")
+            .map(|p| p["id"].clone())
+            .expect("column created");
+
+        let replies =
+            session.handle_message(r#"{"type":"dispatchAction","module":"App","action":"clear"}"#);
+        let patch_msg = replies
+            .iter()
+            .map(|m| serde_json::from_str::<Value>(m).unwrap())
+            .find(|m| m["type"] == "patch")
+            .expect("a patch message");
+        let patches = patch_msg["patches"].as_array().unwrap();
+        assert_eq!(
+            patches
+                .iter()
+                .filter(|p| p["type"] == "clearChildren")
+                .collect::<Vec<_>>(),
+            vec![&serde_json::json!({ "type": "clearChildren", "id": column })],
+            "the wire shape is exactly {{type, id}}: {patches:?}"
+        );
+        assert!(
+            !patches.iter().any(|p| p["type"] == "remove"),
+            "no per-row removes alongside the clear: {patches:?}"
+        );
+    }
+
+    #[test]
+    fn clear_children_round_trips_through_the_remote_message() {
+        let msg = RemoteMessage::Patch {
+            module: "App".to_string(),
+            patches: vec![Patch::ClearChildren {
+                id: "4294967301".into(),
+            }],
+            revision: 7,
+        };
+        let json = serde_json::to_string(&msg).unwrap();
+        assert!(
+            json.contains(r#"{"type":"clearChildren","id":"4294967301"}"#),
+            "{json}"
+        );
+        match serde_json::from_str::<RemoteMessage>(&json).unwrap() {
+            RemoteMessage::Patch { patches, .. } => assert!(matches!(
+                &patches[..],
+                [Patch::ClearChildren { id }] if id.as_ref() == "4294967301"
+            )),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

@@ -1,0 +1,62 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "clear-children-single-row",
+  "description": "A single leaving row is a plain remove, never a clearChildren (the patch needs at least two children)",
+  "category": "reconciliation",
+  "priority": "P0",
+  "input": {
+    "source": "List(@state.items, key: \"id\", lazy: false) { Text(\"@{item.name}\") }",
+    "initialState": {
+      "items": [
+        {
+          "id": 0,
+          "name": "row 0"
+        }
+      ]
+    },
+    "module": {
+      "name": "ClearChildrenModule",
+      "actions": [],
+      "stateKeys": [
+        "items"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "List"
+        }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "Emptying a one-row list removes that row",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": []
+        }
+      },
+      "expectedPatchTypes": [
+        "remove"
+      ],
+      "expectedPatches": [
+        {
+          "type": "remove",
+          "transition": false
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "clearChildren"
+      ]
+    }
+  ]
+}

@@ -285,6 +285,34 @@ pub enum Patch {
         transition: bool,
     },
 
+    /// Remove every child of `id` and tear down their subtrees, in one step.
+    ///
+    /// Exactly equivalent to a plain `Remove` (no `transition`) for each of
+    /// the node's current children: every node beneath `id` is dead once the
+    /// patch is applied — release its native element, listeners and id-table
+    /// entry — while `id` itself stays, with all of its own props. The
+    /// engine emits it instead of one `Remove` per child when a list pass
+    /// removes ALL of a real element's children at once (a list cleared, or
+    /// replaced wholesale), so a renderer can empty the container in a
+    /// single native operation instead of unlinking N siblings one by one.
+    ///
+    /// # Contract
+    ///
+    /// - It is positioned BEFORE any `Create`/`Instantiate`/`Insert` the
+    ///   same batch adds under `id`: clear first, then the new children.
+    /// - Never used for a child that carries an exit transition
+    ///   (`"__anim.exit"`); those passes keep per-child `Remove`s.
+    /// - A child still on screen only because the renderer is playing out an
+    ///   exit from an EARLIER `Remove { transition: true }` is already dead
+    ///   to the engine; the renderer may cut that exit short or let it
+    ///   finish, as it prefers.
+    /// - `id` is always a real element, never `"root"`.
+    ///
+    /// There is no capability negotiation: every renderer and remote client
+    /// must handle it.
+    #[serde(rename_all = "camelCase")]
+    ClearChildren { id: Arc<str> },
+
     /// Detach a subtree from its parent without tearing it down.
     ///
     /// The renderer must **unlink** `id` from its parent's children list
@@ -493,6 +521,13 @@ impl Patch {
         Self::Remove {
             id: node_id_str(id),
             transition: true,
+        }
+    }
+
+    /// Construct a `ClearChildren` patch for the given parent.
+    pub fn clear_children(id: NodeId) -> Self {
+        Self::ClearChildren {
+            id: node_id_str(id),
         }
     }
 

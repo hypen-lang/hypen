@@ -1091,6 +1091,7 @@ fn summarize_patches(patches: &[Patch]) -> String {
             Patch::Insert { .. } => "Insert",
             Patch::Move { .. } => "Move",
             Patch::Remove { .. } => "Remove",
+            Patch::ClearChildren { .. } => "ClearChildren",
             Patch::Detach { .. } => "Detach",
             Patch::Attach { .. } => "Attach",
             Patch::SetSemantics { .. } => "SetSemantics",
@@ -1239,10 +1240,13 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
                 }
             }
         }
+        // Against the pre-batch shadow tree, before `forward` applies
+        // anything: a shell clear of the viewport must not take the tab
+        // roots grafted under it.
+        let mut out = lower_clear_children(&g, patches.to_vec());
+        out.extend(lower_clear_children(&g, queued_flush));
+        out
     }
-    let mut out = patches.to_vec();
-    out.extend(queued_flush);
-    out
 }
 
 /// Translate a tab's patches into the merged stream. The tab's
@@ -1285,6 +1289,7 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
     };
     let mut new_roots: Vec<Arc<str>> = Vec::new();
     let rewritten = rewrite_tab_batch(patches, &prefix, &viewport, &mut new_roots);
+    let rewritten = lower_clear_children(&g, rewritten);
     let created: std::collections::HashSet<&str> = rewritten
         .iter()
         .filter_map(|patch| match patch {
@@ -1643,47 +1648,29 @@ fn handle_embed_lifecycle(inner: &Arc<Mutex<Inner>>, batch: &[Patch]) -> EmbedLi
                     // intact; `detached_parents` bridges the gaps
                     // Detach cut (a cached route holding an embed,
                     // removed via an ancestor above the detach point).
-                    let doomed: Vec<String> = g
-                        .embeds
-                        .iter()
-                        .filter(|(_, e)| {
-                            let mut cur = Some(e.host_id.as_str());
-                            while let Some(c) = cur {
-                                if c == id.as_ref() {
-                                    return true;
-                                }
-                                cur = g
-                                    .tree
-                                    .parent_of(c)
-                                    .or_else(|| g.detached_parents.get(c).map(String::as_str));
-                            }
-                            false
-                        })
-                        .map(|(marker, _)| marker.clone())
-                        .collect();
-                    for marker in doomed {
-                        if let Some(e) = g.embeds.shift_remove(&marker) {
-                            log::info!(
-                                "hypen-browser: embed {marker} torn down (host {} removed)",
-                                e.host_id,
-                            );
-                            // The subtree Remove reclaims linked nodes
-                            // only — anything this embed Detached (slot
-                            // children while connected, roots while
-                            // errored) sits in no children list and
-                            // must be removed explicitly or it leaks.
-                            for d in &e.detached {
-                                g.detached_parents.remove(d);
-                                extra.push(Patch::Remove {
-                                    id: d.as_str().into(),
-                                    transition: false,
-                                });
-                            }
-                            torn_down.push(e);
-                        }
-                        to_connect.retain(|m| m != &marker);
-                    }
+                    teardown_embeds_under(
+                        &mut g,
+                        id,
+                        true,
+                        &mut extra,
+                        &mut to_connect,
+                        &mut torn_down,
+                    );
                     g.detached_parents.remove(id.as_ref());
+                }
+                Patch::ClearChildren { id } => {
+                    // A plain Remove of each child: every embed whose
+                    // host sits strictly below `id` goes. (`id` itself is
+                    // never a host here — `lower_clear_children` turned a
+                    // clear of a host into per-child Removes.)
+                    teardown_embeds_under(
+                        &mut g,
+                        id,
+                        false,
+                        &mut extra,
+                        &mut to_connect,
+                        &mut torn_down,
+                    );
                 }
                 _ => {}
             }
@@ -1693,6 +1680,127 @@ fn handle_embed_lifecycle(inner: &Arc<Mutex<Inner>>, batch: &[Patch]) -> EmbedLi
     // outside the lock, like `close_tab_silent`.
     drop(torn_down);
     EmbedLifecycle { extra, to_connect }
+}
+
+/// Tear down every embed whose host sits under `root` (at-or-under when
+/// `include_root`, strictly under otherwise), queueing a Remove for each
+/// subtree the embed holds Detached — the subtree removal reclaims linked
+/// nodes only. The walk runs on the PRE-batch shadow tree, bridging
+/// Detach gaps through `detached_parents`.
+fn teardown_embeds_under(
+    g: &mut Inner,
+    root: &str,
+    include_root: bool,
+    extra: &mut Vec<Patch>,
+    to_connect: &mut Vec<String>,
+    torn_down: &mut Vec<Embed>,
+) {
+    let doomed: Vec<String> = g
+        .embeds
+        .iter()
+        .filter(|(_, e)| {
+            if !include_root && e.host_id == root {
+                return false;
+            }
+            let mut cur = Some(e.host_id.as_str());
+            while let Some(c) = cur {
+                if c == root {
+                    return true;
+                }
+                cur = g
+                    .tree
+                    .parent_of(c)
+                    .or_else(|| g.detached_parents.get(c).map(String::as_str));
+            }
+            false
+        })
+        .map(|(marker, _)| marker.clone())
+        .collect();
+    for marker in doomed {
+        if let Some(e) = g.embeds.shift_remove(&marker) {
+            log::info!(
+                "hypen-browser: embed {marker} torn down (host {} removed)",
+                e.host_id,
+            );
+            // The subtree Remove reclaims linked nodes only — anything
+            // this embed Detached (slot children while connected, roots
+            // while errored) sits in no children list and must be
+            // removed explicitly or it leaks.
+            for d in &e.detached {
+                g.detached_parents.remove(d);
+                extra.push(Patch::Remove {
+                    id: d.as_str().into(),
+                    transition: false,
+                });
+            }
+            torn_down.push(e);
+        }
+        to_connect.retain(|m| m != &marker);
+    }
+}
+
+/// Make a stream's `ClearChildren` safe for the MERGED tree.
+///
+/// The engine that sent it knows only its own children of `id`, but the
+/// Browser grafts other streams' roots under two kinds of node: the
+/// shell viewport (tab roots) and `HypenApp` hosts (embed roots), and it
+/// Detaches a host's slot children behind the engine's back. Applied
+/// as-is, a clear of such a node would wipe a foreign tree, and miss the
+/// slot children the Browser detached. For those nodes — and any node
+/// whose shadow-tree children are not all the sender's — the clear is
+/// lowered to what it means: a plain `Remove` of each child the sender
+/// owns (linked ones, then Browser-detached slot children). Everything
+/// else keeps the single patch. The shadow tree is pre-batch here, which
+/// is what the clear addresses: the engine emits it before any new
+/// children of `id`.
+fn lower_clear_children(g: &Inner, patches: Vec<Patch>) -> Vec<Patch> {
+    if !patches
+        .iter()
+        .any(|p| matches!(p, Patch::ClearChildren { .. }))
+    {
+        return patches;
+    }
+    let mut out = Vec::with_capacity(patches.len());
+    for patch in patches {
+        let Patch::ClearChildren { id } = &patch else {
+            out.push(patch);
+            continue;
+        };
+        let owner = stream_prefix_of(id);
+        let children = g.tree.children_of(id);
+        let hosts: Vec<&Embed> = g
+            .embeds
+            .values()
+            .filter(|e| e.host_id.as_str() == id.as_ref())
+            .collect();
+        let is_viewport = g.viewport_id.as_deref() == Some(id.as_ref());
+        let foreign = children.iter().any(|c| stream_prefix_of(c) != owner);
+        if !is_viewport && hosts.is_empty() && !foreign {
+            out.push(patch);
+            continue;
+        }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let owned_linked = children
+            .iter()
+            .filter(|c| stream_prefix_of(c) == owner)
+            .map(String::as_str);
+        let owned_detached = hosts.iter().flat_map(|e| {
+            e.loading_slot_ids
+                .iter()
+                .chain(e.error_slot_ids.iter())
+                .filter(|s| e.detached.contains(s.as_str()))
+                .map(String::as_str)
+        });
+        for child in owned_linked.chain(owned_detached) {
+            if seen.insert(child) {
+                out.push(Patch::Remove {
+                    id: child.into(),
+                    transition: false,
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Open the embed's WebSocket and wire its callbacks. Runs without the
@@ -1787,6 +1895,7 @@ fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Pat
         .into_iter()
         .map(|p| rewrite_embed_patch_actions(p, &prefix))
         .collect();
+    let rewritten = lower_clear_children(&g, rewritten);
 
     let embed = g.embeds.get_mut(marker).expect("embed still present");
 
@@ -1954,6 +2063,19 @@ fn rewrite_patch(
             id: prefix_id(prefix, &id),
             transition,
         },
+        // The engine never clears `"root"` (its children are the stream's
+        // roots, grafted under a node it doesn't own). Should a host do
+        // it anyway, the prefixed `"root"` names no node, so the clear
+        // is the protocol's ignored-unknown-id no-op rather than a wipe
+        // of the shared viewport / embed host.
+        Patch::ClearChildren { id } => {
+            if id.as_ref() == ROOT_ID {
+                log::warn!("hypen-browser: ignoring ClearChildren of the stream root");
+            }
+            Patch::ClearChildren {
+                id: prefix_id(prefix, &id),
+            }
+        }
         Patch::Detach { id } => Patch::Detach {
             id: prefix_id(prefix, &id),
         },
@@ -4034,5 +4156,168 @@ mod tests {
             "__hypen_bind",
             &Some(json!({"path": "query", "value": "x"})),
         ));
+    }
+
+    // -----------------------------------------------------------------
+    // ClearChildren in the merged stream
+    // -----------------------------------------------------------------
+
+    fn clear(id: &str) -> Patch {
+        Patch::ClearChildren { id: id.into() }
+    }
+
+    /// A tab list `a9:60` with three rows (`a9:61..63`), each holding text.
+    fn tab_list_batch() -> Vec<Patch> {
+        let mut batch = vec![create_with("60", "Column", &[]), insert("root", "60")];
+        for i in 1..=3 {
+            let (row, txt) = (format!("6{i}"), format!("7{i}"));
+            batch.push(create_with(&row, "Row", &[]));
+            batch.push(insert("60", &row));
+            batch.push(create_with(&txt, "Text", &[("0", json!("x"))]));
+            batch.push(insert(&row, &txt));
+        }
+        batch
+    }
+
+    #[test]
+    fn a_tab_list_clear_passes_through_as_one_prefixed_patch() {
+        let (module, captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(&module, "tab-1", &tab_list_batch());
+        captured.lock().unwrap().clear();
+
+        let out = ingest_tab_batch(
+            &module,
+            "tab-1",
+            &[clear("60"), create_with("64", "Text", &[]), insert("60", "64")],
+        );
+        assert!(
+            matches!(&out[0], Patch::ClearChildren { id } if id.as_ref() == "a9:60"),
+            "{out:?}"
+        );
+        assert!(!out.iter().any(|p| matches!(p, Patch::Remove { .. })));
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(inner.tree.children_of("a9:60"), ["a9:64".to_string()]);
+        for id in ["a9:61", "a9:71", "a9:63", "a9:73"] {
+            assert!(inner.tree.get(id).is_none(), "{id} gone from the shadow tree");
+        }
+    }
+
+    #[test]
+    fn a_clear_of_the_stream_root_names_no_node() {
+        // The engine never clears "root"; if a host does, it must not
+        // wipe the shared viewport.
+        assert!(matches!(
+            rewrite_patch(clear(ROOT_ID), "a9:", "viewport", &mut Vec::new()),
+            Patch::ClearChildren { id } if id.as_ref() == "a9:root"
+        ));
+    }
+
+    #[test]
+    fn clear_children_above_a_host_tears_the_embed_down() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        // Wrap the launcher route in a list element so a clear reaches it.
+        ingest_tab_batch(&module, "tab-1", &[create_with("40", "Column", &[]), insert("root", "40")]);
+        let mut route = hypenapp_route_batch("ws://127.0.0.1:1/nope");
+        route[1] = insert("40", "50");
+        ingest_tab_batch(&module, "tab-1", &route);
+        assert_eq!(module.inner.lock().unwrap().embeds.len(), 1);
+
+        let out = ingest_tab_batch(&module, "tab-1", &[clear("40")]);
+        assert!(matches!(&out[0], Patch::ClearChildren { id } if id.as_ref() == "a9:40"));
+        let inner = module.inner.lock().unwrap();
+        assert!(inner.embeds.is_empty(), "the host left with the cleared route");
+        // The embed held its error slot Detached: reclaimed explicitly.
+        assert!(inner.tree.get("a9:53").is_none());
+        assert!(inner.tree.get("a9:51").is_none());
+        assert!(inner.tree.get("a9:40").is_some());
+    }
+
+    #[test]
+    fn clear_children_of_a_host_spares_the_embedded_tree() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        // The embed's tree lands under the host; both slots are now
+        // Detached by the Browser (loading hid on the first batch).
+        let grafted = process_embed_patches(
+            &module.inner,
+            "e1:",
+            &[create_with("1", "Column", &[]), insert("root", "1")],
+        );
+        forward(&module.inner, &grafted);
+        assert_eq!(
+            module.inner.lock().unwrap().tree.children_of("a9:51"),
+            ["e1:1".to_string()]
+        );
+
+        // The tab's engine empties the host — all IT knows is the two
+        // slot children. Lowered to Removes of exactly those.
+        let out = ingest_tab_batch(&module, "tab-1", &[clear("51")]);
+        assert!(!out.iter().any(|p| matches!(p, Patch::ClearChildren { .. })));
+        let mut removed: Vec<&str> = out
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Remove { id, .. } => Some(id.as_ref()),
+                _ => None,
+            })
+            .collect();
+        removed.sort();
+        assert_eq!(removed, ["a9:52", "a9:53"]);
+        let inner = module.inner.lock().unwrap();
+        assert_eq!(inner.tree.children_of("a9:51"), ["e1:1".to_string()]);
+        assert!(inner.tree.get("e1:1").is_some(), "the embedded tree survives");
+        assert!(inner.tree.get("a9:52").is_none() && inner.tree.get("a9:53").is_none());
+        assert_eq!(inner.embeds.len(), 1, "the host survives, so does its embed");
+    }
+
+    #[test]
+    fn a_shell_clear_of_the_viewport_spares_the_tab_roots() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(&module, "tab-1", &tab_list_batch());
+        let viewport = module.inner.lock().unwrap().viewport_id.clone().unwrap();
+        assert!(module
+            .inner
+            .lock()
+            .unwrap()
+            .tree
+            .children_of(&viewport)
+            .contains(&"a9:60".to_string()));
+
+        let out = process_shell_patches(&module.inner, &[clear(&viewport)]);
+        assert!(!out.iter().any(|p| matches!(p, Patch::ClearChildren { .. })));
+        assert!(
+            !out.iter()
+                .any(|p| matches!(p, Patch::Remove { id, .. } if id.starts_with("a9:"))),
+            "a tab root is not the shell's to remove: {out:?}"
+        );
+    }
+
+    #[test]
+    fn lowering_a_clear_equals_a_plain_remove_per_owned_child() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(&module, "tab-1", &tab_list_batch());
+        // Graft a foreign node under the list (as an embed would).
+        forward(
+            &module.inner,
+            &[create_with("e5:1", "Text", &[]), insert("a9:60", "e5:1")],
+        );
+        let g = module.inner.lock().unwrap();
+        let lowered = lower_clear_children(&g, vec![clear("a9:60")]);
+        let ids: Vec<&str> = lowered
+            .iter()
+            .map(|p| match p {
+                Patch::Remove { id, transition: false } => id.as_ref(),
+                other => panic!("expected plain Removes, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(ids, ["a9:61", "a9:62", "a9:63"]);
     }
 }

@@ -339,6 +339,9 @@ pub(crate) fn reconcile_iterable_children_full(
 ) {
     let parent_id = logical_parent;
     let multi_template = ir_templates.len() > 1;
+    // Where this pass's patches start: a `ClearChildren` standing in for
+    // the pass's removals must precede the rows the pass creates.
+    let pass_start = ctx.patches.len();
 
     // Snapshot the parent's existing children + their keys.
     let old_children: Vec<NodeId> = ctx
@@ -663,6 +666,23 @@ pub(crate) fn reconcile_iterable_children_full(
         }
     }
 
+    // Every old child is leaving and nothing else renders under the parent:
+    // empty it with one patch instead of a Remove per row.
+    let leftover = old_keyed.len() + (old_unkeyed.len() - unkeyed_idx);
+    if leftover >= CLEAR_CHILDREN_MIN
+        && leftover == old_children.len()
+        && !at_root
+        && can_clear_children(ctx, parent_id, render_parent, &old_children)
+    {
+        for &old_id in &old_children {
+            ctx.tree
+                .remove_subtree_with(old_id, |id| ctx.dependencies.remove_node(id));
+        }
+        ctx.patches
+            .insert(pass_start, Patch::clear_children(render_parent));
+        return;
+    }
+
     // Remove old children that weren't reused.
     let mut live_keys: Option<HashSet<String>> = None;
     for (child_key, &old_id) in old_keyed.iter() {
@@ -707,6 +727,44 @@ pub(crate) fn reconcile_iterable_children_full(
             remove_child_subtree(ctx, old_id);
         }
     }
+}
+
+/// Fewest leaving children worth a `ClearChildren`; below it the per-child
+/// `Remove`s are just as cheap and keep small batches in the familiar shape.
+const CLEAR_CHILDREN_MIN: usize = 2;
+
+/// Whether removing every one of `old_children` is the same as emptying
+/// `render_parent` — the precondition for [`Patch::ClearChildren`].
+///
+/// - `render_parent` is a real element whose only content is this list:
+///   the list's own element, or the element whose sole child is the list's
+///   (transparent) container. Anything else under it would be wiped too.
+/// - No leaving child is rooted at control flow (its rendered roots are
+///   not the child itself) or carries an exit transition (which needs its
+///   own flagged `Remove`, and an exit tombstone).
+fn can_clear_children(
+    ctx: &ReconcileCtx,
+    logical_parent: NodeId,
+    render_parent: NodeId,
+    old_children: &[NodeId],
+) -> bool {
+    let Some(parent) = ctx.tree.get(render_parent) else {
+        return false;
+    };
+    if parent.control_flow.is_some() {
+        return false;
+    }
+    let sole_content = logical_parent == render_parent
+        || (parent.children.len() == 1 && parent.children.iter().next() == Some(&logical_parent));
+    if !sole_content {
+        return false;
+    }
+    old_children.iter().all(|&id| {
+        ctx.tree.get(id).is_some_and(|node| {
+            node.control_flow.is_none()
+                && !node.props.contains_key(crate::ir::anim::ANIM_EXIT_PROP)
+        })
+    })
 }
 
 /// The live id for a reused child after its in-place reconcile: itself, or —

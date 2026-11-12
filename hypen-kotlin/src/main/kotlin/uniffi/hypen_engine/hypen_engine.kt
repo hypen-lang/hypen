@@ -5053,7 +5053,13 @@ enum class PatchType {
      * and Swift switches on the same ordinal), so new variants must go
      * at the end or every existing case shifts.
      */
-    BATCH_ANIMATION;
+    BATCH_ANIMATION,
+    /**
+     * Remove every child of `id` and tear down their subtrees in one step;
+     * `id` itself stays. Equivalent to a plain `Remove` per child. Appended
+     * after `BatchAnimation` for the ordinal reason above.
+     */
+    CLEAR_CHILDREN;
 
     
 

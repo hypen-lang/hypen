@@ -363,6 +363,13 @@ native views. Handled in `HypenRenderer.applyDetach` / `applyAttach`
 A `Patch.remove` arriving for a detached id (engine LRU eviction)
 tears down normally via `applyRemove`.
 
+`PatchType.clearChildren` (`hypen-web/docs/clear-children.md`) is handled by
+`HypenRenderer.applyClearChildren`: it runs the same `removeSubtree` path as
+`applyRemove` for each current child, in order (so it is exactly a plain
+remove per child — an exiting child from an earlier flagged remove is left
+to finish), and keeps the element itself. Publications are batch-coalesced,
+so the parent's view is invalidated once.
+
 ### Root children (`"root"` sentinel)
 
 `parentId: "root"` names the mount container, which can hold several

@@ -1,0 +1,105 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "clear-children-list-replaced",
+  "description": "Replacing every row of a list that owns its element (no key reused) clears the element first, then creates the new rows: clearChildren precedes every create/insert of the batch and no per-row remove is sent",
+  "category": "reconciliation",
+  "priority": "P0",
+  "input": {
+    "source": "List(@state.items, key: \"id\", lazy: false) { Text(\"@{item.name}\") }",
+    "initialState": {
+      "items": [
+        {
+          "id": 0,
+          "name": "row 0"
+        },
+        {
+          "id": 1,
+          "name": "row 1"
+        },
+        {
+          "id": 2,
+          "name": "row 2"
+        }
+      ]
+    },
+    "module": {
+      "name": "ClearChildrenModule",
+      "actions": [],
+      "stateKeys": [
+        "items"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "List"
+        }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "Wholesale replace: clearChildren first, then the two new rows",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": [
+            {
+              "id": 100,
+              "name": "row 100"
+            },
+            {
+              "id": 101,
+              "name": "row 101"
+            }
+          ]
+        }
+      },
+      "expectedPatchTypes": [
+        "clearChildren",
+        "create",
+        "insert",
+        "create",
+        "insert"
+      ],
+      "expectedPatches": [
+        {
+          "type": "clearChildren",
+          "target": {
+            "elementType": "List"
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "row 100"
+          }
+        },
+        {
+          "type": "insert"
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "row 101"
+          }
+        },
+        {
+          "type": "insert"
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "remove"
+      ]
+    }
+  ]
+}

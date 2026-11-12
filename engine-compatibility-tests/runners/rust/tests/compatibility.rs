@@ -149,6 +149,11 @@ struct ExpectedPatch {
     /// following sibling, not appended behind it — that the id-agnostic
     /// structural match otherwise cannot see.
     before: Option<ExpectedAnchor>,
+    /// Fixture-assertion-only (never on the wire): on `clearChildren`, the
+    /// element the patch's `id` must name, matched against that element's
+    /// `create` patch (from any earlier step). Pins WHICH element is emptied
+    /// (the List itself, or the Column a sole ForEach renders into).
+    target: Option<ExpectedAnchor>,
 }
 
 /// See [`ExpectedPatch::before`].
@@ -374,28 +379,48 @@ fn matches_expected_patch(actual: &Value, expected: &ExpectedPatch, created: &Cr
     }
 
     if let Some(ref anchor) = expected.before {
-        let Some(target) = actual
-            .get("beforeId")
-            .and_then(Value::as_str)
-            .and_then(|id| created.get(id))
-        else {
+        if !anchor_matches(actual, "beforeId", anchor, created) {
             return false;
-        };
-        if let Some(ref et) = anchor.element_type {
-            if target.get("elementType").and_then(Value::as_str) != Some(et) {
-                return false;
-            }
-        }
-        if let Some(ref props) = anchor.props {
-            for (key, expected_val) in props {
-                match target.get("props").and_then(|p| p.get(key)) {
-                    Some(av) if json_values_equal(av, expected_val) => {}
-                    _ => return false,
-                }
-            }
         }
     }
 
+    if let Some(ref anchor) = expected.target {
+        if !anchor_matches(actual, "id", anchor, created) {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Whether the element `actual[field]` names was created (in any step so
+/// far) with the anchor's element type and props.
+fn anchor_matches(
+    actual: &Value,
+    field: &str,
+    anchor: &ExpectedAnchor,
+    created: &CreatedById,
+) -> bool {
+    let Some(target) = actual
+        .get(field)
+        .and_then(Value::as_str)
+        .and_then(|id| created.get(id))
+    else {
+        return false;
+    };
+    if let Some(ref et) = anchor.element_type {
+        if target.get("elementType").and_then(Value::as_str) != Some(et) {
+            return false;
+        }
+    }
+    if let Some(ref props) = anchor.props {
+        for (key, expected_val) in props {
+            match target.get("props").and_then(|p| p.get(key)) {
+                Some(av) if json_values_equal(av, expected_val) => {}
+                _ => return false,
+            }
+        }
+    }
     true
 }
 

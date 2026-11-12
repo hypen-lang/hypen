@@ -215,6 +215,8 @@ public final class HypenRenderer: ObservableObject {
             applySetSemantics(patch)
         case .batchAnimation:
             applyBatchAnimation(patch)
+        case .clearChildren:
+            applyClearChildren(patch)
         }
     }
 
@@ -494,6 +496,57 @@ public final class HypenRenderer: ObservableObject {
             log.debug("REMOVE: Element not found: %@", id)
             return
         }
+
+        removeSubtree(element, patch: patch)
+    }
+
+    /// Empty `id` in one step (`hypen-web/docs/clear-children.md`): exactly
+    /// a plain `remove` (no transition) of each current child, in order.
+    /// Each child goes through the same path as `applyRemove` — the DnD
+    /// cancel / list rebuild, the animator's swallow of a child still
+    /// playing an exit from an EARLIER flagged remove (that exit is left to
+    /// finish, which the contract allows), and the full subtree purge from
+    /// `elements`, `detachedIds`, the animator and DnD tables. `id` itself
+    /// keeps its props and can take new children in the same batch.
+    ///
+    /// Element publications are coalesced per batch (`publishBatch`), so
+    /// the parent's view is invalidated once however many children leave.
+    private func applyClearChildren(_ patch: Patch) {
+        guard let id = patch.id else {
+            log.debug("CLEAR_CHILDREN: Missing id")
+            return
+        }
+        guard let parent = elements[id] else {
+            log.debug("CLEAR_CHILDREN: Element not found: %@", id)
+            return
+        }
+
+        let childIds = parent.children
+        guard !childIds.isEmpty else { return }
+
+        for childId in childIds {
+            guard let child = elements[childId] else { continue }
+            removeSubtree(child, patch: Patch(type: .remove, id: childId))
+        }
+
+        // A child id with no element behind it is unreachable anyway; the
+        // contract says every child is unlinked, so drop it. Children still
+        // here are exiting corpses the animator owns — its finalize unlinks
+        // them.
+        let stale = parent.children.filter { elements[$0] == nil }
+        if !stale.isEmpty {
+            for childId in stale {
+                parent.removeChild(childId)
+            }
+            bubbleControlFlowChange(from: parent)
+        }
+        log.debug("Cleared children of \(id) (\(childIds.count))")
+    }
+
+    /// The body of a `remove` for an element known to exist: shared by
+    /// `applyRemove` and each child of `applyClearChildren`.
+    private func removeSubtree(_ element: HypenElement, patch: Patch) {
+        let id = element.id
 
         // A drag whose source or moving item sits at-or-under this subtree
         // cancels cleanly and dispatches NOTHING (§6.6) — a dead interaction

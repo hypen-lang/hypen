@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **`clearChildren` patch** (`core.PatchClearChildren`,
+  `{"type":"clearChildren","id":…}`; contract in
+  `hypen-web/docs/clear-children.md`): the engine now empties a list's
+  element in one patch instead of a `remove` per row when a pass takes away
+  every child. `BaseRenderer.OnClearChildren` receives it (custom renderers
+  that set `OnRemove` must set it too), `TestRenderer` applies it (and now
+  tracks parent/child links so `remove` drops whole subtrees), the remote
+  server relays it unchanged, and the embedded browser client
+  (`/__hypen__/client.js`) empties the element with one `replaceChildren()`
+  and tears down every removed subtree's bookkeeping. Requires the rebuilt
+  `hypen_engine.wasm`.
+
 ### Changed (quick-start fixes)
 - **`RemoteServer.Listen` now blocks** until `Stop()` (like
   `http.ListenAndServe`), so a `main` that ends with `.Listen(3000)` keeps

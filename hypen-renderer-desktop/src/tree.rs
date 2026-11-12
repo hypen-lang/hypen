@@ -448,6 +448,23 @@ impl Tree {
                 self.clear_detached(id);
                 self.remove_subtree(id);
             }
+            Patch::ClearChildren { id } => {
+                // Exactly a plain `Remove` of every current child, in
+                // one step: take the whole child list (one map write
+                // instead of N `retain`s on it), then tear each child's
+                // subtree down. `id` keeps its node, props and an empty
+                // child list, so Inserts later in the batch land on it.
+                // An unknown `id` has no list and is a no-op.
+                let Some(children) = self.children.get_mut(id.as_ref()) else {
+                    return;
+                };
+                let children = std::mem::take(children);
+                for child in &children {
+                    self.parent_by_child.remove(child);
+                    self.clear_detached(child);
+                    self.remove_subtree(child);
+                }
+            }
             Patch::Detach { id } => {
                 // Unlink from parent without dropping the node — the
                 // engine's Router subtree cache reattaches later via
@@ -1120,5 +1137,129 @@ mod tests {
         // Legitimate moves still work.
         tree.apply(&move_patch(ROOT_ID, "b", None));
         assert_eq!(tree.root_children(), ["a".to_string(), "b".to_string()]);
+    }
+
+    /// Every internal table, normalised for comparison.
+    #[allow(clippy::type_complexity)]
+    fn snapshot(
+        tree: &Tree,
+    ) -> (
+        std::collections::BTreeMap<String, (String, std::collections::BTreeMap<String, Value>)>,
+        std::collections::BTreeMap<String, Vec<String>>,
+        std::collections::BTreeMap<String, String>,
+        Vec<String>,
+        (usize, usize),
+    ) {
+        (
+            tree.nodes
+                .iter()
+                .map(|(k, n)| {
+                    let props = n.props.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+                    (k.clone(), (n.element_type.clone(), props))
+                })
+                .collect(),
+            tree.children.iter().map(|(k, v)| (k.clone(), v.clone())).collect(),
+            tree.parent_by_child
+                .iter()
+                .map(|(k, v)| (k.clone(), v.clone()))
+                .collect(),
+            tree.detached.clone(),
+            (tree.opacity_keys, tree.transform_keys),
+        )
+    }
+
+    /// `list` with three rows, each `row{i}` -> `cell{i}` (with paint-gate
+    /// props, so the counters move), plus a `header` sibling of `list`.
+    fn clear_fixture() -> Tree {
+        let mut tree = Tree::new();
+        tree.apply(&create("list", "Column", &[("opacity", json!(0.5))]));
+        tree.apply(&insert(ROOT_ID, "list", None));
+        tree.apply(&create("header", "Text", &[("0", json!("h"))]));
+        tree.apply(&insert(ROOT_ID, "header", None));
+        for i in 0..3 {
+            let (row, cell) = (format!("row{i}"), format!("cell{i}"));
+            tree.apply(&create(&row, "Row", &[("scale", json!(1.0))]));
+            tree.apply(&insert("list", &row, None));
+            tree.apply(&create(&cell, "Text", &[("opacity", json!(1)), ("0", json!("x"))]));
+            tree.apply(&insert(&row, &cell, None));
+        }
+        tree
+    }
+
+    fn clear(id: &str) -> Patch {
+        Patch::ClearChildren { id: id.into() }
+    }
+
+    #[test]
+    fn clear_children_drops_every_child_subtree_from_every_table() {
+        let mut tree = clear_fixture();
+        tree.apply(&clear("list"));
+        for i in 0..3 {
+            for id in [format!("row{i}"), format!("cell{i}")] {
+                assert!(tree.get(&id).is_none(), "{id} node gone");
+                assert!(!tree.children.contains_key(&id), "{id} child list gone");
+                assert!(!tree.parent_by_child.contains_key(&id), "{id} parent link gone");
+            }
+        }
+        // The parent survives with its own props and an empty list.
+        let list = tree.get("list").expect("list kept");
+        assert_eq!(list.props.get("opacity"), Some(&json!(0.5)));
+        assert!(tree.children_of("list").is_empty());
+        assert_eq!(tree.parent_of("list"), Some(ROOT_ID));
+        // Untouched sibling; counters only hold the survivors' keys.
+        assert!(tree.get("header").is_some());
+        assert_eq!((tree.opacity_keys, tree.transform_keys), (1, 0));
+        assert_eq!(tree.nodes.len(), 2);
+    }
+
+    #[test]
+    fn clear_children_then_insert_in_the_same_batch_refills_the_parent() {
+        let mut tree = clear_fixture();
+        tree.apply_batch(&[
+            clear("list"),
+            create("new0", "Text", &[]),
+            insert("list", "new0", None),
+            // A re-used id (a fresh session restarting allocation) is a
+            // brand-new node, not a resurrection of the old subtree.
+            create("row1", "Text", &[]),
+            insert("list", "row1", None),
+        ]);
+        assert_eq!(tree.children_of("list"), ["new0".to_string(), "row1".to_string()]);
+        assert_eq!(tree.parent_of("row1"), Some("list"));
+        assert!(tree.children_of("row1").is_empty(), "no stale cell under row1");
+        assert!(tree.get("cell1").is_none());
+    }
+
+    #[test]
+    fn clear_children_of_an_unknown_or_empty_node_is_a_noop() {
+        let mut tree = clear_fixture();
+        let before = snapshot(&tree);
+        tree.apply(&clear("ghost"));
+        tree.apply(&clear("header"));
+        assert_eq!(snapshot(&tree), before);
+    }
+
+    #[test]
+    fn clear_children_equals_a_plain_remove_per_child() {
+        let mut cleared = clear_fixture();
+        let mut removed = clear_fixture();
+        // A detached (Router-cached) subtree elsewhere must be untouched
+        // by both, and a detached root's bookkeeping must match too.
+        for t in [&mut cleared, &mut removed] {
+            t.apply(&create("cached", "Column", &[]));
+            t.apply(&insert("row2", "cached", None));
+            t.apply(&Patch::Detach { id: "cached".into() });
+            t.apply(&create("other", "Column", &[]));
+            t.apply(&insert(ROOT_ID, "other", None));
+            t.apply(&Patch::Detach { id: "other".into() });
+        }
+        cleared.apply(&clear("list"));
+        for child in removed.children_of("list").to_vec() {
+            removed.apply(&Patch::Remove {
+                id: child.as_str().into(),
+                transition: false,
+            });
+        }
+        assert_eq!(snapshot(&cleared), snapshot(&removed));
     }
 }

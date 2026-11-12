@@ -1,0 +1,87 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "clear-children-shared-parent",
+  "description": "A list that shares its parent with other content (a header Text beside the ForEach) is never cleared: emptying it sends a plain remove per row and no clearChildren, so the header survives",
+  "category": "reconciliation",
+  "priority": "P0",
+  "input": {
+    "source": "Column { Text(\"header\") ForEach(items: @state.items, key: \"id\") { Text(\"@{item.name}\") } }",
+    "initialState": {
+      "items": [
+        {
+          "id": 0,
+          "name": "row 0"
+        },
+        {
+          "id": 1,
+          "name": "row 1"
+        },
+        {
+          "id": 2,
+          "name": "row 2"
+        }
+      ]
+    },
+    "module": {
+      "name": "ClearChildrenModule",
+      "actions": [],
+      "stateKeys": [
+        "items"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Column"
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "header"
+          }
+        }
+      ],
+      "allowExtraPatches": true
+    },
+    {
+      "description": "Emptying the list removes each row on its own",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": []
+        }
+      },
+      "expectedPatchTypes": [
+        "remove",
+        "remove",
+        "remove"
+      ],
+      "expectedPatches": [
+        {
+          "type": "remove",
+          "transition": false
+        },
+        {
+          "type": "remove",
+          "transition": false
+        },
+        {
+          "type": "remove",
+          "transition": false
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "clearChildren"
+      ]
+    }
+  ]
+}

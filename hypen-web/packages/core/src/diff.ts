@@ -395,6 +395,10 @@ function diffContainers(
     }
     const maxLen = aLen > bLen ? aLen : bLen;
     for (let i = 0; i < maxLen; i++) {
+      // The steady state of a list is "almost every element unchanged":
+      // settle those before building a path string or entering the
+      // general walk (see `certainlyEqual`).
+      if (i < aLen && i < bLen && certainlyEqual(a[i], b[i], depth + 1)) continue;
       const path = join(prefix, String(i));
       if (i >= bLen) {
         emitValue(view(a[i]), depth + 1, null); // serializability walk
@@ -417,6 +421,7 @@ function diffContainers(
   const bKeys = presentKeysSorted(b);
   const bSet = new Set(bKeys);
   for (const k of aKeys) {
+    if (bSet.has(k) && certainlyEqual(a[k], b[k], depth + 1)) continue;
     const path = join(prefix, k);
     if (bSet.has(k)) {
       const va = view(a[k]);
@@ -452,6 +457,78 @@ function diffContainers(
       out.push({ path: join(prefix, k), value: emitValue(vb, depth + 1, null) });
     }
   }
+}
+
+/** Deepest nesting `certainlyEqual` follows; anything deeper (and so any
+ * cycle) is left to the general walk and its cycle guards. */
+const CERTAINLY_EQUAL_MAX_DEPTH = 32;
+
+const hasOwn = Object.prototype.hasOwnProperty;
+
+/**
+ * A cheap, allocation-light proof that two raw values are the same through
+ * the JSON lens — so the general walk, which would emit nothing for them,
+ * can be skipped.
+ *
+ * It only ever answers `true` for the plain cases it fully understands:
+ * equal strings, booleans, finite numbers and nulls, and plain arrays /
+ * plain objects made of those, with the same length or the same own keys.
+ * Everything else — `undefined`, functions, symbols, BigInts, non-finite
+ * numbers, `toJSON`, class instances, wrapper objects, holes, different
+ * key sets, deep nesting — answers `false`, which is not "different" but
+ * "ask the general walk". That walk still owns every rule in this file's
+ * header, including the unserializable-tree contract, so skipping on
+ * `true` cannot change a result: a `true` pair contains nothing that walk
+ * could emit or throw on.
+ *
+ * Why it matters: `state.rows = nextRows` marks `rows` dirty, and the walk
+ * then visits every row. Per unchanged row it sorted both key lists, built
+ * two Sets and concatenated a path string per field; this compares the
+ * fields in place instead.
+ */
+function certainlyEqual(x: any, y: any, depth: number): boolean {
+  switch (typeof x) {
+    case "string":
+    case "boolean":
+      return x === y;
+    case "number":
+      return x === y && Number.isFinite(x);
+    case "object":
+      break;
+    default:
+      return false;
+  }
+  if (x === null) return y === null;
+  if (y === null || typeof y !== "object") return false;
+  if (depth > CERTAINLY_EQUAL_MAX_DEPTH) return false;
+  x = unwrapProxy(x);
+  y = unwrapProxy(y);
+  if (x.toJSON !== undefined || y.toJSON !== undefined) return false;
+
+  if (Array.isArray(x)) {
+    if (!Array.isArray(y)) return false;
+    const len = x.length;
+    if (len !== y.length) return false;
+    for (let i = 0; i < len; i++) {
+      if (!certainlyEqual(x[i], y[i], depth + 1)) return false;
+    }
+    return true;
+  }
+  if (Array.isArray(y)) return false;
+
+  const px = Object.getPrototypeOf(x);
+  if (px !== Object.prototype && px !== null) return false;
+  const py = Object.getPrototypeOf(y);
+  if (py !== Object.prototype && py !== null) return false;
+
+  const keys = Object.keys(y);
+  if (Object.keys(x).length !== keys.length) return false;
+  for (let i = 0; i < keys.length; i++) {
+    const k = keys[i]!;
+    if (!hasOwn.call(x, k)) return false;
+    if (!certainlyEqual(x[k], y[k], depth + 1)) return false;
+  }
+  return true;
 }
 
 function emitArrayElement(raw: any, depth: number): unknown {

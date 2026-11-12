@@ -1,0 +1,127 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "clear-children-list-emptied",
+  "description": "Emptying a list that owns its element sends ONE clearChildren on that element and no per-row remove (hypen-web/docs/clear-children.md); the emptied element stays and refills with plain create/insert",
+  "category": "reconciliation",
+  "priority": "P0",
+  "input": {
+    "source": "List(@state.items, key: \"id\", lazy: false) { Text(\"@{item.name}\") }",
+    "initialState": {
+      "items": [
+        {
+          "id": 0,
+          "name": "row 0"
+        },
+        {
+          "id": 1,
+          "name": "row 1"
+        },
+        {
+          "id": 2,
+          "name": "row 2"
+        },
+        {
+          "id": 3,
+          "name": "row 3"
+        },
+        {
+          "id": 4,
+          "name": "row 4"
+        }
+      ]
+    },
+    "module": {
+      "name": "ClearChildrenModule",
+      "actions": [],
+      "stateKeys": [
+        "items"
+      ]
+    }
+  },
+  "steps": [
+    {
+      "description": "Initial render creates the List and five rows",
+      "action": "initialRender",
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "List"
+        }
+      ],
+      "allowExtraPatches": true,
+      "forbiddenPatchTypes": [
+        "clearChildren"
+      ]
+    },
+    {
+      "description": "Emptying the list clears the List in one patch: one clearChildren, zero removes",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": []
+        }
+      },
+      "expectedPatchTypes": [
+        "clearChildren"
+      ],
+      "expectedPatches": [
+        {
+          "type": "clearChildren",
+          "target": {
+            "elementType": "List"
+          }
+        }
+      ],
+      "forbiddenPatchTypes": [
+        "remove",
+        "create",
+        "insert"
+      ]
+    },
+    {
+      "description": "The cleared List keeps working: new rows arrive with plain create/insert",
+      "action": "updateState",
+      "stateChange": {
+        "paths": [
+          "items"
+        ],
+        "newValues": {
+          "items": [
+            {
+              "id": 10,
+              "name": "row 10"
+            },
+            {
+              "id": 11,
+              "name": "row 11"
+            }
+          ]
+        }
+      },
+      "expectedPatches": [
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "row 10"
+          }
+        },
+        {
+          "type": "create",
+          "elementType": "Text",
+          "props": {
+            "0": "row 11"
+          }
+        }
+      ],
+      "allowExtraPatches": true,
+      "forbiddenPatchTypes": [
+        "clearChildren",
+        "remove"
+      ]
+    }
+  ]
+}

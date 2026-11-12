@@ -257,6 +257,10 @@ pub enum PatchType {
     /// and Swift switches on the same ordinal), so new variants must go
     /// at the end or every existing case shifts.
     BatchAnimation,
+    /// Remove every child of `id` and tear down their subtrees in one step;
+    /// `id` itself stays. Equivalent to a plain `Remove` per child. Appended
+    /// after `BatchAnimation` for the ordinal reason above.
+    ClearChildren,
 }
 
 /// A patch represents a single DOM operation
@@ -482,6 +486,24 @@ impl Patch {
                 before_id: None,
                 semantics_json: None,
                 transition,
+                spec_json: None,
+            },
+            // ClearChildren empties `id` in one step: every child subtree
+            // is torn down exactly as by a plain Remove per child, and `id`
+            // itself stays. Kotlin/Swift renderers must release every
+            // descendant's native element and id-table entry.
+            InternalPatch::ClearChildren { id } => Patch {
+                patch_type: PatchType::ClearChildren,
+                id: id.to_string(),
+                element_type: None,
+                props_json: None,
+                name: None,
+                value_json: None,
+                text: None,
+                parent_id: None,
+                before_id: None,
+                semantics_json: None,
+                transition: false,
                 spec_json: None,
             },
             // Detach/Attach are emitted by the engine's Router

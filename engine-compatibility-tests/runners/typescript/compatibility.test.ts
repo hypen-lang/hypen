@@ -55,6 +55,10 @@ interface ExpectedPatch {
    *  element's `create` patch from any earlier batch of the run (elementType,
    *  partial props). Pins placement contracts the id-agnostic match can't. */
   before?: { elementType?: string; props?: Record<string, any> };
+  /** Fixture-assertion-only, same shape as `before`: the element the
+   *  patch's own `id` must name (e.g. which element a `clearChildren`
+   *  empties). */
+  target?: { elementType?: string; props?: Record<string, any> };
 }
 
 interface TestStep {
@@ -217,6 +221,18 @@ function patchMatches(actual: EnginePatch, expected: ExpectedPatch): boolean {
     }
     for (const [key, value] of Object.entries(expected.before.props ?? {})) {
       if (!deepEquals(target.props?.[key], value)) return false;
+    }
+  }
+
+  // Check which element the patch itself addresses
+  if (expected.target !== undefined) {
+    const addressed = actual.id == null ? undefined : createdById.get(actual.id);
+    if (addressed === undefined) return false;
+    if (expected.target.elementType !== undefined && addressed.elementType !== expected.target.elementType) {
+      return false;
+    }
+    for (const [key, value] of Object.entries(expected.target.props ?? {})) {
+      if (!deepEquals(addressed.props?.[key], value)) return false;
     }
   }
 

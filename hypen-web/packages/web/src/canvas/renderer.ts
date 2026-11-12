@@ -524,6 +524,10 @@ export class CanvasRenderer implements Renderer {
         this.onDetach(patch.id!);
         break;
 
+      case "clearChildren":
+        this.onClearChildren(patch.id!);
+        break;
+
       case "attach":
         this.onInsert(patch.parentId!, patch.id!, patch.beforeId);
         break;
@@ -1035,6 +1039,26 @@ export class CanvasRenderer implements Renderer {
   }
 
   /**
+   * Empty an element in one step (`clearChildren`, docs/clear-children.md):
+   * exactly a plain (non-transition) `remove` of each current child — every
+   * child subtree is torn down (animator, drag, editing/focus, a11y mirror,
+   * video, id table) and the element itself keeps its props and can take
+   * new children in the same batch. Children are walked last-to-first so
+   * each unlink pops the tail of the children array instead of shifting it
+   * (O(n) for the whole clear). A child still playing an exit from an
+   * earlier `remove { transition: true }` is dead engine-side already; its
+   * exit is cut short here (the contract allows either). Unknown id: no-op.
+   */
+  private onClearChildren(id: string): void {
+    const node = this.nodes.get(id);
+    if (!node) return;
+    const kids = node.children.slice();
+    for (let i = kids.length - 1; i >= 0; i--) {
+      this.onRemoveMaybeDeferred(kids[i]!.id, false);
+    }
+  }
+
+  /**
    * Remove node from tree
    */
   private onRemove(id: string): void {
@@ -1069,9 +1093,12 @@ export class CanvasRenderer implements Renderer {
     // Remove from parent (a root child leaves the implicit root's list)
     const wasRoot = node.parent === this.rootContainer;
     if (node.parent) {
-      const index = node.parent.children.indexOf(node);
+      const siblings = node.parent.children;
+      // Tail fast path (clearChildren unlinks last-to-first).
+      const index =
+        siblings[siblings.length - 1] === node ? siblings.length - 1 : siblings.indexOf(node);
       if (index >= 0) {
-        node.parent.children.splice(index, 1);
+        siblings.splice(index, 1);
       }
       node.parent = null;
     }

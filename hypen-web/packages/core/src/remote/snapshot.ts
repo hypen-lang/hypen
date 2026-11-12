@@ -170,6 +170,10 @@ export class NodeShadow {
       case "remove":
         if (p.id) this.drop(p.id);
         break;
+      case "clearChildren":
+        // = a plain `remove` of every current child (docs/clear-children.md).
+        if (p.id) this.clearChildren(p.id);
+        break;
       default:
         break;
     }
@@ -196,6 +200,14 @@ export class NodeShadow {
     if (at >= 0) list.splice(at, 0, id);
     else list.push(id);
     this.parent.set(id, parentId);
+  }
+
+  private clearChildren(id: string): void {
+    const kids = this.children.get(id);
+    if (!kids) return;
+    // Detach the whole list first so each drop's unlink is O(1).
+    this.children.delete(id);
+    for (const kid of kids) this.drop(kid);
   }
 
   private drop(id: string): void {

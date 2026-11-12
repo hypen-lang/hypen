@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added (`clearChildren` patch)
+- `PatchType.clearChildren` (`{ "type": "clearChildren", "id": … }`, see
+  `hypen-web/docs/clear-children.md`): empties an element in one step.
+  `HypenRenderer` applies it exactly as a plain `remove` of each current
+  child (DnD cancel / list rebuild, full subtree purge from every table); the
+  element keeps its props and takes new children in the same batch. A child
+  still playing an exit from an earlier `remove { transition: true }` is left
+  to finish. Unknown ids are ignored.
+
 ### Added (list virtualization)
 - `HypenAccessibility.listPosition` / `listSummary`: host-overridable
   VoiceOver strings for windowed lists, localized by default (en, de, es, fr,

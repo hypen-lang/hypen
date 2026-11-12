@@ -56,6 +56,7 @@ export const wasmengine_treeSize: (a: number) => number;
 export const wasmengine_unregisterModule: (a: number, b: number, c: number) => void;
 export const wasmengine_updateState: (a: number, b: number, c: number, d: any, e: number) => [number, number];
 export const wasmengine_updateStateSparse: (a: number, b: number, c: number, d: any, e: any, f: number) => [number, number];
+export const wasmengine_updateStateSparseJson: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number];
 export const wasmengine_validate: (a: number) => any;
 export const wasmengine_renderSource: (a: number, b: number, c: number) => [number, number];
 export const __wbindgen_malloc: (a: number, b: number) => number;

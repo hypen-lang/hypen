@@ -74,6 +74,35 @@ describe("NodeShadow", () => {
     s.apply([{ type: "attach", id: "2", parentId: "root", beforeId: "1" }] as any);
     expect(s.serialize()!.ids).toEqual(["2", "1"]);
   });
+
+  test("clearChildren drops every child subtree, keeps the element, and refills in the same batch", () => {
+    const s = new NodeShadow();
+    s.apply([
+      { type: "create", id: "list", elementType: "Column" },
+      { type: "create", id: "r1", elementType: "Row" },
+      { type: "create", id: "r1t", elementType: "Text" },
+      { type: "create", id: "r2", elementType: "Row" },
+      { type: "insert", id: "list", parentId: "root" },
+      { type: "insert", id: "r1", parentId: "list" },
+      { type: "insert", id: "r1t", parentId: "r1" },
+      { type: "insert", id: "r2", parentId: "list" },
+    ] as any);
+    expect(s.serialize()!.ids).toEqual(["list", "r1", "r1t", "r2"]);
+
+    s.apply([
+      { type: "clearChildren", id: "list" },
+      { type: "create", id: "r3", elementType: "Row" },
+      { type: "insert", id: "r3", parentId: "list" },
+      // Unknown id is ignored.
+      { type: "clearChildren", id: "nope" },
+    ] as any);
+    expect(s.serialize()).toEqual({ ids: ["list", "r3"], types: ["Column", "Row"], parents: [-1, 0] });
+    expect(s.isAttached("list")).toBe(true);
+    for (const dead of ["r1", "r1t", "r2"]) expect(s.isAttached(dead)).toBe(false);
+    // A stale insert of a dead child does not resurrect its old subtree.
+    s.apply([{ type: "insert", id: "r1", parentId: "list" }] as any);
+    expect(s.serialize()!.ids).toEqual(["list", "r3", "r1"]);
+  });
 });
 
 describe("SessionManager carries the full snapshot through suspend/resume", () => {

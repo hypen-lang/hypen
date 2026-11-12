@@ -3,7 +3,21 @@ import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
 const repoBench = resolve(import.meta.dirname, "../..");
-const packagesDir = resolve(repoBench, "../../hypen-web/packages");
+
+// `scripts/build-variants.ts` builds this one app against several SDK
+// versions; these three variables are how it points a build at each one.
+// Unset, the app builds against this checkout exactly as before.
+const packagesDir = resolve(
+  process.env.HYPEN_PACKAGES_DIR ?? resolve(repoBench, "../../hypen-web/packages"),
+);
+const outDir = process.env.BENCH_OUT_DIR
+  ? resolve(process.env.BENCH_OUT_DIR)
+  : process.env.BENCH_PROFILE
+    ? "dist-profile"
+    : "dist";
+const publicDir = process.env.BENCH_PUBLIC_DIR
+  ? resolve(process.env.BENCH_PUBLIC_DIR)
+  : "public";
 
 /**
  * Resolve `@hypen-space/*` against this checkout instead of npm.
@@ -108,7 +122,7 @@ function hypenLocalPackages(): Plugin {
      * import would have produced anyway.
      */
     transform(code, id) {
-      if (!id.includes("/hypen-web/packages/") || !code.includes("require(")) {
+      if (!id.startsWith(packagesDir) || !code.includes("require(")) {
         return null;
       }
       const specs = new Map<string, string>();
@@ -134,15 +148,18 @@ function hypenLocalPackages(): Plugin {
 
 export default defineConfig({
   plugins: [hypenLocalPackages()],
+  define: { __BENCH_LIST_ARGS__: JSON.stringify(process.env.BENCH_LIST_ARGS ?? "") },
   server: { port: 5302, fs: { allow: [repoBench, packagesDir] } },
   preview: { port: 5302 },
+  publicDir,
   build: {
     target: "es2022",
+    emptyOutDir: true,
     // `bench/profile.ts` builds with BENCH_PROFILE=1 into a separate outDir:
     // minified function names make a CPU profile unreadable, and the profile
     // is only ever used to attribute time, never to report a duration.
     minify: process.env.BENCH_PROFILE ? false : "esbuild",
-    outDir: process.env.BENCH_PROFILE ? "dist-profile" : "dist",
+    outDir,
     modulePreload: { polyfill: false },
     rollupOptions: { output: { inlineDynamicImports: true } },
   },

@@ -773,6 +773,46 @@ impl WasmEngine {
         Ok(())
     }
 
+    /// [`update_state_sparse`](Self::update_state_sparse) with the paths
+    /// and values handed over as JSON text.
+    ///
+    /// `paths_json` is a JSON array of path strings, `values_json` a JSON
+    /// object mapping each path to its new value. Semantics are identical;
+    /// only the transport differs. Converting a `JsValue` tree with
+    /// `serde_wasm_bindgen` calls back into JavaScript for every object and
+    /// copies every key and string across the boundary one at a time, which
+    /// for a list-sized update (a thousand rows appended) cost more than
+    /// the reconcile it fed. One string crosses once and is parsed here.
+    ///
+    /// Hosts feature-detect this method and fall back to
+    /// `updateStateSparse` on an engine build without it.
+    #[wasm_bindgen(js_name = updateStateSparseJson)]
+    pub fn update_state_sparse_json(
+        &mut self,
+        scope: Option<String>,
+        paths_json: &str,
+        values_json: &str,
+        animation: Option<JsValue>,
+    ) -> Result<(), JsValue> {
+        let paths: Vec<String> = serde_json::from_str(paths_json)
+            .map_err(|e| structured_error("stateError", &format!("Invalid paths array: {}", e)))?;
+
+        let values: serde_json::Value = serde_json::from_str(values_json).map_err(|e| {
+            structured_error("stateError", &format!("Invalid values object: {}", e))
+        })?;
+
+        let animation = convert_animation(animation)?;
+
+        let normalized = scope.as_deref().filter(|s| !s.is_empty());
+        if self
+            .core
+            .update_state_sparse(normalized, &paths, &values, animation)
+        {
+            self.render_dirty();
+        }
+        Ok(())
+    }
+
     /// Render only dirty nodes (optimized for state changes).
     fn render_dirty(&mut self) {
         let patches = self.core.render_dirty();

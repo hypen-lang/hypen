@@ -72,6 +72,10 @@ class ClientState(
                 PatchType.INSERT, PatchType.MOVE, PatchType.ATTACH ->
                     if (p.parentId == ROOT_ID) rootIds += id else rootIds -= id
                 PatchType.REMOVE, PatchType.DETACH -> rootIds -= id
+                // The engine never clears `root` (clear-children.md), so a
+                // clear only ever drops non-top-level nodes; handled anyway
+                // so the mirror stays equal to a `remove` per child.
+                PatchType.CLEAR_CHILDREN -> if (id == ROOT_ID) rootIds.clear()
             }
         }
     }

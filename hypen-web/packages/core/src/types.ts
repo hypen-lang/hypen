@@ -16,6 +16,12 @@ export type Patch = {
    * under the same id, so a later `attach` can reinsert it with zero
    * rebuild. If `remove` arrives for a detached id instead, the
    * subtree is torn down normally.
+   *
+   * `clearChildren` empties element `id` in one step: exactly a plain
+   * `remove` (no `transition`) of each of its current children — every
+   * child subtree is torn down, `id` keeps its own props and may receive
+   * new children later in the same batch. Unknown `id` is ignored. See
+   * `hypen-web/docs/clear-children.md`.
    */
   type:
     | "create"
@@ -29,6 +35,7 @@ export type Patch = {
     | "detachEvent"
     | "detach"
     | "attach"
+    | "clearChildren"
     | "setSemantics"
     | "batchAnimation"
     | "registerTemplate"
