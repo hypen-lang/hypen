@@ -29,6 +29,9 @@ const REQUIRED: ReadonlyArray<{ marker: string; provides: string }> = [
   { marker: "hypen-a11y-styles", provides: "the reduced-motion / focus stylesheet" },
   { marker: "data-hypen-device-dialog", provides: "the device host's consent dialog (RFC 001)" },
   { marker: "drop-zone", provides: "the device host's picker drop zone" },
+  // @hypen-space/cf@0.6.7 shipped a client predating it: replaced lists kept
+  // their old rows and taps on them failed as "stale UI action target".
+  { marker: "clearChildren", provides: "the clearChildren patch (list cleared/replaced in one step)" },
 ];
 
 const file = Bun.file(BUNDLE);

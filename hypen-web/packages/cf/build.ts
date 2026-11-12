@@ -5,12 +5,14 @@ console.log("Building @hypen-space/cf...");
 await $`rm -rf dist`;
 
 // Build the browser client bundle, then assert it actually contains the
-// renderer runtime. `build:client` bundles @hypen-space/web as a dependency,
-// so a stale copy under packages/cf/node_modules silently shadows the
-// workspace package and ships a client missing whatever the newer renderer
-// added — no error, no warning. That is how @hypen-space/cf@0.6.0 shipped a
-// client built against web@0.5.4, which predates the DOM animation runtime:
-// every published web app rendered fine and animated nothing.
+// renderer runtime. `build:client` (client/build-client.ts) bundles
+// @hypen-space/web, core and device-web from their workspace SOURCES: a plain
+// browser-target bundle resolves them through their `dist/` export entries,
+// so a stale sibling build (or a stale copy under packages/cf/node_modules)
+// silently ships a client missing whatever the newer renderer added — no
+// error, no warning. That is how @hypen-space/cf@0.6.0 shipped a client
+// built against web@0.5.4 (no DOM animation runtime), and how 0.6.7 shipped
+// one without `clearChildren` support.
 await $`bun run build:client`;
 await $`bun run client/verify-bundle.ts`;
 
