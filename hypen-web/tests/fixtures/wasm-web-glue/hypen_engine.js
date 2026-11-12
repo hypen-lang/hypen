@@ -746,14 +746,6 @@ export class WasmEngine {
         wasm.wasmengine_onDataSourceAction(this.__wbg_ptr, handler);
     }
     /**
-     * How many removed nodes are waiting for `releaseRemoved`.
-     * @returns {number}
-     */
-    pendingRelease() {
-        const ret = wasm.wasmengine_pendingRelease(this.__wbg_ptr);
-        return ret >>> 0;
-    }
-    /**
      * Register all standard Hypen primitives (Text, Column, Row, Button, etc.)
      */
     registerDefaultPrimitives() {
@@ -796,12 +788,6 @@ export class WasmEngine {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
-    }
-    /**
-     * Free the removed nodes parked since the last call.
-     */
-    releaseRemoved() {
-        wasm.wasmengine_releaseRemoved(this.__wbg_ptr);
     }
     /**
      * Remove a data source context entirely.
@@ -903,16 +889,6 @@ export class WasmEngine {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
-    }
-    /**
-     * Park removed nodes instead of freeing them during the update that
-     * removes them; the host then calls [`releaseRemoved`](Self::release_removed)
-     * when it is idle. See `InstanceTree::set_deferred_release`. Turning it
-     * off releases anything parked.
-     * @param {boolean} deferred
-     */
-    setDeferredRelease(deferred) {
-        wasm.wasmengine_setDeferredRelease(this.__wbg_ptr, deferred);
     }
     /**
      * Report the item range `[start, end)` (visible rows plus overscan) of

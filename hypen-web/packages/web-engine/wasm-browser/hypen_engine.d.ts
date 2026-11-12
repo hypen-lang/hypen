@@ -198,10 +198,6 @@ export class WasmEngine {
      */
     onDataSourceAction(handler: Function): void;
     /**
-     * How many removed nodes are waiting for `releaseRemoved`.
-     */
-    pendingRelease(): number;
-    /**
      * Register all standard Hypen primitives (Text, Column, Row, Button, etc.)
      */
     registerDefaultPrimitives(): void;
@@ -217,10 +213,6 @@ export class WasmEngine {
      * Register resources from a JavaScript object (name -> SVG string map).
      */
     registerResources(resources_js: any): void;
-    /**
-     * Free the removed nodes parked since the last call.
-     */
-    releaseRemoved(): void;
     /**
      * Remove a data source context entirely.
      */
@@ -264,13 +256,6 @@ export class WasmEngine {
      * Set (or replace) a named data source context.
      */
     setContext(name: string, data_js: any): void;
-    /**
-     * Park removed nodes instead of freeing them during the update that
-     * removes them; the host then calls [`releaseRemoved`](Self::release_removed)
-     * when it is idle. See `InstanceTree::set_deferred_release`. Turning it
-     * off releases anything parked.
-     */
-    setDeferredRelease(deferred: boolean): void;
     /**
      * Report the item range `[start, end)` (visible rows plus overscan) of
      * the lazy list whose element is `listId`; emits the patches that move
@@ -487,12 +472,10 @@ export interface InitOutput {
     readonly wasmengine_new: () => number;
     readonly wasmengine_onAction: (a: number, b: number, c: number, d: any) => void;
     readonly wasmengine_onDataSourceAction: (a: number, b: any) => void;
-    readonly wasmengine_pendingRelease: (a: number) => number;
     readonly wasmengine_registerDefaultPrimitives: (a: number) => void;
     readonly wasmengine_registerModule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => [number, number];
     readonly wasmengine_registerPrimitive: (a: number, b: number, c: number) => void;
     readonly wasmengine_registerResources: (a: number, b: any) => [number, number];
-    readonly wasmengine_releaseRemoved: (a: number) => void;
     readonly wasmengine_removeContext: (a: number, b: number, c: number) => void;
     readonly wasmengine_renderInto: (a: number, b: number, c: number, d: number, e: number, f: any) => [number, number];
     readonly wasmengine_renderLazyComponent: (a: number, b: number, c: number) => [number, number];
@@ -500,7 +483,6 @@ export interface InitOutput {
     readonly wasmengine_resolveUIAction: (a: number, b: number, c: number, d: any) => [number, number, number];
     readonly wasmengine_setComponentResolver: (a: number, b: any) => void;
     readonly wasmengine_setContext: (a: number, b: number, c: number, d: any) => [number, number];
-    readonly wasmengine_setDeferredRelease: (a: number, b: number) => void;
     readonly wasmengine_setListViewport: (a: number, b: number, c: number, d: number, e: number) => void;
     readonly wasmengine_setModule: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: any) => [number, number];
     readonly wasmengine_setRenderCallback: (a: number, b: any) => void;

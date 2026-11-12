@@ -416,10 +416,6 @@ impl InstanceNode {
     }
 }
 
-/// Most removed nodes a tree parks before releasing them itself (see
-/// [`InstanceTree::set_deferred_release`]): a few large lists' worth.
-pub(crate) const GRAVEYARD_LIMIT: usize = 100_000;
-
 /// The instance tree - maintains the current UI tree state
 pub struct InstanceTree {
     /// All nodes in the tree
@@ -439,12 +435,6 @@ pub struct InstanceTree {
     /// tears down one subtree per removed row, and a fresh `Vec` per row
     /// grew by reallocation on a heap that is mid mass-free.
     remove_stack: Vec<NodeId>,
-
-    /// Removed nodes whose memory has not been released yet — see
-    /// [`InstanceTree::set_deferred_release`].
-    graveyard: Vec<InstanceNode>,
-    /// Whether removed nodes are parked in `graveyard` instead of dropped.
-    deferred_release: bool,
 
     /// Exit tombstones — see [`ExitTombstone`]. Oldest first, bounded by
     /// [`MAX_EXIT_TOMBSTONES`].
@@ -525,8 +515,6 @@ impl InstanceTree {
             root: None,
             registered_templates: std::collections::HashSet::new(),
             remove_stack: Vec::new(),
-            graveyard: Vec::new(),
-            deferred_release: false,
             exit_tombstones: std::collections::VecDeque::new(),
             sole_child_slot: false,
             place_before_slot: None,
@@ -650,7 +638,6 @@ impl InstanceTree {
     /// reconciling (and patching) through their bindings. Removed ids also
     /// leave `deferred_detached`.
     pub fn remove_subtree_with(&mut self, id: NodeId, mut on_removed: impl FnMut(NodeId)) {
-        self.release_removed_if_over_limit();
         let mut stack = std::mem::take(&mut self.remove_stack);
         stack.clear();
         stack.push(id);
@@ -667,54 +654,9 @@ impl InstanceTree {
                 if let Some(ControlFlowKind::Router { cache, .. }) = node.control_flow.as_deref() {
                     stack.extend(cache.values().flatten().copied());
                 }
-                if self.deferred_release {
-                    self.graveyard.push(node);
-                }
             }
         }
         self.remove_stack = stack;
-    }
-
-    /// Choose when a removed node's memory is released.
-    ///
-    /// Off (the default), a node is dropped the moment it leaves the tree.
-    /// On, it is parked and dropped by [`release_removed`](Self::release_removed).
-    /// A removed node is already gone from the tree and the dependency graph
-    /// either way — this only moves the deallocation. Dropping a node frees
-    /// its prop maps, key and semantics, and tearing down a 1,000-row list
-    /// (~17,000 nodes) spent more time in the allocator than in the removal
-    /// itself; a host with an idle moment to spare (a browser between
-    /// frames) can take that cost out of the interaction.
-    ///
-    /// A host that turns this on must call `release_removed`, or the parked
-    /// nodes are only released by the next removal pass that finds the
-    /// backlog over [`GRAVEYARD_LIMIT`].
-    pub fn set_deferred_release(&mut self, deferred: bool) {
-        self.deferred_release = deferred;
-        if !deferred {
-            self.release_removed();
-        }
-    }
-
-    /// Number of removed nodes waiting to be released.
-    pub fn pending_release(&self) -> usize {
-        self.graveyard.len()
-    }
-
-    /// Release every parked node now.
-    pub fn release_removed(&mut self) {
-        self.graveyard.clear();
-        if self.graveyard.capacity() > GRAVEYARD_LIMIT {
-            self.graveyard.shrink_to(0);
-        }
-    }
-
-    /// Release the backlog if it has grown past [`GRAVEYARD_LIMIT`]: the
-    /// bound on what a host that never finds an idle moment can accumulate.
-    pub(crate) fn release_removed_if_over_limit(&mut self) {
-        if self.graveyard.len() > GRAVEYARD_LIMIT {
-            self.release_removed();
-        }
     }
 
     /// Walk the live tree from `id` to the root: `Some(owner scope)` — the
@@ -976,80 +918,6 @@ mod tests {
 
     use crate::reconcile::resolve::evaluate_binding;
     use serde_json::json;
-
-    /// A small tree: a root with `rows` children, each with one child.
-    fn list_tree(rows: usize) -> (super::InstanceTree, crate::ir::NodeId, Vec<crate::ir::NodeId>) {
-        use crate::ir::Element;
-        let mut tree = super::InstanceTree::new();
-        let root = tree.create_node(&Element::new("Column"), &json!({}));
-        tree.set_root(root);
-        let mut ids = Vec::new();
-        for _ in 0..rows {
-            let row = tree.create_node(&Element::new("Row"), &json!({}));
-            let text = tree.create_node(&Element::new("Text"), &json!({}));
-            tree.add_child(root, row, None);
-            tree.add_child(row, text, None);
-            ids.push(row);
-        }
-        (tree, root, ids)
-    }
-
-    /// Deferring release changes when memory is freed and nothing else: the
-    /// nodes are gone from the tree, and reported as removed, immediately.
-    #[test]
-    fn deferred_release_parks_removed_nodes_until_released() {
-        let (mut eager, _, eager_rows) = list_tree(5);
-        let (mut deferred, _, deferred_rows) = list_tree(5);
-        deferred.set_deferred_release(true);
-
-        let mut eager_seen = 0;
-        let mut deferred_seen = 0;
-        for &row in &eager_rows {
-            eager.remove_subtree_with(row, |_| eager_seen += 1);
-        }
-        for &row in &deferred_rows {
-            deferred.remove_subtree_with(row, |_| deferred_seen += 1);
-        }
-
-        assert_eq!((eager_seen, deferred_seen), (10, 10));
-        assert_eq!((eager.len(), deferred.len()), (1, 1));
-        assert!(deferred_rows.iter().all(|&id| deferred.get(id).is_none()));
-        assert_eq!((eager.pending_release(), deferred.pending_release()), (0, 10));
-
-        deferred.release_removed();
-        assert_eq!(deferred.pending_release(), 0);
-    }
-
-    #[test]
-    fn turning_deferred_release_off_releases_the_backlog() {
-        let (mut tree, _, rows) = list_tree(3);
-        tree.set_deferred_release(true);
-        tree.remove_subtree_with(rows[0], |_| {});
-        assert_eq!(tree.pending_release(), 2);
-
-        tree.set_deferred_release(false);
-        assert_eq!(tree.pending_release(), 0);
-        tree.remove_subtree_with(rows[1], |_| {});
-        assert_eq!(tree.pending_release(), 0);
-    }
-
-    /// A host that never calls `release_removed` cannot grow the backlog
-    /// without bound: the next removal past the limit releases it.
-    #[test]
-    fn the_backlog_is_bounded_without_a_release_call() {
-        let rows = super::GRAVEYARD_LIMIT / 2 + 1;
-        let (mut tree, _, ids) = list_tree(rows);
-        tree.set_deferred_release(true);
-        for &row in &ids {
-            tree.remove_subtree_with(row, |_| {});
-        }
-        assert!(tree.pending_release() > super::GRAVEYARD_LIMIT);
-
-        let (mut other, _, more) = list_tree(1);
-        std::mem::swap(&mut tree.nodes, &mut other.nodes);
-        tree.remove_subtree_with(more[0], |_| {});
-        assert_eq!(tree.pending_release(), 2, "old backlog released, new removal parked");
-    }
 
     /// Every node is copied by value on slotmap insert and remove, so the
     /// struct must stay small — see the `control_flow` field doc.

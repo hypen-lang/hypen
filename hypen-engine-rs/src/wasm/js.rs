@@ -813,27 +813,6 @@ impl WasmEngine {
         Ok(())
     }
 
-    /// Park removed nodes instead of freeing them during the update that
-    /// removes them; the host then calls [`releaseRemoved`](Self::release_removed)
-    /// when it is idle. See `InstanceTree::set_deferred_release`. Turning it
-    /// off releases anything parked.
-    #[wasm_bindgen(js_name = setDeferredRelease)]
-    pub fn set_deferred_release(&mut self, deferred: bool) {
-        self.core.tree.set_deferred_release(deferred);
-    }
-
-    /// How many removed nodes are waiting for `releaseRemoved`.
-    #[wasm_bindgen(js_name = pendingRelease)]
-    pub fn pending_release(&self) -> u32 {
-        self.core.tree.pending_release().min(u32::MAX as usize) as u32
-    }
-
-    /// Free the removed nodes parked since the last call.
-    #[wasm_bindgen(js_name = releaseRemoved)]
-    pub fn release_removed(&mut self) {
-        self.core.tree.release_removed();
-    }
-
     /// Render only dirty nodes (optimized for state changes).
     fn render_dirty(&mut self) {
         let patches = self.core.render_dirty();
