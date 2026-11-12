@@ -2057,16 +2057,31 @@ export class RemoteSession {
       }
     }
 
-    // Component-backed routes are mounted via ManagedRouter. Routes can also be fully INLINE — `Route(path: "/x") { ...markup... }`
-    // with no component — in which case the engine's own Router IR renders
-    // them straight from `state.location`, and there's nothing for
-    // ManagedRouter to mount. And an app with no Router block at all still
-    // navigates through `context.router` (the web client mirrors
-    // `state.location` to the URL). So the router is always wired: the
-    // `@router.*` action handlers plus the router ↔ `location` mirror,
-    // which writes `location` into the primary state even when the
-    // module's initial state did not declare it.
+    // Component-backed routes are mounted via ManagedRouter. Routes can
+    // also be fully INLINE — `Route(path: "/x") { ...markup... }` with no
+    // component — in which case the engine's own Router IR renders them
+    // straight from `state.location`, and there's nothing for ManagedRouter
+    // to mount. And an app with no Router block at all still navigates
+    // through `context.router` (the web client mirrors `state.location` to
+    // the URL). So the router is always wired: the `@router.*` action
+    // handlers plus the router ↔ `location` mirror.
+    //
+    // With a Router block `state.location` IS the route, and the mirror
+    // writes it even when the module's initial state did not declare it.
+    // Without one, `location` may just as well be the app's own data (a
+    // weather app's `"Paris"`, an `{ lat, lng }` object): it is treated as
+    // a route only while it holds a path (a string starting with "/").
+    // Anything else is never pushed to the router, never replaced, and
+    // never overwritten — if the app navigates through `context.router` /
+    // `@router.*` while `location` holds such a value, the router still
+    // moves but the write is skipped with a one-time warning.
     const locationKey = "location";
+    const hasRouterBlocks = discovered.length > 0;
+    const isRouteLocation = (value: unknown): value is string =>
+      hasRouterBlocks
+        ? typeof value === "string" && value.length > 0
+        : typeof value === "string" && value.startsWith("/");
+    let warnedNonPathLocation = false;
 
     // Mirror router path into primary module state's `location` so the
     // engine-level Router IR reconciles to the matching Route subtree.
@@ -2081,14 +2096,14 @@ export class RemoteSession {
     const restoredLocation = (
       primary?.getState() as Record<string, unknown> | undefined
     )?.[locationKey];
-    if (typeof restoredLocation === "string" && restoredLocation) {
+    if (isRouteLocation(restoredLocation)) {
       router.replace(restoredLocation);
     }
 
     // `onNavigate` reports the current route on subscribe. Without a Router
     // block that is no navigation at all: skip it, so an app that never
     // navigates never gets a `location` it did not declare.
-    let skipSubscribeCall = discovered.length === 0;
+    let skipSubscribeCall = !hasRouterBlocks;
     router.onNavigate((rs) => {
       if (skipSubscribeCall) {
         skipSubscribeCall = false;
@@ -2114,12 +2129,26 @@ export class RemoteSession {
         // A newer navigation superseded this one; its own mirror writes.
         if (router.getCurrentPath() !== path) return;
         try {
-          const state = this._moduleInstance?.getState() as
+          const live = this._moduleInstance?.getLiveState() as
             | Record<string, unknown>
             | undefined;
+          const current = live?.[locationKey];
           // Skip when already in sync — this mirror and the state →
           // router one below would otherwise ping-pong.
-          if (state?.[locationKey] === path) return;
+          if (current === path) return;
+          if (!hasRouterBlocks && current !== undefined && !isRouteLocation(current)) {
+            // `location` is the app's own data, not a route: don't clobber it.
+            if (!warnedNonPathLocation) {
+              warnedNonPathLocation = true;
+              log.warn(
+                `Auto-router: navigated to "${path}" but state.${locationKey} ` +
+                  `holds a non-path value; leaving it untouched (an app that ` +
+                  `navigates via context.router / @router.* should keep a ` +
+                  `path, or nothing, in state.${locationKey})`
+              );
+            }
+            return;
+          }
           this._moduleInstance?.updateState({ [locationKey]: path });
         } catch (err) {
           log.error(`Auto-router: state.${locationKey} sync failed:`, err);
@@ -2133,14 +2162,18 @@ export class RemoteSession {
     // directly, but module mount/unmount and per-route action handlers
     // follow the HypenRouter — without this push, navigating via a state
     // mutation renders the new route while its module (and thus its
-    // actions) never activates.
+    // actions) never activates. Every flush of the primary state passes
+    // through here, so it early-outs on the changed paths (no snapshot)
+    // unless `location` itself moved.
     if (primary) {
-      primary.onStateChange(() => {
+      const prefix = `${locationKey}.`;
+      primary.onStateChange((change) => {
+        if (!change.paths.some((p) => p === locationKey || p.startsWith(prefix))) return;
         try {
-          const loc = (primary.getState() as Record<string, unknown>)?.[
+          const loc = (primary.getLiveState() as Record<string, unknown>)?.[
             locationKey
           ];
-          if (typeof loc === "string" && loc && loc !== router.getCurrentPath()) {
+          if (isRouteLocation(loc) && loc !== router.getCurrentPath()) {
             router.push(loc);
           }
         } catch (err) {
@@ -2155,11 +2188,15 @@ export class RemoteSession {
     // hello racing initialisation still reaches every routed instance.
     this._autoManagedRouter = managed;
     managed.start();
-    // HypenRouter doesn't fire onNavigate on subscribe; kick an
-    // explicit push so the initial route mounts. Without a Router block
-    // there is nothing to mount, and the kick would only write a
-    // `location` the app never asked for.
-    if (discovered.length > 0) router.push(router.getCurrentPath());
+    // `HypenRouter.onNavigate` calls back immediately on subscribe, so both
+    // the mirror above and `managed.start()` already saw the initial route
+    // (that is what `skipSubscribeCall` filters for Router-less apps). This
+    // same-path push only re-notifies them — no history entry, and
+    // ManagedRouter treats the already-active route as a no-op — kept as a
+    // belt-and-braces kick for the initial mount. Without a Router block
+    // there is nothing to mount, and it would only write a `location` the
+    // app never asked for.
+    if (hasRouterBlocks) router.push(router.getCurrentPath());
   }
 
   /**

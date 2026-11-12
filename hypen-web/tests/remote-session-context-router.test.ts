@@ -62,7 +62,11 @@ async function start(config: HypenDurableObjectConfig) {
     }
     return out;
   };
-  return { d, ws, send, state, texts, close: () => d.webSocketClose(ws as unknown as WebSocket, 1000, "") };
+  const router = () => session()._router as {
+    getCurrentPath(): string;
+    serverHistory: string[];
+  };
+  return { d, ws, send, state, texts, router, close: () => d.webSocketClose(ws as unknown as WebSocket, 1000, "") };
 }
 
 const action = (name: string, payload: unknown = null) => ({ type: "dispatchAction", action: name, payload });
@@ -183,6 +187,93 @@ describe("context.router in remote sessions", () => {
     await s.send(action("openAbout"));
     expect(s.state().location).toBe("/about");
     expect(s.texts()).toContain("ABOUT");
+    await s.close();
+  });
+
+  // ── `state.location` that is app data, not a route ──────────────────────
+  // Without a Router block, `location` is only a route when it holds a path
+  // ("/..."). Anything else (a city, an object) is the app's own data: never
+  // pushed to the router, never normalised, never overwritten.
+
+  test("no Router block, location: \"Paris\": state changes leave it alone and never move the router", async () => {
+    const module = app
+      .defineState<{ location: string; temp: number }>({ location: "Paris", temp: 10 })
+      .onAction("tick", ({ state }: any) => { state.temp += 1; })
+      .onAction("city", ({ state, action }: any) => { state.location = action.payload.to; })
+      .ui('Text("@{state.location}:@{state.temp}")');
+    const s = await start({ module, template: module.template ?? "", moduleName: "App" });
+
+    expect(s.state().location).toBe("Paris");
+    expect(s.router().getCurrentPath()).toBe("/");
+    await s.send(action("tick"));
+    await s.send(action("tick"));
+    await s.send(action("city", { to: "London" }));
+    await s.send(action("tick"));
+    expect(s.state().location).toBe("London");
+    expect(s.state().temp).toBe(13);
+    expect(s.router().getCurrentPath()).toBe("/");
+    expect(s.router().serverHistory).toEqual([]);
+    expect(s.texts()).toContain("London:13");
+    await s.close();
+  });
+
+  test("no Router block, object location: left untouched", async () => {
+    const loc = { city: "Paris", lat: 48.85 };
+    const module = app
+      .defineState<{ location: { city: string; lat: number }; n: number }>({ location: loc, n: 0 })
+      .onAction("tick", ({ state }: any) => { state.n += 1; })
+      .onAction("move", ({ state }: any) => { state.location.city = "Lyon"; })
+      .ui('Text("n:@{state.n}")');
+    const s = await start({ module, template: module.template ?? "", moduleName: "App" });
+
+    await s.send(action("tick"));
+    await s.send(action("move"));
+    await s.send(action("tick"));
+    expect(s.state().location).toEqual({ city: "Lyon", lat: 48.85 });
+    expect(s.state().n).toBe(2);
+    expect(s.router().getCurrentPath()).toBe("/");
+    expect(s.router().serverHistory).toEqual([]);
+    await s.close();
+  });
+
+  test("no Router block, non-path location: context.router.push does not clobber it", async () => {
+    const module = app
+      .defineState<{ location: string }>({ location: "Paris" })
+      .onAction("go", ({ context }: any) => { context.router.push("/x"); })
+      .ui('Text("@{state.location}")');
+    const s = await start({ module, template: module.template ?? "", moduleName: "App" });
+
+    await s.send(action("go"));
+    // The router moved (the app asked it to) but `location` is app data.
+    expect(s.router().getCurrentPath()).toBe("/x");
+    expect(s.state().location).toBe("Paris");
+    await s.close();
+  });
+
+  test("no Router block, path location: context.router.push moves state.location", async () => {
+    const module = app
+      .defineState<{ location: string; n: number }>({ location: "/", n: 0 })
+      .onAction("go", ({ context }: any) => { context.router.push("/x"); })
+      .onAction("tick", ({ state }: any) => { state.n += 1; })
+      .ui('Text("at:@{state.location}")');
+    const s = await start({ module, template: module.template ?? "", moduleName: "App" });
+
+    await s.send(action("tick"));
+    expect(s.router().getCurrentPath()).toBe("/");
+    await s.send(action("go"));
+    expect(s.state().location).toBe("/x");
+    expect(s.texts()).toContain("at:/x");
+    await s.close();
+  });
+
+  test("no Router block, @router.push action moves state.location", async () => {
+    const module = app
+      .defineState<{ n: number }>({ n: 0 })
+      .ui('Text("n:@{state.n}")');
+    const s = await start({ module, template: module.template ?? "", moduleName: "App" });
+
+    await s.send(action("router.push", { to: "/y" }));
+    expect(s.state().location).toBe("/y");
     await s.close();
   });
 });
