@@ -146,40 +146,56 @@ pub(crate) struct Inner {
 /// (a window, or hypen-browser's tab / embed grafting), so the node's
 /// image-like sources resolve against THIS server and never reach a
 /// local file (`paint::image::node_source`).
+///
+/// Template patches the expander could not lower (an `Instantiate` for
+/// an unknown template id or with a node-count mismatch, a
+/// `RegisterTemplate` with a malformed skeleton) are DROPPED: they
+/// would otherwise reach a downstream expander — e.g. the window's own,
+/// which also learns templates from local engines — and expand there
+/// into unstamped nodes carrying server-controlled props.
+///
+/// Takes the batch by value: a decoded `Create`'s props `Arc` is then
+/// uniquely owned, so stamping it is an in-place insert, not a deep
+/// copy of the map.
 pub(crate) fn own_patches(
     patches: Vec<Patch>,
     origin: &Arc<str>,
     expander: &mut hypen_engine::TemplateExpander,
 ) -> Vec<Patch> {
     use crate::paint::image::ASSET_ORIGIN_PROP;
-    expander
-        .expand(patches)
-        .into_iter()
-        .filter_map(|patch| match patch {
-            Patch::Create {
-                id,
-                element_type,
-                mut props,
-                semantics,
-            } => {
-                Arc::make_mut(&mut props)
-                    .insert(ASSET_ORIGIN_PROP.to_string(), Value::from(&**origin));
-                Some(Patch::Create {
-                    id,
-                    element_type,
-                    props,
-                    semantics,
-                })
+    // One `Value` per batch; each node still needs its own copy (the
+    // props map owns `String` keys and `Value`s), so a stamp costs the
+    // key and value allocations and nothing else.
+    let stamp = Value::String(origin.to_string());
+    let mut out = expander.expand(patches);
+    out.retain_mut(|patch| match patch {
+        Patch::Create { props, .. } => {
+            let props = Arc::make_mut(props);
+            match props.get_mut(ASSET_ORIGIN_PROP) {
+                // A server-forged stamp: overwrite in place (no key
+                // allocation, original key order kept).
+                Some(v) => *v = stamp.clone(),
+                None => {
+                    props.insert(ASSET_ORIGIN_PROP.to_owned(), stamp.clone());
+                }
             }
-            Patch::SetProp { ref name, .. } | Patch::RemoveProp { ref name, .. }
-                if name == ASSET_ORIGIN_PROP =>
-            {
-                log::warn!("remote: dropping a server write to the reserved {ASSET_ORIGIN_PROP}");
-                None
-            }
-            other => Some(other),
-        })
-        .collect()
+            true
+        }
+        Patch::SetProp { name, .. } | Patch::RemoveProp { name, .. }
+            if name == ASSET_ORIGIN_PROP =>
+        {
+            log::warn!("remote: dropping a server write to the reserved {ASSET_ORIGIN_PROP}");
+            false
+        }
+        Patch::RegisterTemplate { template_id, .. } | Patch::Instantiate { template_id, .. } => {
+            log::debug!(
+                "remote: dropping a template patch the expander could not lower (template '{template_id}')"
+            );
+            false
+        }
+        _ => true,
+    });
+    out
 }
 
 /// How a [`RemoteModule`] connects.
@@ -300,13 +316,16 @@ impl RemoteModule {
 ///
 /// Every batch is first made to carry its owner ([`own_patches`]), so
 /// no consumer ever sees an unstamped node from this connection.
-pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
+///
+/// Takes the decoded batch by value so stamping never deep-copies a
+/// `Create`'s props or clones a `SetProp` value (see [`own_patches`]).
+pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: Vec<Patch>) {
     let (cb, owned) = {
         let mut guard = inner.lock().expect("remote inner poisoned");
         let guard = &mut *guard;
         let owned = match guard.asset_origin.as_ref() {
-            Some(origin) => own_patches(patches.to_vec(), origin, &mut guard.expander),
-            None => patches.to_vec(),
+            Some(origin) => own_patches(patches, origin, &mut guard.expander),
+            None => patches,
         };
         if let Some(cb) = guard.callback.as_ref() {
             (Some(Arc::clone(cb)), owned)
@@ -699,7 +718,7 @@ pub(crate) fn handle_incoming(
         Some("patch") | Some("initialTree") => {
             let patches = decode_patches_lenient(value.get("patches"));
             if !patches.is_empty() {
-                deliver_patches(inner, &patches);
+                deliver_patches(inner, patches);
             }
             return;
         }
@@ -748,7 +767,7 @@ pub(crate) fn handle_incoming(
         }
         RemoteMessage::InitialTree { patches, .. } | RemoteMessage::Patch { patches, .. } => {
             if !patches.is_empty() {
-                deliver_patches(inner, &patches);
+                deliver_patches(inner, patches);
             }
         }
         RemoteMessage::StateUpdate { .. } => {
@@ -865,8 +884,8 @@ mod tests {
     #[test]
     fn deliver_buffers_patches_when_no_callback_is_set() {
         let inner = Arc::new(Mutex::new(Inner::default()));
-        deliver_patches(&inner, &[fake_patch("a", "Text")]);
-        deliver_patches(&inner, &[fake_patch("b", "Text")]);
+        deliver_patches(&inner, vec![fake_patch("a", "Text")]);
+        deliver_patches(&inner, vec![fake_patch("b", "Text")]);
         let g = inner.lock().unwrap();
         assert_eq!(g.pending.len(), 2);
         assert!(g.callback.is_none());
@@ -962,6 +981,142 @@ mod tests {
             .any(|p| matches!(p, Patch::SetProp { name, .. } if name == "src")));
     }
 
+    /// A decoded batch is owned end to end: stamping a `Create` inserts
+    /// into the SAME props map the decoder produced (no deep copy of the
+    /// map per remote node — CLAUDE.md "Arc-Shared Props").
+    #[test]
+    fn stamping_does_not_deep_copy_a_creates_props() {
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let mut props = IndexMap::new();
+        props.insert("src".to_string(), json!("/a.png"));
+        let props = Arc::new(props);
+        let before = Arc::as_ptr(&props);
+        let create = Patch::Create {
+            id: "img".into(),
+            element_type: "Image".into(),
+            props,
+            semantics: None,
+        };
+
+        // Directly through `own_patches`: same allocation, still unique.
+        let origin: Arc<str> = Arc::from("http://a.test");
+        let out = own_patches(
+            vec![create],
+            &origin,
+            &mut hypen_engine::TemplateExpander::new(),
+        );
+        match &out[0] {
+            Patch::Create { props, .. } => {
+                assert_eq!(Arc::as_ptr(props), before, "props map was deep-copied");
+                assert_eq!(Arc::strong_count(props), 1);
+                assert_eq!(props.get(ASSET_ORIGIN_PROP), Some(&json!("http://a.test")));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+
+        // And through the delivery path the socket uses.
+        let mut props = IndexMap::new();
+        props.insert("src".to_string(), json!("/b.png"));
+        let props = Arc::new(props);
+        let before = Arc::as_ptr(&props);
+        let inner = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::clone(&origin)),
+            ..Inner::default()
+        }));
+        let seen: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
+            for patch in p {
+                if let Patch::Create { props, .. } = patch {
+                    sink.lock().unwrap().push(Arc::as_ptr(props) as usize);
+                }
+            }
+        }));
+        deliver_patches(
+            &inner,
+            vec![Patch::Create {
+                id: "img2".into(),
+                element_type: "Image".into(),
+                props,
+                semantics: None,
+            }],
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![before as usize]);
+    }
+
+    /// Template patches the connection's expander can't lower must not
+    /// survive `own_patches`: passed through, an `Instantiate` naming a
+    /// template id some OTHER expander knows (the window's, which learns
+    /// templates from local engines) would expand downstream into
+    /// unstamped nodes with server-chosen props.
+    #[test]
+    fn own_patches_drops_template_patches_it_could_not_lower() {
+        let origin: Arc<str> = Arc::from("http://a.test");
+        let skeleton = json!({
+            "elementType": "Row",
+            "props": {},
+            "children": [{"elementType": "Image", "props": {}, "children": []}],
+        });
+        let instantiate = |template: &str, nodes: &[&str]| Patch::Instantiate {
+            template_id: template.into(),
+            parent_id: "root".into(),
+            before_id: None,
+            nodes: nodes.iter().map(|n| Arc::from(*n)).collect(),
+            subs: vec![(1, "src".to_string(), json!("/etc/passwd"))],
+            semantics: Vec::new(),
+        };
+
+        // The window's expander learned "local_row" from a local engine.
+        let mut window_expander = hypen_engine::TemplateExpander::new();
+        assert!(window_expander.register("local_row", &skeleton));
+
+        let mut remote_expander = hypen_engine::TemplateExpander::new();
+        let out = own_patches(
+            vec![
+                // Unknown to this connection (known to the window).
+                instantiate("local_row", &["x", "x_img"]),
+                // Malformed skeleton: not stored, would pass through.
+                Patch::RegisterTemplate {
+                    template_id: "bad".into(),
+                    root: json!({"props": {}}),
+                },
+                instantiate("bad", &["y"]),
+                // Registered here, but a node-count mismatch.
+                Patch::RegisterTemplate {
+                    template_id: "row".into(),
+                    root: skeleton.clone(),
+                },
+                instantiate("row", &["z"]),
+                fake_patch("kept", "Text"),
+            ],
+            &origin,
+            &mut remote_expander,
+        );
+        assert!(
+            !out.iter().any(|p| matches!(
+                p,
+                Patch::RegisterTemplate { .. } | Patch::Instantiate { .. }
+            )),
+            "{out:?}"
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(origin_of(&out[0]), Some("http://a.test"));
+
+        // Nothing reaches the window's expander to expand unstamped.
+        let lowered = window_expander.expand(out);
+        assert!(lowered.iter().all(|p| match p {
+            Patch::Create { .. } => origin_of(p) == Some("http://a.test"),
+            _ => true,
+        }));
+        assert_eq!(
+            lowered
+                .iter()
+                .filter(|p| matches!(p, Patch::Create { .. }))
+                .count(),
+            1
+        );
+    }
+
     /// The stamp is applied at the delivery choke point, so both the
     /// pre-wiring buffer and a wired callback only ever see owned nodes.
     #[test]
@@ -970,7 +1125,7 @@ mod tests {
             asset_origin: Some(Arc::from("https://b.test")),
             ..Inner::default()
         }));
-        deliver_patches(&inner, &[fake_patch("early", "Image")]);
+        deliver_patches(&inner, vec![fake_patch("early", "Image")]);
         let got: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&got);
         let cb: PatchCallback =
@@ -981,7 +1136,7 @@ mod tests {
             std::mem::take(&mut g.pending)
         };
         cb(&pending);
-        deliver_patches(&inner, &[fake_patch("late", "Image")]);
+        deliver_patches(&inner, vec![fake_patch("late", "Image")]);
         let got = got.lock().unwrap();
         assert_eq!(got.len(), 2);
         assert!(got.iter().all(|p| origin_of(p) == Some("https://b.test")));
@@ -997,7 +1152,10 @@ mod tests {
         });
         inner.lock().unwrap().callback = Some(cb);
 
-        deliver_patches(&inner, &[fake_patch("a", "Text"), fake_patch("b", "Text")]);
+        deliver_patches(
+            &inner,
+            vec![fake_patch("a", "Text"), fake_patch("b", "Text")],
+        );
         assert_eq!(received.lock().unwrap().len(), 2);
         // Buffer stays empty when the callback is live.
         assert!(inner.lock().unwrap().pending.is_empty());
@@ -1017,8 +1175,8 @@ mod tests {
             asset_origin: "http://test.invalid".into(),
         };
 
-        deliver_patches(&inner, &[fake_patch("root_a", "Column")]);
-        deliver_patches(&inner, &[fake_patch("a_text", "Text")]);
+        deliver_patches(&inner, vec![fake_patch("root_a", "Column")]);
+        deliver_patches(&inner, vec![fake_patch("a_text", "Text")]);
 
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);

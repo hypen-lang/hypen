@@ -273,6 +273,8 @@ fn node_errored(node: &Node) -> bool {
 /// Without the feature there is no playback, so the state is `idle` —
 /// except that a poster/probe fetch which came back with an HTTP failure
 /// is exactly the contract's sticky error surface, and reports `error`.
+/// With or without it, a node with no pipeline whose track or poster
+/// its asset origin refuses reports `error` as well.
 pub fn player_state(node: &Node, viewport: Viewport) -> VideoPlayerState {
     #[cfg(test)]
     if let Some(state) = test_state_override(&node.id) {
@@ -313,6 +315,17 @@ pub fn player_state(node: &Node, viewport: Viewport) -> VideoPlayerState {
         {
             return VideoPlayerState::Loading;
         }
+    }
+    // A track or poster the node's asset origin refuses (a remote app
+    // naming `file:` …) can never load: that is the sticky error too
+    // (its `onError` is dispatched once by the media error scan).
+    if crate::layout::resolve_media_source(node, viewport)
+        .0
+        .is_some_and(|s| s.is_refused())
+        || crate::layout::resolve_media_poster_source(node, viewport)
+            .is_some_and(|s| s.is_refused())
+    {
+        return VideoPlayerState::Error;
     }
     // The poster/probe failure registry is the feature-off error source
     // (and, with the feature on, the error source for a player that has

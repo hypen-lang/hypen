@@ -123,6 +123,7 @@ fn muted_opts() -> PlayOpts {
         muted: true,
         looping: false,
         headers: Vec::new(),
+        restrict_sources: false,
     }
 }
 
@@ -138,8 +139,15 @@ fn frames_arrive_from_local_fixture() {
         return;
     };
     let node = "test-video-frames";
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     let frame = poll_until(Duration::from_secs(15), || current_frame(node));
     let frame = frame.expect("a decoded RGBA frame should arrive within the timeout");
     assert_eq!(frame.width, 64);
@@ -168,8 +176,15 @@ fn eos_surfaces_ended_event_and_marks_paused() {
     };
     let node = "test-video-eos";
     let _ = take_events(); // drain stale events from other runs
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     // 30 frames at 30 fps ≈ 1 s of media; allow generous slack for
     // preroll on a loaded CI box.
     let ended = poll_until(Duration::from_secs(20), || {
@@ -203,6 +218,7 @@ fn missing_file_surfaces_error_event() {
     // Either way exactly one Error event must surface.
     let started = start(
         node,
+        "/tmp/__hypen_video_does_not_exist_xyz.mp4",
         "/tmp/__hypen_video_does_not_exist_xyz.mp4",
         0,
         &muted_opts(),
@@ -248,8 +264,15 @@ fn toggle_pauses_and_resumes() {
         return;
     };
     let node = "test-video-toggle";
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     poll_until(Duration::from_secs(15), || current_frame(node)).expect("frame before toggling");
     assert_eq!(toggle(node), Some(false), "first toggle pauses");
     assert!(is_paused(node));
@@ -271,8 +294,15 @@ fn suspend_pauses_playing_pipeline_and_resume_restores_it() {
         return;
     };
     let node = "test-video-suspend";
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     poll_until(Duration::from_secs(15), || current_frame(node)).expect("frame before suspending");
 
     assert!(
@@ -311,8 +341,15 @@ fn suspend_leaves_user_paused_player_paused_across_the_round_trip() {
         return;
     };
     let node = "test-video-suspend-paused";
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     poll_until(Duration::from_secs(15), || current_frame(node)).expect("frame before pausing");
     assert_eq!(toggle(node), Some(false), "user pauses");
 
@@ -345,8 +382,15 @@ fn status_snapshot_reports_position_duration_and_frame_arrival() {
     };
     let node = "test-video-status";
     assert!(status(node).is_none(), "no pipeline, no status");
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     // Before the first frame the coarse buffering signal is `has_frame:
     // false` — that is exactly what `video_v2::player_state` maps to
     // `loading`.
@@ -386,8 +430,15 @@ fn seek_moves_the_reported_position() {
     let node = "test-video-seek";
     assert!(!seek(node, 1.0), "a node with no pipeline cannot seek");
     // Preroll paused so playback can't race the seek past its target.
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), false)
-        .expect("preroll the local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        false,
+    )
+    .expect("preroll the local fixture");
     let duration = poll_until(Duration::from_secs(15), || {
         status(node).map(|s| s.duration).filter(|d| *d > 0.0)
     })
@@ -435,8 +486,15 @@ fn set_playing_drives_explicit_states_and_restarts_after_eos() {
         "no pipeline, no state change"
     );
     let _ = take_events();
-    start(node, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     poll_until(Duration::from_secs(15), || current_frame(node)).expect("a frame");
 
     assert_eq!(set_playing(node, false), Some(false), "explicit pause");
@@ -478,8 +536,15 @@ fn broken_poster_does_not_error_a_live_pipeline() {
     let node_id = "test-video-poster-vs-pipeline";
     let poster = "https://cdn.example.com/__broken_poster_for_live_pipeline.jpg";
     crate::paint::image::test_seed_failure(poster, 404, "Not Found");
-    start(node_id, fixture.to_str().unwrap(), 0, &muted_opts(), true)
-        .expect("start playback of local fixture");
+    start(
+        node_id,
+        fixture.to_str().unwrap(),
+        fixture.to_str().unwrap(),
+        0,
+        &muted_opts(),
+        true,
+    )
+    .expect("start playback of local fixture");
     poll_until(Duration::from_secs(15), || current_frame(node_id))
         .expect("a decoded frame before asserting the player state");
     let node = crate::tree::Node {
@@ -566,7 +631,7 @@ fn resolve_playlist_keeps_index_alignment() {
         3,
         "empty entries must NOT be filtered — indexes align"
     );
-    assert_eq!(list[2], "https://cdn/c.mp4");
+    assert_eq!(list[2].url(), Some("https://cdn/c.mp4"));
 }
 
 #[test]
@@ -651,4 +716,454 @@ fn http_status_extraction_never_fabricates_from_url_path_segments() {
         extract_http_status("https://cdn.example.com/500/x.mp4: server returned 503"),
         Some(503)
     );
+}
+
+// ---------------------------------------------------------------------------
+// Remote-content source restriction (a remote app's HLS / DASH manifest
+// must not be able to name `file://` segments, keys or playlists).
+// ---------------------------------------------------------------------------
+
+fn restricted_opts() -> PlayOpts {
+    PlayOpts {
+        restrict_sources: true,
+        ..muted_opts()
+    }
+}
+
+#[test]
+fn remote_media_uri_policy_allows_only_http_and_data() {
+    use super::gst_pipeline::remote_media_uri_allowed;
+    for ok in [
+        "http://a.test/x.m3u8",
+        "HTTPS://a.test/seg.ts",
+        "data:application/x-mpegurl;base64,AAAA",
+    ] {
+        assert!(remote_media_uri_allowed(ok), "{ok}");
+    }
+    for refused in [
+        "file:///etc/passwd",
+        "FILE:///etc/passwd",
+        "/etc/passwd",
+        "C:\\secret.ts",
+        "smb://host/share/x.ts",
+        "rtsp://cam/stream",
+        "",
+    ] {
+        assert!(!remote_media_uri_allowed(refused), "{refused}");
+    }
+}
+
+/// A node stamped with a remote app's asset origin plays with
+/// `restrict_sources`; a local app's node does not.
+#[test]
+fn play_opts_restrict_a_remote_apps_node_only() {
+    use crate::paint::image::ASSET_ORIGIN_PROP;
+    use serde_json::json;
+    assert!(!resolve_play_opts(&node_with(&[("src", json!("/a.mp4"))])).restrict_sources);
+    assert!(
+        resolve_play_opts(&node_with(&[
+            ("src", json!("/a.mp4")),
+            (ASSET_ORIGIN_PROP, json!("http://a.test")),
+        ]))
+        .restrict_sources
+    );
+}
+
+#[test]
+fn restricted_pipeline_refuses_a_local_top_level_uri() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    let shared = || {
+        Arc::new(PlayerShared {
+            frame: Mutex::new(None),
+            ended: AtomicBool::new(false),
+            errored: AtomicBool::new(false),
+        })
+    };
+    for uri in ["file:///etc/hosts", "/etc/hosts"] {
+        let err = super::gst_pipeline::build(
+            "test-video-restrict-top",
+            uri,
+            &restricted_opts(),
+            shared(),
+        )
+        .expect_err("a restricted pipeline must not open a local file");
+        assert!(err.contains("refusing"), "{err}");
+    }
+}
+
+/// The HLS / DASH case: playbin with an allowed manifest URL, whose
+/// demuxer then adds a source element for a segment URI the manifest
+/// names. Simulated by adding a bin holding a `filesrc` below playbin
+/// (exactly how `adaptivedemux` nests its fragment sources): in a
+/// restricted pipeline it is locked in `NULL` (never opens the file)
+/// and the node gets a `resource/NotAuthorized` error; an allowed
+/// `data:` source and an unrestricted pipeline's `filesrc` are left
+/// alone.
+#[test]
+fn restricted_pipeline_refuses_a_nested_local_segment_source() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    let shared = || {
+        Arc::new(PlayerShared {
+            frame: Mutex::new(None),
+            ended: AtomicBool::new(false),
+            errored: AtomicBool::new(false),
+        })
+    };
+    let secret = std::env::temp_dir().join(format!("hypen_secret_{}.ts", std::process::id()));
+    std::fs::write(&secret, b"secret").unwrap();
+    let file_uri = gst::glib::filename_to_uri(&secret, None)
+        .unwrap()
+        .to_string();
+
+    // A demuxer-style nested bin: [bin [filesrc]] or [bin [dataurisrc]].
+    let nested = |factory: &str, uri: &str| {
+        let bin = gst::Bin::new();
+        let src = gst::Element::make_from_uri(gst::URIType::Src, uri, None)
+            .unwrap_or_else(|e| panic!("{factory} for {uri}: {e}"));
+        assert_eq!(src.factory().unwrap().name(), factory);
+        bin.add(&src).unwrap();
+        (bin, src)
+    };
+
+    let _ = take_events();
+    let node = "test-video-restrict-nested";
+    let playbin = match super::gst_pipeline::build(
+        node,
+        "http://127.0.0.1:9/manifest.m3u8",
+        &restricted_opts(),
+        shared(),
+    ) {
+        Ok(p) => p,
+        Err(e) if e.contains("playbin unavailable") => {
+            eprintln!("skipping: {e}");
+            return;
+        }
+        Err(e) => panic!("{e}"),
+    };
+    let playbin = playbin.downcast::<gst::Bin>().expect("playbin is a bin");
+
+    let (data_bin, data_src) = nested("dataurisrc", "data:,hello");
+    playbin.add(&data_bin).unwrap();
+    assert!(!data_src.is_locked_state(), "an allowed data: source runs");
+
+    let (file_bin, file_src) = nested("filesrc", &file_uri);
+    playbin.add(&file_bin).unwrap();
+    assert!(
+        file_src.is_locked_state(),
+        "a file: segment source in a remote pipeline must never leave NULL"
+    );
+    let err = take_events().into_iter().find_map(|e| match e.kind {
+        MediaEventKind::Error { code, .. } if e.node_id == node => Some(code),
+        _ => None,
+    });
+    assert_eq!(err.as_deref(), Some("resource/NotAuthorized"));
+    // Even when the bin is driven, the locked source stays put.
+    let _ = file_bin.set_state(gst::State::Paused);
+    assert_eq!(file_src.current_state(), gst::State::Null);
+    let _ = file_bin.set_state(gst::State::Null);
+    let _ = playbin.set_state(gst::State::Null);
+
+    // A local app's pipeline is not restricted: same nested filesrc runs.
+    let local = super::gst_pipeline::build(
+        "test-video-unrestricted-nested",
+        "http://127.0.0.1:9/manifest.m3u8",
+        &muted_opts(),
+        shared(),
+    )
+    .unwrap()
+    .downcast::<gst::Bin>()
+    .unwrap();
+    let (local_bin, local_src) = nested("filesrc", &file_uri);
+    local.add(&local_bin).unwrap();
+    assert!(!local_src.is_locked_state());
+    let _ = local.set_state(gst::State::Null);
+    let _ = std::fs::remove_file(&secret);
+}
+
+/// The legacy `adaptivedemux` demuxers fetch playlists and keys through
+/// a downloader no signal can see, so a restricted pipeline refuses
+/// them outright (decodebin never plugs them — see the end-to-end test
+/// below — and one that got in anyway is locked and errored).
+/// Skipped where gst-plugins-bad isn't installed.
+#[test]
+fn restricted_pipeline_refuses_legacy_adaptive_demuxers() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    let pipeline: gst::Element = gst::Pipeline::new().upcast();
+    let mut ran = false;
+    for name in ["hlsdemux", "dashdemux", "mssdemux"] {
+        let Ok(demux) = gst::ElementFactory::make(name).build() else {
+            continue;
+        };
+        ran = true;
+        assert!(
+            !super::gst_pipeline::guard_remote_element(&pipeline, &demux),
+            "{name}"
+        );
+        assert!(demux.is_locked_state(), "{name}");
+    }
+    // Their adaptivedemux2 successors are fine.
+    for name in ["hlsdemux2", "dashdemux2"] {
+        if let Ok(demux) = gst::ElementFactory::make(name).build() {
+            assert!(super::gst_pipeline::guard_remote_element(&pipeline, &demux));
+        }
+    }
+    if !ran {
+        eprintln!("skipping: no legacy adaptive demuxer installed (gst-plugins-bad)");
+    }
+}
+
+/// Encode 30 frames into an MPEG-TS segment at `path` (an HLS segment).
+fn build_ts_segment(path: &std::path::Path) -> bool {
+    use gstreamer as gst;
+    let desc = format!(
+        "videotestsrc num-buffers=30 ! video/x-raw,width=64,height=48,framerate=30/1 \
+         ! videoconvert ! openh264enc ! h264parse ! mpegtsmux ! filesink location={}",
+        path.display()
+    );
+    let Ok(pipeline) = gst::parse::launch(&desc) else {
+        return false;
+    };
+    if pipeline.set_state(gst::State::Playing).is_err() {
+        let _ = pipeline.set_state(gst::State::Null);
+        return false;
+    }
+    let msg = pipeline.bus().expect("bus").timed_pop_filtered(
+        gst::ClockTime::from_seconds(20),
+        &[gst::MessageType::Eos, gst::MessageType::Error],
+    );
+    let ok = matches!(
+        msg.as_ref().map(|m| m.view()),
+        Some(gst::MessageView::Eos(_))
+    );
+    let _ = pipeline.set_state(gst::State::Null);
+    ok && path.exists()
+}
+
+/// Serve `files` (`(path, content type, body)`) over HTTP/1.1 on an
+/// ephemeral localhost port until the process exits; 404 otherwise.
+fn serve(files: Vec<(String, &'static str, Vec<u8>)>) -> u16 {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut request_line = String::new();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let _ = reader.read_line(&mut request_line);
+            // Drain the headers.
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                    break;
+                }
+            }
+            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+            let path = path.split('?').next().unwrap_or(path);
+            match files.iter().find(|(p, _, _)| p == path) {
+                Some((_, mime, body)) => {
+                    let _ = write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
+                         Connection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(body);
+                }
+                None => {
+                    let _ = stream.write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    );
+                }
+            }
+        }
+    });
+    port
+}
+
+fn serve_manifest(body: String) -> u16 {
+    serve(vec![(
+        "/live.m3u8".to_string(),
+        "application/vnd.apple.mpegurl",
+        body.into_bytes(),
+    )])
+}
+
+/// End to end, with real demuxers: an HLS manifest served over HTTP
+/// whose only segment is a `file://` URI. With the legacy `hlsdemux`
+/// a local app's pipeline really plays the local segment (the attack
+/// path); a remote app's (restricted, `playbin3`) pipeline must produce
+/// no frame. With `hlsdemux2` (the default) the demuxer refuses the
+/// `file://` URI itself and the stream stalls; with only the legacy
+/// demuxer, it is starved and refused (`resource/NotAuthorized`).
+/// Exercises whichever HLS demuxer the registry ranks first; force the
+/// legacy one with `GST_PLUGIN_FEATURE_RANK=hlsdemux2:NONE` (rank
+/// changes made at runtime don't reach decodebin's factory cache).
+/// Skipped without souphttpsrc / an HLS demuxer / an H.264 encoder.
+#[test]
+fn remote_hls_manifest_cannot_reach_a_local_segment() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    let registry = gst::Registry::get();
+    let have = |name: &str| {
+        registry
+            .find_feature(name, gst::ElementFactory::static_type())
+            .filter(|f| f.rank() > gst::Rank::NONE)
+    };
+    if have("souphttpsrc").is_none() || (have("hlsdemux").is_none() && have("hlsdemux2").is_none())
+    {
+        eprintln!("skipping: souphttpsrc or an HLS demuxer is not installed");
+        return;
+    }
+    let segment = std::env::temp_dir().join(format!("hypen_local_seg_{}.ts", std::process::id()));
+    if !build_ts_segment(&segment) {
+        eprintln!("skipping: cannot encode an MPEG-TS segment here");
+        return;
+    }
+    let seg_uri = gst::glib::filename_to_uri(&segment, None).unwrap();
+    let port = serve_manifest(format!(
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+         #EXTINF:1.0,\n{seg_uri}\n#EXT-X-ENDLIST\n"
+    ));
+    let manifest = format!("http://127.0.0.1:{port}/live.m3u8");
+    let run = |node: &str, opts: &PlayOpts| {
+        let _ = take_events();
+        let started = start(node, &manifest, &manifest, 0, opts, true);
+        let frame = started
+            .as_ref()
+            .ok()
+            .and_then(|_| poll_until(Duration::from_secs(8), || current_frame(node)));
+        let events = take_events();
+        release(node);
+        let err = events.into_iter().find_map(|e| match e.kind {
+            MediaEventKind::Error { code, .. } if e.node_id == node => Some(code),
+            _ => None,
+        });
+        (frame.is_some(), err)
+    };
+    let (local_frame, local_err) = run("test-hls-local", &muted_opts());
+    let (remote_frame, remote_err) = run("test-hls-remote", &restricted_opts());
+    let _ = std::fs::remove_file(&segment);
+    eprintln!(
+        "hls: legacy hlsdemux ranked {:?}, hlsdemux2 {:?}; local: frame={local_frame} \
+         err={local_err:?}; remote: frame={remote_frame} err={remote_err:?}",
+        have("hlsdemux").map(|f| f.rank()),
+        have("hlsdemux2").map(|f| f.rank()),
+    );
+    assert!(
+        !remote_frame,
+        "a remote app's HLS manifest played a file:// segment"
+    );
+    if let Some(code) = remote_err.as_deref() {
+        // Refused by the guard: the legacy demuxer (never plugged under
+        // playbin → missing plugin; starved under playbin3) or a
+        // `file://` source. `hlsdemux2` refuses the URI itself and
+        // stalls without an error.
+        assert!(
+            matches!(code, "core/MissingPlugin" | "resource/NotAuthorized"),
+            "{code}"
+        );
+    }
+}
+
+/// A remote app's media still plays: progressive MP4 and an HLS stream
+/// whose segment is on the server, both over HTTP, through the
+/// restricted (`playbin3`) pipeline — HLS via the HTTP-only
+/// `hlsdemux2`. Skipped without souphttpsrc / an encoder / hlsdemux2.
+#[test]
+fn restricted_pipeline_plays_http_mp4_and_hls() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    let registry = gst::Registry::get();
+    let have = |name: &str| {
+        registry
+            .find_feature(name, gst::ElementFactory::static_type())
+            .is_some_and(|f| f.rank() > gst::Rank::NONE)
+    };
+    if !have("souphttpsrc") {
+        eprintln!("skipping: souphttpsrc not installed");
+        return;
+    }
+    let Some(fixture) = fixture_path() else {
+        eprintln!("skipping: no usable MP4 encoder to build the fixture");
+        return;
+    };
+    let mut files = vec![(
+        "/clip.mp4".to_string(),
+        "video/mp4",
+        std::fs::read(&fixture).unwrap(),
+    )];
+    let segment = std::env::temp_dir().join(format!("hypen_http_seg_{}.ts", std::process::id()));
+    let hls = have("hlsdemux2") && build_ts_segment(&segment);
+    if hls {
+        files.push((
+            "/live.m3u8".to_string(),
+            "application/vnd.apple.mpegurl",
+            b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+              #EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
+                .to_vec(),
+        ));
+        files.push((
+            "/seg0.ts".to_string(),
+            "video/mp2t",
+            std::fs::read(&segment).unwrap(),
+        ));
+        let _ = std::fs::remove_file(&segment);
+    }
+    let port = serve(files);
+    let mut cases = vec![(
+        "test-remote-mp4",
+        format!("http://127.0.0.1:{port}/clip.mp4"),
+    )];
+    if hls {
+        cases.push((
+            "test-remote-hls",
+            format!("http://127.0.0.1:{port}/live.m3u8"),
+        ));
+    } else {
+        eprintln!("skipping the HLS case: hlsdemux2 / a TS segment unavailable");
+    }
+    for (node, url) in cases {
+        let _ = take_events();
+        start(node, &url, &url, 0, &restricted_opts(), true)
+            .unwrap_or_else(|e| panic!("{node}: {e}"));
+        let frame = poll_until(Duration::from_secs(15), || current_frame(node));
+        let errors: Vec<String> = take_events()
+            .into_iter()
+            .filter_map(|e| match e.kind {
+                MediaEventKind::Error { code, message, .. } if e.node_id == node => {
+                    Some(format!("{code}: {message}"))
+                }
+                _ => None,
+            })
+            .collect();
+        release(node);
+        assert!(
+            frame.is_some(),
+            "{node}: no frame from {url}; errors: {errors:?}"
+        );
+        assert!(errors.is_empty(), "{node}: {errors:?}");
+    }
 }

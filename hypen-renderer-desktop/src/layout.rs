@@ -758,9 +758,9 @@ pub enum ItemKind {
     /// the painter renders the `poster` bitmap (objectFit cover,
     /// loaded through the shared image pipeline) — or a dark
     /// placeholder when there's no poster / the poster failed — and
-    /// overlays a centered play glyph. `src` is the resolved stream
-    /// URL of the current track (playlist-aware); carried for event
-    /// payloads and the a11y label, never fetched as media.
+    /// overlays a centered play glyph. `src` is the current track's
+    /// source AS AUTHORED (playlist-aware); carried for event payloads
+    /// and the a11y label, never fetched as media.
     Video {
         poster: Option<String>,
         src: Option<String>,
@@ -5876,29 +5876,107 @@ fn dim_to_dimension(d: Dim, scale: f32) -> Dimension {
     }
 }
 
-/// Resolve a Video node's `poster` prop. Empty / whitespace strings
-/// collapse to `None` (a record with no poster serialises to `""`).
-/// Resolved under the node's own asset origin
-/// ([`crate::paint::image::node_source`]); a refused source is `None`.
-pub(crate) fn resolve_media_poster(node: &crate::tree::Node, viewport: Viewport) -> Option<String> {
+/// One media source a Video / Audio node names — its `src`, a
+/// `playlist` entry or its `poster` — both as AUTHORED (what the
+/// contract's event payloads report: `onPlay` / `onEnded` / `onError`
+/// carry the app's own `src`, never a renderer-resolved URL) and as
+/// resolved for loading under the node's own asset origin
+/// ([`crate::paint::image::node_source`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum MediaSource {
+    /// Loadable: `url` is what the image loader / media pipeline
+    /// fetches (equal to `authored` for a local app's node).
+    Allowed { authored: String, url: String },
+    /// Refused under the node's asset origin (a remote app naming
+    /// `file:`, a drive path, …). Never loaded; surfaced to the app as
+    /// an `onError` (see [`REFUSED_MEDIA_ERROR_CODE`]).
+    Refused { authored: String },
+}
+
+/// `onError.code` for a media source the node's asset origin refuses —
+/// the same code GStreamer's own `NotAuthorized` resource errors map to.
+pub(crate) const REFUSED_MEDIA_ERROR_CODE: &str = "resource/NotAuthorized";
+
+impl MediaSource {
+    /// Resolve the authored source `raw` under `node`'s asset origin.
+    pub(crate) fn resolve(node: &crate::tree::Node, raw: &str) -> Self {
+        match crate::paint::image::node_source(node, raw) {
+            Some(url) => MediaSource::Allowed {
+                url: url.into_owned(),
+                authored: raw.to_owned(),
+            },
+            None => MediaSource::Refused {
+                authored: raw.to_owned(),
+            },
+        }
+    }
+
+    /// The source as the app wrote it (trimmed) — for event payloads.
+    pub(crate) fn authored(&self) -> &str {
+        match self {
+            MediaSource::Allowed { authored, .. } | MediaSource::Refused { authored } => authored,
+        }
+    }
+
+    /// What to load, or `None` when refused.
+    #[cfg_attr(not(feature = "video"), allow(dead_code))] // used by the `video` playback paths
+    pub(crate) fn url(&self) -> Option<&str> {
+        match self {
+            MediaSource::Allowed { url, .. } => Some(url),
+            MediaSource::Refused { .. } => None,
+        }
+    }
+
+    pub(crate) fn into_url(self) -> Option<String> {
+        match self {
+            MediaSource::Allowed { url, .. } => Some(url),
+            MediaSource::Refused { .. } => None,
+        }
+    }
+
+    pub(crate) fn is_refused(&self) -> bool {
+        matches!(self, MediaSource::Refused { .. })
+    }
+
+    /// The `message` of the `onError` a refused source dispatches.
+    pub(crate) fn refused_message(&self) -> String {
+        format!(
+            "media source refused: {} is not reachable from this app",
+            self.authored()
+        )
+    }
+}
+
+/// A Video node's `poster` as a [`MediaSource`]. Empty / whitespace
+/// strings collapse to `None` (a record with no poster serialises to
+/// `""`).
+pub(crate) fn resolve_media_poster_source(
+    node: &crate::tree::Node,
+    viewport: Viewport,
+) -> Option<MediaSource> {
     crate::style::prop_str_at(node, "poster", viewport)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .and_then(|s| crate::paint::image::node_source(node, s))
-        .map(std::borrow::Cow::into_owned)
+        .map(|s| MediaSource::resolve(node, s))
 }
 
-/// Resolve a Video node's current track: `(src, playlist index)`.
+/// Resolve a Video node's `poster` prop for loading: the URL of
+/// [`resolve_media_poster_source`], `None` when absent or refused.
+pub(crate) fn resolve_media_poster(node: &crate::tree::Node, viewport: Viewport) -> Option<String> {
+    resolve_media_poster_source(node, viewport).and_then(MediaSource::into_url)
+}
+
+/// Resolve a Video node's current track: `(source, playlist index)`.
 /// Follows the cross-platform contract (`hypen-docs/content/docs/guide/components.mdx`):
 /// a non-empty `playlist` supersedes `src` / `source` / positional
 /// `0`, starting at `startIndex` clamped to the valid range. `index`
-/// is `0` for single-src playback. The source is resolved under the
-/// node's own asset origin ([`crate::paint::image::node_source`]); a
-/// refused one is `None`.
-pub(crate) fn resolve_media_src(
+/// is `0` for single-src playback. `None` when the node names no
+/// (non-empty) source; a source its asset origin refuses is
+/// [`MediaSource::Refused`].
+pub(crate) fn resolve_media_source(
     node: &crate::tree::Node,
     viewport: Viewport,
-) -> (Option<String>, u64) {
+) -> (Option<MediaSource>, u64) {
     let playlist = node
         .props
         .get("playlist")
@@ -5915,8 +5993,7 @@ pub(crate) fn resolve_media_src(
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .and_then(|s| crate::paint::image::node_source(node, s))
-                .map(std::borrow::Cow::into_owned);
+                .map(|s| MediaSource::resolve(node, s));
             return (src, idx as u64);
         }
     }
@@ -5925,9 +6002,70 @@ pub(crate) fn resolve_media_src(
         .or_else(|| node.props.get("0").and_then(|v| v.as_str()))
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .and_then(|s| crate::paint::image::node_source(node, s))
-        .map(std::borrow::Cow::into_owned);
+        .map(|s| MediaSource::resolve(node, s));
     (src, 0)
+}
+
+/// [`resolve_media_source`] for loading: the current track's URL
+/// (`None` when absent or refused) and its playlist index.
+#[cfg_attr(not(feature = "video"), allow(dead_code))] // used by the `video` playback paths
+pub(crate) fn resolve_media_src(
+    node: &crate::tree::Node,
+    viewport: Viewport,
+) -> (Option<String>, u64) {
+    let (src, index) = resolve_media_source(node, viewport);
+    (src.and_then(MediaSource::into_url), index)
+}
+
+/// The node's `playlist` prop as ordered [`MediaSource`]s. Entries are
+/// trimmed but NOT filtered — indexes must stay aligned with the
+/// authored array (contract payloads carry the index); a non-string
+/// entry reads as `""`. A refused entry is [`MediaSource::Refused`],
+/// never an empty URL a player could be started on.
+#[cfg_attr(not(feature = "video"), allow(dead_code))] // used by the `video` playback paths
+pub(crate) fn resolve_media_playlist(node: &crate::tree::Node) -> Vec<MediaSource> {
+    node.props
+        .get("playlist")
+        .or_else(|| node.props.get("playlist.0"))
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|v| MediaSource::resolve(node, v.as_str().map(str::trim).unwrap_or_default()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The track a playlist advances to after track `current` ends:
+/// the first entry after it (wrapping to the start under `wraps`, the
+/// node's `loop`) that its asset origin allows. Refused entries on the
+/// way are SKIPPED and returned (`(index, source)`, in order) so the
+/// caller can report each through `onError`. `None` for the next track
+/// when the queue is done.
+#[cfg_attr(not(feature = "video"), allow(dead_code))] // used by the `video` playback paths
+pub(crate) fn next_playlist_track(
+    playlist: &[MediaSource],
+    current: u64,
+    wraps: bool,
+) -> (Vec<(u64, &MediaSource)>, Option<(u64, &MediaSource)>) {
+    let len = playlist.len() as u64;
+    let mut skipped = Vec::new();
+    for step in 1..=len {
+        let mut n = current + step;
+        if n >= len {
+            if !wraps {
+                break;
+            }
+            n %= len;
+        }
+        let entry = &playlist[n as usize];
+        if entry.is_refused() {
+            skipped.push((n, entry));
+            continue;
+        }
+        return (skipped, Some((n, entry)));
+    }
+    (skipped, None)
 }
 
 /// Click behaviour for a Video surface: when an `onPlay` action is
@@ -7580,7 +7718,16 @@ fn emit_items(
                 }
                 et if MEDIA_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) => {
                     let poster = resolve_media_poster(node, viewport);
-                    let (src, index) = resolve_media_src(node, viewport);
+                    // `src` is reported, never loaded, from here (event
+                    // payloads, a11y label): the app's authored value.
+                    let (src, index) = resolve_media_source(node, viewport);
+                    // A refused track never plays, so a click must not
+                    // announce `onPlay` for it (its `onError` went out).
+                    let refused = src.as_ref().is_some_and(MediaSource::is_refused);
+                    let src = src.map(|s| match s {
+                        MediaSource::Allowed { authored, .. }
+                        | MediaSource::Refused { authored } => authored,
+                    });
                     let state = crate::video_v2::player_state(node, viewport);
                     let slots = crate::video_v2::slot_presence(tree, rid);
                     // Click routing: an explicit `.onClick(...)` (already
@@ -7592,8 +7739,9 @@ fn emit_items(
                     // layout chrome and button-ish semantics.
                     let (action, action_payload) = if action.is_some() {
                         (action, action_payload.clone())
-                    } else if let Some((play, payload)) =
-                        resolve_video_play_action(node, src.as_deref(), index)
+                    } else if let Some((play, payload)) = (!refused)
+                        .then(|| resolve_video_play_action(node, src.as_deref(), index))
+                        .flatten()
                     {
                         (Some(play), Some(payload))
                     } else {

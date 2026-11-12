@@ -8,6 +8,12 @@
 //! player's shared slot and wakes the winit loop. The bus sync
 //! handler turns EOS / errors into [`MediaEventKind`] events (or a
 //! silent seek-to-zero for single-src looping).
+//!
+//! A remote app's media ([`PlayOpts::restrict_sources`], or any media
+//! while the window is in a remote asset scope) plays in a restricted
+//! `playbin3`: only `http(s)` / `data:` sources, including every source
+//! the stream itself names (HLS / DASH segments, playlists, keys) — see
+//! [`guard_remote_element`] and `LEGACY_ADAPTIVE_DEMUXERS`.
 
 use super::{MediaEventKind, PlayOpts, PlayerShared, VideoFrame};
 use gstreamer as gst;
@@ -47,6 +53,139 @@ fn to_uri(src: &str) -> Result<String, String> {
         .map_err(|e| format!("cannot build file URI for {src}: {e}"))
 }
 
+/// The only URI schemes a restricted (remote-content) pipeline may
+/// open: `http`, `https` and `data`.
+pub(crate) fn remote_media_uri_allowed(uri: &str) -> bool {
+    let Some((scheme, _)) = uri.trim().split_once(':') else {
+        return false;
+    };
+    ["http", "https", "data"]
+        .iter()
+        .any(|s| scheme.eq_ignore_ascii_case(s))
+}
+
+/// Adaptive-streaming demuxers of the LEGACY `adaptivedemux` family
+/// (gst-plugins-bad). Besides the per-fragment source elements they add
+/// (which [`guard_remote_element`] vets), they fetch variant playlists,
+/// manifest updates and encryption keys through an internal
+/// `GstUriDownloader` whose source never joins any bin — no signal
+/// reaches it, so a remote manifest could make it read a `file://`
+/// URI (verified: with `playbin` an HTTP manifest naming a `file://`
+/// segment or `EXT-X-KEY` URI reads the local file). Their
+/// `adaptivedemux2` successors (`hlsdemux2`, `dashdemux2`, `mssdemux2`,
+/// gst-plugins-good) download over HTTP only — but `playbin`'s
+/// decodebin never plugs them; only `playbin3` (urisourcebin) does. So a
+/// restricted pipeline is a `playbin3` (HLS / DASH keep working, through
+/// the HTTP-only demuxers), never plugs a legacy demuxer under `playbin`
+/// ([`skip_legacy_demuxers`]), and starves one that gets in anyway
+/// ([`guard_remote_element`]).
+const LEGACY_ADAPTIVE_DEMUXERS: &[&str] = &["hlsdemux", "dashdemux", "mssdemux"];
+
+fn is_legacy_adaptive_demuxer(factory: &gst::ElementFactory) -> bool {
+    LEGACY_ADAPTIVE_DEMUXERS.contains(&factory.name().as_str())
+}
+
+/// Make a restricted pipeline's (uri)decodebin never pick a legacy
+/// adaptive demuxer: its `autoplug-select` answers `skip` for them (and
+/// `try` — the default, which lets the remaining handlers decide — for
+/// everything else). Decoding then falls back to the next candidate
+/// (`hlsdemux2` …) or fails with a missing-plugin error.
+fn skip_legacy_demuxers(decodebin: &gst::Element) {
+    if !matches!(
+        decodebin.factory().map(|f| f.name().to_string()).as_deref(),
+        Some("uridecodebin" | "decodebin")
+    ) {
+        return;
+    }
+    let Some(result_type) = gst::glib::Type::from_name("GstAutoplugSelectResult") else {
+        return;
+    };
+    // `glib::Value` isn't `Send`; the handler runs on streaming threads,
+    // so it builds its answer from the (thread-safe) GType each time.
+    decodebin.connect("autoplug-select", false, move |args| {
+        let legacy = args
+            .get(3)
+            .and_then(|v| v.get::<gst::ElementFactory>().ok())
+            .is_some_and(|f| is_legacy_adaptive_demuxer(&f));
+        if legacy {
+            log::warn!("video: not plugging a legacy adaptive demuxer in a remote app's pipeline");
+        }
+        gst::glib::EnumClass::with_type(result_type)?.to_value_by_nick(if legacy {
+            "skip"
+        } else {
+            "try"
+        })
+    });
+}
+
+/// Vet one element joining a restricted pipeline (playbin's
+/// `element-setup` / `source-setup`, which fire synchronously for every
+/// element added anywhere below playbin — including the per-fragment
+/// sources an HLS / DASH demuxer creates for the segment URIs its
+/// manifest names). A URI source for anything but `http(s)` / `data:`,
+/// or a legacy adaptive demuxer that got plugged anyway, is refused:
+/// its state is locked (a fragment source's bin is brought up with
+/// `sync_state_with_parent`, so a locked `filesrc` never opens its
+/// file) and a `resource/NotAuthorized` error is posted STRAIGHT on
+/// `pipeline` — demuxers and decodebin swallow their children's errors
+/// (fragment retries, autoplug fallbacks) — so the bus handler turns it
+/// into the node's `onError` and the window tears the pipeline down.
+/// Returns `false` when the element was refused.
+pub(crate) fn guard_remote_element(pipeline: &gst::Element, element: &gst::Element) -> bool {
+    let factory = element.factory();
+    let refusal = if factory.as_ref().is_some_and(is_legacy_adaptive_demuxer) {
+        Some(format!(
+            "{} (its internal downloader can read local files)",
+            factory
+                .as_ref()
+                .map(|f| f.name().to_string())
+                .unwrap_or_default()
+        ))
+    } else {
+        match element.dynamic_cast_ref::<gst::URIHandler>() {
+            Some(handler) if handler.uri_type() == gst::URIType::Src => {
+                let uri = handler.uri().map(|u| u.to_string());
+                match uri {
+                    Some(uri) if remote_media_uri_allowed(&uri) => None,
+                    other => Some(format!("source {}", other.as_deref().unwrap_or("<no uri>"))),
+                }
+            }
+            _ => {
+                skip_legacy_demuxers(element);
+                None
+            }
+        }
+    };
+    let Some(what) = refusal else {
+        return true;
+    };
+    log::warn!("video: refusing {what} in a remote app's media pipeline");
+    element.set_locked_state(true);
+    // A demuxer is brought up directly by its parent (lock ignored):
+    // starve it instead — it never sees its manifest, so it never
+    // fetches anything the manifest names. (At EOS the legacy demuxer
+    // then logs a harmless GStreamer-CRITICAL about its missing
+    // playlist; the pipeline is torn down on the error below anyway.)
+    if factory.as_ref().is_some_and(is_legacy_adaptive_demuxer) {
+        for pad in element.sink_pads() {
+            pad.add_probe(
+                gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
+                |_, _| gst::PadProbeReturn::Drop,
+            );
+        }
+    }
+    let _ = pipeline.post_message(
+        gst::message::Error::builder(
+            gst::ResourceError::NotAuthorized,
+            "refusing a non-HTTP media source from a remote app",
+        )
+        .src(element)
+        .debug(&what)
+        .build(),
+    );
+    false
+}
+
 /// Ensure GStreamer is initialised (idempotent, thread-safe).
 pub(crate) fn ensure_init() -> Result<(), String> {
     gst::init().map_err(|e| format!("GStreamer init failed: {e}"))
@@ -54,7 +193,9 @@ pub(crate) fn ensure_init() -> Result<(), String> {
 
 /// Build a `playbin` pipeline for `url`, wired to `shared`. The
 /// returned element is in the `Null` state — the caller sets it to
-/// `Paused` / `Playing`.
+/// `Paused` / `Playing`. A restricted pipeline (remote content, see
+/// [`PlayOpts::restrict_sources`]) is a `playbin3` with every element
+/// vetted by [`guard_remote_element`]; otherwise a `playbin`.
 pub(crate) fn build(
     node_id: &str,
     url: &str,
@@ -63,9 +204,23 @@ pub(crate) fn build(
 ) -> Result<gst::Element, String> {
     ensure_init()?;
     let uri = to_uri(url)?;
+    // A remote app's media (a stamped node, or any node while the
+    // window is in a remote asset scope) may only reach http(s) / data:
+    // — the top-level URI here, and everything the stream itself names
+    // via the element guard below.
+    let restricted = opts.restrict_sources || crate::paint::image::remote_origin().is_some();
+    if restricted && !remote_media_uri_allowed(&uri) {
+        return Err(format!(
+            "refusing non-HTTP media source from a remote app: {url}"
+        ));
+    }
 
-    let playbin = gst::ElementFactory::make("playbin")
-        .build()
+    // playbin3 where available for remote content: only it plugs the
+    // HTTP-only adaptive demuxers (see `LEGACY_ADAPTIVE_DEMUXERS`).
+    let playbin = restricted
+        .then(|| gst::ElementFactory::make("playbin3").build().ok())
+        .flatten()
+        .map_or_else(|| gst::ElementFactory::make("playbin").build(), Ok)
         .map_err(|e| format!("playbin unavailable (is gstreamer-plugins-base installed?): {e}"))?;
     playbin.set_property("uri", &uri);
 
@@ -126,6 +281,25 @@ pub(crate) fn build(
         playbin.set_property("audio-sink", &sink);
     }
     playbin.set_property("mute", opts.muted);
+
+    if restricted {
+        // `element-setup` fires (synchronously, as each is added) for
+        // every element anywhere below playbin, before it changes state:
+        // the main source, the demuxers decodebin plugs, and the
+        // fragment sources an adaptive demuxer creates for the segment
+        // URIs its manifest names. `source-setup` is belt and braces
+        // for the main source.
+        for signal in ["element-setup", "source-setup"] {
+            playbin.connect(signal, false, |args| {
+                if let (Ok(pipeline), Ok(element)) =
+                    (args[0].get::<gst::Element>(), args[1].get::<gst::Element>())
+                {
+                    guard_remote_element(&pipeline, &element);
+                }
+                None
+            });
+        }
+    }
 
     // Extra HTTP request headers via playbin's source-setup signal.
     // souphttpsrc exposes them as a GstStructure-valued

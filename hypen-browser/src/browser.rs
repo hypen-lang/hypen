@@ -90,12 +90,12 @@ struct Tab {
     /// linked into the visible tree. Flipped by `attach_tab` /
     /// `detach_tab`.
     attached: bool,
-    /// Lowers `RegisterTemplate`/`Instantiate` from the tab's server
-    /// into the plain `Create`+`Insert` runs the id-rewriting and the
-    /// desktop renderer consume. Remote servers should expand before
-    /// streaming, but a raw host may not — one expander per tab
-    /// (per session) makes the merged stream template-free either way.
-    expander: hypen_engine::TemplateExpander,
+    // No per-tab `TemplateExpander` / media-URL rewriting: the tab's
+    // `RemoteModule` already delivers a template-free batch whose every
+    // `Create` carries its server's asset origin
+    // (`hypen_renderer_desktop::paint::image::ASSET_ORIGIN_PROP`), and
+    // the renderer resolves each node's `src` / `poster` / `url(...)`
+    // against that origin (`paint::image::node_source`).
 }
 
 fn track_tab_roots(tab: &mut Tab, patches: &[Patch], viewport: &str) {
@@ -409,7 +409,6 @@ impl BrowserModule {
             // the viewport — no Detach needed for incoming root
             // inserts.
             attached: true,
-            expander: hypen_engine::TemplateExpander::new(),
         };
 
         log::info!("hypen-browser: opening {url} in {tab_id}");
@@ -1274,22 +1273,15 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
 /// known (worker fired after a close, for instance).
 fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch]) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
-    // Lower template patches first so everything downstream — the
-    // pre-viewport buffer included — carries the plain wire.
-    let patches: Vec<Patch> = match g.tabs.get_mut(tab_id) {
-        Some(t) => t.expander.expand(patches.to_vec()),
+    // The batch arrives from the tab's `RemoteModule` already lowered
+    // (no template patches) and owner-stamped, so root-relative media
+    // URLs resolve per node against the tab's server in the renderer —
+    // nothing to expand or absolutize here.
+    let patches: Vec<Patch> = patches.to_vec();
+    let (prefix, attached) = match g.tabs.get(tab_id) {
+        Some(t) => (t.id_prefix.clone(), t.attached),
         None => return Vec::new(),
     };
-    let (prefix, attached, source_url) = match g.tabs.get(tab_id) {
-        Some(t) => (t.id_prefix.clone(), t.attached, t.info.url.clone()),
-        None => return Vec::new(),
-    };
-    // DOM clients resolve `/poster/foo` and other root-relative media URLs
-    // against the page origin. A native renderer has no document URL, so do
-    // that small browser responsibility here while the owning tab endpoint is
-    // still known. This is what makes Hypeflix's same-origin poster proxy work
-    // in the Desktop Browser instead of handing the image loader `/poster/foo`.
-    let patches = absolutize_tab_media_urls(patches, &source_url);
     let viewport = match g.viewport_id.clone() {
         Some(v) => v,
         None => {
@@ -1363,89 +1355,6 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
         }
     }
     out
-}
-
-/// Resolve root-relative Image/Video media props against a tab's WebSocket
-/// endpoint (`wss:` → `https:`, `ws:` → `http:`). The renderer deliberately
-/// stays transport-agnostic; only the Browser knows which remote origin owns a
-/// streamed tree.
-fn absolutize_tab_media_urls(patches: Vec<Patch>, endpoint: &str) -> Vec<Patch> {
-    let Some((http_scheme, authority)) = websocket_http_origin(endpoint) else {
-        return patches;
-    };
-
-    let resolve = |value: &mut Value| {
-        let Value::String(raw) = value else { return };
-        if raw.starts_with("//") {
-            *raw = format!("{http_scheme}:{raw}");
-        } else if raw.starts_with('/') {
-            *raw = format!("{http_scheme}://{authority}{raw}");
-        }
-    };
-    let is_media_prop = |name: &str| {
-        matches!(
-            hypen_engine::portable::parse_prop_key(name).base.as_str(),
-            "src" | "poster"
-        )
-    };
-
-    patches
-        .into_iter()
-        .map(|patch| match patch {
-            Patch::Create {
-                id,
-                element_type,
-                props,
-                semantics,
-            } => {
-                let is_media = matches!(
-                    element_type.to_ascii_lowercase().as_str(),
-                    "image" | "video" | "audio"
-                );
-                if !is_media {
-                    return Patch::Create {
-                        id,
-                        element_type,
-                        props,
-                        semantics,
-                    };
-                }
-                let mut resolved = (*props).clone();
-                for (name, value) in resolved.iter_mut() {
-                    if is_media_prop(name) {
-                        resolve(value);
-                    }
-                }
-                Patch::Create {
-                    id,
-                    element_type,
-                    props: Arc::new(resolved),
-                    semantics,
-                }
-            }
-            Patch::SetProp {
-                id,
-                name,
-                mut value,
-            } if is_media_prop(&name) => {
-                resolve(&mut value);
-                Patch::SetProp { id, name, value }
-            }
-            other => other,
-        })
-        .collect()
-}
-
-fn websocket_http_origin(endpoint: &str) -> Option<(&'static str, &str)> {
-    let (scheme, rest) = if let Some(rest) = endpoint.strip_prefix("wss://") {
-        ("https", rest)
-    } else if let Some(rest) = endpoint.strip_prefix("ws://") {
-        ("http", rest)
-    } else {
-        return None;
-    };
-    let authority = rest.split('/').next()?.split('?').next()?;
-    (!authority.is_empty()).then_some((scheme, authority))
 }
 
 // ---------------------------------------------------------------------------
@@ -1899,8 +1808,9 @@ fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Pat
     let Some(embed) = g.embeds.get_mut(marker) else {
         return Vec::new();
     };
-    let patches = embed.expander.expand(patches.to_vec());
-    let patches = absolutize_tab_media_urls(patches, &embed.url);
+    // Already lowered and owner-stamped by the embed's `RemoteModule`
+    // (see `process_tab_patches`).
+    let patches = patches.to_vec();
     let prefix = embed.id_prefix.clone();
     let host = embed.host_id.clone();
 
@@ -2113,12 +2023,11 @@ fn rewrite_patch(
         // namespacing rewrite has nothing to touch — pass it through
         // untouched at the head of its batch.
         p @ Patch::BatchAnimation { .. } => p,
-        // Template patches are lowered by the per-tab `TemplateExpander`
-        // before the rewrite, so these arms only see the expander's
-        // degraded pass-throughs (unknown template id / malformed
-        // skeleton). Rewrite their ids anyway so the merged stream stays
-        // consistently namespaced; the renderer skips what it can't
-        // expand.
+        // Template patches never reach here from a live tab or embed:
+        // its `RemoteModule` lowers them and drops any it could not
+        // lower (`hypen_renderer_desktop::remote::own_patches`). Rewrite
+        // their ids anyway so the merged stream stays consistently
+        // namespaced should a caller ever pass one.
         p @ Patch::RegisterTemplate { .. } => p,
         Patch::Instantiate {
             template_id,
@@ -2693,9 +2602,58 @@ mod tests {
         ));
     }
 
+    /// Stamp `patches` with `url`'s asset origin exactly as the tab's /
+    /// embed's `RemoteModule` does before its callback ever fires.
+    fn stamped(url: &str, patches: Vec<Patch>) -> Vec<Patch> {
+        use hypen_renderer_desktop::paint::image::{http_origin_for, ASSET_ORIGIN_PROP};
+        let origin = http_origin_for(url).expect("ws(s) url");
+        patches
+            .into_iter()
+            .map(|p| match p {
+                Patch::Create {
+                    id,
+                    element_type,
+                    mut props,
+                    semantics,
+                } => {
+                    Arc::make_mut(&mut props).insert(ASSET_ORIGIN_PROP.to_string(), json!(origin));
+                    Patch::Create {
+                        id,
+                        element_type,
+                        props,
+                        semantics,
+                    }
+                }
+                other => other,
+            })
+            .collect()
+    }
+
+    /// Resolve `prop` of the node `id` in `out` the way the renderer
+    /// does: under the node's own (stamped) asset origin.
+    fn resolved_media_prop(out: &[Patch], id: &str, prop: &str) -> Option<String> {
+        let mut tree = Tree::new();
+        for p in out {
+            tree.apply(p);
+        }
+        let node = tree.get(id)?;
+        let raw = node.props.get(prop)?.as_str()?;
+        hypen_renderer_desktop::paint::image::node_source(node, raw).map(|c| c.into_owned())
+    }
+
+    /// The browser no longer rewrites a tab's media URLs: root-relative
+    /// `src` / `poster` stay as the server authored them (no deep copy
+    /// of the props map), and the renderer resolves each against the
+    /// tab's server through the node's stamped origin — the same URLs
+    /// the old browser-side absolutization produced.
     #[test]
     fn tab_media_urls_resolve_against_the_remote_http_origin() {
-        let patches = absolutize_tab_media_urls(
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &[], true);
+        module.inner.lock().unwrap().viewport_id = Some("viewport".into());
+        let url = "wss://hypeflix.example/ws?session=abc";
+        let batch = stamped(
+            url,
             vec![
                 create_with(
                     "poster",
@@ -2710,46 +2668,54 @@ mod tests {
                         ("poster.0", json!("/poster/sintel")),
                     ],
                 ),
-                Patch::SetProp {
-                    id: "poster".into(),
-                    name: "src".into(),
-                    value: json!("/poster/updated"),
-                },
+                create_with("cdn", "Image", &[("src", json!("//cdn.example/a.png"))]),
             ],
-            "wss://hypeflix.example/ws?session=abc",
         );
-
-        let values: Vec<Value> = patches
+        let in_ptrs: Vec<usize> = batch
             .iter()
-            .flat_map(|patch| match patch {
-                Patch::Create { props, .. } => props.values().cloned().collect(),
-                Patch::SetProp { value, .. } => vec![value.clone()],
-                _ => Vec::new(),
+            .filter_map(|p| match p {
+                Patch::Create { props, .. } => Some(Arc::as_ptr(props) as usize),
+                _ => None,
             })
             .collect();
-        assert!(values.contains(&json!("https://hypeflix.example/poster/big-buck-bunny")));
-        assert!(values.contains(&json!("https://hypeflix.example/poster/sintel")));
-        assert!(values.contains(&json!("https://hypeflix.example/poster/updated")));
-        assert!(values.contains(&json!("https://cdn.example/movie.mp4")));
-    }
-
-    #[test]
-    fn tab_media_url_resolution_preserves_non_websocket_transports() {
-        let original = vec![create_with(
-            "poster",
-            "Image",
-            &[("src", json!("/poster/local"))],
-        )];
+        let out = process_tab_patches(&module.inner, "tab-A", &batch);
+        let out_ptrs: Vec<usize> = out
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Create { props, .. } => Some(Arc::as_ptr(props) as usize),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            format!(
-                "{:?}",
-                absolutize_tab_media_urls(original.clone(), "file:///tmp/app")
-            ),
-            format!("{original:?}"),
+            in_ptrs, out_ptrs,
+            "media Create props must not be deep-cloned"
+        );
+
+        let mut out = out;
+        out.push(Patch::SetProp {
+            id: "a1:poster".into(),
+            name: "src".into(),
+            value: json!("/poster/updated"),
+        });
+        assert_eq!(
+            resolved_media_prop(&out[..out.len() - 1], "a1:poster", "src").as_deref(),
+            Some("https://hypeflix.example/poster/big-buck-bunny")
         );
         assert_eq!(
-            websocket_http_origin("ws://localhost:5556/app"),
-            Some(("http", "localhost:5556"))
+            resolved_media_prop(&out, "a1:poster", "src").as_deref(),
+            Some("https://hypeflix.example/poster/updated")
+        );
+        assert_eq!(
+            resolved_media_prop(&out, "a1:video", "poster.0").as_deref(),
+            Some("https://hypeflix.example/poster/sintel")
+        );
+        assert_eq!(
+            resolved_media_prop(&out, "a1:video", "src").as_deref(),
+            Some("https://cdn.example/movie.mp4")
+        );
+        assert_eq!(
+            resolved_media_prop(&out, "a1:cdn", "src").as_deref(),
+            Some("https://cdn.example/a.png")
         );
     }
 
@@ -2833,7 +2799,6 @@ mod tests {
                     active_root_ids: vec!["a99:1".into(), "a99:2".into()],
                     queued: Vec::new(),
                     attached: true,
-                    expander: hypen_engine::TemplateExpander::new(),
                 },
             );
             inner.active_tab_id = Some(tab_id.into());
@@ -2881,7 +2846,6 @@ mod tests {
                         active_root_ids: vec![format!("a{n}:1")],
                         queued: Vec::new(),
                         attached: n == 3,
-                        expander: hypen_engine::TemplateExpander::new(),
                     },
                 );
             }
@@ -3043,7 +3007,6 @@ mod tests {
                 active_root_ids: roots.iter().map(|s| (*s).to_string()).collect(),
                 queued: Vec::new(),
                 attached,
-                expander: hypen_engine::TemplateExpander::new(),
             },
         );
     }
@@ -3814,52 +3777,83 @@ mod tests {
         // callbacks perform that step only after this forwarding point.
     }
 
+    /// An embed's nodes keep the origin their `RemoteModule` stamped
+    /// through the browser's embed rewrite — id prefixing, re-rooting
+    /// onto the host and the action-marker rewrite that REBUILDS the
+    /// props map (`embed::rewrite_embed_patch_actions`) — so their media
+    /// resolve against the embedded app's server and a `file:` source
+    /// stays refused.
     #[test]
-    fn embed_media_urls_resolve_against_the_embedded_app_origin() {
+    fn embed_nodes_keep_their_stamped_origin_through_the_rewrite() {
+        use hypen_renderer_desktop::paint::image::ASSET_ORIGIN_PROP;
         let (module, _captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-1", "a9:", &[], true);
         ingest_tab_batch(
             &module,
             "tab-1",
-            &hypenapp_route_batch("wss://hypeflix.example/ws"),
+            &stamped(
+                "wss://launcher.example/ws",
+                hypenapp_route_batch("wss://hypeflix.example/ws"),
+            ),
         );
 
         let out = process_embed_patches(
             &module.inner,
             "e1:",
-            &[
-                create_with("1", "Column", &[]),
-                insert("root", "1"),
-                create_with("2", "Image", &[("src", json!("/poster/sintel"))]),
-                insert("1", "2"),
-                create_with(
-                    "3",
-                    "Video",
-                    &[("poster.0", json!("/poster/big-buck-bunny"))],
-                ),
-                insert("1", "3"),
-            ],
+            &stamped(
+                "wss://hypeflix.example/ws",
+                vec![
+                    create_with("1", "Column", &[]),
+                    insert("root", "1"),
+                    create_with(
+                        "2",
+                        "Image",
+                        &[
+                            ("src", json!("/poster/sintel")),
+                            ("onClick", json!("@actions.open")),
+                        ],
+                    ),
+                    insert("1", "2"),
+                    create_with(
+                        "3",
+                        "Video",
+                        &[("poster.0", json!("/poster/big-buck-bunny"))],
+                    ),
+                    insert("1", "3"),
+                    create_with("4", "Image", &[("src", json!("file:///etc/passwd"))]),
+                    insert("1", "4"),
+                ],
+            ),
         );
 
-        let media_props: Vec<&Arc<IndexMap<String, Value>>> = out
+        let creates: Vec<(&str, &Arc<IndexMap<String, Value>>)> = out
             .iter()
             .filter_map(|patch| match patch {
-                Patch::Create {
-                    element_type,
-                    props,
-                    ..
-                } if element_type == "Image" || element_type == "Video" => Some(props),
+                Patch::Create { id, props, .. } => Some((id.as_ref(), props)),
                 _ => None,
             })
             .collect();
+        assert_eq!(creates.len(), 4);
+        for (id, props) in &creates {
+            assert_eq!(
+                props.get(ASSET_ORIGIN_PROP),
+                Some(&json!("https://hypeflix.example")),
+                "{id} lost its stamp"
+            );
+        }
+        // The rebuilt map (action rewrite) still carries it.
+        let (_, image) = creates.iter().find(|(id, _)| *id == "e1:2").unwrap();
+        assert_eq!(image.get("onClick"), Some(&json!("@actions.e1:open")));
+
         assert_eq!(
-            media_props[0].get("src"),
-            Some(&json!("https://hypeflix.example/poster/sintel"))
+            resolved_media_prop(&out, "e1:2", "src").as_deref(),
+            Some("https://hypeflix.example/poster/sintel")
         );
         assert_eq!(
-            media_props[1].get("poster.0"),
-            Some(&json!("https://hypeflix.example/poster/big-buck-bunny"))
+            resolved_media_prop(&out, "e1:3", "poster.0").as_deref(),
+            Some("https://hypeflix.example/poster/big-buck-bunny")
         );
+        assert_eq!(resolved_media_prop(&out, "e1:4", "src"), None);
     }
 
     #[test]

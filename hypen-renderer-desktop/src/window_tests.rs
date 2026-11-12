@@ -1660,6 +1660,152 @@ mod media_errors {
         assert!(out.is_empty());
     }
 
+    /// A remote app's Video (stamped with its server's origin) naming a
+    /// `file:` src / poster: never loaded, and the app hears about it —
+    /// one `onError` each, carrying the AUTHORED source, the refusal
+    /// code and no status — instead of failing silently.
+    #[test]
+    fn refused_remote_src_and_poster_dispatch_onerror_once() {
+        use crate::layout::REFUSED_MEDIA_ERROR_CODE;
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("http://a.test:8787")),
+            ("src", json!("file:///etc/passwd")),
+            ("poster", json!("C:\\secret.jpg")),
+            ("onError.0", json!("@actions.playbackFailed")),
+        ]);
+        let mut dispatched = HashSet::new();
+        let lookup =
+            |_: &str| -> Option<LoadFailure> { panic!("a refused source is never looked up") };
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &lookup,
+        );
+        assert_eq!(out.len(), 2, "{out:?}");
+        for (node, action, payload) in &out {
+            assert_eq!(node, "vid");
+            assert_eq!(action, "playbackFailed");
+            assert_eq!(payload["type"], json!("error"));
+            assert_eq!(payload["src"], json!("file:///etc/passwd"));
+            assert_eq!(payload["index"], json!(0));
+            assert_eq!(payload["code"], json!(REFUSED_MEDIA_ERROR_CODE));
+            assert!(payload.get("status").is_none());
+        }
+        assert!(out[0].2["message"]
+            .as_str()
+            .unwrap()
+            .contains("file:///etc/passwd"));
+        assert!(out[1].2["message"].as_str().unwrap().contains("secret.jpg"));
+        let again = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &lookup,
+        );
+        assert!(again.is_empty(), "refusals report once");
+    }
+
+    /// The playlist's current (`startIndex`) entry refused: reported with
+    /// its index; a poster-only refused element reports the poster.
+    #[test]
+    fn refused_playlist_entry_and_poster_only_report_their_own_source() {
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("http://a.test")),
+            ("playlist", json!(["/ep1.mp4", "file:///etc/shadow"])),
+            ("startIndex", json!(1)),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        let mut dispatched = HashSet::new();
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut dispatched,
+            &|_: &str| None,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2["src"], json!("file:///etc/shadow"));
+        assert_eq!(out[0].2["index"], json!(1));
+
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("http://a.test")),
+            ("poster", json!("file:///etc/hosts")),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut HashSet::new(),
+            &|_: &str| None,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2["src"], json!("file:///etc/hosts"));
+    }
+
+    /// A remote poster that fails to load is looked up by its RESOLVED
+    /// URL (what the loader fetched) but reported with the app's
+    /// authored sources.
+    #[test]
+    fn remote_poster_failure_reports_authored_sources() {
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("https://b.test")),
+            ("src", json!("/media/clip.mp4")),
+            ("poster", json!("/art/frame.jpg")),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        let lookup = failing_403("https://b.test/art/frame.jpg");
+        let out = collect_media_error_dispatches(
+            &tree,
+            Viewport::new(800.0, 600.0),
+            &mut HashSet::new(),
+            &lookup,
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].2["src"], json!("/media/clip.mp4"));
+        assert_eq!(out[0].2["status"], json!(403));
+    }
+
+    /// Playlist auto-advance over refused entries: each skipped entry
+    /// reports its own `onError` (authored src, its index, the refusal
+    /// code) exactly once per node; nothing is dispatched unwired.
+    #[test]
+    fn skipped_refused_playlist_entries_report_onerror_once() {
+        use crate::layout::{
+            next_playlist_track, resolve_media_playlist, REFUSED_MEDIA_ERROR_CODE,
+        };
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("http://a.test")),
+            (
+                "playlist",
+                json!(["/ep1.mp4", "file:///etc/passwd", "C:\\x.mp4", "/ep4.mp4"]),
+            ),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        let node = tree.get("vid").unwrap();
+        let playlist = resolve_media_playlist(node);
+        let (skipped, next) = next_playlist_track(&playlist, 0, false);
+        assert_eq!(
+            next.map(|(i, s)| (i, s.url())),
+            Some((3, Some("http://a.test/ep4.mp4")))
+        );
+        let mut keys = HashSet::new();
+        let out = crate::window::refused_track_dispatches(node, &skipped, &mut keys);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].0, "err");
+        assert_eq!(out[0].1["src"], json!("file:///etc/passwd"));
+        assert_eq!(out[0].1["index"], json!(1));
+        assert_eq!(out[0].1["code"], json!(REFUSED_MEDIA_ERROR_CODE));
+        assert_eq!(out[1].1["src"], json!("C:\\x.mp4"));
+        assert_eq!(out[1].1["index"], json!(2));
+        // The next pass over the same entries (e.g. under `loop`)
+        // doesn't re-report them.
+        assert!(crate::window::refused_track_dispatches(node, &skipped, &mut keys).is_empty());
+    }
+
     #[test]
     fn healthy_poster_means_no_dispatch() {
         let tree = video_tree(&[

@@ -55,6 +55,13 @@ pub struct PlayOpts {
     /// stream fetch via playbin's `source-setup` signal
     /// (souphttpsrc `extra-headers`).
     pub headers: Vec<(String, String)>,
+    /// Only `http(s)` / `data:` sources may be opened — including ones
+    /// the stream itself names (an HLS / DASH manifest's segment URIs,
+    /// which the demuxer fetches with its own source elements). Set for
+    /// a remote app's node (it carries an asset-origin stamp); the
+    /// pipeline also applies it whenever the window is in a remote
+    /// asset scope. See `gst_pipeline::build`.
+    pub restrict_sources: bool,
 }
 
 /// Event surfaced from a playback pipeline, consumed by the window
@@ -93,6 +100,9 @@ pub(crate) struct PlayerShared {
 struct Player {
     /// Resolved URL of the playing track.
     url: String,
+    /// The track's source as the app authored it — what event payloads
+    /// report (`url` is the renderer's resolution of it).
+    src: String,
     /// Playlist index of the playing track (0 for single src).
     index: u64,
     pipeline: gstreamer::Element,
@@ -206,16 +216,31 @@ pub fn has_playback(node_id: &str) -> bool {
         .contains_key(node_id)
 }
 
-/// The `(url, playlist_index)` of the track the node's player is
-/// currently on. Diverges from the node's `startIndex`-derived track
-/// after a playlist advance — the registry is the source of truth.
-pub fn current_track(node_id: &str) -> Option<(String, u64)> {
+/// The track a node's player is on (see [`current_track`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentTrack {
+    /// The resolved URL the pipeline plays — the track's identity.
+    pub url: String,
+    /// The source as the app authored it — what event payloads carry.
+    pub src: String,
+    /// Playlist index (0 for single src).
+    pub index: u64,
+}
+
+/// The track the node's player is currently on. Diverges from the
+/// node's `startIndex`-derived track after a playlist advance — the
+/// registry is the source of truth.
+pub fn current_track(node_id: &str) -> Option<CurrentTrack> {
     registry()
         .players
         .lock()
         .expect("media registry poisoned")
         .get(node_id)
-        .map(|p| (p.url.clone(), p.index))
+        .map(|p| CurrentTrack {
+            url: p.url.clone(),
+            src: p.src.clone(),
+            index: p.index,
+        })
 }
 
 /// Latest decoded frame for the node, if playback has produced one.
@@ -379,8 +404,9 @@ pub fn set_playing(node_id: &str, playing: bool) -> Option<bool> {
     Some(playing)
 }
 
-/// Start (or restart) playback of `url` for `node_id`. Any existing
-/// pipeline for the node is torn down first. `playing = false`
+/// Start (or restart) playback of `url` (the resolution of the app's
+/// authored `src`, which event payloads report) for `node_id`. Any
+/// existing pipeline for the node is torn down first. `playing = false`
 /// prerolls paused (first frame shows, no advance).
 ///
 /// Returns `Ok(true)` when playback started, `Ok(false)` when the
@@ -391,6 +417,7 @@ pub fn set_playing(node_id: &str, playing: bool) -> Option<bool> {
 pub fn start(
     node_id: &str,
     url: &str,
+    src: &str,
     index: u64,
     opts: &PlayOpts,
     playing: bool,
@@ -421,6 +448,7 @@ pub fn start(
     }
     let player = Player {
         url: url.to_string(),
+        src: src.to_string(),
         index,
         pipeline,
         shared,
@@ -580,27 +608,10 @@ pub(crate) fn prop_truthy(node: &crate::tree::Node, name: &str) -> bool {
     }
 }
 
-/// The node's `playlist` prop as an ordered list of URLs. Entries are
-/// trimmed but NOT filtered — indexes must stay aligned with the
-/// authored array (contract payloads carry the index). Each entry is
-/// resolved under the node's own asset origin
-/// ([`crate::paint::image::node_source`]); a refused one becomes `""`.
-pub(crate) fn resolve_playlist(node: &crate::tree::Node) -> Vec<String> {
-    node.props
-        .get("playlist")
-        .or_else(|| node.props.get("playlist.0"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|v| {
-                    let s = v.as_str().map(str::trim).unwrap_or_default();
-                    crate::paint::image::node_source(node, s)
-                        .map(std::borrow::Cow::into_owned)
-                        .unwrap_or_default()
-                })
-                .collect()
-        })
-        .unwrap_or_default()
+/// The node's `playlist` prop as ordered sources, index-aligned with
+/// the authored array — see [`crate::layout::resolve_media_playlist`].
+pub(crate) fn resolve_playlist(node: &crate::tree::Node) -> Vec<crate::layout::MediaSource> {
+    crate::layout::resolve_media_playlist(node)
 }
 
 /// Resolve the node's `headers` prop: either a whole JSON object
@@ -634,11 +645,19 @@ pub(crate) fn resolve_headers(node: &crate::tree::Node) -> Vec<(String, String)>
 /// for single-src playback — playlist wrap is queue-level and handled
 /// by the window on `Ended`.
 pub(crate) fn resolve_play_opts(node: &crate::tree::Node) -> PlayOpts {
-    let has_playlist = !resolve_playlist(node).is_empty();
+    let has_playlist = node
+        .props
+        .get("playlist")
+        .or_else(|| node.props.get("playlist.0"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty());
     PlayOpts {
         muted: prop_truthy(node, "muted"),
         looping: prop_truthy(node, "loop") && !has_playlist,
         headers: resolve_headers(node),
+        restrict_sources: node
+            .props
+            .contains_key(crate::paint::image::ASSET_ORIGIN_PROP),
     }
 }
 

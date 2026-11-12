@@ -976,6 +976,133 @@ fn image_sources_resolve_per_owning_node_not_per_window() {
     }
 }
 
+/// A remote app's Video: sources resolve for LOADING under the node's
+/// own origin, but everything the app hears back (`onPlay` payload,
+/// `ItemKind::Video.src`) carries the source it authored; a `file:` /
+/// drive-path src or playlist entry is an explicit refusal (never an
+/// empty URL a player could be started on) and the player reads
+/// `error`.
+#[test]
+fn remote_video_sources_resolve_per_node_and_report_as_authored() {
+    let own = |patches: Vec<Patch>| {
+        crate::remote::own_patches(
+            patches,
+            &Arc::from("http://a.test:8787"),
+            &mut hypen_engine::TemplateExpander::new(),
+        )
+    };
+    let mut tree = Tree::new();
+    for p in own(vec![
+        create_patch(
+            "v_rel",
+            "Video",
+            &[
+                ("src", json!("/media/a.mp4")),
+                ("onPlay.0", json!("@actions.play")),
+            ],
+        ),
+        create_patch(
+            "v_file",
+            "Video",
+            &[
+                ("src", json!("file:///etc/passwd")),
+                ("onPlay.0", json!("@actions.play")),
+            ],
+        ),
+        create_patch(
+            "v_list",
+            "Video",
+            &[(
+                "playlist",
+                json!(["/ep1.mp4", "file:///etc/passwd", "C:\\x.mp4", "/ep4.mp4"]),
+            )],
+        ),
+    ]) {
+        tree.apply(&p);
+        if let Patch::Create { id, .. } = &p {
+            tree.apply(&insert_patch("root", id));
+        }
+    }
+    let viewport = vp(800.0);
+    let node = |id: &str| tree.get(id).unwrap();
+
+    // Loading: resolved against the node's server. Reporting: authored.
+    assert_eq!(
+        resolve_media_src(node("v_rel"), viewport).0.as_deref(),
+        Some("http://a.test:8787/media/a.mp4")
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "v_rel");
+    match &item.kind {
+        ItemKind::Video { src, .. } => assert_eq!(src.as_deref(), Some("/media/a.mp4")),
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+    assert_eq!(
+        item.action_payload.as_ref().expect("play payload")["src"],
+        json!("/media/a.mp4")
+    );
+
+    // A refused src: explicit, never loadable, still reported as authored.
+    let (refused, _) = resolve_media_source(node("v_file"), viewport);
+    assert_eq!(
+        refused,
+        Some(MediaSource::Refused {
+            authored: "file:///etc/passwd".into()
+        })
+    );
+    assert_eq!(resolve_media_src(node("v_file"), viewport).0, None);
+    let refused_item = find_item(&pass, "v_file");
+    match &refused_item.kind {
+        ItemKind::Video { src, .. } => assert_eq!(src.as_deref(), Some("file:///etc/passwd")),
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+    assert!(
+        refused_item.action.is_none(),
+        "a refused track must not announce onPlay"
+    );
+    assert_eq!(
+        crate::video_v2::player_state(node("v_file"), viewport),
+        crate::video_v2::VideoPlayerState::Error
+    );
+    assert_eq!(
+        crate::video_v2::player_state(node("v_rel"), viewport),
+        crate::video_v2::VideoPlayerState::Idle
+    );
+
+    // Playlist: index-aligned, refused entries explicit, and an advance
+    // skips them (reporting each) instead of starting on "".
+    let list = resolve_media_playlist(node("v_list"));
+    assert_eq!(
+        list.iter().map(MediaSource::url).collect::<Vec<_>>(),
+        vec![
+            Some("http://a.test:8787/ep1.mp4"),
+            None,
+            None,
+            Some("http://a.test:8787/ep4.mp4")
+        ]
+    );
+    let (skipped, next) = next_playlist_track(&list, 0, false);
+    assert_eq!(
+        skipped
+            .iter()
+            .map(|(i, s)| (*i, s.authored()))
+            .collect::<Vec<_>>(),
+        vec![(1, "file:///etc/passwd"), (2, "C:\\x.mp4")]
+    );
+    assert_eq!(next.map(|(i, s)| (i, s.authored())), Some((3, "/ep4.mp4")));
+    // End of queue: done without `loop`, wraps to 0 with it.
+    assert!(next_playlist_track(&list, 3, false).1.is_none());
+    assert_eq!(
+        next_playlist_track(&list, 3, true).1.map(|(i, _)| i),
+        Some(0)
+    );
+    // Only refused entries ahead, wrapping: replays the current track.
+    let two = &list[..2];
+    assert_eq!(next_playlist_track(two, 0, true).1.map(|(i, _)| i), Some(0));
+    assert!(next_playlist_track(&list[1..3], 0, true).1.is_none());
+}
+
 #[test]
 fn image_default_size_when_width_height_unset() {
     // An Image without width/height props uses a sensible default

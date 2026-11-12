@@ -80,9 +80,9 @@ pub struct Embed {
     /// redundant Detach/Attach.
     pub detached: HashSet<String>,
     pub status: EmbedStatus,
-    /// Lowers `RegisterTemplate`/`Instantiate` from the embed's server,
-    /// exactly as each tab does for its own stream.
-    pub expander: hypen_engine::TemplateExpander,
+    // No `TemplateExpander` / media-URL rewriting: the embed's
+    // `RemoteModule` delivers template-free, owner-stamped batches
+    // (see `browser::process_tab_patches`).
 }
 
 impl Embed {
@@ -99,7 +99,6 @@ impl Embed {
             error_slot_ids: Vec::new(),
             detached: HashSet::new(),
             status: EmbedStatus::Loading,
-            expander: hypen_engine::TemplateExpander::new(),
         }
     }
 
@@ -389,6 +388,34 @@ mod tests {
         assert_eq!(out.get("bind"), Some(&json!("e7:query")));
         assert_eq!(out.get("color.0"), Some(&json!("#fff")));
         assert_eq!(out.get("0"), Some(&json!("@somebody")));
+    }
+
+    /// The action rewrite rebuilds the props map; the asset-origin stamp
+    /// the embed's `RemoteModule` put on the node must come through it
+    /// unchanged (it is neither an event key nor `bind`), or the node
+    /// would fall back to the window's scope.
+    #[test]
+    fn rewrite_embed_patch_actions_keeps_the_asset_origin_stamp() {
+        use hypen_renderer_desktop::paint::image::ASSET_ORIGIN_PROP;
+        let p = Patch::Create {
+            id: "1".into(),
+            element_type: "Image".into(),
+            props: props(&[
+                ("src", json!("/poster.png")),
+                ("onClick", json!("@actions.open")),
+                (ASSET_ORIGIN_PROP, json!("https://app.example")),
+            ]),
+            semantics: None,
+        };
+        let Patch::Create { props: out, .. } = rewrite_embed_patch_actions(p, "e7:") else {
+            panic!("expected Create");
+        };
+        assert_eq!(out.get("onClick"), Some(&json!("@actions.e7:open")));
+        assert_eq!(
+            out.get(ASSET_ORIGIN_PROP),
+            Some(&json!("https://app.example"))
+        );
+        assert_eq!(out.get("src"), Some(&json!("/poster.png")));
     }
 
     #[test]

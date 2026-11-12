@@ -542,12 +542,16 @@ impl App {
                 let Some(node) = self.tree.get(node_id) else {
                     return;
                 };
-                let (src, index) = crate::layout::resolve_media_src(node, viewport);
-                let Some(src) = src else { return };
+                let (source, index) = crate::layout::resolve_media_source(node, viewport);
+                // A refused source has nothing to start (its `onError`
+                // is the poster/source error scan's).
+                let Some(crate::layout::MediaSource::Allowed { url, authored }) = source else {
+                    return;
+                };
                 let opts = crate::media::resolve_play_opts(node);
                 self.video_error_keys
-                    .remove(&crate::window::video_error_key(node_id, &src));
-                self.start_video(node_id, &src, index, &opts);
+                    .remove(&crate::window::video_error_key(node_id, &url));
+                self.start_video(node_id, &url, &authored, index, &opts);
                 self.request_redraw_full();
                 return;
             }
@@ -564,9 +568,10 @@ impl App {
             if now_playing == was_playing {
                 return;
             }
-            let (src, index) = match crate::media::current_track(node_id) {
-                Some((u, i)) => (u, i),
-                None => return,
+            let Some(crate::media::CurrentTrack { src, index, .. }) =
+                crate::media::current_track(node_id)
+            else {
+                return;
             };
             let (event, typ) = if now_playing {
                 ("onPlay", "play")
@@ -625,7 +630,7 @@ impl App {
         // track when one exists, else the node's resolved source (the
         // pipeline may start later in this same flush, or on a tap).
         let track = crate::media::current_track(node_id)
-            .map(|(u, _)| u)
+            .map(|t| t.url)
             .or_else(|| {
                 let viewport = self.logical_viewport();
                 self.tree
@@ -664,7 +669,7 @@ impl App {
                 continue;
             };
             match crate::media::current_track(id) {
-                Some((cur, _)) if &cur == url => {
+                Some(cur) if &cur.url == url => {
                     let seekable = crate::media::status(id).is_some_and(|s| s.duration > 0.0);
                     if seekable {
                         ready.push((id.clone(), *secs));

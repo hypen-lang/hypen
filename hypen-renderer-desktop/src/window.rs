@@ -348,7 +348,10 @@ pub struct App {
     /// desktop renderer can't exploit template cloning, so every drained
     /// batch is expanded in `flush_patches` before ingestion. Session-
     /// lifetime state: skeletons registered by earlier batches expand
-    /// later `Instantiate`s.
+    /// later `Instantiate`s. Needed for LOCAL engines only: a remote
+    /// connection's batches arrive already lowered (and any template
+    /// patch its own expander couldn't lower is dropped there —
+    /// `remote::own_patches`), so they pass through this unchanged.
     template_expander: hypen_engine::TemplateExpander,
     /// EventLoopProxy used to construct the AccessKit adapter on
     /// `resumed`.
@@ -667,7 +670,7 @@ pub struct App {
 
 /// Sticky-error key for a `(video node, src)` pair — mirrors the
 /// poster path's `"node_id\u{0}poster"` dedupe keys.
-#[cfg(feature = "video")]
+#[cfg(any(feature = "video", test))]
 pub(crate) fn video_error_key(node_id: &str, src: &str) -> String {
     format!("{node_id}\u{0}{src}")
 }
@@ -829,7 +832,8 @@ impl App {
         let detached = self.tree.detached_node_ids();
         let mut alive: HashSet<String> = HashSet::new();
         let mut to_release: Vec<String> = Vec::new();
-        let mut to_start: Vec<(String, String, u64, crate::media::PlayOpts)> = Vec::new();
+        // (node, url, authored src, index, opts)
+        let mut to_start: Vec<(String, String, String, u64, crate::media::PlayOpts)> = Vec::new();
         let mut suspend_flips: Vec<(String, bool)> = Vec::new();
         for node in self.tree.nodes() {
             if !crate::layout::MEDIA_TYPES
@@ -848,7 +852,12 @@ impl App {
             if crate::media::set_suspended(&node.id, false) {
                 suspend_flips.push((node.id.clone(), false));
             }
-            let (src, index) = crate::layout::resolve_media_src(node, viewport);
+            // A refused source never starts (no URL); its `onError` is
+            // dispatched once by `dispatch_media_poster_errors`.
+            let (source, index) = crate::layout::resolve_media_source(node, viewport);
+            let src = source
+                .as_ref()
+                .and_then(|s| Some((s.url()?.to_string(), s.authored().to_string())));
             // `autoplay`, or the one-way controlled form (`playing:` as
             // a plain truthy prop — the spec's "module drives, renderer
             // follows" subset): both mean this node should be playing on
@@ -857,48 +866,50 @@ impl App {
             // `apply_playback_writes`.
             let autoplay = crate::media::prop_truthy(node, "autoplay")
                 || crate::video_v2::controlled_playing(node) == Some(true);
-            if let Some((cur_url, _)) = crate::media::current_track(&node.id) {
+            if let Some(cur) = crate::media::current_track(&node.id) {
                 let single_src = crate::media::resolve_playlist(node).is_empty();
-                if single_src && src.as_deref() != Some(cur_url.as_str()) {
+                if single_src && src.as_ref().map(|(url, _)| url) != Some(&cur.url) {
                     to_release.push(node.id.clone());
-                    if let Some(src) = src {
+                    if let Some((url, authored)) = src {
                         if autoplay
                             && !self
                                 .video_error_keys
-                                .contains(&video_error_key(&node.id, &src))
+                                .contains(&video_error_key(&node.id, &url))
                         {
                             let opts = crate::media::resolve_play_opts(node);
-                            to_start.push((node.id.clone(), src, index, opts));
+                            to_start.push((node.id.clone(), url, authored, index, opts));
                         }
                     }
                 }
                 continue;
             }
-            let Some(src) = src else { continue };
+            let Some((url, authored)) = src else { continue };
             if !autoplay {
                 continue;
             }
             if self
                 .video_error_keys
-                .contains(&video_error_key(&node.id, &src))
+                .contains(&video_error_key(&node.id, &url))
             {
                 continue;
             }
             let opts = crate::media::resolve_play_opts(node);
-            to_start.push((node.id.clone(), src, index, opts));
+            to_start.push((node.id.clone(), url, authored, index, opts));
         }
         crate::media::retain_only(&alive);
         for id in to_release {
             crate::media::release(&id);
         }
-        for (id, src, index, opts) in to_start {
-            self.start_video(&id, &src, index, &opts);
+        for (id, url, authored, index, opts) in to_start {
+            self.start_video(&id, &url, &authored, index, &opts);
         }
         // Suspension flips map onto the contract's playback events:
         // navigating away pauses (`onPause`), navigating back resumes
         // (`onPlay`) — same payloads a user-initiated toggle sends.
         for (id, suspended) in suspend_flips {
-            let Some((src, index)) = crate::media::current_track(&id) else {
+            let Some(crate::media::CurrentTrack { src, index, .. }) =
+                crate::media::current_track(&id)
+            else {
                 continue;
             };
             let (event, typ) = if suspended {
@@ -915,13 +926,21 @@ impl App {
         }
     }
 
-    /// Feature `video`: start playback of `src` for the node and
+    /// Feature `video`: start playback of `url` (the resolution of the
+    /// app's authored `src`, which the payloads report) and
     /// dispatch the contract event — `onPlay` on success, `onError`
     /// (code `pipeline`, no status) when the pipeline can't even be
     /// constructed. Failures record a sticky error key so autoplay
     /// doesn't retry-loop.
     #[cfg(feature = "video")]
-    fn start_video(&mut self, node_id: &str, src: &str, index: u64, opts: &crate::media::PlayOpts) {
+    fn start_video(
+        &mut self,
+        node_id: &str,
+        url: &str,
+        src: &str,
+        index: u64,
+        opts: &crate::media::PlayOpts,
+    ) {
         // A fresh pipeline invalidates any Scrubber drag captured on the
         // old one (its fraction belongs to the old track's timeline) and
         // clears the Video v2 sticky-error marker (which is what shows
@@ -930,7 +949,7 @@ impl App {
         // changes only (`apply_start_positions`), not on restarts.
         self.cancel_video_scrub_for(node_id);
         self.mark_video_error(node_id, false);
-        match crate::media::start(node_id, src, index, opts, true) {
+        match crate::media::start(node_id, url, src, index, opts, true) {
             Ok(true) => {
                 if let Some((action, payload)) =
                     self.video_event_payload(node_id, "onPlay", "play", src, index, &[])
@@ -945,8 +964,8 @@ impl App {
             // dispatch the single `onError` and record the sticky key.
             Ok(false) => {}
             Err(e) => {
-                log::warn!("video: failed to start {src} for {node_id}: {e}");
-                self.video_error_keys.insert(video_error_key(node_id, src));
+                log::warn!("video: failed to start {url} for {node_id}: {e}");
+                self.video_error_keys.insert(video_error_key(node_id, url));
                 // Video v2: the sticky error is also the `error` player
                 // state, which is what shows an `error` composition slot.
                 self.mark_video_error(node_id, true);
@@ -1014,12 +1033,24 @@ impl App {
                 crate::media::release(&ev.node_id);
                 continue;
             }
-            let (cur_src, cur_idx) = match crate::media::current_track(&ev.node_id) {
-                Some((u, i)) => (u, i),
+            // `cur_url` is the track's identity (sticky error keys),
+            // `cur_src` what the payloads report (the authored source).
+            let (cur_url, cur_src, cur_idx) = match crate::media::current_track(&ev.node_id) {
+                Some(t) => (t.url, t.src, t.index),
                 None => {
                     let node = self.tree.get(&ev.node_id).expect("checked above");
-                    let (s, i) = crate::layout::resolve_media_src(node, viewport);
-                    (s.unwrap_or_default(), i)
+                    let (s, i) = crate::layout::resolve_media_source(node, viewport);
+                    let url = s
+                        .as_ref()
+                        .and_then(|s| s.url())
+                        .unwrap_or_default()
+                        .to_string();
+                    let src = s
+                        .as_ref()
+                        .map(|s| s.authored())
+                        .unwrap_or_default()
+                        .to_string();
+                    (url, src, i)
                 }
             };
             match ev.kind {
@@ -1028,20 +1059,26 @@ impl App {
                     let playlist = crate::media::resolve_playlist(node);
                     let wraps = crate::media::prop_truthy(node, "loop");
                     let opts = crate::media::resolve_play_opts(node);
-                    let next = if playlist.is_empty() {
-                        None
-                    } else {
-                        let n = cur_idx + 1;
-                        if (n as usize) < playlist.len() {
-                            Some((playlist[n as usize].clone(), n))
-                        } else if wraps {
-                            Some((playlist[0].clone(), 0))
-                        } else {
-                            None
-                        }
-                    };
+                    // Refused entries are skipped — never started with
+                    // an empty URL — and each reports its own `onError`
+                    // (once per (node, entry), like any sticky error).
+                    let (skipped, next) =
+                        crate::layout::next_playlist_track(&playlist, cur_idx, wraps);
+                    let refused =
+                        refused_track_dispatches(node, &skipped, &mut self.video_error_keys);
+                    let next = next.and_then(|(i, s)| {
+                        Some((s.url()?.to_string(), s.authored().to_string(), i))
+                    });
+                    for (action, payload) in refused {
+                        log::warn!(
+                            "video: skipped a refused playlist entry for {}: {payload}",
+                            ev.node_id
+                        );
+                        self.module
+                            .dispatch_ui_action(&ev.node_id, &action, Some(payload));
+                    }
                     match next {
-                        Some((next_src, next_idx)) => {
+                        Some((next_url, next_src, next_idx)) => {
                             // Finished track first (`completed: false`
                             // — the queue continues), then advance and
                             // announce the new track.
@@ -1063,8 +1100,14 @@ impl App {
                             // (and write it into module state). Cancel
                             // the gesture before advancing.
                             self.cancel_video_scrub_for(&ev.node_id);
-                            match crate::media::start(&ev.node_id, &next_src, next_idx, &opts, true)
-                            {
+                            match crate::media::start(
+                                &ev.node_id,
+                                &next_url,
+                                &next_src,
+                                next_idx,
+                                &opts,
+                                true,
+                            ) {
                                 Ok(true) => {
                                     if let Some((action, payload)) = self.video_event_payload(
                                         &ev.node_id,
@@ -1086,9 +1129,9 @@ impl App {
                                 // and records the sticky key.
                                 Ok(false) => {}
                                 Err(e) => {
-                                    log::warn!("video: playlist advance to {next_src} failed: {e}");
+                                    log::warn!("video: playlist advance to {next_url} failed: {e}");
                                     self.video_error_keys
-                                        .insert(video_error_key(&ev.node_id, &next_src));
+                                        .insert(video_error_key(&ev.node_id, &next_url));
                                     self.mark_video_error(&ev.node_id, true);
                                     if let Some((action, payload)) = self.video_event_payload(
                                         &ev.node_id,
@@ -1133,11 +1176,11 @@ impl App {
                 } => {
                     log::warn!(
                         "video: {} failed for {}: {code}: {message} (status {status:?})",
-                        cur_src,
+                        cur_url,
                         ev.node_id
                     );
                     self.video_error_keys
-                        .insert(video_error_key(&ev.node_id, &cur_src));
+                        .insert(video_error_key(&ev.node_id, &cur_url));
                     self.mark_video_error(&ev.node_id, true);
                     // The pipeline is going away — an in-flight Scrubber
                     // drag on it has nothing left to commit against.
@@ -1226,12 +1269,17 @@ impl App {
         let Some(node) = self.tree.get(node_id) else {
             return false;
         };
-        let (src, index) = match crate::media::current_track(node_id) {
-            Some((u, i)) => (Some(u), i),
-            None => crate::layout::resolve_media_src(node, viewport),
-        };
-        let Some(src) = src else {
-            return false;
+        let (url, src, index) = match crate::media::current_track(node_id) {
+            Some(t) => (t.url, t.src, t.index),
+            None => {
+                let (source, index) = crate::layout::resolve_media_source(node, viewport);
+                // A refused source has nothing to play (its `onError`
+                // is the poster/source error scan's).
+                let Some(crate::layout::MediaSource::Allowed { url, authored }) = source else {
+                    return false;
+                };
+                (url, authored, index)
+            }
         };
         let opts = crate::media::resolve_play_opts(node);
         if crate::media::has_playback(node_id) {
@@ -1253,8 +1301,8 @@ impl App {
             // for this (node, src) so the user can recover from a
             // transient failure.
             self.video_error_keys
-                .remove(&video_error_key(node_id, &src));
-            self.start_video(node_id, &src, index, &opts);
+                .remove(&video_error_key(node_id, &url));
+            self.start_video(node_id, &url, &src, index, &opts);
         }
         self.request_redraw_full();
         true
@@ -4368,10 +4416,63 @@ pub(crate) fn clear_focus_if_exiting(
     }
 }
 
+/// The `onError` dispatches `(action, payload)` for playlist entries a
+/// track advance SKIPPED because the node's asset origin refuses them
+/// ([`crate::layout::next_playlist_track`]): payload
+/// `{ type: "error", src: <authored entry>, index, code, message }`
+/// merged over the applicator's static args, `code`
+/// [`crate::layout::REFUSED_MEDIA_ERROR_CODE`]. Each `(node, entry)`
+/// reports once — `error_keys` is the window's sticky video-error set.
+/// Empty when no `onError` is wired.
+#[cfg(any(feature = "video", test))]
+pub(crate) fn refused_track_dispatches(
+    node: &crate::tree::Node,
+    skipped: &[(u64, &crate::layout::MediaSource)],
+    error_keys: &mut HashSet<String>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    for (index, source) in skipped {
+        if !error_keys.insert(video_error_key(
+            &node.id,
+            &format!("refused\u{0}{}", source.authored()),
+        )) {
+            continue;
+        }
+        let Some((action, base)) = crate::layout::resolve_named_event_action(node, "onError")
+        else {
+            continue;
+        };
+        let mut obj = match base {
+            serde_json::Value::Object(o) => o,
+            _ => serde_json::Map::new(),
+        };
+        obj.insert("type".to_string(), json!("error"));
+        obj.insert("src".to_string(), json!(source.authored()));
+        obj.insert("index".to_string(), json!(index));
+        obj.insert(
+            "code".to_string(),
+            json!(crate::layout::REFUSED_MEDIA_ERROR_CODE),
+        );
+        obj.insert("message".to_string(), json!(source.refused_message()));
+        out.push((action, serde_json::Value::Object(obj)));
+    }
+    out
+}
+
 /// Pure scan behind [`App::dispatch_media_poster_errors`]: walk the
-/// tree's Video nodes and produce the `(node_id, action, payload)` dispatches
-/// for posters whose fetch failed with an HTTP status, deduped through
-/// `dispatched` (`"node_id\u{0}poster"` keys, mutated in place).
+/// tree's Video nodes and produce the `(node_id, action, payload)`
+/// dispatches for
+///
+/// - posters whose fetch failed with an HTTP status (`status`,
+///   `message`), and
+/// - a current track (`src` / playlist entry) or poster that the node's
+///   asset origin REFUSES (a remote app naming `file:` …): never
+///   loaded, so without this it would fail silently. `code` is
+///   [`crate::layout::REFUSED_MEDIA_ERROR_CODE`], no `status`.
+///
+/// Each is deduped through `dispatched` (mutated in place; keys are
+/// per node and source). Payload `src` is the app's AUTHORED source —
+/// the track's, or the poster's for a poster-only element.
 /// `lookup_failure` is injected so tests don't depend on the global
 /// image-cache registry.
 pub(crate) fn collect_media_error_dispatches(
@@ -4380,6 +4481,7 @@ pub(crate) fn collect_media_error_dispatches(
     dispatched: &mut HashSet<String>,
     lookup_failure: &dyn Fn(&str) -> Option<crate::paint::image::LoadFailure>,
 ) -> Vec<(String, String, serde_json::Value)> {
+    use crate::layout::{MediaSource, REFUSED_MEDIA_ERROR_CODE};
     let mut pending = Vec::new();
     for node in tree.nodes() {
         if !crate::layout::MEDIA_TYPES
@@ -4393,36 +4495,81 @@ pub(crate) fn collect_media_error_dispatches(
         else {
             continue;
         };
-        let Some(poster) = crate::layout::resolve_media_poster(node, viewport) else {
-            continue;
+        let (source, index) = crate::layout::resolve_media_source(node, viewport);
+        let poster = crate::layout::resolve_media_poster_source(node, viewport);
+        let mut push = |src: &str, extra: Vec<(&str, serde_json::Value)>| {
+            let mut obj = match base_payload.clone() {
+                serde_json::Value::Object(o) => o,
+                _ => serde_json::Map::new(),
+            };
+            obj.insert("type".to_string(), json!("error"));
+            obj.insert("src".to_string(), json!(src));
+            obj.insert("index".to_string(), json!(index));
+            for (k, v) in extra {
+                obj.insert(k.to_string(), v);
+            }
+            pending.push((
+                node.id.clone(),
+                action.clone(),
+                serde_json::Value::Object(obj),
+            ));
         };
-        let Some(failure) = lookup_failure(&poster) else {
-            continue;
-        };
-        let dedupe_key = format!("{}\u{0}{}", node.id, poster);
-        if !dispatched.insert(dedupe_key) {
-            continue;
+        // `src` names the track the error refers to; for a poster-only
+        // element the poster is what failed, so it stands in.
+        let reported = source
+            .as_ref()
+            .or(poster.as_ref())
+            .map(MediaSource::authored)
+            .unwrap_or_default()
+            .to_string();
+        if let Some(src @ MediaSource::Refused { .. }) = &source {
+            if dispatched.insert(format!(
+                "{}\u{0}refused-src\u{0}{}",
+                node.id,
+                src.authored()
+            )) {
+                push(
+                    src.authored(),
+                    vec![
+                        ("code", json!(REFUSED_MEDIA_ERROR_CODE)),
+                        ("message", json!(src.refused_message())),
+                    ],
+                );
+            }
         }
-        let (src, index) = crate::layout::resolve_media_src(node, viewport);
-        let mut obj = match base_payload {
-            serde_json::Value::Object(o) => o,
-            _ => serde_json::Map::new(),
-        };
-        obj.insert("type".to_string(), json!("error"));
-        // `src` names the track the error refers to; the poster is
-        // what actually failed, so fall back to it for poster-only
-        // elements.
-        obj.insert(
-            "src".to_string(),
-            match src.as_deref() {
-                Some(s) => json!(s),
-                None => json!(poster),
-            },
-        );
-        obj.insert("index".to_string(), json!(index));
-        obj.insert("status".to_string(), json!(failure.status));
-        obj.insert("message".to_string(), json!(failure.message));
-        pending.push((node.id.clone(), action, serde_json::Value::Object(obj)));
+        match &poster {
+            Some(p @ MediaSource::Refused { .. }) => {
+                if dispatched.insert(format!(
+                    "{}\u{0}refused-poster\u{0}{}",
+                    node.id,
+                    p.authored()
+                )) {
+                    push(
+                        &reported,
+                        vec![
+                            ("code", json!(REFUSED_MEDIA_ERROR_CODE)),
+                            ("message", json!(p.refused_message())),
+                        ],
+                    );
+                }
+            }
+            Some(MediaSource::Allowed { url, .. }) => {
+                let Some(failure) = lookup_failure(url) else {
+                    continue;
+                };
+                if !dispatched.insert(format!("{}\u{0}{}", node.id, url)) {
+                    continue;
+                }
+                push(
+                    &reported,
+                    vec![
+                        ("status", json!(failure.status)),
+                        ("message", json!(failure.message)),
+                    ],
+                );
+            }
+            None => {}
+        }
     }
     pending
 }
