@@ -32,6 +32,7 @@ import type {
 } from "../app.js";
 import { HypenModuleInstance, HypenApp as HypenAppClass } from "../app.js";
 import { HypenGlobalContext } from "../context.js";
+import type { StateStore } from "../persistence.js";
 import type { I18n } from "../i18n.js";
 import { HypenRouter } from "../router.js";
 import { ManagedRouter } from "../managed-router.js";
@@ -209,6 +210,16 @@ export interface SessionHost {
    */
   loadSnapshot?(sessionId: string): Promise<SessionSnapshot | null | undefined>;
   saveSnapshot?(sessionId: string, snapshot: SessionSnapshot): void | Promise<void>;
+  /**
+   * Map a module's `.persist()` store to the store this host's instances
+   * must use (optional; identity when absent). Every module instance the
+   * session builds — primary, nested and routed — goes through it. A
+   * Cloudflare Durable Object returns the store bound to ITS OWN storage:
+   * all DOs of a class share one isolate and one module definition (so one
+   * store object), and a save that ran after an `await` must not land in
+   * another DO's storage.
+   */
+  stateStoreFor?(store: StateStore<any>): StateStore<any>;
   /**
    * The app's i18n instance. Each session forks it (own active locale,
    * shared catalogs) and publishes it to its engine as the `t` / `i18n`
@@ -463,6 +474,18 @@ export class RemoteSession {
    * element list. Torn down alongside the session in `destroy()`.
    */
   private _autoManagedRouter: ManagedRouter | null = null;
+  /**
+   * The session's one `HypenRouter`, shared by every module instance
+   * (`context.router`) and driven by the auto-wired `ManagedRouter`. Created
+   * with the primary module; absent with auto-routing disabled (the host
+   * wires its own router then).
+   */
+  private _router: HypenRouter | null = null;
+  private sessionRouter(): HypenRouter | undefined {
+    if (!this.autoRouterEnabled) return undefined;
+    if (!this._router) this._router = new HypenRouter();
+    return this._router;
+  }
   /**
    * Instances of named child modules mounted directly in a template (e.g.
    * `module App { Column { Counter() } }`, or a second module inside one
@@ -1312,7 +1335,7 @@ export class RemoteSession {
           { ...def, name: def.name || name } as HypenModuleDefinition<any>,
           name.toLowerCase()
         ),
-        undefined,
+        this.sessionRouter(),
         this._globalContext,
         this._sessionId ?? undefined
       );
@@ -1630,7 +1653,12 @@ export class RemoteSession {
   /** `def` seeded with the restored state of `moduleId`, or `def` itself. */
   private seededDefinition<D extends HypenModuleDefinition<any>>(def: D, moduleId: string): D {
     const seeded = this.takeRestoredState(moduleId, def);
-    return seeded === undefined ? def : ({ ...def, initialState: seeded } as D);
+    let out = seeded === undefined ? def : ({ ...def, initialState: seeded } as D);
+    if (out.stateStore && this.host.stateStoreFor) {
+      const store = this.host.stateStoreFor(out.stateStore);
+      if (store !== out.stateStore) out = { ...out, stateStore: store } as D;
+    }
+    return out;
   }
 
   /**
@@ -1839,7 +1867,9 @@ export class RemoteSession {
         this._moduleInstance = new HypenModuleInstance(
           this.engine,
           this.seededDefinition(this.host.module, this.host.moduleName.toLowerCase()),
-          undefined,
+          // `context.router` — the session router, whose navigation the
+          // auto-wired router mirrors into `state.location`.
+          this.sessionRouter(),
           this._globalContext,
           session.id,
           // The entry backs the engine's primary slot even when it is a
@@ -1950,9 +1980,13 @@ export class RemoteSession {
    * Parse Router {} blocks out of the primary template and spin up a
    * per-session ManagedRouter bound to the shared engine, auto-adding
    * one route per Route() — components resolved from the HypenApp
-   * registry. The primary module's `location` field (if present) is
-   * kept in sync with the router path so the Router IR re-renders on
-   * navigation.
+   * registry. The router is the session router every module's
+   * `context.router` is, and its path is kept in sync with the primary
+   * module's `state.location` (written on navigation, created if the state
+   * lacks it) so the Router IR re-renders and the web client's URL sync
+   * follows. An app with no `Router {}` block still gets the router — its
+   * `context.router.push/replace/back` and `@router.*` actions move
+   * `state.location`.
    *
    * Both top-level routers (`moduleScope` = primary / unscoped) and
    * routers nested inside per-route module templates are registered
@@ -1971,14 +2005,14 @@ export class RemoteSession {
     // `@router.push` handler + `state.location` mirror wired.
     const app = this.host.app ?? new HypenAppClass();
     const discovered = this.discoverRouterBlocks();
-    if (discovered.length === 0) return;
+    const router = this.sessionRouter();
+    if (!router) return;
 
     // Build a single top-level ManagedRouter covering every route from
     // every discovered router block (primary AND nested). Multiple
     // `Router {}` blocks flatten into one route list — the engine's
     // own Router IR still renders them independently, but the SDK only
     // needs a single `HypenRouter` per session.
-    const router = new HypenRouter();
     // Reuse the session's shared global context (the primary module is
     // already registered in it) rather than minting a second one.
     const globalContext = this._globalContext;
@@ -1995,10 +2029,12 @@ export class RemoteSession {
       // A restored session seeds each route module, as it is first
       // constructed, with the state it had in the previous incarnation.
       initialStateFor: (moduleId, definition) => this.takeRestoredState(moduleId, definition),
+      ...(this.host.stateStoreFor
+        ? { stateStoreFor: (store: StateStore<any>) => this.host.stateStoreFor!(store) }
+        : {}),
     });
     const primary = this._moduleInstance;
 
-    let added = 0;
     const seenPaths = new Set<string>();
     for (const block of discovered) {
       for (const route of block.routes) {
@@ -2018,99 +2054,99 @@ export class RemoteSession {
         }
         managed.addRoute({ path: route.path, component });
         seenPaths.add(route.path);
-        added += 1;
       }
     }
 
-    // `added` counts component-backed routes (mounted via ManagedRouter).
-    // Routes can also be fully INLINE — `Route(path: "/x") { ...markup... }`
+    // Component-backed routes are mounted via ManagedRouter. Routes can also be fully INLINE — `Route(path: "/x") { ...markup... }`
     // with no component — in which case the engine's own Router IR renders
     // them straight from `state.location`, and there's nothing for
-    // ManagedRouter to mount. We still need the URL→`location` mirror and the
-    // `@router.push` action handler so navigation works. So: bail only if no
-    // Router blocks were discovered at all; otherwise wire the router even
-    // when `added === 0`.
-    const locationKey = this.primaryHasLocationKey() ? "location" : null;
-    if (added === 0 && !locationKey) {
-      // No component routes and no `location` state to drive inline routes —
-      // nothing this router could affect.
-      log.debug(`Auto-router: nothing to mount for ${this.id}`);
-      return;
-    }
+    // ManagedRouter to mount. And an app with no Router block at all still
+    // navigates through `context.router` (the web client mirrors
+    // `state.location` to the URL). So the router is always wired: the
+    // `@router.*` action handlers plus the router ↔ `location` mirror,
+    // which writes `location` into the primary state even when the
+    // module's initial state did not declare it.
+    const locationKey = "location";
 
     // Mirror router path into primary module state's `location` so the
     // engine-level Router IR reconciles to the matching Route subtree.
     // Deferring via `queueMicrotask` keeps the engine write off the
     // synchronous notify path (Rust rejects re-entrant WASM state
     // proxy calls).
-    if (locationKey) {
-      // Persistence is loaded before auto-wiring. Seed the windowless router
-      // from that restored location before any subscribers are attached;
-      // otherwise its default `/` is immediately mirrored back into state
-      // and a hibernation wake silently replaces the restored detail route
-      // with Home before the triggering action runs.
-      const restoredLocation = (
-        primary?.getState() as Record<string, unknown> | undefined
-      )?.[locationKey];
-      if (typeof restoredLocation === "string" && restoredLocation) {
-        router.replace(restoredLocation);
-      }
+    // Persistence is loaded before auto-wiring. Seed the windowless router
+    // from that restored location before any subscribers are attached;
+    // otherwise its default `/` is immediately mirrored back into state
+    // and a hibernation wake silently replaces the restored detail route
+    // with Home before the triggering action runs.
+    const restoredLocation = (
+      primary?.getState() as Record<string, unknown> | undefined
+    )?.[locationKey];
+    if (typeof restoredLocation === "string" && restoredLocation) {
+      router.replace(restoredLocation);
+    }
 
-      router.onNavigate((rs) => {
-        const path = rs.currentPath;
-        // Write `location` only once ManagedRouter has mounted/activated the
-        // target module, so the navigation batch renders the route with the
-        // state `onActivated` wrote (e.g. a resolved `.sharedElement` key)
-        // instead of an empty first frame. The microtask hop lets
-        // `handleRouteChange` chain its navPromise first (this listener is
-        // registered before `managed.start()`); the cap keeps a slow
-        // `onActivated` (I/O) from stalling navigation.
-        queueMicrotask(async () => {
-          let timer: ReturnType<typeof setTimeout> | undefined;
-          await Promise.race([
-            managed.waitForNavigation(),
-            new Promise<void>((resolve) => {
-              timer = setTimeout(resolve, LOCATION_MIRROR_WAIT_MS);
-            }),
-          ]);
-          clearTimeout(timer);
-          // A newer navigation superseded this one; its own mirror writes.
-          if (router.getCurrentPath() !== path) return;
-          try {
-            const state = this._moduleInstance?.getState() as
-              | Record<string, unknown>
-              | undefined;
-            // Skip when already in sync — this mirror and the state →
-            // router one below would otherwise ping-pong.
-            if (state?.[locationKey] === path) return;
-            this._moduleInstance?.updateState({ [locationKey]: path });
-          } catch (err) {
-            log.error(`Auto-router: state.${locationKey} sync failed:`, err);
-          }
-        });
+    // `onNavigate` reports the current route on subscribe. Without a Router
+    // block that is no navigation at all: skip it, so an app that never
+    // navigates never gets a `location` it did not declare.
+    let skipSubscribeCall = discovered.length === 0;
+    router.onNavigate((rs) => {
+      if (skipSubscribeCall) {
+        skipSubscribeCall = false;
+        return;
+      }
+      const path = rs.currentPath;
+      // Write `location` only once ManagedRouter has mounted/activated the
+      // target module, so the navigation batch renders the route with the
+      // state `onActivated` wrote (e.g. a resolved `.sharedElement` key)
+      // instead of an empty first frame. The microtask hop lets
+      // `handleRouteChange` chain its navPromise first (this listener is
+      // registered before `managed.start()`); the cap keeps a slow
+      // `onActivated` (I/O) from stalling navigation.
+      queueMicrotask(async () => {
+        let timer: ReturnType<typeof setTimeout> | undefined;
+        await Promise.race([
+          managed.waitForNavigation(),
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, LOCATION_MIRROR_WAIT_MS);
+          }),
+        ]);
+        clearTimeout(timer);
+        // A newer navigation superseded this one; its own mirror writes.
+        if (router.getCurrentPath() !== path) return;
+        try {
+          const state = this._moduleInstance?.getState() as
+            | Record<string, unknown>
+            | undefined;
+          // Skip when already in sync — this mirror and the state →
+          // router one below would otherwise ping-pong.
+          if (state?.[locationKey] === path) return;
+          this._moduleInstance?.updateState({ [locationKey]: path });
+        } catch (err) {
+          log.error(`Auto-router: state.${locationKey} sync failed:`, err);
+        }
       });
+    });
 
-      // Mirror the other direction too: templates commonly navigate by
-      // mutating `state.location` from a module action (the scaffold's
-      // `@actions.navigate`). The engine's Router IR follows that state
-      // directly, but module mount/unmount and per-route action handlers
-      // follow the HypenRouter — without this push, navigating via a state
-      // mutation renders the new route while its module (and thus its
-      // actions) never activates.
-      if (primary) {
-        primary.onStateChange(() => {
-          try {
-            const loc = (primary.getState() as Record<string, unknown>)?.[
-              locationKey
-            ];
-            if (typeof loc === "string" && loc && loc !== router.getCurrentPath()) {
-              router.push(loc);
-            }
-          } catch (err) {
-            log.error(`Auto-router: ${locationKey} → router sync failed:`, err);
+    // Mirror the other direction too: templates commonly navigate by
+    // mutating `state.location` from a module action (the scaffold's
+    // `@actions.navigate`). The engine's Router IR follows that state
+    // directly, but module mount/unmount and per-route action handlers
+    // follow the HypenRouter — without this push, navigating via a state
+    // mutation renders the new route while its module (and thus its
+    // actions) never activates.
+    if (primary) {
+      primary.onStateChange(() => {
+        try {
+          const loc = (primary.getState() as Record<string, unknown>)?.[
+            locationKey
+          ];
+          if (typeof loc === "string" && loc && loc !== router.getCurrentPath()) {
+            router.push(loc);
           }
-        });
-      }
+        } catch (err) {
+          log.error(`Auto-router: ${locationKey} → router sync failed:`, err);
+        }
+      });
     }
 
     // `start()` installs the `@router.push`/`@router.back`/... action handlers
@@ -2120,8 +2156,10 @@ export class RemoteSession {
     this._autoManagedRouter = managed;
     managed.start();
     // HypenRouter doesn't fire onNavigate on subscribe; kick an
-    // explicit push so the initial route mounts.
-    router.push(router.getCurrentPath());
+    // explicit push so the initial route mounts. Without a Router block
+    // there is nothing to mount, and the kick would only write a
+    // `location` the app never asked for.
+    if (discovered.length > 0) router.push(router.getCurrentPath());
   }
 
   /**

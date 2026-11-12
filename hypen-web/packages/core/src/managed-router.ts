@@ -52,6 +52,7 @@
  */
 
 import type { IEngine, HypenModuleDefinition } from "./app.js";
+import type { StateStore } from "./persistence.js";
 import { HypenModuleInstance, HypenApp } from "./app.js";
 import type { HypenRouter, RouteState } from "./router.js";
 import type { HypenGlobalContext } from "./context.js";
@@ -106,6 +107,12 @@ export interface ManagedRouterOptions {
    * hibernation wake or a hot-reload resume.
    */
   initialStateFor?: (moduleId: string, definition: HypenModuleDefinition) => unknown;
+  /**
+   * Map a route module's `.persist()` store to the one this host's instances
+   * must use. A Cloudflare Durable Object returns the store bound to ITS OWN
+   * storage (every DO of a class shares one definition, and so one store).
+   */
+  stateStoreFor?: (store: StateStore<any>) => StateStore<any>;
 }
 
 export class ManagedRouter {
@@ -144,6 +151,7 @@ export class ManagedRouter {
   private readonly maxPinnedModules: number;
   private readonly onModuleCreated?: (instance: HypenModuleInstance, moduleId: string) => void;
   private readonly initialStateFor?: (moduleId: string, definition: HypenModuleDefinition) => unknown;
+  private readonly stateStoreFor?: (store: StateStore<any>) => StateStore<any>;
   /**
    * Serialized chain of in-flight route transitions. Because mount /
    * unmount are now async (they await `onActivated` / `onDeactivated`),
@@ -172,6 +180,7 @@ export class ManagedRouter {
     this.maxPinnedModules = pinCap >= 0 ? pinCap : MAX_BACKGROUND_PINNED_MODULES;
     this.onModuleCreated = options.onModuleCreated;
     this.initialStateFor = options.initialStateFor;
+    this.stateStoreFor = options.stateStoreFor;
   }
 
   /**
@@ -399,6 +408,9 @@ export class ManagedRouter {
       if (seeded !== undefined) namedDef.initialState = seeded;
     } catch (e) {
       log.error(`initialStateFor hook failed for ${moduleId}:`, e);
+    }
+    if (namedDef.stateStore && this.stateStoreFor) {
+      namedDef.stateStore = this.stateStoreFor(namedDef.stateStore);
     }
 
     const instance = new HypenModuleInstance(
