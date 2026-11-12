@@ -147,6 +147,42 @@ export const APPS: LauncherApp[] = [
     glow: "rgba(225, 29, 72, 0.48)",
     url: appEndpoint("hypen-hypeflix", 8795),
   },
+  {
+    slug: "weather",
+    name: "Weather",
+    resource: "cloud-sun",
+    iconColor: "#FFFBEB",
+    tile: "radial-gradient(circle at 28% 14%, rgba(255,255,255,0.46), transparent 29%), linear-gradient(145deg, #7DD3FC 0%, #3B82F6 48%, #1E3A8A 100%)",
+    glow: "rgba(59, 130, 246, 0.46)",
+    url: appEndpoint("hypen-weather", 8796),
+  },
+  {
+    slug: "photos",
+    name: "Photos",
+    resource: "camera",
+    iconColor: "#FFFBEB",
+    tile: "radial-gradient(circle at 28% 14%, rgba(255,255,255,0.46), transparent 28%), linear-gradient(145deg, #FDE68A 0%, #F59E0B 40%, #DB2777 100%)",
+    glow: "rgba(245, 158, 11, 0.44)",
+    url: appEndpoint("hypen-photos", 8797),
+  },
+  {
+    slug: "messages",
+    name: "Messages",
+    resource: "message-square",
+    iconColor: "#EEF2FF",
+    tile: "radial-gradient(circle at 27% 13%, rgba(255,255,255,0.44), transparent 28%), linear-gradient(145deg, #A5B4FC 0%, #6366F1 46%, #3730A3 100%)",
+    glow: "rgba(99, 102, 241, 0.46)",
+    url: appEndpoint("hypen-messages", 8798),
+  },
+  {
+    slug: "news",
+    name: "News",
+    resource: "newspaper",
+    iconColor: "#FFF7ED",
+    tile: "radial-gradient(circle at 26% 13%, rgba(255,255,255,0.42), transparent 28%), linear-gradient(145deg, #FDBA74 0%, #FF7A1A 46%, #9A3412 100%)",
+    glow: "rgba(255, 122, 26, 0.46)",
+    url: appEndpoint("hypen-news", 8800),
+  },
 ];
 
 const iconSvg = (paths: string) =>
@@ -215,6 +251,10 @@ export const resources: Record<string, string> = {
       stroke("M10 8.25v7.5l6-3.75-6-3.75Z") +
       stroke("M5 5l1.25 1.25M18 17.75 19.25 19"),
   ),
+  "camera": iconSvg(stroke("M4 8.5A2.5 2.5 0 0 1 6.5 6h1.8l1.4-2h4.6l1.4 2h1.8A2.5 2.5 0 0 1 20 8.5v9a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5v-9Z") + stroke("M12 16.5a3.5 3.5 0 1 0 0-7 3.5 3.5 0 0 0 0 7Z")),
+  "message-square": iconSvg(stroke("M20 15a2 2 0 0 1-2 2H8l-4 4V5a2 2 0 0 1 2-2h12a2 2 0 0 1 2 2v10Z") + stroke("M8 8.5h8M8 12h5")),
+  "newspaper": iconSvg(stroke("M4 5.5A1.5 1.5 0 0 1 5.5 4h11A1.5 1.5 0 0 1 18 5.5V18a2 2 0 0 0 2 2H6a2 2 0 0 1-2-2V5.5Z") + stroke("M18 9h2v9a2 2 0 0 1-2 2") + stroke("M7.5 8h7M7.5 12h7M7.5 16h4")),
+  "radio": iconSvg(stroke("M4 10.5A2.5 2.5 0 0 1 6.5 8h11a2.5 2.5 0 0 1 2.5 2.5v7a2.5 2.5 0 0 1-2.5 2.5h-11A2.5 2.5 0 0 1 4 17.5v-7Z") + stroke("M7 8l9-4.5") + stroke("M15.5 15.5a1.5 1.5 0 1 0 0-3 1.5 1.5 0 0 0 0 3Z") + stroke("M7.5 12h3.5M7.5 15.5h3.5")),
   "image": iconSvg(stroke("M3 5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5") + stroke("M8 11l3 3 2-2 5 5") + stroke("M8.5 8.5h.01")),
   "message-circle": iconSvg(
     `<path d="M6 6a3 3 0 0 1 3-3h7a3 3 0 0 1 3 3v4a3 3 0 0 1-3 3h-4.5L7 16v-3.35A3 3 0 0 1 6 10V6Z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>` +

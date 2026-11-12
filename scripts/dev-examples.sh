@@ -67,6 +67,10 @@ food-ordering examples/food-ordering/cloudflare 8792
 social examples/social/cloudflare 8793
 calculator examples/calculator/cloudflare 8794
 hypeflix examples/hypeflix/cloudflare 8795
+weather examples/weather/cloudflare 8796
+photos examples/photos/cloudflare 8797
+messages examples/messages/cloudflare 8798
+news examples/news/cloudflare 8800
 "
 
 # Echoes "relative-dir http-port" for a known name, nothing for an unknown one.
@@ -90,7 +94,7 @@ example_names() {
 }
 
 DEFAULT_SET=(home-screen todo calculator)
-ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator hypeflix)
+ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator hypeflix weather photos messages news)
 
 FRESH=0
 LOCAL=0

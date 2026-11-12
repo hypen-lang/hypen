@@ -50,6 +50,10 @@ icons to `wss://<worker>.<subdomain>.workers.dev/ws`.)
 | social | `examples/social/cloudflare` | 8793 | Social |
 | calculator | `examples/calculator/cloudflare` | 8794 | Calculator |
 | hypeflix | `examples/hypeflix/cloudflare` | 8795 | Hypeflix |
+| weather | `examples/weather/cloudflare` | 8796 | Weather |
+| photos | `examples/photos/cloudflare` | 8797 | Photos |
+| messages | `examples/messages/cloudflare` | 8798 | Messages |
+| news | `examples/news/cloudflare` | 8800 | News |
 
 ## Gotchas
 

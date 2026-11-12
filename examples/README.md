@@ -12,6 +12,10 @@ Every example is a complete Hypen app. Most deploy as a Cloudflare Worker and ar
 | [`movie-discovery/`](movie-discovery/) | Remote API data, shared element transitions, detail routes | [open](https://hypen-movie-discovery.ian-dae.workers.dev) |
 | [`social/`](social/) | An Instagram-style feed with the same UI served from several server languages | [open](https://hypen-social.ian-dae.workers.dev/) |
 | [`hypeflix/`](hypeflix/) | A Netflix-style browser with rows, hero banners and breakpoints | [open](https://hypen-hypeflix.ian-dae.workers.dev/) |
+| [`weather/`](weather/) | Open-Meteo forecast: hourly chart, 7-day range bars, city search, saved cities, condition-driven theme | run locally |
+| [`photos/`](photos/) | Camera capture, gallery import and desktop drops over the device plane; R2 storage, EXIF, places, albums by drag and drop | run locally |
+| [`messages/`](messages/) | Real-time rooms and DMs between visitors: presence, typing, receipts, reactions, link previews | run locally |
+| [`news/`](news/) | Hacker News lists that re-rank live, threaded comments, Wikipedia's daily featured feed | run locally |
 | [`simple/`](simple/) | The smallest Hypen-on-Cloudflare app: one file, a counter and two routes | run locally |
 | [`stock-lab/`](stock-lab/) | One template with charts captured on all five renderers (the README hero image) | run locally |
 | [`a11y-demo/`](a11y-demo/) | Every semantics translation the renderers perform, on one screen | run locally |
