@@ -6202,6 +6202,35 @@ mod paint_refresh {
     }
 
     #[test]
+    fn text_decoration_toggle_on_the_text() {
+        // A Todo row ticked done: `.textDecoration("line-through")`
+        // arrives as a paint-only SetProp and must strike the text
+        // through without waiting for an unrelated full layout.
+        assert_refresh_matches(
+            fixture(),
+            &[set_prop("name", "textDecoration.0", json!("line-through"))],
+        );
+    }
+
+    #[test]
+    fn text_decoration_removed_from_the_text() {
+        // Un-ticking: the line must go away in place, not linger.
+        let mut tree = fixture();
+        tree.apply(&set_prop("name", "textDecoration.0", json!("line-through")));
+        assert_refresh_matches(tree, &[remove_prop("name", "textDecoration.0")]);
+    }
+
+    #[test]
+    fn text_decoration_propagates_from_an_ancestor_in_place() {
+        // Decorations propagate to descendant text, so a write on the
+        // card must restrike the Text inside it.
+        assert_refresh_matches(
+            fixture(),
+            &[set_prop("card", "textDecorationLine", json!("underline"))],
+        );
+    }
+
+    #[test]
     fn text_align_change_is_no_longer_paint_only() {
         // This used to assert the in-place refresh reproduced a full
         // recompute for a `textAlign` change, which held because the

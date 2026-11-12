@@ -8080,9 +8080,19 @@ pub(crate) fn refresh_item_paint(
                 .map(str::to_string);
             *color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
         }
-        ItemKind::Text { color, align, .. } => {
+        ItemKind::Text {
+            color,
+            align,
+            decoration,
+            ..
+        } => {
             *color = prop_color_at(node, "color", viewport).unwrap_or(Rgba::BLACK);
             *align = parse_text_align(crate::style::prop_str_at(node, "textAlign", viewport));
+            // Decorations propagate from ancestors; a write on any of
+            // them puts this descendant in `affected`, so re-resolving
+            // the inherited set here covers both own and ancestor
+            // toggles (e.g. a Todo row's line-through on tick/untick).
+            *decoration = inherited_text_decoration(tree, &item.node_id, viewport);
         }
         ItemKind::Icon { .. } | ItemKind::Image { .. } => {
             // Icon-vs-Image is prop-driven (`__iconPaths` presence),
