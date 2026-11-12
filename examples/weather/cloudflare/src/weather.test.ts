@@ -17,6 +17,11 @@ import {
   type Forecast,
 } from "./openmeteo";
 import { describeCode, present } from "./present";
+import weather, { initialWeatherState, load, retry, retryDelayMs, tick } from "./weather";
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+// @ts-ignore - the web-target glue (initSync + WasmEngine), as in worker.ts.
+import * as wasm from "hypen-engine";
 
 const SF = { lat: 37.7749, lon: -122.4194 };
 // The ensemble fixture was recorded 2026-11-12 ~09:30 Pacific.
@@ -135,5 +140,133 @@ describe("network layer", () => {
     expect(rows[0]!.name).toBe("Reykjavik");
     expect(rows[0]!.country).toBe("Iceland");
     expect(await searchCities("R")).toEqual([]); // too short — no request
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Module: error state, retry with backoff, stale data
+// ---------------------------------------------------------------------------
+
+const timeout = () => Promise.reject(new DOMException("The operation timed out.", "TimeoutError"));
+
+/** Open-Meteo answering normally: the ensemble stands in for the forecast API. */
+const healthy: Parameters<typeof setFetcher>[0] = async (url) => {
+  const host = new URL(url).host;
+  if (host === "api.open-meteo.com") return json({ reason: "Daily API request limit exceeded" }, 429);
+  if (host === "air-quality-api.open-meteo.com") return json(airFixture);
+  return json(ensembleFixture);
+};
+
+describe("forecast error state", () => {
+  test("a hung upstream leaves Loading for an error with Retry, then reports the failure", async () => {
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    setFetcher(async () => {
+      await gate;
+      return timeout();
+    });
+    const state = initialWeatherState();
+    const pending = load(state, { deadlineMs: 20 });
+    expect(state.status).toBe("loading");
+    await Bun.sleep(40);
+    // Still waiting on Open-Meteo, but no longer stuck on "Loading…".
+    expect(state.status).toBe("error");
+    expect(state.errorText).toContain("taking too long");
+    expect(state.retryText).toBe("Still trying…");
+
+    release();
+    await pending;
+    expect(state.status).toBe("error");
+    expect(state.errorText).toBe("Open-Meteo is not responding.");
+    expect(state.retryText).toBe("Retrying automatically in 1 min.");
+    expect(state.stale).toBe(false);
+  }, 15_000);
+
+  test("the ticker retries with exponential backoff; Retry skips the wait", async () => {
+    expect([1, 2, 3, 4, 5, 9].map(retryDelayMs)).toEqual([60_000, 120_000, 240_000, 480_000, 600_000, 600_000]);
+
+    let calls = 0;
+    setFetcher(async (url) => {
+      if (new URL(url).host === "api.open-meteo.com") calls++;
+      return timeout();
+    });
+    const state = initialWeatherState();
+    const t0 = Date.now();
+    await load(state);
+    expect(state.status).toBe("error");
+    const afterFirst = calls;
+    expect(afterFirst).toBeGreaterThan(0);
+
+    // Within the 1 min backoff the ticker only updates the countdown.
+    expect(tick(state, t0 + 30_000)).toBeUndefined();
+    expect(calls).toBe(afterFirst);
+
+    // Due: the ticker tries again; the second failure doubles the wait.
+    await tick(state, Date.now() + 61_000);
+    expect(calls).toBeGreaterThan(afterFirst);
+    expect(state.status).toBe("error");
+    expect(state.retryText).toBe("Retrying automatically in 2 min.");
+    const afterSecond = calls;
+    expect(tick(state, Date.now() + 90_000)).toBeUndefined();
+    expect(calls).toBe(afterSecond);
+
+    // Retry ignores the backoff, and success clears the error.
+    setFetcher(healthy);
+    await retry(state);
+    expect(state.status).toBe("ready");
+    expect(state.retryText).toBe("");
+    expect(state.daily.length).toBe(7);
+  }, 20_000);
+
+  test("a failed refresh keeps the previous forecast on screen, marked stale", async () => {
+    setFetcher(healthy);
+    const state = initialWeatherState();
+    await load(state);
+    expect(state.status).toBe("ready");
+    const temp = state.now.temp;
+    const days = state.daily.length;
+
+    setFetcher(async () => timeout()); // also drops the cache
+    await load(state, { quiet: true });
+    expect(state.status).toBe("ready");
+    expect(state.now.temp).toBe(temp);
+    expect(state.daily.length).toBe(days);
+    expect(state.stale).toBe(true);
+    expect(state.staleText).toContain("Couldn't refresh the forecast");
+    expect(state.staleText).toContain("Retrying automatically in 1 min.");
+
+    // A Retry with the forecast up never flips the screen back to Loading.
+    setFetcher(healthy);
+    const retrying = retry(state);
+    expect(state.status).toBe("ready");
+    await retrying;
+    expect(state.stale).toBe(false);
+    expect(state.staleText).toBe("");
+  }, 15_000);
+
+  test("the template renders the error screen and the stale banner", () => {
+    wasm.initSync({ module: readFileSync(join(import.meta.dir, "../node_modules/hypen-engine/hypen_engine_bg.wasm")) });
+    const engine = new wasm.WasmEngine();
+    engine.registerDefaultPrimitives?.();
+    const batches: string[] = [];
+    engine.setRenderCallback((p: unknown) => batches.push(typeof p === "string" ? p : JSON.stringify(p)));
+    const module = weather as unknown as { actions: string[]; template: string };
+    const state = {
+      ...initialWeatherState(),
+      status: "error",
+      errorText: "Open-Meteo is not responding.",
+      retryText: "Retrying automatically in 1 min.",
+    };
+    engine.setModule("App", module.actions, Object.keys(state), state);
+    engine.renderSource(module.template);
+    const errorScreen = batches.join("\n");
+    expect(errorScreen).toContain("Couldn’t load the forecast for Locating…");
+    expect(errorScreen).toContain("Open-Meteo is not responding.");
+    expect(errorScreen).toContain("Retrying automatically in 1 min.");
+    expect(errorScreen).toContain('"Retry"');
+
+    batches.length = 0;
+    engine.updateState(null, { status: "ready", stale: true, staleText: "Couldn't refresh the forecast" });
+    expect(batches.join("\n")).toContain("Couldn't refresh the forecast");
   });
 });

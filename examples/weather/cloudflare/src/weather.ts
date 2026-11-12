@@ -15,6 +15,10 @@ import { present, themeFor, type Unit, type WeatherView } from "./present";
 //   - A 60 s ticker per session re-derives the view (clock, "Now" hour,
 //     "updated N min ago") from the shared cache and pulls a fresh forecast
 //     once the 10-minute TTL lapses, so open clients update live.
+//   - When Open-Meteo is unreachable the screen never sits on "Loading…":
+//     after LOAD_DEADLINE_MS it shows an error with a Retry button, the
+//     ticker retries with exponential backoff, and a forecast already on
+//     screen stays up (marked stale) instead of being replaced by the error.
 //   - The background and surfaces follow the current condition, day/night.
 
 export interface Place {
@@ -55,7 +59,13 @@ export type WeatherState = WeatherView & {
   searchState: "idle" | "searching" | "results" | "empty" | "error";
   showResults: boolean;
   status: "loading" | "ready" | "error";
+  /** Why the forecast couldn't be loaded (error screen). */
   errorText: string;
+  /** When the next automatic attempt is due ("" while one is running). */
+  retryText: string;
+  /** A refresh failed and the screen shows an older forecast. */
+  stale: boolean;
+  staleText: string;
   locateIcon: string;
 };
 
@@ -103,6 +113,9 @@ export function initialWeatherState(): WeatherState {
     showResults: false,
     status: "loading",
     errorText: "",
+    retryText: "",
+    stale: false,
+    staleText: "",
     locateIcon: ICONS.locate,
   };
 }
@@ -154,6 +167,32 @@ interface Loaded {
 const loaded = new WeakMap<object, Loaded>();
 const tickers = new WeakMap<object, ReturnType<typeof setInterval>>();
 const searchSeq = new WeakMap<object, number>();
+const loadSeq = new WeakMap<object, number>();
+
+/**
+ * How long the screen may say "Loading…" before it switches to the error
+ * state. The request keeps running (fetchJson retries for up to ~30 s on
+ * timeouts) and still lands if it succeeds.
+ */
+export const LOAD_DEADLINE_MS = 12_000;
+/** Automatic retries ride the 60 s ticker: 1, 2, 4, 8 min, then every 10. */
+export const TICK_MS = 60_000;
+const RETRY_MAX_MS = 10 * 60_000;
+
+/** Backoff before the next automatic attempt after `failures` failed loads in a row. */
+export function retryDelayMs(failures: number): number {
+  return Math.min(TICK_MS * 2 ** Math.max(0, failures - 1), RETRY_MAX_MS);
+}
+
+interface Health {
+  placeId: string;
+  failures: number;
+  nextRetryAt: number;
+  reason: string;
+}
+
+/** Consecutive failures for the current place, per session. */
+const health = new WeakMap<object, Health>();
 
 function chipsFor(state: WeatherState): Chip[] {
   const theme = state.theme;
@@ -190,36 +229,136 @@ function applyView(state: WeatherState, data: Loaded): void {
   refreshChrome(state);
 }
 
+function failureReason(error: unknown): string {
+  if (error instanceof Error && /limit|429/i.test(error.message)) {
+    return "Open-Meteo is rate-limiting this server.";
+  }
+  if (error instanceof Error && /timeout|timed out/i.test(`${error.name} ${error.message}`)) {
+    return "Open-Meteo is not responding.";
+  }
+  return "Couldn't reach Open-Meteo.";
+}
+
+function minutes(ms: number): string {
+  const min = Math.max(1, Math.ceil(ms / 60_000));
+  return min === 1 ? "1 min" : `${min} min`;
+}
+
+/** Re-derive the error / stale wording from the failure record. */
+function describeHealth(state: WeatherState, now: number): void {
+  const h = health.get(state);
+  if (!h || h.placeId !== state.place.id) return;
+  const wait = h.nextRetryAt - now;
+  const next = wait > 0 ? `Retrying automatically in ${minutes(wait)}.` : "Retrying…";
+  if (state.status === "error") {
+    state.errorText = h.reason;
+    state.retryText = next;
+  } else if (state.stale) {
+    const data = loaded.get(state);
+    const age = data ? Math.max(0, Math.round((now - data.forecast.fetchedAt) / 60_000)) : 0;
+    state.staleText = `Couldn't refresh the forecast — showing data from ${age} min ago. ${next}`;
+  }
+}
+
+function clearHealth(state: WeatherState): void {
+  health.delete(state);
+  state.stale = false;
+  state.staleText = "";
+  state.retryText = "";
+}
+
 /**
  * Fetch (or reuse from cache) the forecast for `state.place` and re-render.
  * `quiet` keeps the current screen up while refreshing.
+ *
+ * Failure handling: with no forecast for this place on screen the view
+ * switches to the error state (after `deadlineMs` at the latest, even if
+ * the request is still retrying); with one on screen it stays up, marked
+ * stale. Each failure pushes the ticker's next automatic attempt out
+ * (`retryDelayMs`).
  */
-async function load(state: WeatherState, { quiet = false } = {}): Promise<void> {
+export async function load(
+  state: WeatherState,
+  { quiet = false, deadlineMs = LOAD_DEADLINE_MS } = {},
+): Promise<void> {
   const place = { ...state.place };
-  const current = loaded.get(state);
-  if (!quiet && current?.placeId !== place.id) {
+  const seq = (loadSeq.get(state) ?? 0) + 1;
+  loadSeq.set(state, seq);
+  const hasData = () => loaded.get(state)?.placeId === place.id;
+  const current = () => state.place.id === place.id && loadSeq.get(state) === seq;
+
+  if (!quiet && !hasData()) {
     state.status = "loading";
+    state.retryText = "";
     refreshChrome(state);
   }
+  if (!quiet && state.stale) state.staleText = "Trying again…";
+
+  // Never leave the screen on "Loading…" behind a hung upstream.
+  const deadline = setTimeout(() => {
+    if (!current() || hasData() || state.status !== "loading") return;
+    state.status = "error";
+    state.errorText = "Open-Meteo is taking too long to respond.";
+    state.retryText = "Still trying…";
+  }, deadlineMs);
+
   try {
     const [forecast, aqi] = await Promise.all([
       getForecast(place.latitude, place.longitude),
       getAirQuality(place.latitude, place.longitude),
     ]);
-    if (state.place.id !== place.id) return; // the user moved on
+    if (!current()) return; // the user moved on, or a newer load owns the screen
     const data = { placeId: place.id, forecast, aqi };
     loaded.set(state, data);
+    clearHealth(state);
     applyView(state, data);
   } catch (error) {
-    if (state.place.id !== place.id) return;
+    if (!current()) return;
     console.warn(`[weather] forecast for ${place.name} failed:`, error);
-    if (current?.placeId === place.id) return; // keep showing what we have
-    state.status = "error";
-    state.errorText =
-      error instanceof Error && /limit|429/i.test(error.message)
-        ? "Open-Meteo is rate-limiting this server. Try again in a minute."
-        : "Couldn't reach Open-Meteo. Check the connection and try again.";
+    const prev = health.get(state);
+    const failures = prev?.placeId === place.id ? prev.failures + 1 : 1;
+    const now = Date.now();
+    health.set(state, {
+      placeId: place.id,
+      failures,
+      nextRetryAt: now + retryDelayMs(failures),
+      reason: failureReason(error),
+    });
+    if (hasData()) {
+      state.stale = true; // keep showing what we have
+    } else {
+      state.status = "error";
+    }
+    describeHealth(state, now);
+  } finally {
+    clearTimeout(deadline);
   }
+}
+
+/**
+ * The 60 s ticker: re-derive the view (clock, "Now", age) and pull a fresh
+ * forecast — a cache hit until the TTL lapses. After failures it waits for
+ * the backoff before the next attempt.
+ */
+export function tick(state: WeatherState, now = Date.now()): Promise<void> | undefined {
+  const data = loaded.get(state);
+  if (data?.placeId === state.place.id) applyView(state, data);
+  const h = health.get(state);
+  if (h?.placeId === state.place.id && now < h.nextRetryAt) {
+    describeHealth(state, now);
+    return undefined;
+  }
+  if (h?.placeId === state.place.id) {
+    if (state.status === "error") state.retryText = "Retrying…";
+  }
+  return load(state, { quiet: true });
+}
+
+/** The Retry button: try now, whatever the backoff says. */
+export async function retry(state: WeatherState): Promise<void> {
+  const h = health.get(state);
+  if (h) h.nextRetryAt = 0;
+  await load(state);
 }
 
 function selectPlace(state: WeatherState, place: Place): void {
@@ -228,6 +367,7 @@ function selectPlace(state: WeatherState, place: Place): void {
   state.results = [];
   state.searchState = "idle";
   state.showResults = false;
+  clearHealth(state); // backoff and staleness belong to the previous place
   refreshChrome(state);
   void load(state);
 }
@@ -262,11 +402,7 @@ export default app
     void load(state);
     tickers.set(
       state as object,
-      setInterval(() => {
-        const data = loaded.get(state);
-        if (data?.placeId === state.place.id) applyView(state, data); // clock, "Now", age
-        void load(state, { quiet: true }); // cache hit until the TTL lapses
-      }, 60_000),
+      setInterval(() => void tick(state), TICK_MS),
     );
   })
   .onDestroyed((state) => {
@@ -338,7 +474,7 @@ export default app
     if (data?.placeId === state.place.id) applyView(state, data);
   })
   .onAction("retry", async ({ state }) => {
-    await load(state);
+    await retry(state);
   })
   .ui(`
     module App {
@@ -494,8 +630,14 @@ export default app
             }
             Case(match: "error") {
               Column {
-                Text("@{state.errorText}").fontSize(15).color("#FFFFFF").textAlign("center")
-                Button { Text("Try again").fontSize(14).fontWeight(600).color("#0F172A") }
+                Text("Couldn’t load the forecast for @{state.place.name}")
+                  .fontSize(18)
+                  .fontWeight(600)
+                  .color("#FFFFFF")
+                  .textAlign("center")
+                Text("@{state.errorText}").fontSize(15).color("@{state.theme.sub}").textAlign("center")
+                Button { Text("Retry").fontSize(14).fontWeight(600).color("#0F172A") }
+                  .label("Retry loading the forecast")
                   .onClick(@actions.retry)
                   .paddingHorizontal(18)
                   .paddingVertical(10)
@@ -503,8 +645,9 @@ export default app
                   .borderWidth(0)
                   .backgroundColor("#FFFFFF")
                   .cursor("pointer")
+                Text("@{state.retryText}").fontSize(12).color("@{state.theme.sub}").textAlign("center")
               }
-                .gap(16)
+                .gap(12)
                 .horizontalAlignment("center")
                 .paddingVertical(100)
                 .paddingHorizontal(24)
@@ -512,6 +655,29 @@ export default app
             }
             Else {
               Column {
+                // ---------- stale banner (a refresh failed) ----------
+                If(condition: @state.stale) {
+                  Row {
+                    Text("@{state.staleText}").fontSize(13).color("#FFFFFF").flex(1).minWidth(0)
+                    Button { Text("Retry").fontSize(13).fontWeight(600).color("#0F172A") }
+                      .label("Retry loading the forecast")
+                      .onClick(@actions.retry)
+                      .paddingHorizontal(12)
+                      .paddingVertical(6)
+                      .borderRadius(999)
+                      .borderWidth(0)
+                      .backgroundColor("#FFFFFF")
+                      .flexShrink(0)
+                      .cursor("pointer")
+                  }
+                    .gap(10)
+                    .verticalAlignment("center")
+                    .padding(12)
+                    .borderRadius(14)
+                    .backgroundColor("rgba(185, 28, 28, 0.55)")
+                    .width("100%")
+                }
+
                 // ---------- hero ----------
                 Column {
                   Row {
