@@ -2361,6 +2361,19 @@ export class DOMRenderer {
     // earlier version materialized `Array.from(children)` per node (~34k
     // array allocations per 1,000-row clear), and an indexed loop over the
     // live collection still built an HTMLCollection per element.
+    // Ask each subsystem ONCE whether it tracks any node at all. A cleared
+    // 1,000-row list sweeps ~17,000 descendants; calling every `forget`
+    // on each was ~25 hash lookups per node into tables that are empty
+    // in an app with no animation, gestures or drag-and-drop on those
+    // rows — more time than the DOM unlink itself.
+    const anim = !this.animator.tracksNothing;
+    const scrub = !this.scrubber.tracksNothing;
+    const dnd = !this.dnd.tracksNothing;
+    const virt = !this.virt.tracksNothing;
+    const handlerProps = this.handlerProps.size > 0;
+    const textBindings = this.textBindings.size > 0;
+    const dialogs = this.dialogIds.size > 0;
+    const routeFocus = this.routeFocusMemory.size > 0;
     walkElements(root, (desc) => {
       if (desc === root) return;
       // Component-internal wrapper elements are never registered and fall
@@ -2373,14 +2386,14 @@ export class DOMRenderer {
       disposeHypenElement(desc);
       this.applicators.release(desc);
       this.nodes.delete(descId);
-      this.handlerProps.delete(descId);
-      this.dropTextBinding(descId);
-      this.dialogIds.delete(descId);
-      this.virt.forget(descId);
-      this.animator.forget(descId);
-      this.scrubber.forget(descId);
-      this.dnd.forget(descId);
-      this.routeFocusMemory.delete(descId);
+      if (handlerProps) this.handlerProps.delete(descId);
+      if (textBindings) this.dropTextBinding(descId);
+      if (dialogs) this.dialogIds.delete(descId);
+      if (virt) this.virt.forget(descId);
+      if (anim) this.animator.forget(descId);
+      if (scrub) this.scrubber.forget(descId);
+      if (dnd) this.dnd.forget(descId);
+      if (routeFocus) this.routeFocusMemory.delete(descId);
     });
   }
 

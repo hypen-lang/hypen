@@ -339,6 +339,11 @@ export class DomVirtualizer {
     }
   }
 
+  /** Whether `forget` would find nothing for any id (see the animator's). */
+  get tracksNothing(): boolean {
+    return this.lists.size === 0 && this.columns.size === 0;
+  }
+
   /** The element `id` is gone for good. */
   forget(id: string): void {
     this.columns.delete(id);

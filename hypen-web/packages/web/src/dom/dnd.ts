@@ -743,6 +743,11 @@ export class DomDnd {
   }
 
   /** A removed node: cancel any drag it participates in, drop all state. */
+  /** Whether `forget` would find nothing for any id (see the animator's). */
+  get tracksNothing(): boolean {
+    return this.nodes.size === 0;
+  }
+
   forget(id: string): void {
     const node = this.nodes.get(id);
     if (!node) return;

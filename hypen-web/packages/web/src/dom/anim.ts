@@ -1114,6 +1114,34 @@ export class DomAnimator {
     this.finalizeExit(id);
   }
 
+  /**
+   * Whether `forget` would find nothing for ANY id: every per-node table is
+   * empty. A teardown that forgets thousands of nodes (a cleared list) asks
+   * once and skips the per-node calls — each `forget` is sixteen lookups in
+   * tables that, in an app with no animation on those nodes, hold nothing.
+   * Keep in step with `forget` and the helpers it calls.
+   */
+  get tracksNothing(): boolean {
+    return (
+      this.specs.size === 0 &&
+      this.animateElements.size === 0 &&
+      this.settles.size === 0 &&
+      this.stateSettles.size === 0 &&
+      this.stateLabels.size === 0 &&
+      this.presetEnds.size === 0 &&
+      this.pinnedOrigins.size === 0 &&
+      this.savedTransitions.size === 0 &&
+      this.motionEssential.size === 0 &&
+      this.transactionSettleIds.size === 0 &&
+      this.transactionProps.size === 0 &&
+      this.createdThisBatch.size === 0 &&
+      this.pendingEnters.size === 0 &&
+      this.pendingFlips.size === 0 &&
+      this.shared.size === 0 &&
+      this.sharedCreatedThisBatch.size === 0
+    );
+  }
+
   /** Drop cached specs for a finalized id. */
   forget(id: string): void {
     this.cancelSettle(id);

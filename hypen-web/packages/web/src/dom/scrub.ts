@@ -511,6 +511,11 @@ export class DomScrubber {
   }
 
   /** A removed node: cancel everything, release capture, drop all state. */
+  /** Whether `forget` would find nothing for any id (see the animator's). */
+  get tracksNothing(): boolean {
+    return this.entries.size === 0 && this.motionEssential.size === 0;
+  }
+
   forget(id: string): void {
     this.motionEssential.delete(id);
     const entry = this.entries.get(id);
