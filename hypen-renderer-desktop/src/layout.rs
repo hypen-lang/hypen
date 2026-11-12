@@ -1429,6 +1429,22 @@ impl TaffyState {
         }
     }
 
+    /// Re-resolve the measure context of every Text leaf strictly below
+    /// `id` (see [`is_inherited_text_measure_key`]).
+    fn restyle_text_descendants(&mut self, tree: &Tree, id: &str, scale: f32, viewport: Viewport) {
+        let mut stack: Vec<&str> = tree.children_of(id).iter().map(String::as_str).collect();
+        while let Some(cur) = stack.pop() {
+            stack.extend(tree.children_of(cur).iter().map(String::as_str));
+            let Some(node) = tree.get(cur) else { continue };
+            if !is_text_leaf(node) {
+                continue;
+            }
+            if let Some(&tid) = self.node_map.get(cur) {
+                self.resolve_node_style(tree, tid, cur, node, scale, viewport);
+            }
+        }
+    }
+
     /// How many live nodes' styles read the viewport at all. Test hook:
     /// the point of the tracer is that this is ZERO for the common tree.
     #[cfg(test)]
@@ -1725,6 +1741,15 @@ impl TaffyState {
                         // pixels, the exact staleness this mechanism
                         // exists to prevent.
                         self.resolve_node_style(tree, tid, id, node, scale, viewport);
+                        // Font size / weight (and a Heading's level, which
+                        // picks their defaults) are INHERITED measure
+                        // inputs: descendant Text leaves bake them into
+                        // their measure context, so re-resolve those too
+                        // or they keep measuring at the old size until an
+                        // unrelated full rebuild.
+                        if is_inherited_text_measure_key(name) {
+                            self.restyle_text_descendants(tree, id, scale, viewport);
+                        }
                     }
                     if let Some(parent_tid) = tree
                         .parent_of(id)
@@ -5069,6 +5094,18 @@ pub(crate) fn is_layout_prop_key(name: &str) -> bool {
     is_layout_prop(&base) || matches!(base.as_str(), "slot" | "scrollable")
 }
 
+/// True when `name` (a raw, possibly decorated patch key) is a text
+/// measure input that descendant Text leaves INHERIT: `fontSize`,
+/// `fontWeight`, and a Heading's `level` (which picks their defaults —
+/// see `inherited_text_font_size` / `inherited_text_font_weight`).
+pub(crate) fn is_inherited_text_measure_key(name: &str) -> bool {
+    let base = hypen_engine::portable::parse_prop_key(name).base;
+    matches!(
+        base.to_ascii_lowercase().as_str(),
+        "fontsize" | "font-size" | "fontweight" | "font-weight" | "level"
+    )
+}
+
 /// True when `patch` can change Taffy geometry or content sizing —
 /// the condition for re-running the fit-content pre-pass. Structural
 /// patches always can; prop writes only when the (decoration-
@@ -5122,6 +5159,9 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "font-size"
             | "fontweight"
             | "font-weight"
+            // A Heading's level picks its default font size (and so the
+            // text's measured box); see `heading_level_at`.
+            | "level"
             // Textarea intrinsic height is `rows` lines of its line height.
             | "rows"
             | "lineheight"
@@ -8720,6 +8760,16 @@ pub(crate) fn resolve_font_weight(node: &crate::tree::Node, viewport: Viewport) 
 /// (both read by `prop_f32_at`), is rounded and clamped, and defaults to
 /// 2 (`<h2>`) when absent or not a number. Position `"0"` is the heading's
 /// TEXT, never its level.
+///
+/// Read live, so a level that changes after creation re-sizes the heading
+/// (`level` is a layout prop for exactly this reason). That is the
+/// cross-renderer contract: Canvas (`canvas/utils.ts`), SwiftUI
+/// (`HeadingComponent`) and Compose (`HeadingComponent.kt`) all derive the
+/// size from the CURRENT level on every render. The DOM is the outlier: it
+/// cannot re-tag a live `<hN>` without orphaning the node, so its visual
+/// size stays at the creation-time tag's UA style and only `aria-level`
+/// follows. Desktop follows the majority (its AccessKit node carries the
+/// heading role without a level, so there is no semantic split either).
 fn heading_level_at(node: &crate::tree::Node, viewport: Viewport) -> u8 {
     prop_f32_at(node, "level", viewport)
         .filter(|l| l.is_finite())

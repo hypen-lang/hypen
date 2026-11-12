@@ -45,6 +45,15 @@ pub trait HypenModule: Send + Sync + 'static {
     fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
         let _ = (list_id, start, end);
     }
+    /// The HTTP origin a REMOTE module's image-like sources resolve
+    /// against (e.g. `http://localhost:8787`), or `None` for a module
+    /// embedded locally, whose sources are local files / absolute URLs.
+    /// The window enters it as the asset scope for everything it does
+    /// (see `paint::image::enter_asset_origin`), so the origin belongs
+    /// to this module rather than to the process.
+    fn asset_origin(&self) -> Option<Arc<str>> {
+        None
+    }
 }
 
 impl<S: State> HypenModule for ModuleInstance<S> {

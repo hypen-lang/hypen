@@ -167,7 +167,18 @@ fn cache() -> &'static ImageCache {
 /// next time. LRU eviction; populated lazily so an image that was
 /// loaded but never painted doesn't claim a slot.
 struct DecodedCache {
-    entries: Mutex<IndexMap<String, Arc<Pixmap>>>,
+    entries: Mutex<IndexMap<String, DecodedEntry>>,
+}
+
+/// One decoded source: the bitmap plus its natural (intrinsic) size.
+/// The two differ for an SVG, which is rasterised above its declared
+/// size for sharpness; storing the size *with* the bitmap means it is
+/// evicted together with it instead of living in a side table keyed by
+/// the (possibly multi-KB `data:`) source.
+#[derive(Clone)]
+struct DecodedEntry {
+    pixmap: Arc<Pixmap>,
+    natural: (f32, f32),
 }
 
 fn decoded_cache() -> &'static DecodedCache {
@@ -190,22 +201,22 @@ pub fn clear_decoded_cache() {
         .clear();
 }
 
-fn lookup_decoded(src: &str) -> Option<Arc<Pixmap>> {
+fn lookup_decoded(key: &str) -> Option<DecodedEntry> {
     let mut entries = decoded_cache()
         .entries
         .lock()
         .expect("decoded cache poisoned");
-    let pm = entries.get(src).map(Arc::clone)?;
-    touch_recent(&mut entries, src);
-    Some(pm)
+    let hit = entries.get(key).cloned()?;
+    touch_recent(&mut entries, key);
+    Some(hit)
 }
 
-fn store_decoded(src: &str, pm: Arc<Pixmap>) {
+fn store_decoded(key: &str, entry: DecodedEntry) {
     let mut entries = decoded_cache()
         .entries
         .lock()
         .expect("decoded cache poisoned");
-    entries.insert(src.to_string(), pm);
+    entries.insert(key.to_string(), entry);
     while entries.len() > DECODED_CACHE_CAP {
         entries.shift_remove_index(0);
     }
@@ -223,10 +234,58 @@ pub fn ensure_loaded_public(src: &str) {
 /// the tier-1 decoded cache so `loaded_source(src)` returns it
 /// synchronously, without going through the async worker. Lets tests
 /// in sibling modules (e.g. `vello_painter`) exercise the draw-image
-/// path deterministically.
+/// path deterministically. Seeds under the calling thread's current
+/// asset origin, like a real load would.
 #[cfg(test)]
 pub(crate) fn test_seed_decoded(src: &str, pm: Arc<Pixmap>) {
-    store_decoded(src, pm);
+    let key = cache_key(src).expect("test seed source must be loadable");
+    let natural = (pm.width() as f32, pm.height() as f32);
+    store_decoded(
+        &key,
+        DecodedEntry {
+            pixmap: pm,
+            natural,
+        },
+    );
+}
+
+/// Both cache tiers for one already-resolved cache key.
+fn loaded_decoded(key: &str) -> Option<DecodedEntry> {
+    // Tier 1: decoded-pixmap cache hit. The hot path during resize
+    // / scroll-out-and-back where the painter tile cache invalidated
+    // for every visible image but the source decode is cached here.
+    // `Arc::clone` pointer-bump, no decode work, no encoded-cache
+    // contention with the worker thread.
+    if let Some(hit) = lookup_decoded(key) {
+        return Some(hit);
+    }
+
+    // Tier 2: encoded-bytes cache. Lock just long enough to clone
+    // the `Arc<Vec<u8>>` + bump LRU; release before decoding so the
+    // (potentially multi-MB JPEG) decode doesn't hold the cache
+    // mutex against the worker thread.
+    let encoded = {
+        let mut entries = cache().entries.lock().expect("image cache poisoned");
+        let result = match entries.get(key) {
+            Some(CacheEntry::Loaded(bytes)) => Some(Arc::clone(bytes)),
+            _ => None,
+        };
+        // Mark as recently used so eviction doesn't strip the avatar
+        // we're currently rendering when the cache fills up.
+        if result.is_some() {
+            touch_recent(&mut entries, key);
+        }
+        result
+    };
+    let encoded = encoded?;
+    let decoded = decode_bytes(&encoded, key)?;
+    let entry = DecodedEntry {
+        pixmap: Arc::new(decoded.pixmap),
+        natural: decoded.natural,
+    };
+    // Populate the decoded tier so next resize / scroll hits.
+    store_decoded(key, entry.clone());
+    Some(entry)
 }
 
 pub fn loaded_source(src: &str) -> Option<std::sync::Arc<Pixmap>> {
@@ -236,37 +295,8 @@ pub fn loaded_source(src: &str) -> Option<std::sync::Arc<Pixmap>> {
     if src.trim().is_empty() {
         return None;
     }
-    // Tier 1: decoded-pixmap cache hit. The hot path during resize
-    // / scroll-out-and-back where the painter tile cache invalidated
-    // for every visible image but the source decode is cached here.
-    // `Arc::clone` pointer-bump, no decode work, no encoded-cache
-    // contention with the worker thread.
-    if let Some(pm) = lookup_decoded(src) {
-        return Some(pm);
-    }
-
-    // Tier 2: encoded-bytes cache. Lock just long enough to clone
-    // the `Arc<Vec<u8>>` + bump LRU; release before decoding so the
-    // (potentially multi-MB JPEG) decode doesn't hold the cache
-    // mutex against the worker thread.
-    let encoded = {
-        let mut entries = cache().entries.lock().expect("image cache poisoned");
-        let result = match entries.get(src) {
-            Some(CacheEntry::Loaded(bytes)) => Some(Arc::clone(bytes)),
-            _ => None,
-        };
-        // Mark as recently used so eviction doesn't strip the avatar
-        // we're currently rendering when the cache fills up.
-        if result.is_some() {
-            touch_recent(&mut entries, src);
-        }
-        result
-    };
-    let encoded = encoded?;
-    let pm = Arc::new(decode_bytes(&encoded, src)?);
-    // Populate the decoded tier so next resize / scroll hits.
-    store_decoded(src, Arc::clone(&pm));
-    Some(pm)
+    let key = cache_key(src)?;
+    loaded_decoded(&key).map(|e| e.pixmap)
 }
 
 /// Register the renderer's event-loop proxy so the worker can wake
@@ -281,12 +311,14 @@ pub fn set_waker(proxy: EventLoopProxy<AppEvent>) {
 /// requested. Never *triggers* a load: layout calls this to derive a
 /// Video poster's natural aspect ratio and must stay non-blocking on
 /// the miss path (decode of already-fetched bytes is served from the
-/// decoded-pixmap tier after the first call).
+/// decoded-pixmap tier after the first call). An SVG reports the size
+/// its document declares, not the (larger) size it was rasterised at.
 pub fn loaded_natural_size(src: &str) -> Option<(f32, f32)> {
-    let pm = loaded_source(src)?;
-    // An SVG is rasterised above its intrinsic size for sharpness;
-    // layout wants the size the document declares.
-    Some(svg_intrinsic_size(src).unwrap_or((pm.width() as f32, pm.height() as f32)))
+    if src.trim().is_empty() {
+        return None;
+    }
+    let key = cache_key(src)?;
+    loaded_decoded(&key).map(|e| e.natural)
 }
 
 // ---------------------------------------------------------------------------
@@ -322,19 +354,22 @@ fn record_failure(src: &str, status: u16, message: String) {
 }
 
 /// HTTP failure details for `src`, if its fetch came back with a
-/// non-2xx status. Sticky, like `CacheEntry::Failed`.
+/// non-2xx status. Sticky, like `CacheEntry::Failed`. Resolved under
+/// the calling thread's asset origin, like the load itself.
 pub fn load_failure(src: &str) -> Option<LoadFailure> {
+    let key = cache_key(src)?;
     failure_registry()
         .lock()
         .expect("failure registry poisoned")
-        .get(src)
+        .get(key.as_ref())
         .cloned()
 }
 
 /// Test-only: seed an HTTP failure without running the worker.
 #[cfg(test)]
 pub(crate) fn test_seed_failure(src: &str, status: u16, message: &str) {
-    record_failure(src, status, message.to_string());
+    let key = cache_key(src).expect("test seed source must be loadable");
+    record_failure(&key, status, message.to_string());
 }
 
 /// Cap on the per-rect image render cache. Sized to comfortably hold
@@ -586,6 +621,14 @@ fn ensure_loaded(src: &str) {
     if src.trim().is_empty() {
         return;
     }
+    // Resolve against the requesting owner's origin. The cache key is
+    // self-describing (see `cache_key`), so the worker needs no origin
+    // of its own; a refused source never enters the cache or the queue.
+    let Some(key) = cache_key(src) else {
+        log::debug!("image: refusing non-HTTP source {src:?} from a remote app");
+        return;
+    };
+    let src = key.as_ref();
     {
         let mut entries = cache().entries.lock().expect("image cache poisoned");
         if entries.contains_key(src) {
@@ -635,6 +678,19 @@ fn is_http(src: &str) -> bool {
 // `blob:`, … — is refused outright. Otherwise a server could make the
 // renderer decode arbitrary local files (and, via natural-size layout or
 // error callbacks, learn whether they exist).
+//
+// The origin is per OWNER, not per process: each window's `App` carries
+// its module's origin (`HypenModule::asset_origin`) and enters it as the
+// thread's asset scope for the duration of every event it handles. All
+// lookups (`ensure_loaded`, `loaded_source`, `loaded_natural_size`,
+// `load_failure`, media URIs) resolve the authored `src` under that scope
+// into a self-describing cache key — the absolute `http(s)` URL or the
+// `data:` URI itself in remote mode, the authored path in local mode — so
+// a local module and any number of remote connections can share one
+// process (and the shared image cache) without clobbering each other,
+// and the worker thread never needs to know whose request it is serving.
+// Outside any scope (embedders painting directly, tests) behaviour is
+// local, exactly as before remote mode existed.
 // ---------------------------------------------------------------------------
 
 /// How the loader obtains one source's encoded bytes.
@@ -650,27 +706,55 @@ pub(crate) enum SourcePlan {
     Refused,
 }
 
-fn remote_origin_slot() -> &'static std::sync::RwLock<Option<String>> {
-    static SLOT: OnceLock<std::sync::RwLock<Option<String>>> = OnceLock::new();
-    SLOT.get_or_init(|| std::sync::RwLock::new(None))
+thread_local! {
+    /// The asset origin of the owner (window / module) whose work is
+    /// running on this thread right now; see [`enter_asset_origin`].
+    static ASSET_ORIGIN: std::cell::RefCell<Option<Arc<str>>> =
+        const { std::cell::RefCell::new(None) };
 }
 
-/// Switch image loading into remote mode: relative sources resolve against
-/// `origin` (e.g. `http://localhost:8787`) and local files become
-/// unreachable. Set by [`crate::remote::RemoteModule::connect_with`]; `None`
-/// restores local embedding behaviour. Process-wide, like the image cache.
-pub fn set_remote_origin(origin: Option<String>) {
-    *remote_origin_slot()
-        .write()
-        .expect("remote origin lock poisoned") = origin.map(|o| o.trim_end_matches('/').to_string());
+/// Restores the previous asset scope when dropped. Returned by
+/// [`enter_asset_origin`]; deliberately `!Send` (it restores a
+/// thread-local).
+#[must_use = "the asset origin scope ends when the guard is dropped"]
+pub struct AssetOriginGuard {
+    prev: Option<Arc<str>>,
+    _not_send: std::marker::PhantomData<*const ()>,
 }
 
-/// The origin set by [`set_remote_origin`], if any.
-pub fn remote_origin() -> Option<String> {
-    remote_origin_slot()
-        .read()
-        .expect("remote origin lock poisoned")
-        .clone()
+impl Drop for AssetOriginGuard {
+    fn drop(&mut self) {
+        let prev = self.prev.take();
+        ASSET_ORIGIN.with(|o| *o.borrow_mut() = prev);
+    }
+}
+
+/// Make `origin` the asset origin for image-like sources resolved on
+/// this thread until the returned guard drops. `Some(origin)` (e.g.
+/// `http://localhost:8787`, see [`http_origin_for`]) is remote mode:
+/// relative sources resolve against it and local files are unreachable.
+/// `None` is local embedding. The window enters its module's origin
+/// around every event it handles; scopes nest.
+pub fn enter_asset_origin(origin: Option<Arc<str>>) -> AssetOriginGuard {
+    let origin = origin.map(|o| {
+        let trimmed = o.trim_end_matches('/');
+        if trimmed.len() == o.len() {
+            o
+        } else {
+            Arc::from(trimmed)
+        }
+    });
+    let prev = ASSET_ORIGIN.with(|o| std::mem::replace(&mut *o.borrow_mut(), origin));
+    AssetOriginGuard {
+        prev,
+        _not_send: std::marker::PhantomData,
+    }
+}
+
+/// The asset origin in scope on this thread (see [`enter_asset_origin`]),
+/// if any. `None` means local embedding.
+pub fn remote_origin() -> Option<Arc<str>> {
+    ASSET_ORIGIN.with(|o| o.borrow().clone())
 }
 
 /// The HTTP origin serving a remote app's assets, derived from its
@@ -723,7 +807,6 @@ pub(crate) fn plan_source(src: &str, remote_origin: Option<&str>) -> SourcePlan 
         return SourcePlan::Http(format!("{scheme}://{rest}"));
     }
     if has_scheme(s) {
-        log::warn!("image: refusing non-HTTP source {s:?} from a remote app");
         return SourcePlan::Refused;
     }
     // Backslashes are path separators to a browser's URL parser too.
@@ -736,9 +819,28 @@ pub(crate) fn plan_source(src: &str, remote_origin: Option<&str>) -> SourcePlan 
     }
 }
 
-/// [`plan_source`] under the process's current mode.
-pub(crate) fn plan_source_now(src: &str) -> SourcePlan {
-    plan_source(src, remote_origin().as_deref())
+/// The image-cache key for `src` under the calling thread's asset
+/// origin, or `None` when a remote app named a refused source.
+///
+/// Keys are self-describing: in remote mode they are always the `data:`
+/// URI or the resolved absolute `http(s)` URL, so two servers' `/art/1`
+/// never share an entry and the worker (which plans every key as local
+/// mode) can only ever read a local file for a key a LOCAL owner
+/// produced. In local mode the key is the source as authored.
+pub(crate) fn cache_key(src: &str) -> Option<std::borrow::Cow<'_, str>> {
+    use std::borrow::Cow;
+    ASSET_ORIGIN.with(|o| {
+        let origin = o.borrow();
+        let Some(origin) = origin.as_deref() else {
+            return Some(Cow::Borrowed(src));
+        };
+        match plan_source(src, Some(origin)) {
+            SourcePlan::Data => Some(Cow::Borrowed(src)),
+            SourcePlan::Http(url) if url == src => Some(Cow::Borrowed(src)),
+            SourcePlan::Http(url) => Some(Cow::Owned(url)),
+            SourcePlan::Local(_) | SourcePlan::Refused => None,
+        }
+    })
 }
 
 fn is_data_uri(src: &str) -> bool {
@@ -897,7 +999,10 @@ fn run_image_worker(rx: mpsc::Receiver<String>) {
     while let Ok(src) = rx.recv() {
         // The cache (and the failure registry) stay keyed by the src as
         // authored; only the fetch uses the resolved URL.
-        let bytes = match plan_source_now(&src) {
+        // `src` is a cache key (see `cache_key`): remote owners only
+        // ever queue `data:` / absolute `http(s)` keys, so planning it
+        // with no origin can only yield `Local` for a local owner's key.
+        let bytes = match plan_source(&src, None) {
             SourcePlan::Data => decode_data_uri(&src),
             SourcePlan::Http(url) => fetch_http_bytes(&url, &src),
             SourcePlan::Local(_) => read_local_bytes(&src),
@@ -993,9 +1098,11 @@ pub(crate) fn read_local_bytes(src: &str) -> Option<Vec<u8>> {
         log::debug!("image: HTTP src queued for worker (not local): {src}");
         return None;
     }
-    // Defence in depth for the remote-mode policy above: a remote app
-    // never reads local files, whichever path got here.
-    let SourcePlan::Local(path) = plan_source_now(src) else {
+    // Defence in depth for the remote-mode policy above: code running
+    // in a remote owner's asset scope never reads local files, whichever
+    // path got here. (The worker thread has no scope; it only ever sees
+    // a `Local` plan for a key a local owner queued — see `cache_key`.)
+    let SourcePlan::Local(path) = plan_source(src, remote_origin().as_deref()) else {
         log::warn!("image: local file access refused in remote mode: {src}");
         return None;
     };
@@ -1025,32 +1132,24 @@ fn looks_like_svg(bytes: &[u8]) -> bool {
 /// viewBox) intrinsic size and letting the painter scale the bitmap up
 /// would blur every glyph on a HiDPI screen, so small documents are
 /// rendered at this size instead. Natural-size layout still sees the
-/// intrinsic size through [`svg_intrinsic_size`].
+/// intrinsic size, carried with the decoded bitmap ([`Decoded::natural`]).
 const SVG_RASTER_TARGET_PX: f32 = 256.0;
 /// Upper bound on either rasterised dimension (memory guard against a
 /// hostile `width="100000"`).
 const SVG_RASTER_MAX_PX: f32 = 4096.0;
 
-fn svg_intrinsic_sizes() -> &'static Mutex<std::collections::HashMap<String, (f32, f32)>> {
-    static SIZES: OnceLock<Mutex<std::collections::HashMap<String, (f32, f32)>>> = OnceLock::new();
-    SIZES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
-}
-
-/// The intrinsic (CSS px) size of an SVG source rasterised by
-/// [`rasterize_svg`]; `None` for raster sources.
-fn svg_intrinsic_size(src: &str) -> Option<(f32, f32)> {
-    svg_intrinsic_sizes()
-        .lock()
-        .expect("svg size registry poisoned")
-        .get(src)
-        .copied()
+/// A decoded source: the premultiplied bitmap plus its natural size
+/// (the SVG document's declared size for an SVG, else the pixel size).
+pub(crate) struct Decoded {
+    pub(crate) pixmap: Pixmap,
+    pub(crate) natural: (f32, f32),
 }
 
 /// Render an SVG document with resvg into a premultiplied pixmap. No
 /// font database and no external resources are loaded: an image source
 /// can't make the renderer read local files through `<image href>` /
 /// `@font-face`, which matters in remote mode (see the policy above).
-fn rasterize_svg(bytes: &[u8], debug_label: &str) -> Option<Pixmap> {
+fn rasterize_svg(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
     let opts = resvg::usvg::Options {
         resources_dir: None,
         // Refuse every nested `<image>` reference rather than resolving
@@ -1083,11 +1182,10 @@ fn rasterize_svg(bytes: &[u8], debug_label: &str) -> Option<Pixmap> {
         Transform::from_scale(pw as f32 / w, ph as f32 / h),
         &mut pixmap.as_mut(),
     );
-    svg_intrinsic_sizes()
-        .lock()
-        .expect("svg size registry poisoned")
-        .insert(debug_label.to_string(), (w, h));
-    Some(pixmap)
+    Some(Decoded {
+        pixmap,
+        natural: (w, h),
+    })
 }
 
 /// A `data:` URI can be kilobytes long; keep log lines readable.
@@ -1105,7 +1203,7 @@ fn truncate_label(label: &str) -> String {
 
 /// Shared codec path: bytes → RGBA8 → premultiplied → tiny-skia
 /// pixmap. Used by both local decode and worker fetch.
-fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Pixmap> {
+fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
     if looks_like_svg(bytes) {
         return rasterize_svg(bytes, debug_label);
     }
@@ -1127,7 +1225,10 @@ fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Pixmap> {
         px[1] = ((px[1] as u32 * a + 127) / 255) as u8;
         px[2] = ((px[2] as u32 * a + 127) / 255) as u8;
     }
-    Pixmap::from_vec(data, size)
+    Pixmap::from_vec(data, size).map(|pixmap| Decoded {
+        pixmap,
+        natural: (w as f32, h as f32),
+    })
 }
 
 fn paint_placeholder(pixmap: &mut Pixmap, rect: LayoutRect, scale: f32) {
@@ -1558,10 +1659,11 @@ mod tests {
         let src = svg_data_uri(r##"<circle cx="32" cy="32" r="20" fill="#FF0000"/>"##);
         let bytes = decode_data_uri(&src).expect("utf8 data URI decodes");
         assert!(bytes.starts_with(b"<svg"), "{:?}", String::from_utf8_lossy(&bytes[..20]));
-        let pm = decode_bytes(&bytes, &src).expect("SVG decodes");
+        let decoded = decode_bytes(&bytes, &src).expect("SVG decodes");
+        let pm = &decoded.pixmap;
         // Rendered above its 64-unit intrinsic size, but layout sees 64.
         assert_eq!((pm.width(), pm.height()), (256, 256));
-        assert_eq!(svg_intrinsic_size(&src), Some((64.0, 64.0)));
+        assert_eq!(decoded.natural, (64.0, 64.0));
         let center = pm.pixel(128, 128).expect("in bounds");
         assert_eq!((center.red(), center.alpha()), (255, 255));
         let corner = pm.pixel(2, 2).expect("in bounds");
@@ -1571,7 +1673,7 @@ mod tests {
     #[test]
     fn svg_never_loads_nested_external_images() {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><image href="/etc/hostname" width="8" height="8"/></svg>"#;
-        let pm = decode_bytes(svg, "test://nested-image.svg").expect("still renders");
+        let pm = decode_bytes(svg, "test://nested-image.svg").expect("still renders").pixmap;
         assert!(pm.pixels().iter().all(|p| p.alpha() == 0), "nested href must not load");
     }
 
@@ -1640,6 +1742,112 @@ mod tests {
             plan_source("\\\\host\\share\\x.png", o),
             SourcePlan::Http("http://localhost:8787//host/share/x.png".into())
         );
+    }
+
+    #[test]
+    fn asset_origin_is_per_owner_not_per_process() {
+        // No scope: local embedding, keys are the sources as authored.
+        assert_eq!(remote_origin(), None);
+        assert_eq!(cache_key("/art/1").as_deref(), Some("/art/1"));
+        {
+            let _a = enter_asset_origin(Some("http://a.example:8787/".into()));
+            assert_eq!(remote_origin().as_deref(), Some("http://a.example:8787"));
+            assert_eq!(
+                cache_key("/art/1").as_deref(),
+                Some("http://a.example:8787/art/1")
+            );
+            {
+                // A second remote owner resolves against its own server.
+                let _b = enter_asset_origin(Some("https://b.example".into()));
+                assert_eq!(
+                    cache_key("/art/1").as_deref(),
+                    Some("https://b.example/art/1")
+                );
+                assert_eq!(cache_key("file:///etc/passwd"), None);
+            }
+            // Leaving B's scope restores A's, not "whatever was set last".
+            assert_eq!(
+                cache_key("/art/1").as_deref(),
+                Some("http://a.example:8787/art/1")
+            );
+            // A local owner on another thread is unaffected by A.
+            std::thread::spawn(|| {
+                assert_eq!(remote_origin(), None);
+                assert_eq!(cache_key("/art/1").as_deref(), Some("/art/1"));
+            })
+            .join()
+            .expect("local owner thread");
+        }
+        // Disconnecting (dropping the scope) leaves nothing behind.
+        assert_eq!(remote_origin(), None);
+        assert_eq!(cache_key("/art/1").as_deref(), Some("/art/1"));
+    }
+
+    #[test]
+    fn local_and_remote_owners_never_share_image_cache_entries() {
+        let src = "/hypen-test/owner-scoped/logo.png";
+        let pm = Arc::new(Pixmap::new(3, 2).unwrap());
+        // Server A's `/…/logo.png` lands in the cache.
+        {
+            let _a = enter_asset_origin(Some("http://a.owner.test".into()));
+            test_seed_decoded(src, Arc::clone(&pm));
+            assert!(loaded_source(src).is_some());
+            assert_eq!(loaded_natural_size(src), Some((3.0, 2.0)));
+        }
+        // Server B and a local module asking for the same authored src
+        // must not be served A's bitmap: B's is a different URL, and the
+        // local module's is a local file.
+        {
+            let _b = enter_asset_origin(Some("http://b.owner.test".into()));
+            assert!(
+                loaded_source(src).is_none(),
+                "server B got server A's image"
+            );
+        }
+        assert!(
+            loaded_source(src).is_none(),
+            "local module got server A's image"
+        );
+        // The reverse: a local module's file never answers a remote owner.
+        let local = "/hypen-test/owner-scoped/local-only.png";
+        test_seed_decoded(local, Arc::clone(&pm));
+        assert!(loaded_source(local).is_some());
+        {
+            let _a = enter_asset_origin(Some("http://a.owner.test".into()));
+            assert!(
+                loaded_source(local).is_none(),
+                "remote owner read a local file"
+            );
+            // A refused scheme never enters the cache or the queue.
+            ensure_loaded("file:///hypen-test/owner-scoped/local-only.png");
+            let entries = cache().entries.lock().expect("image cache poisoned");
+            assert!(!entries.keys().any(|k| k.starts_with("file:")));
+        }
+        let mut decoded = decoded_cache().entries.lock().unwrap();
+        decoded.shift_remove("http://a.owner.test/hypen-test/owner-scoped/logo.png");
+        decoded.shift_remove(local);
+    }
+
+    #[test]
+    fn svg_intrinsic_size_lives_and_dies_with_its_cache_entry() {
+        let src = svg_data_uri(r##"<rect width="64" height="64" fill="#00FF00"/>"##)
+            + "<!-- intrinsic-size-eviction -->";
+        let bytes = decode_data_uri(&src).expect("utf8 data URI decodes");
+        cache()
+            .entries
+            .lock()
+            .unwrap()
+            .insert(src.clone(), CacheEntry::Loaded(Arc::new(bytes)));
+        // Rasterised at 256 px, but layout sees the declared 64.
+        assert_eq!(loaded_source(&src).map(|p| p.width()), Some(256));
+        assert_eq!(loaded_natural_size(&src), Some((64.0, 64.0)));
+        // Served from the decoded tier, the size travels with the bitmap.
+        assert_eq!(lookup_decoded(&src).map(|e| e.natural), Some((64.0, 64.0)));
+        // Evicting the image evicts its intrinsic size too: no side
+        // table keyed by the (multi-KB) data URI outlives it.
+        cache().entries.lock().unwrap().shift_remove(&src);
+        decoded_cache().entries.lock().unwrap().shift_remove(&src);
+        assert_eq!(loaded_natural_size(&src), None);
     }
 
     #[test]
@@ -1985,7 +2193,7 @@ mod tests {
             .get(key)
             .expect("decoded cache must retain after the first decode");
         assert!(
-            Arc::ptr_eq(&pm, stored),
+            Arc::ptr_eq(&pm, &stored.pixmap),
             "the Arc returned by loaded_source must be the same instance the \
              decoded cache stored — otherwise resize will re-decode anyway",
         );
@@ -2048,12 +2256,24 @@ mod tests {
         decoded.clear();
         let dummy = Arc::new(Pixmap::new(1, 1).unwrap());
         for i in 0..DECODED_CACHE_CAP {
-            decoded.insert(format!("test://evict-fixture-{i}"), Arc::clone(&dummy));
+            decoded.insert(
+                format!("test://evict-fixture-{i}"),
+                DecodedEntry {
+                    pixmap: Arc::clone(&dummy),
+                    natural: (1.0, 1.0),
+                },
+            );
         }
         assert_eq!(decoded.len(), DECODED_CACHE_CAP);
         drop(decoded);
 
-        store_decoded("test://evict-fixture-tipover", Arc::clone(&dummy));
+        store_decoded(
+            "test://evict-fixture-tipover",
+            DecodedEntry {
+                pixmap: Arc::clone(&dummy),
+                natural: (1.0, 1.0),
+            },
+        );
         let decoded = decoded_cache().entries.lock().unwrap();
         assert_eq!(
             decoded.len(),

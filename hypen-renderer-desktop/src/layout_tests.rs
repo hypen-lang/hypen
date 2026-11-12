@@ -9265,6 +9265,69 @@ fn heading_without_own_text_stays_a_container_for_its_children() {
     assert_eq!(weight, 700);
 }
 
+/// A `level` that changes after creation re-sizes the heading, like the
+/// Canvas, SwiftUI and Compose renderers (all re-derive the size from the
+/// current level). The DOM is the outlier only because it cannot re-tag a
+/// live `<hN>`. The incremental path (Taffy restyle + paint-only gate)
+/// must agree with a fresh layout — `level` was missing from the layout
+/// prop list, so a live write was treated as paint-only and the size only
+/// caught up on some unrelated full layout.
+#[test]
+fn heading_level_change_after_creation_resizes_incrementally() {
+    use crate::window::paint_only_affected_ids;
+    let initial = vec![
+        create_patch("page", "Column", &[]),
+        insert_patch(ROOT_ID, "page"),
+        create_patch("own", "Heading", &[("0", json!("Own")), ("level", json!(1))]),
+        insert_patch("page", "own"),
+        create_patch("wrap", "Heading", &[("level.0", json!(1))]),
+        insert_patch("page", "wrap"),
+        create_patch("child", "Text", &[("0", json!("Child"))]),
+        insert_patch("wrap", "child"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(430.0)));
+    let mut text = TextEngine::new();
+    let before = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    assert!((heading_text_item(&before, "own").1 - 32.0).abs() < 0.01);
+
+    let change = vec![
+        Patch::SetProp {
+            id: "own".into(),
+            name: "level".into(),
+            value: json!(4),
+        },
+        Patch::SetProp {
+            id: "wrap".into(),
+            name: "level.0".into(),
+            value: json!(5),
+        },
+    ];
+    assert!(
+        paint_only_affected_ids(&change, &[], &tree, false, false, false).is_none(),
+        "a heading level change re-sizes text; it is not paint-only"
+    );
+    tree.apply_batch(&change);
+    assert!(taffy.apply_patches(&change, &tree, 1.0, vp(430.0)));
+    let after = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 2,
+    );
+    let fresh = LayoutPass::compute(&tree, &mut TextEngine::new(), (430, 934), 1.0);
+    for (id, size) in [("own", 16.0), ("child", 13.28)] {
+        let (_, fs, _, _) = heading_text_item(&after, id);
+        assert!((fs - size).abs() < 0.01, "{id}: font size {fs}, want {size}");
+        assert_eq!(
+            find_item(&after, id).rect,
+            find_item(&fresh, id).rect,
+            "{id}: incremental box diverged from a fresh layout"
+        );
+    }
+}
+
 // -----------------------------------------------------------------
 // Text decoration (`.textDecoration("line-through")`, Tailwind
 // `underline` / `line-through`, `.underline()` / `.strikethrough()`)
@@ -9379,4 +9442,67 @@ fn decoration_rects_cross_each_wrapped_line_at_the_right_height() {
 
     assert!(decoration_rects(&mut text, "x", 16.0, None, 400, 16.0, TextDecoration::default())
         .is_empty());
+}
+
+#[test]
+fn decoration_rects_repaint_does_not_reshape() {
+    use crate::paint::vello_painter::decoration_rects;
+    let mut text = TextEngine::new();
+    let strike = TextDecoration {
+        line_through: true,
+        ..Default::default()
+    };
+    let first = decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, strike);
+    assert_eq!(text.line_runs_shapes, 1);
+    // A repaint of the same Text (every frame it is re-encoded) reuses
+    // the cached line runs — no fresh cosmic-text Buffer.
+    let again = decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, strike);
+    assert_eq!(again, first);
+    assert_eq!(text.line_runs_shapes, 1, "second paint reshaped");
+    // The decoration kind is not a layout input: switching it is free.
+    let under = TextDecoration {
+        underline: true,
+        ..Default::default()
+    };
+    decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, under);
+    assert_eq!(text.line_runs_shapes, 1);
+    // Any layout input (here the wrap width) is part of the key.
+    decoration_rects(&mut text, "Buy milk", 16.0, Some(40.0), 400, 16.0, strike);
+    assert_eq!(text.line_runs_shapes, 2);
+    text.clear_measure_cache();
+    decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, strike);
+    assert_eq!(text.line_runs_shapes, 3, "clear_measure_cache drops line runs too");
+}
+
+/// Same retained-tree gap as the Heading level case, for any ancestor's
+/// inherited `fontSize`: the descendant Text's measure context must be
+/// re-resolved on the incremental path, not only on a full rebuild.
+#[test]
+fn ancestor_font_size_change_remeasures_descendant_text_incrementally() {
+    let initial = vec![
+        create_patch("wrap", "Column", &[("fontSize.0", json!(32))]),
+        insert_patch(ROOT_ID, "wrap"),
+        create_patch("child", "Text", &[("0", json!("Child"))]),
+        insert_patch("wrap", "child"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(430.0)));
+    let mut text = TextEngine::new();
+    let _ = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    let change = vec![Patch::SetProp {
+        id: "wrap".into(),
+        name: "fontSize.0".into(),
+        value: json!(10),
+    }];
+    tree.apply_batch(&change);
+    assert!(taffy.apply_patches(&change, &tree, 1.0, vp(430.0)));
+    let after = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 2,
+    );
+    let fresh = LayoutPass::compute(&tree, &mut TextEngine::new(), (430, 934), 1.0);
+    assert_eq!(find_item(&after, "child").rect, find_item(&fresh, "child").rect);
 }

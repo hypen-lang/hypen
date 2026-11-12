@@ -175,6 +175,9 @@ pub struct RemoteModule {
     module_name: String,
     inner: Arc<Mutex<Inner>>,
     outbound: mpsc::UnboundedSender<RemoteMessage>,
+    /// HTTP origin of the server this connection talks to; relative
+    /// image-like sources resolve against it (see `paint::image`).
+    asset_origin: Arc<str>,
 }
 
 impl RemoteModule {
@@ -200,11 +203,12 @@ impl RemoteModule {
         // browser — and must never resolve to local files. See the
         // policy notes in `paint::image`. An unparseable URL still
         // switches to remote mode (with a placeholder origin that can't
-        // be fetched) so local files stay unreachable.
-        crate::paint::image::set_remote_origin(Some(
-            crate::paint::image::http_origin_for(&url)
-                .unwrap_or_else(|| "http://invalid.invalid".to_string()),
-        ));
+        // be fetched) so local files stay unreachable. The origin is
+        // this connection's own (`HypenModule::asset_origin`), not
+        // process state: other modules in the process are unaffected.
+        let asset_origin: Arc<str> = crate::paint::image::http_origin_for(&url)
+            .unwrap_or_else(|| "http://invalid.invalid".to_string())
+            .into();
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<RemoteMessage>();
 
@@ -232,6 +236,7 @@ impl RemoteModule {
             module_name,
             inner,
             outbound: outbound_tx,
+            asset_origin,
         }
     }
 }
@@ -728,6 +733,10 @@ impl RemoteModule {
 }
 
 impl HypenModule for RemoteModule {
+    fn asset_origin(&self) -> Option<Arc<str>> {
+        Some(Arc::clone(&self.asset_origin))
+    }
+
     fn on_patches(&self, cb: PatchCallback) {
         let pending = {
             let mut guard = self.inner.lock().expect("remote inner poisoned");
@@ -830,6 +839,7 @@ mod tests {
             module_name: "Test".into(),
             inner: Arc::clone(&inner),
             outbound: tx,
+            asset_origin: "http://test.invalid".into(),
         };
 
         deliver_patches(&inner, &[fake_patch("root_a", "Column")]);
@@ -858,6 +868,7 @@ mod tests {
             module_name: "Counter".into(),
             inner: Arc::new(Mutex::new(Inner::default())),
             outbound: tx,
+            asset_origin: "http://test.invalid".into(),
         };
 
         module.dispatch_action("increment", None);
@@ -899,6 +910,7 @@ mod tests {
             module_name: "Feed".into(),
             inner: Arc::new(Mutex::new(Inner::default())),
             outbound: tx,
+            asset_origin: "http://test.invalid".into(),
         };
         module.set_list_viewport("4294967301", 40, 70);
         module.set_list_viewport("7", 0, usize::MAX);

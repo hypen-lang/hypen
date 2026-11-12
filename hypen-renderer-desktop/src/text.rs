@@ -60,6 +60,15 @@ pub struct TextEngine {
     /// costs — which used to run for EVERY text draw on every subtree
     /// re-encode.
     scene_tile_cache: IndexMap<u64, vello::peniko::ImageData>,
+    /// Laid-out visual lines (ink extent + baseline) keyed on the same
+    /// `(text, font_size, wrap, weight, line_height)` inputs as
+    /// `measure_cache`. Backs decoration painting: without it every paint
+    /// of a decorated Text built and shaped a fresh cosmic-text `Buffer`,
+    /// on top of the (cached) glyph tile it decorates.
+    line_runs_cache: IndexMap<u64, std::sync::Arc<[LineRun]>>,
+    /// How many times [`Self::line_runs`] actually shaped (cache misses).
+    #[cfg(test)]
+    pub(crate) line_runs_shapes: usize,
 }
 
 impl TextEngine {
@@ -70,6 +79,9 @@ impl TextEngine {
             measure_cache: IndexMap::new(),
             raster_cache: IndexMap::new(),
             scene_tile_cache: IndexMap::new(),
+            line_runs_cache: IndexMap::new(),
+            #[cfg(test)]
+            line_runs_shapes: 0,
         }
     }
 
@@ -81,6 +93,7 @@ impl TextEngine {
         self.measure_cache.clear();
         self.raster_cache.clear();
         self.scene_tile_cache.clear();
+        self.line_runs_cache.clear();
     }
 
     /// Measure `text` at `font_size` (physical px). When `wrap_width` is
@@ -584,7 +597,8 @@ impl TextEngine {
     /// The visual lines of `text`, laid out exactly as
     /// [`Self::draw_text_into_scene_line_height`] paints them. Backs
     /// `underline` / `line-through` / `overline`, which need each wrapped
-    /// line's extent and baseline. Only decorated text asks.
+    /// line's extent and baseline. Only decorated text asks. Cached on
+    /// the same inputs as the measure cache, so a repaint does no shaping.
     pub fn line_runs(
         &mut self,
         text: &str,
@@ -592,7 +606,42 @@ impl TextEngine {
         wrap_width: Option<f32>,
         weight: u16,
         line_height: f32,
+    ) -> std::sync::Arc<[LineRun]> {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        font_size.to_bits().hash(&mut hasher);
+        wrap_width.map(f32::to_bits).hash(&mut hasher);
+        weight.hash(&mut hasher);
+        line_height.to_bits().hash(&mut hasher);
+        let key = hasher.finish();
+        if let Some(hit) = self.line_runs_cache.get(&key) {
+            return std::sync::Arc::clone(hit);
+        }
+        let runs: std::sync::Arc<[LineRun]> = self
+            .shape_line_runs(text, font_size, wrap_width, weight, line_height)
+            .into();
+        // FIFO single-entry eviction, like the raster cache it pairs with.
+        if self.line_runs_cache.len() >= RASTER_CACHE_CAP {
+            self.line_runs_cache.shift_remove_index(0);
+        }
+        self.line_runs_cache
+            .insert(key, std::sync::Arc::clone(&runs));
+        runs
+    }
+
+    fn shape_line_runs(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
     ) -> Vec<LineRun> {
+        #[cfg(test)]
+        {
+            self.line_runs_shapes += 1;
+        }
         let metrics = Metrics::new(font_size, line_height.max(font_size));
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()

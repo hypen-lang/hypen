@@ -337,6 +337,12 @@ pub struct App {
     initial_size: (u32, u32),
     queue: Arc<PatchQueue>,
     module: Arc<dyn HypenModule>,
+    /// The module's asset origin ([`HypenModule::asset_origin`]): `Some`
+    /// for a remote module, whose image-like sources resolve against its
+    /// server and never reach local files. Entered as the thread's asset
+    /// scope around every event this window handles, so the origin is
+    /// this window's, not the process's.
+    asset_origin: Option<Arc<str>>,
     /// Lowers `RegisterTemplate`/`Instantiate` back into the plain
     /// `Create`+`Insert` runs the rest of the renderer consumes. The
     /// desktop renderer can't exploit template cloning, so every drained
@@ -678,6 +684,7 @@ impl App {
             title: title.into(),
             initial_size,
             queue,
+            asset_origin: module.asset_origin(),
             module,
             template_expander: hypen_engine::TemplateExpander::new(),
             proxy,
@@ -3172,6 +3179,7 @@ pub(crate) mod window_video;
 
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         if self.window.is_some() {
             return;
         }
@@ -3219,6 +3227,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         match event {
             AppEvent::Accessibility(AkEvent { window_event, .. }) => match window_event {
                 AkWindowEvent::InitialTreeRequested => {
@@ -3352,6 +3361,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         if let (Some(adapter), Some(window)) = (self.ak.as_mut(), self.window.as_ref()) {
             adapter.process_event(window, &event);
         }
@@ -4074,6 +4084,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         // A chart long press can mature while the loop is otherwise idle.
         self.check_chart_long_press();
 
@@ -4149,6 +4160,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         self.device_overlay.hub().detach_window();
         // Feature `video`: tear down every playback pipeline so the
         // process exits without live GStreamer streaming threads.

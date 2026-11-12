@@ -2585,7 +2585,7 @@ pub(crate) fn decoration_rects(
     }
     let thickness = (font_size / 16.0).round().max(1.0);
     let mut out = Vec::new();
-    for run in text.line_runs(content, font_size, wrap, weight, line_height) {
+    for run in text.line_runs(content, font_size, wrap, weight, line_height).iter() {
         if run.w <= 0.0 {
             continue;
         }
