@@ -1,0 +1,36 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-weather",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // The Hypen WASM engine is pulled in as a CompiledWasm module — this rule is
+  // what lets the engine boot inside a Worker.
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "WEATHER_DO", "class_name": "WeatherDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["WeatherDO"] }
+  ],
+
+  // Port 8796 is the Weather icon's slot in the home-screen launcher
+  // (ws://localhost:8796/ws); the inspector port keeps a concurrent
+  // `wrangler dev` of a sibling example from colliding on 9229/9230.
+  "dev": {
+    "port": 8796,
+    "inspector_port": 9238
+  },
+
+  "observability": {
+    "enabled": true
+  }
+}
