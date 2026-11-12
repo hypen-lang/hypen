@@ -1,0 +1,35 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-messages",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  // `no_web_socket_compression`: since the 2023-08-15 compatibility date
+  // workerd negotiates permessage-deflate WITH context takeover, and a
+  // socket compressed that way stays UI-only (RFC 001 §2.3) — no device
+  // plane, so no photo picks. Frames go uncompressed instead.
+  "compatibility_flags": ["nodejs_compat", "no_web_socket_compression"],
+
+  // The Hypen WASM engine is pulled in as a CompiledWasm module — this rule is
+  // what lets the engine boot inside a Worker.
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  // One coordinator DO ("hub:main") holds every socket plus the chat's
+  // SQLite tables. See README.md → "Durable Object topology".
+  "durable_objects": {
+    "bindings": [
+      { "name": "MESSAGES_DO", "class_name": "MessagesDO" }
+    ]
+  },
+
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["MessagesDO"] }
+  ],
+
+  "dev": {
+    "port": 8798,
+    "inspector_port": 9240
+  }
+}
