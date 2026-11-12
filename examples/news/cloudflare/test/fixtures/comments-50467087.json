@@ -1,0 +1,49 @@
+[
+ {
+  "by": "duplessitous",
+  "id": 50467199,
+  "kids": [
+   50467349
+  ],
+  "parent": 50467087,
+  "text": "I hope people understand that the affairs are not the reason he is being fired - NVIDIA has <i>supposedly</i> been skirting the export ban put in place by the previous administration. This was put in place for national security reasons. Whether you agree or disagree with the ban, it exists and Jensen&amp;NVIDIA are in a world of trouble if this comes to light.<p>From all the reporting I&#x27;ve read, it is hard for me to avoid the conclusion that NVIDIA sold to China despite the export ban. I&#x27;d love to be wrong",
+  "time": 1794492073,
+  "type": "comment"
+ },
+ {
+  "by": "kphorn",
+  "id": 50467672,
+  "kids": [
+   50471242,
+   50467768
+  ],
+  "parent": 50467087,
+  "text": "Jensen has created more shareholder value than nearly any human on earth. Significantly more than Elon, with the key distinction that Jensen has distributed much more of that shareholder value than Elon has through stock options to employees and appreciation of public stock (it\u2019s one of the reasons he\u2019s worth 150Bn vs 1Tn).<p>I think the real risk for the economy, the AI industry, and the US is that Nvidia becomes JUST another company. Nvidia losing 50% of its value from its peak means it\u2019s still a $3 trillion company. What if it loses 90%? Then it\u2019s the size of Intel which we generally agree is an important part of the industry.<p>Nvidia can afford to invest in companies because the stock is so high and capital is incredibly abundant. Those companies buy Nvidia products at the 50% NET margins. Nvidia gets a ton of cash. Earnings are crazy. But if this cycle stops and efficiency wins in the market (lower margins, more competitors, more options), then Nvidia goes back to where they were which was a Tier-1&#x2F;2 supplier battling for margin and market share. That is not a $6T company.",
+  "time": 1794493264,
+  "type": "comment"
+ },
+ {
+  "by": "rcr-anti",
+  "id": 50469788,
+  "kids": [
+   50470080,
+   50470000
+  ],
+  "parent": 50467087,
+  "text": "It is baffling to read comments that this is excusable or he should be retained &#x27;in interest of the shareholders&#x27;. Setting aside the obviously poor judgement, the appearance of impropriety has serious ammunition behind a situation that already looked weird. More practically, he&#x27;s compromised now. Whether it&#x27;s further scandal or the impending criminal investigations, there might be further hooks people have on him.<p>The quote about succession planning is also a little out of context, he phrased it more that there should be continual information and responsibility sharing such that succession planning is effectively redundant or unnecessary.<p>I always wondered why investors were ok with not having any control due to dual structure shares and board composition. A &quot;Great Men&quot; theory of the world is a convenient and satisfying narrative, but it&#x27;s usually not the best at explaining things. As the saying goes, &quot;The cemeteries are full of indispensable men&quot;.",
+  "time": 1794500098,
+  "type": "comment"
+ },
+ {
+  "by": "kphorn",
+  "id": 50467349,
+  "kids": [
+   50467505,
+   50469222
+  ],
+  "parent": 50467199,
+  "text": "The image of Nvidia advocating for exports of GPUs to china while compromised by an allegedly Chinese agent is the real issue here. Endless congressional hearings on that topic starting in Jan. The Nvidia corp still has to answer for that even when Jensen is out.",
+  "time": 1794492505,
+  "type": "comment"
+ }
+]
