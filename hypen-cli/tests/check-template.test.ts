@@ -131,6 +131,21 @@ describe("evaluateTemplate: unknown-state-path", () => {
     expect(findings[0].message).toContain('"nmae"');
   });
 
+  test("an inline-template ${…} key is a hole: only the path before it is judged", () => {
+    const { findings } = run({
+      module: { kind: "loaded", facts: facts({ user: { name: "a", age: 3 } }) },
+      report: report([
+        stateRef("user.__ts_interpolation"),
+        stateRef("user.x__ts_interpolation.y"),
+        stateRef("__ts_interpolation.name"),
+        stateRef("usr.__ts_interpolation", { line: 4, col: 2 }),
+      ]),
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ rule: "unknown-state-path", line: 4, col: 2 });
+    expect(findings[0].message).toContain('"usr"');
+  });
+
   test("skips reserved roots, module-name prefixes and other modules' scopes", () => {
     const { findings } = run({
       module: { kind: "loaded", facts: facts({ a: 1 }) },

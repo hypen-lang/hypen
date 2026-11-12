@@ -39,11 +39,56 @@ fn missing_accessible_name_fires_on_icon_only_button_only() {
 
 #[test]
 fn control_flow_gated_label_is_flagged_missing() {
-    // A button whose only content is behind a When can't be named statically.
+    // A button whose only content is behind a list boundary can't be named
+    // statically.
     assert!(has(
-        r#"Button { When(value: @state.x) { Case(match: "a") { Text("A") } } }"#,
+        r#"Button { ForEach(items: @state.parts) { Text("@{item}") } }"#,
         A11yRule::MissingAccessibleName
     ));
+    // A conditional none of whose branches has nameable text is still nameless.
+    assert!(has(
+        r#"Button { If(condition: @state.on) { Icon("pause") } Else { Icon("play") } }"#,
+        A11yRule::MissingAccessibleName
+    ));
+    assert!(has(
+        r#"Button {
+            If(condition: "@{state.playing}") { Icon("pause") }
+            If(condition: "@{!state.playing}") { Icon("play") }
+        }"#,
+        A11yRule::MissingAccessibleName
+    ));
+}
+
+#[test]
+fn text_inside_a_conditional_branch_names_the_control() {
+    // Branch-dependent text is a runtime fact: when any branch is named the
+    // name is deferred, not flagged (complementary Ifs can't be proven
+    // exhaustive statically, and a check that fires on correct code gets
+    // turned off).
+    for src in [
+        r#"Button { If(condition: @state.saving) { Text("Saving") } }"#,
+        r#"Button {
+            If(condition: "@{state.saving}") { Text("Saving") }
+            If(condition: "@{!state.saving}") { Text("Save") }
+        }"#,
+        r#"Button { If(condition: @state.saving) { Icon("spin") } Else { Text("Save") } }"#,
+        r#"Button { When(value: @state.x) { Case(match: "a") { Text("A") } } }"#,
+        r#"Link(href: "/x") { Icon("home") If(condition: @state.wide) { Text("@{state.title}") } }"#,
+        r#"Button { Row { If(condition: @state.a) { Column { Text("Go") } } } }"#,
+    ] {
+        assert!(
+            !has(src, A11yRule::MissingAccessibleName),
+            "should not flag: {src}"
+        );
+    }
+}
+
+#[test]
+fn explicitly_empty_alt_marks_a_decorative_image() {
+    // `alt: ""` is the decorative-image marker, not a missing alt.
+    assert!(!has(r#"Image(src: "/a.png", alt: "")"#, A11yRule::ImageMissingAlt));
+    assert!(!has(r#"Image(src: "/a.png").alt("")"#, A11yRule::ImageMissingAlt));
+    assert!(rules(r#"Image(src: "/a.png", alt: "")"#).is_empty());
 }
 
 #[test]

@@ -204,8 +204,9 @@ pub struct Semantics {
     pub name: Option<String>,
 
     /// `Some(true)` when this element's role *requires* an accessible name but
-    /// none could be derived — an icon-only button, or nameable content hidden
-    /// behind a control-flow boundary (`ForEach`/`When`/`Router`). The
+    /// none could be derived — an icon-only button, nameable content hidden
+    /// behind a `ForEach`/`Router` boundary, or an `If`/`When` none of whose
+    /// branches carries nameable text. The
     /// dev-mode conformance check surfaces these; the fix is an explicit
     /// `.label(...)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -755,9 +756,13 @@ fn role_from_token(token: &str) -> Option<Role> {
 ///
 /// Only roles that *require* a name (interactive controls) get one; for
 /// everything else the name is left unset. The name is gathered from static
-/// text content, excluding `Icon` children, and **not** crossing control-flow
-/// boundaries — content behind a `ForEach`/`When`/`Router` is treated as
-/// missing (the author should supply an explicit label), not guessed.
+/// text content, excluding `Icon` children, and **not** crossing `ForEach` /
+/// `Router` boundaries — content behind those is treated as missing (the
+/// author should supply an explicit label), not guessed. Content behind an
+/// `If`/`When` branch is branch-dependent: when *any* branch carries nameable
+/// text the name is deferred (neither derived nor missing), and only a
+/// conditional whose every branch is nameless counts as missing — see
+/// [`TextCollection::Branching`].
 fn derive_name(role: Option<Role>, element: &Element) -> (Option<String>, Option<bool>) {
     let collection = match role {
         // Controls whose accessible name comes from their text content.
@@ -765,7 +770,11 @@ fn derive_name(role: Option<Role>, element: &Element) -> (Option<String>, Option
         Some(Role::Button) | Some(Role::Link) | Some(Role::Tab) | Some(Role::OptionItem) => {
             collect_text(element)
         }
-        // An image's name is its alt text, not its content.
+        // An image's name is its alt text, not its content. An explicitly
+        // empty `alt: ""` is the standard marker for a decorative image
+        // (rendered `alt=""`, skipped by assistive tech): deliberate, so it
+        // is neither a name nor missing.
+        Some(Role::Img) if image_alt_is_decorative(&element.props) => return (None, None),
         Some(Role::Img) => image_alt(&element.props),
         // A video's name comes from a `title`/`label`/`alt` prop — its
         // content is a media stream, not nameable text.
@@ -789,6 +798,9 @@ fn derive_name(role: Option<Role>, element: &Element) -> (Option<String>, Option
         // missing. Child-spanning templates are hoisted onto the parent as
         // the synthetic `__a11yName` prop — see [`hoisted_name_template`].
         TextCollection::Templated { .. } => (None, None),
+        // Nameable text exists on some `If`/`When` branch — which one renders
+        // is decided at runtime, so defer rather than flag.
+        TextCollection::Branching => (None, None),
     }
 }
 
@@ -843,6 +855,17 @@ fn image_alt(props: &Props) -> TextCollection {
     TextCollection::Empty
 }
 
+/// Whether an image's alt text is an explicitly empty static string
+/// (`alt: ""` / `.alt("")`) — the decorative-image marker.
+fn image_alt_is_decorative(props: &Props) -> bool {
+    for key in ["alt", "alt.0"] {
+        if let Some(value) = props.get(key) {
+            return matches!(value, Value::Static(serde_json::Value::String(s)) if s.trim().is_empty());
+        }
+    }
+    false
+}
+
 /// Classify a video's accessible label: a `title` prop (named arg or
 /// `.title(...)` applicator), or the `label`/`alt` named args for parity with
 /// the other self-naming media/controls. The `.label(...)` a11y applicator
@@ -871,9 +894,17 @@ enum TextCollection {
         template: String,
         bindings: Vec<Binding>,
     },
-    /// A control-flow boundary (`ForEach`/`When`/`Router`) was encountered;
-    /// the name is not statically derivable.
+    /// A control-flow boundary (`ForEach`/`Router`) was encountered; the name
+    /// is not statically derivable.
     ControlFlow,
+    /// Nameable text (static or templated) sits behind at least one branch of
+    /// an `If`/`When` conditional. Which branch renders is a runtime fact, and
+    /// the common complementary pattern (`If(x) { Text("Pause") }
+    /// If(!x) { Text("Play") }`) cannot be proven exhaustive statically, so
+    /// the name is deferred — neither derived nor flagged missing. A
+    /// conditional whose every branch is nameless contributes nothing
+    /// (`Empty`), so an icon-only toggle is still flagged.
+    Branching,
 }
 
 impl TextCollection {
@@ -885,6 +916,9 @@ impl TextCollection {
         use TextCollection::*;
         match (self, other) {
             (ControlFlow, _) | (_, ControlFlow) => ControlFlow,
+            // Some branch is named; whatever surrounds it, the full name is
+            // only known once a branch is chosen.
+            (Branching, _) | (_, Branching) => Branching,
             (
                 Templated {
                     template: a,
@@ -948,20 +982,46 @@ fn classify_text_value(value: &Value) -> TextCollection {
 /// Recursively gather nameable text from an element and its descendants,
 /// excluding `Icon` children (they contribute a glyph, not a name).
 fn collect_text(element: &Element) -> TextCollection {
-    let mut acc = own_text(&element.props).unwrap_or(TextCollection::Empty);
+    let own = own_text(&element.props).unwrap_or(TextCollection::Empty);
+    own.merge(collect_children_text(&element.ir_children))
+}
 
-    for child in &element.ir_children {
+/// Gather nameable text from a list of IR children (see [`collect_text`]).
+fn collect_children_text(children: &[IRNode]) -> TextCollection {
+    let mut acc = TextCollection::Empty;
+    for child in children {
         let child_text = match child {
             IRNode::Element(e) if e.element_type == "Icon" => continue,
             IRNode::Element(e) => collect_text(e),
-            // Any control-flow child means the nameable content is not static.
-            IRNode::ForEach { .. } | IRNode::Conditional { .. } | IRNode::Router { .. } => {
-                TextCollection::ControlFlow
+            // `If`/`When`: named when any branch carries nameable text
+            // (deferred to runtime, see `TextCollection::Branching`);
+            // nameless when every branch is.
+            IRNode::Conditional {
+                branches, fallback, ..
+            } => {
+                let named = branches
+                    .iter()
+                    .map(|b| b.children.as_slice())
+                    .chain(fallback.as_deref())
+                    .any(|children| {
+                        matches!(
+                            collect_children_text(children),
+                            TextCollection::Static(_)
+                                | TextCollection::Templated { .. }
+                                | TextCollection::Branching
+                        )
+                    });
+                if named {
+                    TextCollection::Branching
+                } else {
+                    TextCollection::Empty
+                }
             }
+            // A list/route boundary means the nameable content is not static.
+            IRNode::ForEach { .. } | IRNode::Router { .. } => TextCollection::ControlFlow,
         };
         acc = acc.merge(child_text);
     }
-
     acc
 }
 
