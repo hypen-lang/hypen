@@ -430,6 +430,7 @@ impl Semantics {
         // semantics. An all-default block serializes to `{}`, so the wire
         // cost is nil.
         let has_bound_deferred = [
+            "label.0",
             "expanded.0",
             "pressed.0",
             "selected.0",
@@ -473,8 +474,24 @@ impl Semantics {
                 | Some(Role::Tab)
                 | Some(Role::OptionItem)
         );
-        if !needs || self.name.is_some() || self.name_missing.is_some() || self.hidden == Some(true)
-        {
+        if self.name.is_some() || self.name_missing.is_some() || self.hidden == Some(true) {
+            return self;
+        }
+
+        // A templated `.label(...)` applicator (`label.0`, kept on the node
+        // by expand only when dynamic) is the author's explicit name and wins
+        // over every content source — for any element, as a static `.label`
+        // does. An empty resolution leaves the name unset rather than falling
+        // back to content the author deliberately overrode.
+        if let Some(label) = resolved.lookup("label.0") {
+            if let Some(text) = label.as_str().map(str::trim).filter(|t| !t.is_empty()) {
+                self.name = Some(text.to_string());
+                self.name_explicit = Some(true);
+            }
+            return self;
+        }
+
+        if !needs {
             return self;
         }
 

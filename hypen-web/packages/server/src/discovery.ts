@@ -97,7 +97,7 @@ export const BUILT_IN_PRIMITIVES: ReadonlySet<string> = new Set([
   "Box", "Center", "List", "Spacer", "Stack", "Divider", "Grid", "Card",
   "Heading", "Checkbox", "Select", "Switch", "Slider", "Scrubber", "Spinner",
   "Badge", "Avatar", "ProgressBar", "Video", "Audio", "Paragraph", "Icon",
-  "SafeArea", "Chart", "Axis", "Line", "Area", "Bars", "Points", "Rule",
+  "SafeArea", "Link", "Chart", "Axis", "Line", "Area", "Bars", "Points", "Rule",
   "Marker", "Path",
 ]);
 

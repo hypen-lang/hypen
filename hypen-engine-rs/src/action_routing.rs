@@ -14,6 +14,16 @@ pub fn split_scoped_action(name: &str) -> Option<(&str, &str)> {
     name.strip_prefix(SCOPED)?.split_once(':')
 }
 
+/// A renderer `.bind` write awaiting [`EngineCore::apply_renderer_bind_writes`].
+#[derive(Debug, Clone)]
+pub struct RendererBindWrite {
+    node: NodeId,
+    prop: &'static str,
+    /// Path below the declared bind path (empty for the whole value).
+    subpath: String,
+    value: Value,
+}
+
 pub fn safe_state_path(path: &str) -> bool {
     !path.is_empty()
         && path
@@ -131,6 +141,9 @@ impl EngineCore {
                     return Err(invalid());
                 }
             }
+            if name == "__hypen_bind" {
+                self.note_renderer_bind_write(node, envelope.get("payload"));
+            }
         } else if split_scoped_action(&action.name).is_some() {
             if !self.registered_actions.contains(&action.name) {
                 return Err(EngineError::ActionNotFound(
@@ -157,6 +170,90 @@ impl EngineCore {
             }
         }
         Ok(action)
+    }
+
+    /// Record an accepted renderer `.bind` write (see
+    /// [`EngineCore::renderer_bind_writes`]). Only a write through a real
+    /// `.bind()` applicator (`__bind` declares the path) onto its bound
+    /// value prop qualifies — a settle's pose-label write must still flip
+    /// the node's `.states` pose, which the renderer waits for.
+    fn note_renderer_bind_write(&self, node: &str, payload: Option<&Value>) {
+        let Some(id) = node.parse::<u64>().ok() else {
+            return;
+        };
+        let node_id = NodeId::from(slotmap::KeyData::from_ffi(id));
+        let Some(target) = self.tree.get(node_id) else {
+            return;
+        };
+        let (Some(path), Some(value)) = (
+            payload.and_then(|p| p.get("path")).and_then(Value::as_str),
+            payload.and_then(|p| p.get("value")),
+        ) else {
+            return;
+        };
+        let Some(declared) = target.props.get("__bind").and_then(Value::as_str) else {
+            return;
+        };
+        let subpath = if path == declared {
+            String::new()
+        } else if let Some(rest) = path.strip_prefix(&format!("{declared}.")) {
+            rest.to_string()
+        } else {
+            return;
+        };
+        let prop = crate::agent_core::bind_prop_for(&target.element_type);
+        // Only the Video playback struct. Text fields count on the echo:
+        // their renderers match each answer against the ordered outstanding
+        // keystrokes (`hypen-web/packages/web/src/bind-echo.ts`, one answer
+        // per state-changing write) — with no answers that queue never
+        // drains and a genuine module reset to an earlier value would be
+        // taken for a stale echo. Scalar controls (checkbox, switch, select,
+        // slider) report a level the echo merely repeats.
+        if prop != "playback" {
+            return;
+        }
+        if let Ok(mut writes) = self.renderer_bind_writes.lock() {
+            writes.push(RendererBindWrite {
+                node: node_id,
+                prop,
+                subpath,
+                value: value.clone(),
+            });
+        }
+    }
+
+    /// Fold pending renderer `.bind` writes into their nodes' resolved bound
+    /// props, so the next diff treats the renderer's own value as already
+    /// sent. Called at the top of every reconcile entry point.
+    pub(crate) fn apply_renderer_bind_writes(&mut self) {
+        let writes = match self.renderer_bind_writes.get_mut() {
+            Ok(writes) if !writes.is_empty() => std::mem::take(writes),
+            _ => return,
+        };
+        for write in writes {
+            let Some(node) = self.tree.get_mut(write.node) else {
+                continue;
+            };
+            // Only a prop the engine resolves from a binding: a static one
+            // never re-diffs, so there is nothing to suppress.
+            if matches!(
+                node.raw_props.get(write.prop),
+                None | Some(crate::ir::Value::Static(_))
+            ) {
+                continue;
+            }
+            let Some(current) = node.props.get(write.prop) else {
+                continue;
+            };
+            let next = if write.subpath.is_empty() {
+                write.value
+            } else {
+                let mut next = current.clone();
+                crate::portable::path::path_set(&mut next, &write.subpath, write.value);
+                next
+            };
+            node.props.insert(write.prop, next);
+        }
     }
 
     fn validate_ui_write(
@@ -203,8 +300,17 @@ impl EngineCore {
             let path = path("path").ok_or_else(invalid)?;
             let declared = bind(node);
             if name == "__hypen_bind" {
+                // A `.scrub`/`.settle` node writes its winning pose label to
+                // the settle's declared `bind:` path (`__anim.scrubBind`)
+                // through the same channel — exactly that path, no subfields.
+                let settle = target
+                    .props
+                    .get(crate::ir::anim::ANIM_SCRUB_BIND_PROP)
+                    .and_then(Value::as_str);
                 // Struct-valued controls (video) report individual subfields.
-                if !declared.is_some_and(|b| path == b || path.starts_with(&format!("{b}."))) {
+                if !declared.is_some_and(|b| path == b || path.starts_with(&format!("{b}.")))
+                    && settle != Some(path)
+                {
                     return Err(invalid());
                 }
             } else {
@@ -350,6 +456,37 @@ mod tests {
     }
 
     #[test]
+    fn settle_bind_path_is_an_accepted_write_target() {
+        let (mut engine, alpha, _, calls) = setup();
+        let mut element = Element::new("Column").with_prop(
+            crate::ir::anim::ANIM_SCRUB_BIND_PROP,
+            Prop::Static(json!("sheetPhase")),
+        );
+        element.module_scope = Some("alpha".into());
+        let sheet = engine.core.tree.create_node(&element, &json!({}));
+        engine.core.tree.add_child(alpha, sheet, None);
+        engine
+            .dispatch_action(ui(
+                sheet,
+                "__hypen_bind",
+                json!({"path":"sheetPhase","value":"open"}),
+            ))
+            .unwrap();
+        assert_eq!(*calls.lock().unwrap(), vec!["alpha"]);
+        // Only the declared settle path: no other path, no subfields.
+        for path in ["other", "sheetPhase.x", "items"] {
+            assert!(engine
+                .dispatch_action(ui(
+                    sheet,
+                    "__hypen_bind",
+                    json!({"path":path,"value":"open"})
+                ))
+                .is_err());
+        }
+        assert_eq!(calls.lock().unwrap().len(), 1);
+    }
+
+    #[test]
     fn wrappers_inherit_scope_and_primary_module_names_normalize() {
         let (mut engine, alpha, _, calls) = setup();
         let child = engine
@@ -394,5 +531,160 @@ mod tests {
         assert!(engine
             .dispatch_action(ui(row, "done", json!({"animation": "exit"})))
             .is_err());
+    }
+
+    /// A bound Video's own playback reports are not echoed back to it; a
+    /// module write that differs from what it reported still is.
+    #[test]
+    fn renderer_bind_writes_are_not_echoed_to_the_writing_node() {
+        let mut engine = Engine::new();
+        engine.set_module(ModuleInstance::new(
+            Module::new("App"),
+            json!({"playback": {"playing": false}, "name": ""}),
+        ));
+        engine.on_action(scoped_action_name("", "__hypen_bind"), |_| {});
+        let patches = Arc::new(Mutex::new(Vec::new()));
+        let captured = patches.clone();
+        engine.set_render_callback(move |p| captured.lock().unwrap().extend(p.iter().cloned()));
+        let doc = hypen_parser::parse_document(
+            r#"Column {
+                Video(src: "a.mp4", autoplay: true).bind(@state.playback)
+                Input().bind(@state.name)
+            }"#,
+        )
+        .unwrap();
+        engine.render_ir_node(&crate::ir::ast_to_ir_node(&doc.components[0]));
+        let root = engine.core.tree.root().unwrap();
+        let video = engine.core.tree.get(root).unwrap().children[0];
+        let input = engine.core.tree.get(root).unwrap().children[1];
+        let set_props = |patches: &Arc<Mutex<Vec<crate::reconcile::Patch>>>, key: &str| {
+            patches
+                .lock()
+                .unwrap()
+                .iter()
+                .filter_map(|p| match p {
+                    crate::reconcile::Patch::SetProp { name, value, .. } if name == key => {
+                        Some(value.clone())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Autoplay pending: the renderer reports `false`, then starts and
+        // reports `true`; the host flushes both writes as one state update.
+        patches.lock().unwrap().clear();
+        for (key, value) in [("playing", json!(false)), ("state", json!("loading"))] {
+            engine
+                .dispatch_action(ui(
+                    video,
+                    "__hypen_bind",
+                    json!({"path": format!("playback.{key}"), "value": value}),
+                ))
+                .unwrap();
+        }
+        engine
+            .dispatch_action(ui(
+                video,
+                "__hypen_bind",
+                json!({"path":"playback.playing","value":true}),
+            ))
+            .unwrap();
+        engine.update_state(
+            None,
+            json!({"playback": {"playing": true, "state": "loading"}}),
+        );
+        assert!(
+            set_props(&patches, "playback").is_empty(),
+            "the renderer's own report must not echo back: {:?}",
+            patches.lock().unwrap()
+        );
+
+        // A text field keeps its echo: its renderer reconciles keystrokes
+        // against one answer per write (bind-echo.ts).
+        engine
+            .dispatch_action(ui(
+                input,
+                "__hypen_bind",
+                json!({"path":"name","value":"ab"}),
+            ))
+            .unwrap();
+        engine.update_state(None, json!({"name": "ab"}));
+        assert_eq!(set_props(&patches, "value"), vec![json!("ab")]);
+
+        // A genuine module command still reaches the renderer.
+        engine.update_state(
+            None,
+            json!({"playback": {"playing": false, "state": "loading"}}),
+        );
+        assert_eq!(
+            set_props(&patches, "playback"),
+            vec![json!({"playing": false, "state": "loading"})]
+        );
+        // ...including flipping a field back to a value the renderer
+        // itself reported earlier.
+        engine.update_state(
+            None,
+            json!({"playback": {"playing": true, "state": "loading"}}),
+        );
+        assert_eq!(
+            set_props(&patches, "playback")[1..],
+            [json!({"playing": true, "state": "loading"})]
+        );
+    }
+
+    /// The Photos-viewer path end to end: a real `.scrub`/`.settle` node's
+    /// settle write is accepted and, once applied, flips the `.states` pose —
+    /// the `__anim.states` label SetProp renderers fire
+    /// `.onAnimationComplete` from.
+    #[test]
+    fn settle_write_from_a_lowered_scrub_node_routes_and_flips_the_pose() {
+        let mut engine = Engine::new();
+        engine.set_module(ModuleInstance::new(
+            Module::new("App"),
+            json!({"sheetPhase": "closed"}),
+        ));
+        let writes = Arc::new(Mutex::new(Vec::new()));
+        let sink = writes.clone();
+        engine.on_action(scoped_action_name("", "__hypen_bind"), move |a| {
+            sink.lock().unwrap().push(a.payload.clone().unwrap())
+        });
+        let patches = Arc::new(Mutex::new(Vec::new()));
+        let captured = patches.clone();
+        engine.set_render_callback(move |p| captured.lock().unwrap().extend(p.iter().cloned()));
+        let doc = hypen_parser::parse_document(
+            r#"Column { Box().translateY(400)
+                .scrub(from: closed, to: open, over: [0, 400])
+                .settle(bind: @state.sheetPhase)
+                .states(@state.sheetPhase) {
+                    onState(closed).translateY(400)
+                    onState(open).translateY(0)
+                }
+                .onAnimationComplete(@actions.done) }"#,
+        )
+        .unwrap();
+        engine.render_ir_node(&crate::ir::ast_to_ir_node(&doc.components[0]));
+        let root = engine.core.tree.root().unwrap();
+        let sheet = engine.core.tree.get(root).unwrap().children[0];
+
+        engine
+            .dispatch_action(ui(
+                sheet,
+                "__hypen_bind",
+                json!({"path":"sheetPhase","value":"open"}),
+            ))
+            .unwrap();
+        assert_eq!(
+            *writes.lock().unwrap(),
+            vec![json!({"path":"sheetPhase","value":"open"})]
+        );
+
+        patches.lock().unwrap().clear();
+        engine.update_state(None, json!({"sheetPhase": "open"}));
+        let flipped = patches.lock().unwrap().iter().any(|p| {
+            matches!(p, crate::reconcile::Patch::SetProp { name, value, .. }
+                if name == "__anim.states" && value["label"] == "open")
+        });
+        assert!(flipped, "got {:?}", patches.lock().unwrap());
     }
 }

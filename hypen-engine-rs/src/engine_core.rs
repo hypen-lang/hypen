@@ -122,6 +122,25 @@ pub(crate) struct EngineCore {
     /// and surfaced in the manifest's `degraded` list. Reaching it at all means
     /// something is generating templates without bound.
     pub evicted_templates: HashSet<Option<String>>,
+
+    /// Renderer-originated `.bind` playback reports (Video) accepted by
+    /// [`route_ui_action`](Self::route_ui_action) and not yet folded into
+    /// the writing node's resolved props. Text fields are deliberately not
+    /// recorded — see `note_renderer_bind_write`.
+    ///
+    /// The control already shows a value it reported itself, so the engine
+    /// records it as what that node's renderer holds: when the host then
+    /// writes it to state, the dirty re-render finds the bound prop
+    /// unchanged and sends nothing back to the node. Echoing it raced the
+    /// control's own later reports — a Video reporting `playing: false`
+    /// while autoplay was pending got that stale `false` back after it had
+    /// started, paused, reported, got the stale `true`… (play/pause
+    /// ping-pong). A module write that differs still produces a SetProp.
+    ///
+    /// Interior-mutable because routing is `&self` (hosts resolve envelopes
+    /// through shared references); drained by every reconcile entry point
+    /// before it diffs, so a record never lands after a newer engine value.
+    pub renderer_bind_writes: std::sync::Mutex<Vec<crate::action_routing::RendererBindWrite>>,
 }
 
 /// Declaring module scope plus the id of the template that declared it.
@@ -167,6 +186,7 @@ impl EngineCore {
             evicted_templates: HashSet::new(),
             declared_call_sites: IndexMap::new(),
             placeholder_scopes: HashSet::new(),
+            renderer_bind_writes: std::sync::Mutex::new(Vec::new()),
         }
     }
 
@@ -606,6 +626,7 @@ impl EngineCore {
     /// current tree, returning the resulting patches. Clears and rebuilds the
     /// dependency graph.
     pub fn render_ir_node(&mut self, ir_node: &IRNode) -> Vec<Patch> {
+        self.apply_renderer_bind_writes();
         let mut expanded = self.component_registry.expand_ir_node(ir_node);
 
         if !self.resource_registry.is_empty() {
@@ -647,7 +668,7 @@ impl EngineCore {
         } else {
             Some(&self.modules)
         };
-        let patches = reconcile_ir_with_ds(
+        let mut patches = reconcile_ir_with_ds(
             &mut self.tree,
             &expanded,
             None,
@@ -656,9 +677,124 @@ impl EngineCore {
             ds,
             mods,
         );
+        self.attach_bound_icon_data(&mut patches);
 
         self.revision += 1;
         patches
+    }
+
+    /// Resolve the SVG data of `Icon`s whose name is bound
+    /// (`Icon("@{item.icon}")`, `Icon(@state.icon)`) against the resource
+    /// registry, as the patches carrying the resolved name leave the engine.
+    ///
+    /// A static name is resolved once into the IR (`resolve_icons_in_ir`);
+    /// a bound one is only known per row / per state, after reconcile, and
+    /// reconcile has no access to the registry. So this pass follows every
+    /// patch that delivers a dynamic `Icon` name — `Create`, a `SetProp` of
+    /// `0`/`name`, or an `Instantiate` substitution — with the matching
+    /// `__iconPaths`/`__iconViewBox`, exactly the props a static icon's
+    /// `Create` carries. A name the registry doesn't know withdraws stale
+    /// data (renderers fall back to their placeholder).
+    fn attach_bound_icon_data(&self, patches: &mut Vec<Patch>) {
+        if self.resource_registry.is_empty()
+            || !patches.iter().any(|p| match p {
+                Patch::Create { element_type, .. } => element_type == "Icon",
+                Patch::SetProp { name, .. } => name == "0" || name == "name",
+                Patch::Instantiate { .. } => true,
+                _ => false,
+            })
+        {
+            return;
+        }
+        // Whether the node behind a wire id is an Icon whose name was not
+        // resolved at template load: a static name's data is already in its
+        // own props (and diffs like any prop), while a bound one — including
+        // a ForEach row's, whose item-substituted raw prop reads as static —
+        // never is.
+        let bound_icon = |id: &str| -> bool {
+            id.parse::<u64>()
+                .ok()
+                .and_then(|raw| self.tree.get(NodeId::from(slotmap::KeyData::from_ffi(raw))))
+                .is_some_and(|node| {
+                    node.element_type == "Icon" && !node.props.contains_key("__iconPaths")
+                })
+        };
+        let icon_props = |name: &serde_json::Value| -> Option<(serde_json::Value, serde_json::Value)> {
+            let data = self.resource_registry.resolve(name.as_str()?)?;
+            let props = ResourceRegistry::to_props(data);
+            Some((props.get("paths")?.clone(), props.get("viewBox")?.clone()))
+        };
+
+        let mut out = Vec::with_capacity(patches.len());
+        for mut patch in patches.drain(..) {
+            let mut follow: Vec<Patch> = Vec::new();
+            match &mut patch {
+                Patch::Create {
+                    id,
+                    element_type,
+                    props,
+                    ..
+                } if element_type == "Icon" && !props.contains_key("__iconPaths") => {
+                    let name_key = if props.contains_key("0") { "0" } else { "name" };
+                    if bound_icon(id) {
+                        if let Some((paths, view_box)) = props.get(name_key).and_then(icon_props) {
+                            let map = std::sync::Arc::make_mut(props);
+                            map.insert("__iconPaths".to_string(), paths);
+                            map.insert("__iconViewBox".to_string(), view_box);
+                        }
+                    }
+                }
+                Patch::SetProp { id, name, value }
+                    if (name == "0" || name == "name") && bound_icon(id) =>
+                {
+                    match icon_props(value) {
+                        Some((paths, view_box)) => {
+                            follow.push(Patch::SetProp {
+                                id: id.clone(),
+                                name: "__iconPaths".to_string(),
+                                value: paths,
+                            });
+                            follow.push(Patch::SetProp {
+                                id: id.clone(),
+                                name: "__iconViewBox".to_string(),
+                                value: view_box,
+                            });
+                        }
+                        None => {
+                            for key in ["__iconPaths", "__iconViewBox"] {
+                                follow.push(Patch::RemoveProp {
+                                    id: id.clone(),
+                                    name: key.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+                Patch::Instantiate { nodes, subs, .. } => {
+                    let mut extra = Vec::new();
+                    for (node_index, prop, value) in subs.iter() {
+                        if prop != "0" && prop != "name" {
+                            continue;
+                        }
+                        let Some(id) = nodes.get(*node_index) else {
+                            continue;
+                        };
+                        if !bound_icon(id) {
+                            continue;
+                        }
+                        if let Some((paths, view_box)) = icon_props(value) {
+                            extra.push((*node_index, "__iconPaths".to_string(), paths));
+                            extra.push((*node_index, "__iconViewBox".to_string(), view_box));
+                        }
+                    }
+                    subs.extend(extra);
+                }
+                _ => {}
+            }
+            out.push(patch);
+            out.append(&mut follow);
+        }
+        *patches = out;
     }
 
     /// Render only dirty nodes and return the resulting patches.
@@ -669,6 +805,7 @@ impl EngineCore {
     /// stamped update whose diff is empty must not leak the stamp into a
     /// later, unrelated render.
     pub fn render_dirty(&mut self) -> Vec<Patch> {
+        self.apply_renderer_bind_writes();
         let animation = self.pending_animation.take();
         let ds = if self.data_sources.is_empty() {
             None
@@ -688,6 +825,7 @@ impl EngineCore {
             ds,
             mods,
         );
+        self.attach_bound_icon_data(&mut patches);
 
         if !patches.is_empty() {
             self.revision += 1;
@@ -705,6 +843,7 @@ impl EngineCore {
     /// `list_id` is the element carrying `__virt.window`. An id that names no
     /// windowed list returns no patches.
     pub fn set_list_viewport(&mut self, list_id: NodeId, start: usize, end: usize) -> Vec<Patch> {
+        self.apply_renderer_bind_writes();
         let state: &serde_json::Value = self
             .module
             .as_ref()
@@ -720,6 +859,7 @@ impl EngineCore {
             modules: (!self.modules.is_empty()).then_some(&self.modules),
         };
         crate::reconcile::diff::apply_list_viewport(&mut ctx, list_id, start, end);
+        self.attach_bound_icon_data(&mut patches);
         if !patches.is_empty() {
             self.revision += 1;
         }

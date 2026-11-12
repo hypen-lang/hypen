@@ -40,6 +40,10 @@ pub const DEFAULT_PRIMITIVES: &[&str] = &[
     "Paragraph",
     "Icon",
     "SafeArea",
+    // A hyperlink: rendered natively by DOM/Canvas/desktop/iOS/Android
+    // (`link` handlers). Unregistered, every render asked the component
+    // resolver for it and the SDKs warned it "did not resolve".
+    "Link",
     // Chart family: a data-space host and its marks. Positioned in data
     // units; events carry the datum (see hypen-docs guide/charts).
     "Chart",
@@ -1090,5 +1094,23 @@ mod tests {
         let expanded2 = registry.expand_with_context(&element, Some("/some/path"));
         assert_eq!(expanded2.element_type, "Text");
         assert!(expanded2.ir_children.is_empty());
+    }
+
+    #[test]
+    fn test_link_is_a_default_primitive_never_sent_to_the_resolver() {
+        // Every renderer renders `Link` natively; asking the resolver for it
+        // made the SDKs log 'Component "Link" did not resolve'.
+        let mut registry = ComponentRegistry::new();
+        registry.register_default_primitives();
+        assert!(registry.is_primitive("Link"));
+        let asked = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let seen = asked.clone();
+        registry.set_resolver(Arc::new(move |name: &str, _context: Option<&str>| {
+            seen.lock().unwrap().push(name.to_string());
+            None
+        }));
+        let expanded = registry.expand(&Element::new("Link"));
+        assert_eq!(expanded.element_type, "Link");
+        assert!(asked.lock().unwrap().is_empty(), "{:?}", asked.lock().unwrap());
     }
 }
