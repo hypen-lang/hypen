@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "hypen-radio",
+  "main": "src/worker.ts",
+  "compatibility_date": "2025-05-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // The Hypen WASM engine is pulled in as a CompiledWasm module; the generic
+  // browser client is imported as text.
+  "rules": [
+    { "type": "CompiledWasm", "globs": ["**/*.wasm"], "fallthrough": false },
+    { "type": "Text", "globs": ["**/dist/client/*.js"], "fallthrough": true }
+  ],
+
+  // One Durable Object per visitor: favourites + recently played live in its
+  // storage (see src/visitor.ts and src/library-store.ts).
+  "durable_objects": {
+    "bindings": [{ "name": "RADIO_DO", "class_name": "RadioDO" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RadioDO"] }],
+
+  "dev": { "port": 8799, "inspector_port": 9241 },
+  "observability": { "enabled": true }
+}

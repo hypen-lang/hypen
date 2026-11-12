@@ -53,6 +53,7 @@ icons to `wss://<worker>.<subdomain>.workers.dev/ws`.)
 | weather | `examples/weather/cloudflare` | 8796 | Weather |
 | photos | `examples/photos/cloudflare` | 8797 | Photos |
 | messages | `examples/messages/cloudflare` | 8798 | Messages |
+| radio | `examples/radio/cloudflare` | 8799 | Radio |
 | news | `examples/news/cloudflare` | 8800 | News |
 
 ## Gotchas

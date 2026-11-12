@@ -175,6 +175,15 @@ export const APPS: LauncherApp[] = [
     url: appEndpoint("hypen-messages", 8798),
   },
   {
+    slug: "radio",
+    name: "Radio",
+    resource: "radio",
+    iconColor: "#FFF1EC",
+    tile: "radial-gradient(circle at 72% 14%, rgba(255,90,54,0.55), transparent 34%), linear-gradient(145deg, #3B1D2A 0%, #1A1324 52%, #0D0E17 100%)",
+    glow: "rgba(255, 90, 54, 0.44)",
+    url: appEndpoint("hypen-radio", 8799),
+  },
+  {
     slug: "news",
     name: "News",
     resource: "newspaper",

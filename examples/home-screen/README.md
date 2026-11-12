@@ -54,6 +54,7 @@ instance needs a distinct `--inspector-port`):
 | Weather | `weather/cloudflare` | 8796 | `bunx wrangler dev --port 8796 --inspector-port 9238` |
 | Photos | `photos/cloudflare` | 8797 | `bunx wrangler dev --port 8797 --inspector-port 9239` |
 | Messages | `messages/cloudflare` | 8798 | `bunx wrangler dev --port 8798 --inspector-port 9240` |
+| Radio | `radio/cloudflare` | 8799 | `bunx wrangler dev --port 8799 --inspector-port 9241` |
 | News | `news/cloudflare` | 8800 | `bunx wrangler dev --port 8800 --inspector-port 9242` |
 
 (`simple/cf` runs on 8788 under `dev-examples.sh` but has no launcher icon.)

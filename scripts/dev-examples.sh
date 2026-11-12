@@ -70,6 +70,7 @@ hypeflix examples/hypeflix/cloudflare 8795
 weather examples/weather/cloudflare 8796
 photos examples/photos/cloudflare 8797
 messages examples/messages/cloudflare 8798
+radio examples/radio/cloudflare 8799
 news examples/news/cloudflare 8800
 "
 
@@ -94,7 +95,7 @@ example_names() {
 }
 
 DEFAULT_SET=(home-screen todo calculator)
-ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator hypeflix weather photos messages news)
+ALL_SET=(home-screen simple todo calorie-counter movie-discovery food-ordering social calculator hypeflix weather photos messages radio news)
 
 FRESH=0
 LOCAL=0
