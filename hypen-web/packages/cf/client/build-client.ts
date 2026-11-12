@@ -16,6 +16,10 @@
  * bundle is always the renderer as it is in the repo.
  *
  *   bun run client/build-client.ts        # writes dist/client/generic.js
+ *
+ * Needs Bun >= MIN_BUN_VERSION: Bun 1.4.3's bundler emits a broken bundle
+ * (evaluating it throws "'k' is undefined"), so the build refuses to run on
+ * an older Bun rather than produce a client that fails in every browser.
  */
 
 import type { BunPlugin } from "bun";
@@ -26,6 +30,45 @@ const PKG_ROOT = join(import.meta.dir, "..");
 const PACKAGES_DIR = join(PKG_ROOT, "..");
 /** Workspace packages bundled from source (dir name under packages/). */
 const SOURCE_PACKAGES = new Set(["core", "web", "device-web"]);
+
+/**
+ * Oldest Bun whose bundler produces a working generic client. Bun 1.4.3
+ * builds a bundle that throws "'k' is undefined" when evaluated
+ * (tests/client-bundle.test.ts); 1.4.4 is fine. Keep in step with
+ * `engines.bun` in hypen-web/package.json.
+ */
+export const MIN_BUN_VERSION = "1.4.4";
+
+function versionParts(version: string): [number, number, number] | null {
+  const match = /^v?(\d+)\.(\d+)\.(\d+)/.exec(version.trim());
+  return match ? [Number(match[1]), Number(match[2]), Number(match[3])] : null;
+}
+
+/**
+ * Why `version` cannot build the client, or null when it can. Pre-release
+ * suffixes are ignored (a 1.4.4 canary counts as 1.4.4).
+ */
+export function bunVersionProblem(version: string, minimum = MIN_BUN_VERSION): string | null {
+  const have = versionParts(version);
+  const need = versionParts(minimum)!;
+  if (have) {
+    for (let i = 0; i < 3; i++) {
+      if (have[i]! > need[i]!) return null;
+      if (have[i]! < need[i]!) break;
+      if (i === 2) return null;
+    }
+  }
+  return (
+    `@hypen-space/cf: building the generic client needs Bun >= ${minimum}, but this is Bun ${version}. ` +
+    `Older bundlers emit a broken client ("'k' is undefined" in the browser). Run \`bun upgrade\` and rebuild.`
+  );
+}
+
+/** Throw a clear error when the running Bun cannot build the client. */
+export function assertBunVersion(version: string = Bun.version): void {
+  const problem = bunVersionProblem(version);
+  if (problem) throw new Error(problem);
+}
 
 type ExportEntry = string | Record<string, string | undefined>;
 
@@ -67,6 +110,7 @@ export const workspaceSourcePlugin: BunPlugin = {
 
 /** Build the generic client; returns the bundle text. */
 export async function buildClient(options: { minify?: boolean } = {}): Promise<string> {
+  assertBunVersion();
   const result = await Bun.build({
     entrypoints: [join(PKG_ROOT, "client/generic-client.ts")],
     target: "browser",
@@ -80,6 +124,11 @@ export async function buildClient(options: { minify?: boolean } = {}): Promise<s
 }
 
 if (import.meta.main) {
+  const problem = bunVersionProblem(Bun.version);
+  if (problem) {
+    console.error(`✗ ${problem}`);
+    process.exit(1);
+  }
   const out = join(PKG_ROOT, "dist/client/generic.js");
   const text = await buildClient();
   await Bun.write(out, text); // creates dist/client/ as needed
