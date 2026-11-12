@@ -12,6 +12,7 @@ import { ACTION_ANIMATE_KEY } from "@hypen-space/core/types";
 import type { VirtualNode } from "./types.js";
 import { resolveEventAction } from "./props.js";
 import { CHART_POINTER_KEY, chartEventPayload } from "./chart.js";
+import { sanitizeHref } from "../url.js";
 
 /** Minimal engine surface needed for dispatch. */
 export interface DispatchEngine {
@@ -54,11 +55,14 @@ const HAS_SCHEME = /^[a-z][a-z0-9+.-]*:/i;
  * Navigate for a Link that carries a destination but no click handler.
  * In-app paths go through the router action the module-backed form sends
  * (`router.push`, read by ManagedRouter as `to`); a URL with a scheme
- * leaves the app the way an anchor would.
+ * leaves the app the way an anchor would. A destination the DOM Link would
+ * refuse as an `href` (`javascript:`, `data:`, … — see `sanitizeHref`) is
+ * refused here too, so state-driven links cannot run script on click.
  */
 function activateBareLink(engine: DispatchEngine, node: VirtualNode): void {
   const to = linkDestination(node);
   if (!to) return;
+  if (sanitizeHref(to) === null) return;
   if (HAS_SCHEME.test(to)) {
     if (typeof window === "undefined") return;
     const target = node.props.target ?? node.props["target.0"];

@@ -163,6 +163,13 @@ function hashValue(value: any): string {
  * behind the animator's inline writes — the exact shadowing this module
  * exists to prevent — so they are reported as not variant-expressible.
  */
+/**
+ * Properties several applicators compose into as a function list
+ * (`translateX` + `rotate` → `transform`; `blur` + `brightness` → `filter`).
+ * Removing one applicator must not reset the whole property.
+ */
+const COMPOSED_CSS_PROPS = new Set(["transform", "filter", "backdrop-filter"]);
+
 const ANIMATOR_OWNED_BASES = new Set([
   "transition",
   "transitionProperty",
@@ -221,6 +228,19 @@ export class ApplicatorRegistry {
   private variantMeta: WeakMap<HTMLElement, VariantMeta> = new WeakMap();
   /** Detached element used to observe what a handler writes. See `lower()`. */
   private probe: HTMLElement | null = null;
+  /**
+   * The element's inline declarations as its component created them, before
+   * any applicator ran (captured by `applyAll`). Removing an applicator
+   * restores these instead of blanking the property, so clearing
+   * `.display(grid)` gives a Column back its `display: flex`.
+   */
+  private baselines: WeakMap<HTMLElement, Map<string, string>> = new WeakMap();
+  /**
+   * Template clone -> the prototype element it was cloned from. A clone
+   * shares the prototype's inline styles but none of its JS-side state, so
+   * its applicator state and baseline are read through this link lazily.
+   */
+  private cloneSources: WeakMap<HTMLElement, HTMLElement> = new WeakMap();
 
 
   /**
@@ -305,13 +325,149 @@ export class ApplicatorRegistry {
         const normalizedValue = this.normalizeEventValue(previous, value);
         state.set(handlerName, normalizedValue);
         handler(element, normalizedValue);
+      } else if (value === undefined) {
+        this.clearHandler(element, handlerName, handler, previous, state);
       } else {
         state.set(handlerName, value);
         handler(element, value);
       }
+    } else if (value === undefined) {
+      // Removal of a handler-less (plain CSS) prop. Writing it through
+      // `setStyleProperty` produced the string "undefined", which the
+      // browser rejects — leaving the old value in place.
+      if (!handlerName.startsWith("__") && !/[@:.]/.test(handlerName)) {
+        this.restoreBaseline(element, [this.toKebabCase(handlerName)]);
+      }
     } else {
       // Fallback: set as CSS property
       this.setStyleProperty(element, handlerName, value);
+    }
+  }
+
+  // ==========================================================================
+  // Removal (RemoveProp)
+  // ==========================================================================
+
+  /**
+   * Record the element's component-created inline styles before any
+   * applicator writes over them. Idempotent: only the first call counts.
+   */
+  captureBaseline(element: HTMLElement): void {
+    if (this.baselines.has(element)) return;
+    const baseline = new Map<string, string>();
+    for (const [prop, entry] of this.readInline(element)) baseline.set(prop, entry.value);
+    this.baselines.set(element, baseline);
+  }
+
+  /**
+   * Note that `clone` was produced by `cloneNode` from `source`, so removals
+   * on the clone know what the prototype's applicators wrote and what the
+   * prototype's component baseline was.
+   */
+  linkClone(clone: HTMLElement, source: HTMLElement): void {
+    if (this.elementState.has(source) || this.baselines.has(source)) {
+      this.cloneSources.set(clone, source);
+    }
+  }
+
+  private baselineFor(element: HTMLElement): Map<string, string> | undefined {
+    const own = this.baselines.get(element);
+    if (own) return own;
+    const source = this.cloneSources.get(element);
+    return source ? this.baselines.get(source) : undefined;
+  }
+
+  /** Put each property back to its component baseline, or drop it. */
+  private restoreBaseline(element: HTMLElement, props: Iterable<string>): void {
+    const baseline = this.baselineFor(element);
+    for (const prop of props) {
+      const original = baseline?.get(prop);
+      if (original !== undefined) element.style.setProperty(prop, original);
+      else element.style.removeProperty(prop);
+    }
+  }
+
+  /** The inline properties `handler` writes for `value`, observed on the probe. */
+  private probeWrites(handler: ApplicatorHandler, value: any): string[] {
+    const probe = this.getProbe();
+    let props: string[] = [];
+    try {
+      handler(probe, value);
+      props = [...this.readInline(probe).keys()];
+    } catch {
+      // A handler that cannot replay its value leaves nothing to clear.
+    }
+    this.resetProbe(probe);
+    return props;
+  }
+
+  /**
+   * Clear a handler-backed applicator (RemoveProp). Handlers only know how
+   * to write styles for a value; most have no notion of un-applying one, and
+   * many stringify `undefined` into a declaration the browser rejects — so
+   * the previous value stayed (`max-width: 420px` / `overflow-y: auto`
+   * leaking from one When case into the next when the engine reused the
+   * case's root node). The registry undoes the write itself: replay the
+   * previous value on the probe to learn which properties it set, restore
+   * those to the component baseline. The handler still sees `undefined`, for
+   * its non-CSS bookkeeping (width sources, dataset markers).
+   */
+  private clearHandler(
+    element: HTMLElement,
+    name: string,
+    handler: ApplicatorHandler,
+    previous: any,
+    state: Map<string, any>,
+  ): void {
+    // Not undone here: the animator's own inline styles, and the composed
+    // function lists (`transform`, `filter`) that several applicators share —
+    // their handlers already drop exactly their own term on `undefined`, and
+    // restoring the whole property would wipe every sibling term.
+    const ownCss = this.toKebabCase(name);
+    const written =
+      previous === undefined || previous === null || ANIMATOR_OWNED_BASES.has(name)
+        ? []
+        : this.probeWrites(handler, previous).filter(
+            (prop) => !COMPOSED_CSS_PROPS.has(prop) || prop === ownCss,
+          );
+    state.delete(name);
+
+    // The handler runs first: some treat a missing value as "write the
+    // default" (`flex` re-adds `min-width: 0`, `borderWidth` a solid style),
+    // and the restore below must have the last word on what it touched.
+    handler(element, undefined);
+    this.restoreBaseline(element, written);
+
+    // `String(undefined)` / `String(null)` is never valid CSS. A real browser
+    // drops the assignment; a lenient style object keeps it. Either way the
+    // property must end up as if the applicator had never run.
+    const junk: string[] = [];
+    for (const [prop, entry] of this.readInline(element)) {
+      if (entry.value === "undefined" || entry.value === "null") junk.push(prop);
+    }
+    if (junk.length > 0) this.restoreBaseline(element, junk);
+
+    // Properties are shared between applicators (`flex` and `minWidth` both
+    // write `min-width`). Re-assert any other live applicator that writes
+    // one of the cleared properties, so removing one does not undo another.
+    if (written.length > 0) this.reassertOverlapping(element, name, new Set(written), state);
+  }
+
+  private reassertOverlapping(
+    element: HTMLElement,
+    removed: string,
+    cleared: Set<string>,
+    state: Map<string, any>,
+  ): void {
+    const variantBases = this.variantMeta.get(element)?.bases;
+    for (const [other, value] of state) {
+      if (other === removed || value === undefined || value === null) continue;
+      if (this.isEventApplicator(other) || variantBases?.has(other)) continue;
+      const otherHandler = this.handlers.get(other);
+      if (!otherHandler) continue;
+      if (this.probeWrites(otherHandler, value).some((prop) => cleared.has(prop))) {
+        otherHandler(element, value);
+      }
     }
   }
 
@@ -737,7 +893,10 @@ export class ApplicatorRegistry {
   private getElementState(element: HTMLElement): Map<string, any> {
     let state = this.elementState.get(element);
     if (!state) {
-      state = new Map();
+      // A template clone starts from what its prototype's applicators hold.
+      const source = this.cloneSources.get(element);
+      const inherited = source ? this.elementState.get(source) : undefined;
+      state = inherited ? new Map(inherited) : new Map();
       this.elementState.set(element, state);
     }
     return state;
@@ -835,7 +994,7 @@ export class ApplicatorRegistry {
    * Apply multiple applicators
    */
   applyAll(element: HTMLElement, applicators: Record<string, any>): void {
-
+    this.captureBaseline(element);
 
     // Group applicators by their base name (treat applicators like components with arguments)
     // e.g., "onClick.0", "onClick.id", "onClick.title" -> onClick: {0: ..., id: ..., title: ...}

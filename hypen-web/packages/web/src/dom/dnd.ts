@@ -263,6 +263,10 @@ interface DndNode {
   blur: (() => void) | null;
   contextMenu: ((event: { preventDefault?: () => void }) => void) | null;
   click: ((event: ClickEventLike) => void) | null;
+  /** Cancels the browser's native drag (an `<img>`, a link, a selection) inside the source. */
+  nativeDragStart: ((event: { preventDefault?: () => void }) => void) | null;
+  /** Non-passive `touchmove` guard: no UA pan while this source is being dragged. */
+  touchMove: ((event: { preventDefault?: () => void; cancelable?: boolean }) => void) | null;
   /** The next `click` on the source is the tail of a completed drag: swallow it. */
   suppressClick: boolean;
   /** Inline `touch-action` before the runtime wrote its own (`null` = never written). */
@@ -794,6 +798,8 @@ export class DomDnd {
         blur: null,
         contextMenu: null,
         click: null,
+        nativeDragStart: null,
+        touchMove: null,
         suppressClick: false,
         savedTouchAction: null,
         addedTabindex: false,
@@ -1056,7 +1062,12 @@ export class DomDnd {
   }
 
   private arm(node: DndNode): void {
-    if (node.pointerDown) return;
+    if (node.pointerDown) {
+      // Already armed: a changed activation still changes the arm-time
+      // `touch-action` (never under a live drag of this source).
+      if (node !== this.drag?.source) this.applyTouchAction(node);
+      return;
+    }
     const element = node.element;
     const down = (event: PointerEventLike) => this.onPointerDown(node, event);
     node.pointerDown = down;
@@ -1099,6 +1110,31 @@ export class DomDnd {
     };
     node.click = click;
     element.addEventListener("click", click as EventListener, true);
+    // The browser's own HTML5 drag of anything inside the source (an
+    // `<img>` is natively draggable, so are links and text selections)
+    // would start on the first few pixels of travel and `pointercancel`
+    // the Hypen drag before it could claim. Inside a Hypen draggable the
+    // Hypen drag is the only drag: cancel the native one, capture phase so
+    // every descendant is covered without stamping `draggable="false"` on
+    // each (descendants come and go with patches).
+    const nativeDragStart = (event: { preventDefault?: () => void }) => {
+      event.preventDefault?.();
+    };
+    node.nativeDragStart = nativeDragStart;
+    element.addEventListener("dragstart", nativeDragStart as EventListener, true);
+    // Loose `auto` sources leave the UA pan enabled at arm time (see
+    // `touchActionFor`) so a scrolling grid of tiles still scrolls; once the
+    // press has claimed, the drag's touch moves must not pan. A non-passive
+    // `touchmove` that cancels only during a claimed pointer drag of THIS
+    // source does that, and is inert otherwise.
+    const touchMove = (event: { preventDefault?: () => void; cancelable?: boolean }) => {
+      const drag = this.drag;
+      if (drag && drag.mode === "pointer" && drag.source === node && drag.phase === "dragging") {
+        if (event.cancelable !== false) event.preventDefault?.();
+      }
+    };
+    node.touchMove = touchMove;
+    element.addEventListener("touchmove", touchMove as EventListener, { passive: false } as AddEventListenerOptions);
     // Keyboard reachability: a draggable that is not natively focusable and
     // has no author tabindex joins the Tab order; `aria-grabbed="false"`
     // announces it as grabbable.
@@ -1136,6 +1172,14 @@ export class DomDnd {
       element.removeEventListener("click", node.click as EventListener, true);
       node.click = null;
     }
+    if (node.nativeDragStart) {
+      element.removeEventListener("dragstart", node.nativeDragStart as EventListener, true);
+      node.nativeDragStart = null;
+    }
+    if (node.touchMove) {
+      element.removeEventListener("touchmove", node.touchMove as EventListener);
+      node.touchMove = null;
+    }
     node.suppressClick = false;
     if (node.addedTabindex) {
       node.addedTabindex = false;
@@ -1154,14 +1198,23 @@ export class DomDnd {
    * The `touch-action` a source needs BEFORE any touch starts (browsers
    * latch it at touchstart; writing it at lift is too late — the UA pan
    * would `pointercancel` the first move). `none` for `press` / `slop` /
-   * `immediate` and for `auto` outside an axis-constrained sortable (the
-   * 300ms press); `pan-<axis>` for `auto` inside one, so main-axis travel
+   * `immediate` and for `auto` on a pinboard (the 300ms press); `pan-<axis>`
+   * for `auto` inside an axis-constrained sortable, so main-axis travel
    * still scrolls the list while cross-axis slop keeps delivering moves.
+   *
+   * A LOOSE `auto` source (no sortable / pinboard origin) gets
+   * `manipulation`: it is a 300ms press on touch, and a grid of draggable
+   * tiles usually IS the scroll content — `none` made it unscrollable by
+   * touch. A swipe pans the page and `pointercancel`s the pending press
+   * (abandoned silently, §6.1); a still press claims, and from then on the
+   * source's non-passive `touchmove` guard (armed in `arm`) keeps the UA
+   * from panning while the drag runs.
    */
   private touchActionFor(node: DndNode): string {
     if (node.source?.activation !== "auto") return "none";
     const origin = this.findOrigin(node);
     if (origin?.sort) return origin.sort.axis === "x" ? "pan-x" : "pan-y";
+    if (!origin) return "manipulation";
     return "none";
   }
 

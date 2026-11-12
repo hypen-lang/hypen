@@ -4,6 +4,7 @@
 
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength } from "./size.js";
+import { applyTextAlign } from "./typography.js";
 
 // Track loaded Google Fonts to avoid duplicate link tags
 const loadedGoogleFonts = new Set<string>();
@@ -89,24 +90,12 @@ export const fontHandlers: Record<string, ApplicatorHandler> = {
     el.style.fontFamily = processFontFamily(fontValue);
   },
 
-  textAlign: (el, value) => {
-    const v = String(value);
-    el.style.textAlign = v;
-    // `text-align: center | right | end | justify` only takes visible
-    // effect when the box is wider than the text. Hypen's Text defaults
-    // to `inline-block` (shrink-to-fit), so without this an author
-    // writing `Text("Edit Profile").tw("text-center")` saw the same
-    // left-flush text whether they set `text-center` or not (the
-    // social Profile page Edit button). Stretch the box across its
-    // flex parent and switch to block so the alignment has room to act.
-    if (v === "center" || v === "right" || v === "end" || v === "justify") {
-      if (!el.style.alignSelf) el.style.alignSelf = "stretch";
-      if (!el.style.width) el.style.width = "100%";
-      if (el.style.display === "inline-block" || !el.style.display) {
-        el.style.display = "block";
-      }
-    }
-  },
+  // `text-align: center | right | end | justify` only takes visible effect
+  // when the box is wider than the text; Hypen's Text defaults to
+  // `inline-block` (shrink-to-fit), so `Text("Edit Profile").tw("text-center")`
+  // looked left-flush. The shared handler fills the parent's width outside
+  // horizontal parents — see `applyTextAlign`.
+  textAlign: applyTextAlign,
 
   lineHeight: (el, value) => {
     el.style.lineHeight = String(value);
