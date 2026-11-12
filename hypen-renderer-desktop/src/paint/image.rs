@@ -283,7 +283,10 @@ pub fn set_waker(proxy: EventLoopProxy<AppEvent>) {
 /// the miss path (decode of already-fetched bytes is served from the
 /// decoded-pixmap tier after the first call).
 pub fn loaded_natural_size(src: &str) -> Option<(f32, f32)> {
-    loaded_source(src).map(|pm| (pm.width() as f32, pm.height() as f32))
+    let pm = loaded_source(src)?;
+    // An SVG is rasterised above its intrinsic size for sharpness;
+    // layout wants the size the document declares.
+    Some(svg_intrinsic_size(src).unwrap_or((pm.width() as f32, pm.height() as f32)))
 }
 
 // ---------------------------------------------------------------------------
@@ -612,6 +615,132 @@ fn is_http(src: &str) -> bool {
     src.starts_with("http://") || src.starts_with("https://")
 }
 
+// ---------------------------------------------------------------------------
+// Source resolution policy — remote vs local embedding.
+//
+// A locally embedded app (`DesktopApp::run(module)`) is trusted code
+// shipped with the binary, so a bare path like `assets/logo.png` or
+// `/usr/share/app/icon.png` is a file on this machine, as it always was.
+//
+// A remote app (`DesktopApp::connect(ws://…)`) is NOT: its UI is authored
+// by whatever server we connected to, and its `src` strings mean what they
+// mean in a browser — URLs relative to the server. `"/art/x.png"` is
+// `http://<server>/art/x.png`, never the local file `/art/x.png`.
+//
+// Security property: while a remote origin is set, NO image-like source
+// reaches the local filesystem. Every source is either inline (`data:`),
+// an absolute `http(s)` URL, or resolved against the remote origin (path-
+// absolute, scheme-relative and plain relative forms alike). Any other
+// scheme — `file:`, a Windows drive letter (`C:\…` parses as scheme `c`),
+// `blob:`, … — is refused outright. Otherwise a server could make the
+// renderer decode arbitrary local files (and, via natural-size layout or
+// error callbacks, learn whether they exist).
+// ---------------------------------------------------------------------------
+
+/// How the loader obtains one source's encoded bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum SourcePlan {
+    /// Inline `data:` URI, decoded in-process.
+    Data,
+    /// Fetch this absolute `http(s)` URL.
+    Http(String),
+    /// Read this local file (local embedding mode only).
+    Local(String),
+    /// Refused: a remote app named a non-HTTP scheme.
+    Refused,
+}
+
+fn remote_origin_slot() -> &'static std::sync::RwLock<Option<String>> {
+    static SLOT: OnceLock<std::sync::RwLock<Option<String>>> = OnceLock::new();
+    SLOT.get_or_init(|| std::sync::RwLock::new(None))
+}
+
+/// Switch image loading into remote mode: relative sources resolve against
+/// `origin` (e.g. `http://localhost:8787`) and local files become
+/// unreachable. Set by [`crate::remote::RemoteModule::connect_with`]; `None`
+/// restores local embedding behaviour. Process-wide, like the image cache.
+pub fn set_remote_origin(origin: Option<String>) {
+    *remote_origin_slot()
+        .write()
+        .expect("remote origin lock poisoned") = origin.map(|o| o.trim_end_matches('/').to_string());
+}
+
+/// The origin set by [`set_remote_origin`], if any.
+pub fn remote_origin() -> Option<String> {
+    remote_origin_slot()
+        .read()
+        .expect("remote origin lock poisoned")
+        .clone()
+}
+
+/// The HTTP origin serving a remote app's assets, derived from its
+/// WebSocket URL: `ws://h:p/ws` → `http://h:p`, `wss://h/x` → `https://h`.
+/// `http(s)` URLs keep their scheme. `None` for anything else.
+pub fn http_origin_for(url: &str) -> Option<String> {
+    let (scheme, rest) = url.trim().split_once("://")?;
+    let scheme = match scheme.to_ascii_lowercase().as_str() {
+        "ws" | "http" => "http",
+        "wss" | "https" => "https",
+        _ => return None,
+    };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    // Drop any userinfo; the origin is scheme + host + port.
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    if authority.is_empty() {
+        return None;
+    }
+    Some(format!("{scheme}://{authority}"))
+}
+
+/// True when `s` starts with a URL scheme (`file:`, `blob:`, `c:` …).
+fn has_scheme(s: &str) -> bool {
+    let Some(colon) = s.find(':') else {
+        return false;
+    };
+    let scheme = &s[..colon];
+    let mut chars = scheme.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_alphabetic())
+        && chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.'))
+}
+
+/// Decide how to load `src`, given the remote origin (if in remote mode).
+/// Pure, so the policy is unit-testable without touching the global.
+pub(crate) fn plan_source(src: &str, remote_origin: Option<&str>) -> SourcePlan {
+    let s = src.trim();
+    if is_data_uri(s) {
+        return SourcePlan::Data;
+    }
+    if is_http(s) {
+        return SourcePlan::Http(s.to_string());
+    }
+    let Some(origin) = remote_origin else {
+        return SourcePlan::Local(s.strip_prefix("file://").unwrap_or(s).to_string());
+    };
+    let origin = origin.trim_end_matches('/');
+    if let Some(rest) = s.strip_prefix("//") {
+        // Scheme-relative: same scheme as the server.
+        let scheme = origin.split_once("://").map_or("http", |(sc, _)| sc);
+        return SourcePlan::Http(format!("{scheme}://{rest}"));
+    }
+    if has_scheme(s) {
+        log::warn!("image: refusing non-HTTP source {s:?} from a remote app");
+        return SourcePlan::Refused;
+    }
+    // Backslashes are path separators to a browser's URL parser too.
+    let path = s.replace('\\', "/");
+    let path = path.strip_prefix("./").unwrap_or(&path);
+    if path.starts_with('/') {
+        SourcePlan::Http(format!("{origin}{path}"))
+    } else {
+        SourcePlan::Http(format!("{origin}/{path}"))
+    }
+}
+
+/// [`plan_source`] under the process's current mode.
+pub(crate) fn plan_source_now(src: &str) -> SourcePlan {
+    plan_source(src, remote_origin().as_deref())
+}
+
 fn is_data_uri(src: &str) -> bool {
     src.len() >= 5 && src[..5].eq_ignore_ascii_case("data:")
 }
@@ -627,8 +756,9 @@ fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
     let comma = src.find(',')?;
     let meta = &src[..comma];
     if !meta.to_ascii_lowercase().contains("base64") {
-        log::warn!("image: non-base64 data URI is not supported");
-        return None;
+        // `data:image/svg+xml;utf8,%3Csvg…` — the percent-encoded form
+        // SVG glyphs are usually inlined as (weather's icons).
+        return Some(percent_decode(&src[comma + 1..]));
     }
     let payload: String = src[comma + 1..]
         .chars()
@@ -641,6 +771,29 @@ fn decode_data_uri(src: &str) -> Option<Vec<u8>> {
             None
         }
     }
+}
+
+/// Decode `%XX` escapes (URL percent-encoding). Malformed escapes pass
+/// through literally, as browsers do.
+fn percent_decode(input: &str) -> Vec<u8> {
+    fn hex(c: u8) -> Option<u8> {
+        (c as char).to_digit(16).map(|d| d as u8)
+    }
+    let bytes = input.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            if let (Some(h), Some(l)) = (hex(bytes[i + 1]), hex(bytes[i + 2])) {
+                out.push(h << 4 | l);
+                i += 3;
+                continue;
+            }
+        }
+        out.push(bytes[i]);
+        i += 1;
+    }
+    out
 }
 
 /// Minimal standard-alphabet base64 decoder.
@@ -742,12 +895,13 @@ pub(crate) fn bump_image_load_generation_for_test() {
 
 fn run_image_worker(rx: mpsc::Receiver<String>) {
     while let Ok(src) = rx.recv() {
-        let bytes = if is_data_uri(&src) {
-            decode_data_uri(&src)
-        } else if is_http(&src) {
-            fetch_http_bytes(&src)
-        } else {
-            read_local_bytes(&src)
+        // The cache (and the failure registry) stay keyed by the src as
+        // authored; only the fetch uses the resolved URL.
+        let bytes = match plan_source_now(&src) {
+            SourcePlan::Data => decode_data_uri(&src),
+            SourcePlan::Http(url) => fetch_http_bytes(&url, &src),
+            SourcePlan::Local(_) => read_local_bytes(&src),
+            SourcePlan::Refused => None,
         };
         let entry = match bytes {
             Some(bytes) => {
@@ -799,14 +953,17 @@ fn run_image_worker(rx: mpsc::Receiver<String>) {
 /// Fetch the *encoded* body of an HTTP / HTTPS URL via `ureq`.
 /// Returns `None` on any failure (timeout, non-2xx, oversize body).
 /// Decode validation happens in the worker loop.
-fn fetch_http_bytes(url: &str) -> Option<Vec<u8>> {
+///
+/// `key` is the source as authored (the cache / failure-registry key);
+/// it differs from `url` for a relative src resolved in remote mode.
+fn fetch_http_bytes(url: &str, key: &str) -> Option<Vec<u8>> {
     let response = match ureq::get(url).timeout(Duration::from_secs(10)).call() {
         Ok(r) => r,
         Err(ureq::Error::Status(code, _)) => {
             // Non-2xx: keep the status addressable so the renderer can
             // dispatch Video `onError` with `status` per the contract.
             log::warn!("image: HTTP {code} for {url}");
-            record_failure(url, code, format!("HTTP {code} fetching {url}"));
+            record_failure(key, code, format!("HTTP {code} fetching {url}"));
             return None;
         }
         Err(e) => {
@@ -836,7 +993,13 @@ pub(crate) fn read_local_bytes(src: &str) -> Option<Vec<u8>> {
         log::debug!("image: HTTP src queued for worker (not local): {src}");
         return None;
     }
-    let path = src.strip_prefix("file://").unwrap_or(src);
+    // Defence in depth for the remote-mode policy above: a remote app
+    // never reads local files, whichever path got here.
+    let SourcePlan::Local(path) = plan_source_now(src) else {
+        log::warn!("image: local file access refused in remote mode: {src}");
+        return None;
+    };
+    let path = path.as_str();
     match std::fs::read(path) {
         Ok(b) => Some(b),
         Err(e) => {
@@ -846,9 +1009,106 @@ pub(crate) fn read_local_bytes(src: &str) -> Option<Vec<u8>> {
     }
 }
 
+/// Sniff an SVG document (a `data:image/svg+xml` payload, an `.svg` file
+/// or response): optional BOM / whitespace / XML prolog / comments, then
+/// an `<svg` element. Raster formats start with binary magic, so this
+/// never steals a PNG / JPEG / WebP.
+fn looks_like_svg(bytes: &[u8]) -> bool {
+    let head = &bytes[..bytes.len().min(1024)];
+    let text = String::from_utf8_lossy(head);
+    let text = text.trim_start_matches('\u{feff}').trim_start();
+    text.starts_with("<svg") || ((text.starts_with("<?xml") || text.starts_with("<!--")) && text.contains("<svg"))
+}
+
+/// Longest side, in pixels, an SVG is rasterised at. SVG has no
+/// resolution of its own; drawing it at its (often tiny, e.g. a 64-unit
+/// viewBox) intrinsic size and letting the painter scale the bitmap up
+/// would blur every glyph on a HiDPI screen, so small documents are
+/// rendered at this size instead. Natural-size layout still sees the
+/// intrinsic size through [`svg_intrinsic_size`].
+const SVG_RASTER_TARGET_PX: f32 = 256.0;
+/// Upper bound on either rasterised dimension (memory guard against a
+/// hostile `width="100000"`).
+const SVG_RASTER_MAX_PX: f32 = 4096.0;
+
+fn svg_intrinsic_sizes() -> &'static Mutex<std::collections::HashMap<String, (f32, f32)>> {
+    static SIZES: OnceLock<Mutex<std::collections::HashMap<String, (f32, f32)>>> = OnceLock::new();
+    SIZES.get_or_init(|| Mutex::new(std::collections::HashMap::new()))
+}
+
+/// The intrinsic (CSS px) size of an SVG source rasterised by
+/// [`rasterize_svg`]; `None` for raster sources.
+fn svg_intrinsic_size(src: &str) -> Option<(f32, f32)> {
+    svg_intrinsic_sizes()
+        .lock()
+        .expect("svg size registry poisoned")
+        .get(src)
+        .copied()
+}
+
+/// Render an SVG document with resvg into a premultiplied pixmap. No
+/// font database and no external resources are loaded: an image source
+/// can't make the renderer read local files through `<image href>` /
+/// `@font-face`, which matters in remote mode (see the policy above).
+fn rasterize_svg(bytes: &[u8], debug_label: &str) -> Option<Pixmap> {
+    let opts = resvg::usvg::Options {
+        resources_dir: None,
+        // Refuse every nested `<image>` reference rather than resolving
+        // it against the filesystem.
+        image_href_resolver: resvg::usvg::ImageHrefResolver {
+            resolve_data: Box::new(|_, _, _| None),
+            resolve_string: Box::new(|_, _| None),
+        },
+        ..Default::default()
+    };
+    let tree = match resvg::usvg::Tree::from_data(bytes, &opts) {
+        Ok(t) => t,
+        Err(e) => {
+            log::warn!("image: failed parsing SVG {}: {e}", truncate_label(debug_label));
+            return None;
+        }
+    };
+    let size = tree.size();
+    let (w, h) = (size.width(), size.height());
+    if !(w > 0.0 && h > 0.0) {
+        return None;
+    }
+    let long = w.max(h);
+    let k = (SVG_RASTER_TARGET_PX / long).max(1.0).min(SVG_RASTER_MAX_PX / long);
+    let pw = (w * k).round().max(1.0) as u32;
+    let ph = (h * k).round().max(1.0) as u32;
+    let mut pixmap = Pixmap::new(pw, ph)?;
+    resvg::render(
+        &tree,
+        Transform::from_scale(pw as f32 / w, ph as f32 / h),
+        &mut pixmap.as_mut(),
+    );
+    svg_intrinsic_sizes()
+        .lock()
+        .expect("svg size registry poisoned")
+        .insert(debug_label.to_string(), (w, h));
+    Some(pixmap)
+}
+
+/// A `data:` URI can be kilobytes long; keep log lines readable.
+fn truncate_label(label: &str) -> String {
+    if label.len() <= 80 {
+        label.to_string()
+    } else {
+        let mut end = 80;
+        while !label.is_char_boundary(end) {
+            end -= 1;
+        }
+        format!("{}…", &label[..end])
+    }
+}
+
 /// Shared codec path: bytes → RGBA8 → premultiplied → tiny-skia
 /// pixmap. Used by both local decode and worker fetch.
 fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Pixmap> {
+    if looks_like_svg(bytes) {
+        return rasterize_svg(bytes, debug_label);
+    }
     let img = match image::load_from_memory(bytes) {
         Ok(d) => d,
         Err(e) => {
@@ -1276,6 +1536,131 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Weather's glyphs: `data:image/svg+xml;utf8,` + encodeURIComponent(svg).
+    fn svg_data_uri(body: &str) -> String {
+        let svg = format!(
+            "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 64 64\" fill=\"none\">{body}</svg>"
+        );
+        let mut out = String::from("data:image/svg+xml;utf8,");
+        for b in svg.bytes() {
+            if b.is_ascii_alphanumeric() || b"-_.!~*'()".contains(&b) {
+                out.push(b as char);
+            } else {
+                out.push_str(&format!("%{b:02X}"));
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn percent_encoded_svg_data_uri_rasterises_sharply() {
+        let src = svg_data_uri(r##"<circle cx="32" cy="32" r="20" fill="#FF0000"/>"##);
+        let bytes = decode_data_uri(&src).expect("utf8 data URI decodes");
+        assert!(bytes.starts_with(b"<svg"), "{:?}", String::from_utf8_lossy(&bytes[..20]));
+        let pm = decode_bytes(&bytes, &src).expect("SVG decodes");
+        // Rendered above its 64-unit intrinsic size, but layout sees 64.
+        assert_eq!((pm.width(), pm.height()), (256, 256));
+        assert_eq!(svg_intrinsic_size(&src), Some((64.0, 64.0)));
+        let center = pm.pixel(128, 128).expect("in bounds");
+        assert_eq!((center.red(), center.alpha()), (255, 255));
+        let corner = pm.pixel(2, 2).expect("in bounds");
+        assert_eq!(corner.alpha(), 0);
+    }
+
+    #[test]
+    fn svg_never_loads_nested_external_images() {
+        let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><image href="/etc/hostname" width="8" height="8"/></svg>"#;
+        let pm = decode_bytes(svg, "test://nested-image.svg").expect("still renders");
+        assert!(pm.pixels().iter().all(|p| p.alpha() == 0), "nested href must not load");
+    }
+
+    #[test]
+    fn raster_magic_is_not_sniffed_as_svg() {
+        assert!(!looks_like_svg(&tiny_png_bytes()));
+        assert!(looks_like_svg(b"\xef\xbb\xbf  <?xml version=\"1.0\"?>\n<svg/>"));
+        assert!(!looks_like_svg(b"<html><body>404</body></html>"));
+    }
+
+    #[test]
+    fn http_origin_is_derived_from_the_websocket_url() {
+        assert_eq!(
+            http_origin_for("ws://localhost:8787/ws").as_deref(),
+            Some("http://localhost:8787")
+        );
+        assert_eq!(
+            http_origin_for("wss://user:pw@news.example.dev/ws?x=1").as_deref(),
+            Some("https://news.example.dev")
+        );
+        assert_eq!(
+            http_origin_for("https://a.example").as_deref(),
+            Some("https://a.example")
+        );
+        assert_eq!(http_origin_for("file:///tmp/x"), None);
+        assert_eq!(http_origin_for("not a url"), None);
+    }
+
+    #[test]
+    fn remote_mode_resolves_relative_sources_against_the_server() {
+        let o = Some("http://localhost:8787");
+        let http = |s: &str| SourcePlan::Http(s.to_string());
+        // The News / Radio case: a server-relative art URL.
+        assert_eq!(plan_source("/art/1234", o), http("http://localhost:8787/art/1234"));
+        assert_eq!(plan_source("art/x.png", o), http("http://localhost:8787/art/x.png"));
+        assert_eq!(plan_source("./art/x.png", o), http("http://localhost:8787/art/x.png"));
+        assert_eq!(
+            plan_source("//cdn.example/x.png", Some("https://app.example")),
+            http("https://cdn.example/x.png")
+        );
+        // Absolute URLs and inline data pass through untouched.
+        assert_eq!(plan_source("https://e.example/a.png", o), http("https://e.example/a.png"));
+        assert_eq!(plan_source("data:image/png;base64,AAAA", o), SourcePlan::Data);
+    }
+
+    #[test]
+    fn remote_mode_never_reaches_the_local_filesystem() {
+        let o = Some("http://localhost:8787");
+        // An absolute POSIX path is a server path, not /etc/passwd.
+        assert_eq!(
+            plan_source("/etc/passwd", o),
+            SourcePlan::Http("http://localhost:8787/etc/passwd".into())
+        );
+        for refused in [
+            "file:///etc/passwd",
+            "FILE:///etc/passwd",
+            "C:\\Windows\\win.ini",
+            "c:/Windows/win.ini",
+            "blob:http://x/1",
+            "javascript:alert(1)",
+        ] {
+            assert_eq!(plan_source(refused, o), SourcePlan::Refused, "{refused}");
+        }
+        // Backslash paths resolve on the server like a browser would.
+        assert_eq!(
+            plan_source("\\\\host\\share\\x.png", o),
+            SourcePlan::Http("http://localhost:8787//host/share/x.png".into())
+        );
+    }
+
+    #[test]
+    fn local_mode_keeps_reading_files() {
+        assert_eq!(
+            plan_source("/usr/share/app/icon.png", None),
+            SourcePlan::Local("/usr/share/app/icon.png".into())
+        );
+        assert_eq!(
+            plan_source("file:///tmp/a.png", None),
+            SourcePlan::Local("/tmp/a.png".into())
+        );
+        assert_eq!(
+            plan_source("assets/a.png", None),
+            SourcePlan::Local("assets/a.png".into())
+        );
+        assert_eq!(
+            plan_source("http://e.example/a.png", None),
+            SourcePlan::Http("http://e.example/a.png".into())
+        );
+    }
 
     #[test]
     fn http_urls_are_classified_correctly() {

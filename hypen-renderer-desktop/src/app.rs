@@ -33,6 +33,7 @@ pub struct DesktopApp {
     #[cfg(feature = "dev-overlay")]
     dev_overlay_top: f32,
     screenshot_path: Option<PathBuf>,
+    screenshot_delay: Option<std::time::Duration>,
 }
 
 impl DesktopApp {
@@ -49,6 +50,7 @@ impl DesktopApp {
             #[cfg(feature = "dev-overlay")]
             dev_overlay_top: 8.0,
             screenshot_path: None,
+            screenshot_delay: None,
         }
     }
 
@@ -199,6 +201,20 @@ impl DesktopApp {
     /// capture; ordinary apps should omit it.
     pub fn screenshot(mut self, path: impl Into<PathBuf>) -> Self {
         self.screenshot_path = Some(path.into());
+        self
+    }
+
+    /// How long [`Self::screenshot`] waits after the first non-empty frame
+    /// before capturing. Defaults to
+    /// [`DEFAULT_SCREENSHOT_DELAY`](crate::window::DEFAULT_SCREENSHOT_DELAY)
+    /// (750 ms), which covers local image decodes; a page that loads its
+    /// data asynchronously (a remote app fetching an API in `onCreated`,
+    /// network images) would otherwise be captured mid-load, so give it a
+    /// few seconds. The window keeps processing patches and image loads
+    /// while it waits; the capture is of the frame current at the deadline.
+    /// No effect without [`Self::screenshot`].
+    pub fn screenshot_delay(mut self, delay: std::time::Duration) -> Self {
+        self.screenshot_delay = Some(delay);
         self
     }
     /// Drive the window with a fully-built SDK module instance.
@@ -374,6 +390,9 @@ impl DesktopApp {
             app.set_reduced_motion(on);
         }
         app.set_screenshot_path(self.screenshot_path.clone());
+        if let Some(delay) = self.screenshot_delay {
+            app.set_screenshot_delay(delay);
+        }
         event_loop.run_app(&mut app).expect("event loop run");
         if let Some(error) = app.take_screenshot_error() {
             panic!("desktop screenshot failed: {error}");
@@ -396,3 +415,21 @@ impl Default for DesktopApp {
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct EmptyState {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn screenshot_delay_defaults_to_the_window_default_and_is_configurable() {
+        let app = DesktopApp::new().screenshot("out.png");
+        assert_eq!(app.screenshot_delay, None, "unset: the window default applies");
+        assert_eq!(
+            crate::window::DEFAULT_SCREENSHOT_DELAY,
+            Duration::from_millis(750)
+        );
+        let app = app.screenshot_delay(Duration::from_secs(4));
+        assert_eq!(app.screenshot_delay, Some(Duration::from_secs(4)));
+    }
+}

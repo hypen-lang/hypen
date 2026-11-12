@@ -1137,6 +1137,7 @@ impl VelloPainter {
                 align,
                 max_lines,
                 padding,
+                decoration,
             } => {
                 // `truncate` (max_lines = Some(1)) wants overflow to
                 // disappear cleanly instead of bleeding into siblings.
@@ -1171,6 +1172,7 @@ impl VelloPainter {
                     item.font_weight,
                     *max_lines,
                     *padding,
+                    *decoration,
                 );
                 if needs_clip {
                     self.scene.pop_layer();
@@ -1675,6 +1677,7 @@ impl VelloPainter {
         weight: u16,
         max_lines: Option<u32>,
         padding: (f32, f32, f32, f32),
+        decoration: crate::layout::TextDecoration,
     ) {
         // Compute the content rect from the outer rect + padding. Bg /
         // border render against the outer rect (separately, in
@@ -1762,6 +1765,34 @@ impl VelloPainter {
             weight,
             scaled_line_height,
         );
+        if !decoration.is_none() {
+            // The glyph tile is blitted at the rounded origin; anchor
+            // the lines to the same pixel grid so they sit on the text.
+            let origin_x = (content_x + dx).round();
+            let origin_y = content_y.round();
+            let line_color = decoration.color.unwrap_or(color);
+            for run in decoration_rects(
+                &mut self.text,
+                &painted,
+                scaled_size,
+                wrap,
+                weight,
+                scaled_line_height,
+                decoration,
+            ) {
+                fill_rect(
+                    &mut self.scene,
+                    LayoutRect {
+                        x: origin_x + run.x,
+                        y: origin_y + run.y,
+                        w: run.w,
+                        h: run.h,
+                    },
+                    line_color,
+                    0.0,
+                );
+            }
+        }
     }
 
     fn draw_input(
@@ -1775,10 +1806,15 @@ impl VelloPainter {
         scale_factor: f32,
         padding: (f32, f32, f32, f32),
     ) {
-        let (pad_left, pad_top, pad_right, _) = padding;
+        let (pad_left, pad_top, pad_right, pad_bottom) = padding;
         let inner_w = (item.rect.w - pad_left - pad_right).max(0.0);
         let text_x = item.rect.x + pad_left;
-        let text_y = item.rect.y + pad_top;
+        // A single-line field centres its line box vertically, as a DOM
+        // `<input>` does: the box is sized from the default font size, so
+        // pinning the glyphs to the top edge left them visibly high.
+        let (_, line_h) = self.text.measure_weighted("Ag", scaled_size, None, weight);
+        let inner_h = (item.rect.h - pad_top - pad_bottom).max(0.0);
+        let text_y = item.rect.y + pad_top + ((inner_h - line_h) * 0.5).max(0.0);
 
         // An Input is single-line: draw the value/placeholder with NO
         // wrap and clip overflow to the field. Previously this passed
@@ -1811,7 +1847,7 @@ impl VelloPainter {
                     text_x,
                     text_y,
                     scaled_size,
-                    Rgba(0x90, 0x96, 0xa1, 0xff),
+                    crate::paint::PLACEHOLDER_COLOR,
                     None,
                     weight,
                 );
@@ -2017,7 +2053,7 @@ impl VelloPainter {
                     frame.text_x,
                     origin_y,
                     frame.font_px,
-                    dim(Rgba(0x90, 0x96, 0xa1, 0xff)),
+                    dim(crate::paint::PLACEHOLDER_COLOR),
                     Some(frame.inner_w),
                     frame.weight,
                     frame.line_px,
@@ -2528,6 +2564,50 @@ fn draw_chart_path(scene: &mut Scene, path: &BezPath, paint: &crate::chart::Shap
             );
         }
     }
+}
+
+/// Rectangles (relative to the text origin) for a Text's decoration
+/// lines, one per decorated visual line. Thickness follows the browser's
+/// `auto` (≈ 1/16 em, at least one device pixel); offsets approximate the
+/// sans fonts' metrics: underline just below the baseline, line-through
+/// near half the x-height, overline at the ascender line.
+pub(crate) fn decoration_rects(
+    text: &mut crate::text::TextEngine,
+    content: &str,
+    font_size: f32,
+    wrap: Option<f32>,
+    weight: u16,
+    line_height: f32,
+    decoration: crate::layout::TextDecoration,
+) -> Vec<LayoutRect> {
+    if decoration.is_none() || content.is_empty() {
+        return Vec::new();
+    }
+    let thickness = (font_size / 16.0).round().max(1.0);
+    let mut out = Vec::new();
+    for run in text.line_runs(content, font_size, wrap, weight, line_height) {
+        if run.w <= 0.0 {
+            continue;
+        }
+        let mut push = |center_y: f32| {
+            out.push(LayoutRect {
+                x: run.x,
+                y: (center_y - thickness * 0.5).round(),
+                w: run.w,
+                h: thickness,
+            })
+        };
+        if decoration.underline {
+            push(run.baseline + (font_size * 0.1).max(thickness));
+        }
+        if decoration.line_through {
+            push(run.baseline - font_size * 0.3);
+        }
+        if decoration.overline {
+            push(run.baseline - font_size * 0.92);
+        }
+    }
+    out
 }
 
 fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {

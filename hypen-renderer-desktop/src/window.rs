@@ -168,6 +168,12 @@ pub enum AppEvent {
     DevOverlayTick,
 }
 
+/// Default settle time between the first non-empty frame and a
+/// screenshot capture: enough for local images to decode. Pages that
+/// fetch data asynchronously need longer — see
+/// [`crate::DesktopApp::screenshot_delay`].
+pub const DEFAULT_SCREENSHOT_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+
 const MAX_SURFACE_RETRY_ATTEMPTS: u8 = 6;
 
 #[derive(Debug, Default)]
@@ -646,6 +652,9 @@ pub struct App {
     /// same Vello scene used on screen, then the event loop exits.
     screenshot_path: Option<std::path::PathBuf>,
     screenshot_ready_at: Option<std::time::Instant>,
+    /// How long after the first non-empty frame the capture is taken.
+    /// See [`DEFAULT_SCREENSHOT_DELAY`] and `DesktopApp::screenshot_delay`.
+    screenshot_delay: std::time::Duration,
     screenshot_complete: bool,
     screenshot_error: Option<String>,
 }
@@ -748,6 +757,7 @@ impl App {
             video_pending_bind_seeks: HashMap::new(),
             screenshot_path: None,
             screenshot_ready_at: None,
+            screenshot_delay: DEFAULT_SCREENSHOT_DELAY,
             screenshot_complete: false,
             screenshot_error: None,
         }
@@ -1281,6 +1291,11 @@ impl App {
         self.screenshot_ready_at = None;
         self.screenshot_complete = false;
         self.screenshot_error = None;
+    }
+
+    /// Wait `delay` after the first non-empty frame before capturing.
+    pub fn set_screenshot_delay(&mut self, delay: std::time::Duration) {
+        self.screenshot_delay = delay;
     }
 
     pub fn take_screenshot_error(&mut self) -> Option<String> {
@@ -2378,10 +2393,11 @@ impl App {
             let now = std::time::Instant::now();
             match self.screenshot_ready_at {
                 None => {
-                    self.screenshot_ready_at = Some(now + std::time::Duration::from_millis(750));
+                    let delay = self.screenshot_delay;
+                    self.screenshot_ready_at = Some(now + delay);
                     let proxy = self.proxy.clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(750));
+                        std::thread::sleep(delay);
                         let _ = proxy.send_event(AppEvent::Wake);
                     });
                 }

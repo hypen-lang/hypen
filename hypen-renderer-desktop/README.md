@@ -12,6 +12,39 @@ zero FPS.
 It samples once per second without forcing the demand-driven renderer to run
 continuously. Production builds do not include the sampler dependency or HUD.
 
+## Images in remote vs. local mode
+
+`Image` `src`, `url(...)` backgrounds, avatars and Video posters (and, with
+the `video` feature, Video `src`) resolve by mode:
+
+- **Local embedding** (`DesktopApp::run(module)`): the app ships with the
+  binary and is trusted, so a bare path (`assets/a.png`, `/usr/share/...`,
+  `file://...`) is a local file.
+- **Remote** (`DesktopApp::connect(ws://…)`): sources are URLs relative to
+  the server, as in a browser. `/art/x.png` loads
+  `http://<server>/art/x.png` (`wss://` → `https://`); `art/x.png` and
+  `//host/x.png` resolve the same way. A remote app can never make the
+  renderer read a local file: absolute paths are server paths, and any
+  non-HTTP scheme (`file:`, `C:\…`, `blob:`) is refused. SVG images render
+  with nested `<image>` references disabled for the same reason.
+
+SVG sources (`data:image/svg+xml;utf8,…`, base64, or `.svg` URLs) are
+rasterised with resvg. AVIF needs the opt-in `avif` feature (system dav1d:
+`apt install libdav1d-dev` / `brew install dav1d`); without it an AVIF source
+keeps its placeholder or background colour.
+
+## Screenshots
+
+`DesktopApp::screenshot(path)` captures one frame through the on-screen Vello
+scene and exits. The capture is taken `DesktopApp::screenshot_delay(d)` after
+the first non-empty frame (default 750 ms, enough for local image decodes);
+give apps that fetch data or network images a few seconds:
+
+```bash
+cargo run -p hypen-renderer-desktop --example remote_screenshot -- \
+  ws://localhost:8796/ws out.png App 4s     # or HYPEN_SCREENSHOT_DELAY=4000
+```
+
 ## Status: Phase 15 (tw breakpoints + SVG icon rasterisation)
 
 The renderer drives a real `hypen-server::ModuleInstance<S>` through the

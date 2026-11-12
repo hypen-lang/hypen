@@ -683,6 +683,10 @@ pub enum ItemKind {
         /// the painter uses this inset to shift the glyph origin and
         /// shrink the wrap width to the content area.
         padding: (f32, f32, f32, f32),
+        /// `text-decoration` lines (`.textDecoration("line-through")`,
+        /// Tailwind `underline` / `line-through`, `.underline()` /
+        /// `.strikethrough()`), propagated from ancestors like CSS.
+        decoration: TextDecoration,
     },
     Button,
     /// Card keeps Button's action/accessibility behaviour while allowing the
@@ -1404,7 +1408,7 @@ impl TaffyState {
             &active_states,
             self.effective_safe_area(),
         );
-        let is_text = node.element_type == "Text";
+        let is_text = is_text_leaf(node);
         let ctx = is_text.then(|| node_context_in_tree(tree, rid, node, scale, viewport));
         // Taken AFTER the context too: `node_context_in_tree` resolves
         // font size / line height, which can themselves be `vh`.
@@ -4583,7 +4587,7 @@ fn build_subtree(
             renderer_for_taffy.insert(id, node_id.to_string());
             Some(id)
         }
-        "Text" => {
+        _ if is_text_leaf(node) => {
             let font_size = inherited_text_font_size(tree, node_id, viewport) * scale;
             let content = node
                 .text_content()
@@ -5252,7 +5256,7 @@ pub(crate) fn node_style_with(
         scrubber_style(node, &vs, scale)
     } else if TEXT_INPUT_TYPES.iter().any(|t| t.eq_ignore_ascii_case(et)) {
         text_input_style(node, &vs, scale)
-    } else if et == "Text" {
+    } else if is_text_leaf(node) {
         let pad = padding_with(node, &vs);
         Style {
             display: Display::Flex,
@@ -6069,7 +6073,7 @@ pub(crate) fn node_context(
     scale: f32,
     viewport: Viewport,
 ) -> NodeContext {
-    if node.element_type == "Text" {
+    if is_text_leaf(node) {
         let font_size = prop_f32_at(node, "fontSize", viewport)
             .map(|v| v * scale)
             .unwrap_or(DEFAULT_FONT_SIZE_PX * scale);
@@ -6207,7 +6211,7 @@ fn node_context_in_tree(
     scale: f32,
     viewport: Viewport,
 ) -> NodeContext {
-    if node.element_type != "Text" {
+    if !is_text_leaf(node) {
         return NodeContext::default();
     }
     let font_size = inherited_text_font_size(tree, id, viewport) * scale;
@@ -7037,10 +7041,10 @@ fn emit_items(
             let background_gradient = crate::style::prop_linear_gradient(node, viewport);
             // The `url(...)` layer of the same value. Resolved once here
             // beside the gradient so every item kind carries it.
-            let background_image = crate::style::prop_background_image_url(node);
+            let background_image = crate::style::prop_background_image_url(node, viewport);
             // Layered `background` shorthand / radial gradients — the
             // stacks the two single-layer reads above can't express.
-            let background_layers = crate::style::prop_background_layers(node);
+            let background_layers = crate::style::prop_background_layers(node, viewport);
             // Paint-time state-variant colour overrides (hover/focus/
             // active/disabled). Resolved once here for every item kind;
             // empty for the common plain-styled node so the painter's
@@ -7254,7 +7258,7 @@ fn emit_items(
                         transform: Affine2::IDENTITY,
                     });
                 }
-                "Text" => {
+                _ if is_text_leaf(node) => {
                     let font_size = inherited_text_font_size(tree, rid, viewport);
                     let line_height = resolved_line_height(node, font_size, viewport);
                     let font_weight = inherited_text_font_weight(tree, rid, viewport);
@@ -7286,6 +7290,7 @@ fn emit_items(
                             align,
                             max_lines,
                             padding: padding_phys,
+                            decoration: inherited_text_decoration(tree, rid, viewport),
                         },
                         rect,
                         action,
@@ -8022,8 +8027,8 @@ pub(crate) fn refresh_item_paint(
         border_color: prop_color_at(node, "borderColor:hover", viewport),
     };
     item.background_gradient = crate::style::prop_linear_gradient(node, viewport);
-    item.background_image = crate::style::prop_background_image_url(node);
-    item.background_layers = crate::style::prop_background_layers(node);
+    item.background_image = crate::style::prop_background_image_url(node, viewport);
+    item.background_layers = crate::style::prop_background_layers(node, viewport);
     item.state_variants = crate::style::state_variants(node, viewport);
     let bool_prop = |name: &str| {
         node.props
@@ -8700,6 +8705,30 @@ pub(crate) fn resolve_font_weight(node: &crate::tree::Node, viewport: Viewport) 
     400
 }
 
+/// A `Heading`'s level, 1–6. Mirrors the DOM heading handler: `level`
+/// arrives bare from a constructor arg and as `level.0` from `.level(n)`
+/// (both read by `prop_f32_at`), is rounded and clamped, and defaults to
+/// 2 (`<h2>`) when absent or not a number. Position `"0"` is the heading's
+/// TEXT, never its level.
+fn heading_level_at(node: &crate::tree::Node, viewport: Viewport) -> u8 {
+    prop_f32_at(node, "level", viewport)
+        .filter(|l| l.is_finite())
+        .map(|l| l.round().clamp(1.0, 6.0) as u8)
+        .unwrap_or(2)
+}
+
+/// `Text`, or a `Heading` that carries its own text (`Heading("Title")` /
+/// `Heading(text: "Title")`). Both are measured and painted as one text
+/// leaf; the heading's level only changes the inherited font size and
+/// weight defaults (see [`inherited_text_font_size`]), so `.fontSize()` /
+/// `.fontWeight()` / `.color()` on the heading override them exactly as
+/// on a Text. A `Heading { Text(..) }` with no text of its own stays a
+/// container whose Text children inherit the heading defaults.
+pub(crate) fn is_text_leaf(node: &crate::tree::Node) -> bool {
+    node.element_type == "Text"
+        || (node.element_type.eq_ignore_ascii_case("Heading") && node.text_content().is_some())
+}
+
 fn inherited_text_font_size(tree: &Tree, id: &str, viewport: Viewport) -> f32 {
     let mut cursor = Some(id);
     let mut heading_level = None;
@@ -8710,11 +8739,7 @@ fn inherited_text_font_size(tree: &Tree, id: &str, viewport: Viewport) -> f32 {
             return size;
         }
         if node.element_type.eq_ignore_ascii_case("Heading") && heading_level.is_none() {
-            heading_level = Some(
-                prop_f32_at(node, "level", viewport)
-                    .or_else(|| prop_f32_at(node, "0", viewport))
-                    .unwrap_or(1.0) as u8,
-            );
+            heading_level = Some(heading_level_at(node, viewport));
         }
         in_badge |= node.element_type.eq_ignore_ascii_case("Badge");
         cursor = tree.parent_of(current);
@@ -8775,6 +8800,81 @@ pub(crate) fn inherited_text_color(tree: &Tree, id: &str, viewport: Viewport) ->
     }
 }
 
+/// Resolved CSS `text-decoration-line` set for one Text item, plus the
+/// optional `text-decoration-color` (the text colour when `None`).
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct TextDecoration {
+    pub underline: bool,
+    pub line_through: bool,
+    pub overline: bool,
+    pub color: Option<Rgba>,
+}
+
+impl TextDecoration {
+    pub fn is_none(&self) -> bool {
+        !(self.underline || self.line_through || self.overline)
+    }
+}
+
+/// Lines named in a `text-decoration` / `text-decoration-line` value
+/// (`"line-through"`, `"underline overline"`, `"underline red"`…).
+/// Accepts the Android / Swift spellings `linethrough` / `strikethrough`
+/// too. Unknown tokens (colours, styles, `none`) are ignored.
+fn parse_text_decoration_lines(value: &str) -> (bool, bool, bool) {
+    let (mut u, mut l, mut o) = (false, false, false);
+    for tok in value.split_whitespace() {
+        match tok.to_ascii_lowercase().as_str() {
+            "underline" => u = true,
+            "line-through" | "linethrough" | "strikethrough" => l = true,
+            "overline" => o = true,
+            _ => {}
+        }
+    }
+    (u, l, o)
+}
+
+/// A boolean decoration applicator (`.underline()` → `underline.0: true`,
+/// `.strikethrough(true)`), as the Swift renderer reads them.
+fn prop_flag(node: &crate::tree::Node, name: &str) -> bool {
+    let key = format!("{name}.0");
+    match node.props.get(&key).or_else(|| node.props.get(name)) {
+        Some(serde_json::Value::Bool(b)) => *b,
+        Some(serde_json::Value::String(s)) => s.trim().eq_ignore_ascii_case("true"),
+        _ => false,
+    }
+}
+
+/// The decoration painted on a Text: the union of the lines declared on
+/// the node and its ancestors (CSS propagates decorations to descendant
+/// text; a descendant's `none` cannot remove an ancestor's line). The
+/// colour comes from the nearest node that declared a line.
+pub(crate) fn inherited_text_decoration(tree: &Tree, id: &str, viewport: Viewport) -> TextDecoration {
+    let mut out = TextDecoration::default();
+    let mut cursor = Some(id);
+    while let Some(current) = cursor {
+        let Some(node) = tree.get(current) else { break };
+        let mut lines = (false, false, false);
+        for name in ["textDecoration", "textDecorationLine"] {
+            if let Some(v) = crate::style::prop_str_at(node, name, viewport) {
+                let (u, l, o) = parse_text_decoration_lines(v);
+                lines = (lines.0 | u, lines.1 | l, lines.2 | o);
+            }
+        }
+        lines.0 |= prop_flag(node, "underline");
+        lines.1 |= prop_flag(node, "strikethrough") || prop_flag(node, "lineThrough");
+        if lines.0 || lines.1 || lines.2 {
+            if out.is_none() {
+                out.color = prop_color_at(node, "textDecorationColor", viewport);
+            }
+            out.underline |= lines.0;
+            out.line_through |= lines.1;
+            out.overline |= lines.2;
+        }
+        cursor = tree.parent_of(current);
+    }
+    out
+}
+
 fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign {
     let mut cursor = Some(id);
     while let Some(current) = cursor {
@@ -8788,7 +8888,7 @@ fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign 
 }
 
 fn text_requests_stack_track_width(node: &crate::tree::Node) -> bool {
-    node.element_type.eq_ignore_ascii_case("Text")
+    is_text_leaf(node)
         && crate::style::prop_str(node, "textAlign").is_some()
 }
 

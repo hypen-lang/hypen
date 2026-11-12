@@ -1936,9 +1936,9 @@ pub fn prop_linear_gradient(node: &Node, viewport: Viewport) -> Option<LinearGra
 /// Splitting is paren- and quote-aware: a layer list is comma-separated, but
 /// so are `rgba(3, 7, 18, 0.6)` and a gradient's colour stops, and a base64
 /// payload can contain anything. A naive `split(',')` shreds all three.
-pub fn prop_background_image_url(node: &Node) -> Option<String> {
+pub fn prop_background_image_url(node: &Node, viewport: Viewport) -> Option<String> {
     for name in ["background", "backgroundImage"] {
-        let Some(raw) = prop_str(node, name) else {
+        let Some(raw) = prop_str_at(node, name, viewport) else {
             continue;
         };
         for layer in split_top_level(raw) {
@@ -2617,13 +2617,13 @@ pub fn parse_background_value(value: &str) -> Option<ParsedBackground> {
 ///
 /// Returns `None` for the common solid-colour node so the painter's
 /// existing fast paths are undisturbed.
-pub fn prop_background_layers(node: &Node) -> Option<ParsedBackground> {
-    if let Some(raw) = prop_str(node, "background") {
+pub fn prop_background_layers(node: &Node, viewport: Viewport) -> Option<ParsedBackground> {
+    if let Some(raw) = prop_str_at(node, "background", viewport) {
         if let Some(parsed) = parse_background_value(raw) {
             return Some(parsed);
         }
     }
-    if let Some(body) = prop_str(node, "radialGradient") {
+    if let Some(body) = prop_str_at(node, "radialGradient", viewport) {
         if let Some(g) = parse_radial_gradient(&format!("radial-gradient({})", body.trim())) {
             return Some(ParsedBackground {
                 color: None,
@@ -2631,7 +2631,7 @@ pub fn prop_background_layers(node: &Node) -> Option<ParsedBackground> {
             });
         }
     }
-    if let Some(raw) = prop_str(node, "backgroundImage") {
+    if let Some(raw) = prop_str_at(node, "backgroundImage", viewport) {
         // Only values the legacy single-linear path can't express are
         // worth the full layered parse: a radial gradient, or a layer
         // list (a depth-0 comma outside any gradient's stop list —
@@ -3290,8 +3290,42 @@ mod tests {
                     .into(),
             ),
         )]);
-        let pb = prop_background_layers(&node).expect("resolves");
+        let pb = prop_background_layers(&node, vp(430.0)).expect("resolves");
         assert_eq!(pb.layers.len(), 2);
+    }
+
+    #[test]
+    fn background_value_map_picks_the_breakpoint_for_the_window_width() {
+        // `.background({default: …, sm: …, md: …, lg: …, xl: …})` lowers to
+        // `background.0` + `background@<bp>.0` (the launcher wallpaper).
+        let layer = |name: &str| {
+            Value::String(format!(
+                "linear-gradient(180deg, rgba(3, 7, 18, 0.25), rgba(3, 7, 18, 0.62)), \
+                 url('/wallpapers/{name}.avif') center / cover no-repeat #0B1020"
+            ))
+        };
+        let node = node_with(&[
+            ("background.0", layer("default")),
+            ("background@sm.0", layer("sm")),
+            ("background@md.0", layer("md")),
+            ("background@lg.0", layer("lg")),
+            ("background@xl.0", layer("xl")),
+        ]);
+        for (w, want) in [
+            (430.0, "default"),
+            (640.0, "sm"),
+            (800.0, "md"),
+            (1100.0, "lg"),
+            (1920.0, "xl"),
+        ] {
+            let url = format!("/wallpapers/{want}.avif");
+            let pb = prop_background_layers(&node, vp(w)).expect("resolves");
+            assert_eq!(pb.color, Some(Rgba(0x0b, 0x10, 0x20, 0xff)), "{w}");
+            // Paint order: the url layer under the scrim gradient.
+            assert_eq!(pb.layers.first(), Some(&BackgroundLayer::Image(url.clone())), "{w}");
+            assert!(matches!(pb.layers.get(1), Some(BackgroundLayer::Linear(_))), "{w}");
+            assert_eq!(prop_background_image_url(&node, vp(w)).as_deref(), Some(url.as_str()));
+        }
     }
 
     #[test]
@@ -3302,7 +3336,7 @@ mod tests {
             "radialGradient.0",
             Value::String("circle, #ffffff, #000000".into()),
         )]);
-        let pb = prop_background_layers(&node).expect("resolves");
+        let pb = prop_background_layers(&node, vp(430.0)).expect("resolves");
         assert_eq!(pb.layers.len(), 1);
         assert!(matches!(pb.layers[0], BackgroundLayer::Radial(_)));
     }
@@ -3316,7 +3350,7 @@ mod tests {
             "backgroundImage.0",
             Value::String("linear-gradient(to right, #fff, #000)".into()),
         )]);
-        assert!(prop_background_layers(&node).is_none());
+        assert!(prop_background_layers(&node, vp(430.0)).is_none());
         assert!(prop_linear_gradient(&node, vp(800.0)).is_some());
     }
 
@@ -3328,7 +3362,7 @@ mod tests {
             "backgroundImage.0",
             Value::String("radial-gradient(circle, #fff, #000)".into()),
         )]);
-        let pb = prop_background_layers(&node).expect("resolves");
+        let pb = prop_background_layers(&node, vp(430.0)).expect("resolves");
         assert!(matches!(pb.layers[0], BackgroundLayer::Radial(_)));
     }
 

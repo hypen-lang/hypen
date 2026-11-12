@@ -569,7 +569,62 @@ impl TextEngine {
     }
 }
 
+/// One laid-out visual line, for painting text decorations: the glyph
+/// run's left edge and width plus its top and baseline, all relative to
+/// the text origin (in the same pixel space as the font size).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct LineRun {
+    pub x: f32,
+    pub w: f32,
+    pub top: f32,
+    pub baseline: f32,
+}
+
 impl TextEngine {
+    /// The visual lines of `text`, laid out exactly as
+    /// [`Self::draw_text_into_scene_line_height`] paints them. Backs
+    /// `underline` / `line-through` / `overline`, which need each wrapped
+    /// line's extent and baseline. Only decorated text asks.
+    pub fn line_runs(
+        &mut self,
+        text: &str,
+        font_size: f32,
+        wrap_width: Option<f32>,
+        weight: u16,
+        line_height: f32,
+    ) -> Vec<LineRun> {
+        let metrics = Metrics::new(font_size, line_height.max(font_size));
+        let mut buffer = Buffer::new(&mut self.fonts, metrics);
+        let attrs = Attrs::new()
+            .family(Family::SansSerif)
+            .weight(Weight(weight));
+        buffer.set_text(text, &attrs, Shaping::Advanced, None);
+        buffer.set_size(wrap_width, None);
+        buffer.set_wrap(Wrap::Word);
+        buffer.shape_until_scroll(&mut self.fonts, false);
+        buffer
+            .layout_runs()
+            .filter(|run| !run.glyphs.is_empty())
+            .map(|run| {
+                // Trailing whitespace at a soft wrap is not decorated by
+                // browsers either; measure the inked glyph span.
+                let x0 = run.glyphs.iter().map(|g| g.x).fold(f32::INFINITY, f32::min);
+                let x1 = run
+                    .glyphs
+                    .iter()
+                    .filter(|g| !run.text[g.start..g.end].chars().all(char::is_whitespace))
+                    .map(|g| g.x + g.w)
+                    .fold(x0, f32::max);
+                LineRun {
+                    x: x0,
+                    w: (x1 - x0).max(0.0),
+                    top: run.line_top,
+                    baseline: run.line_y,
+                }
+            })
+            .collect()
+    }
+
     /// Lay `text` out exactly as [`Self::draw_text_into_scene_line_height`]
     /// paints it (same font, metrics, and `Wrap::Word` policy) and
     /// return the visual lines with GLOBAL byte offsets. Backs Textarea

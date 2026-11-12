@@ -195,6 +195,16 @@ impl RemoteModule {
     ) -> Self {
         let url = url.into();
         let module_name = module_name.into();
+        // Image-like sources (`Image` src, backgrounds, avatars, posters)
+        // from a remote app are URLs relative to its server, as in a
+        // browser — and must never resolve to local files. See the
+        // policy notes in `paint::image`. An unparseable URL still
+        // switches to remote mode (with a placeholder origin that can't
+        // be fetched) so local files stay unreachable.
+        crate::paint::image::set_remote_origin(Some(
+            crate::paint::image::http_origin_for(&url)
+                .unwrap_or_else(|| "http://invalid.invalid".to_string()),
+        ));
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<RemoteMessage>();
 

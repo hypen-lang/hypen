@@ -69,8 +69,17 @@ impl Node {
     /// the path to a `Number(42)`) silently rendered nothing because
     /// `Value::as_str()` only matches `String`. Profile's "42 Posts /
     /// 1.2k Followers / 3 Following" labels were the visible victim.
+    ///
+    /// A `Heading` also accepts the named `text:` argument — the DOM
+    /// renderer reads `props["0"] ?? props.text` for it.
     pub fn text_content(&self) -> Option<std::borrow::Cow<'_, str>> {
-        let v = self.props.get("0")?;
+        let v = match self.props.get("0") {
+            Some(v) if !v.is_null() => v,
+            other if self.element_type.eq_ignore_ascii_case("Heading") => {
+                self.props.get("text").or(other)?
+            }
+            other => other?,
+        };
         match v {
             Value::String(s) => Some(std::borrow::Cow::Borrowed(s.as_str())),
             Value::Number(n) => Some(std::borrow::Cow::Owned(n.to_string())),

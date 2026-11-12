@@ -21,6 +21,15 @@ use std::sync::Arc;
 /// `file://`-ified.
 fn to_uri(src: &str) -> Result<String, String> {
     let s = src.trim();
+    // A remote app's media URLs resolve against its server like its
+    // images do, and never reach local files (see `paint::image`).
+    if let Some(origin) = crate::paint::image::remote_origin() {
+        return match crate::paint::image::plan_source(s, Some(&origin)) {
+            crate::paint::image::SourcePlan::Http(url) => Ok(url),
+            crate::paint::image::SourcePlan::Data => Ok(s.to_string()),
+            _ => Err(format!("refusing non-HTTP media source from a remote app: {src}")),
+        };
+    }
     if s.contains("://") || s.starts_with("data:") {
         return Ok(s.to_string());
     }

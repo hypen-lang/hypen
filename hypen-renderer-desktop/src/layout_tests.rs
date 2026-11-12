@@ -9140,3 +9140,214 @@ fn taffy_clear_children_matches_a_plain_remove_per_child() {
     }
     assert_eq!(pass_a.items.len(), pass_b.items.len());
 }
+
+// -----------------------------------------------------------------
+// Heading renders as a text leaf (DOM `<h1>`–`<h6>` parity)
+// -----------------------------------------------------------------
+
+fn heading_text_item(pass: &LayoutPass, id: &str) -> (String, f32, u16, Rgba) {
+    let item = find_item(pass, id);
+    match &item.kind {
+        ItemKind::Text {
+            content,
+            font_size,
+            color,
+            ..
+        } => (content.clone(), *font_size, item.font_weight, *color),
+        other => panic!("{id}: Heading should lay out as a Text item, got {other:?}"),
+    }
+}
+
+#[test]
+fn heading_with_own_text_paints_with_level_defaults() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("page", "Column", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "page"));
+    let cases: &[(&str, &[(&str, Value)])] = &[
+        ("h1", &[("0", json!("The Daily Hypen")), ("level", json!(1))]),
+        // Default level is 2, like the DOM's `<h2>` fallback.
+        ("hdef", &[("0", json!("Default"))]),
+        // `.level(3)` arrives as `level.0`.
+        ("h3", &[("0", json!("Three")), ("level.0", json!(3))]),
+        // Out-of-range levels clamp to 1..=6.
+        ("h9", &[("0", json!("Nine")), ("level", json!(9))]),
+        // Named `text:` argument.
+        ("hnamed", &[("text", json!("Named")), ("level", json!(4))]),
+    ];
+    for (id, props) in cases {
+        tree.apply(&create_patch(id, "Heading", props));
+        tree.apply(&insert_patch("page", id));
+    }
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let expect = [
+        ("h1", "The Daily Hypen", 32.0),
+        ("hdef", "Default", 24.0),
+        ("h3", "Three", 18.72),
+        ("h9", "Nine", 10.72),
+        ("hnamed", "Named", 16.0),
+    ];
+    for (id, content, size) in expect {
+        let (c, fs, weight, _) = heading_text_item(&pass, id);
+        assert_eq!(c, content, "{id}");
+        assert!((fs - size).abs() < 0.01, "{id}: font size {fs}, want {size}");
+        assert_eq!(weight, 700, "{id}: headings default to bold");
+        let rect = find_item(&pass, id).rect;
+        assert!(rect.w > 0.0 && rect.h >= size - 0.5, "{id}: measured box {rect:?}");
+    }
+}
+
+#[test]
+fn heading_applicators_override_the_level_defaults() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "h",
+        "Heading",
+        &[
+            ("0", json!("Discover")),
+            ("level", json!(1)),
+            ("fontSize", json!(26)),
+            ("fontWeight", json!("normal")),
+            ("color", json!("#ff0000")),
+        ],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "h"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let (_, fs, weight, color) = heading_text_item(&pass, "h");
+    assert!((fs - 26.0).abs() < 0.01, "fontSize override: {fs}");
+    assert_eq!(weight, 400, "fontWeight override");
+    assert_eq!(color, Rgba(0xff, 0, 0, 0xff));
+}
+
+#[test]
+fn heading_without_own_text_stays_a_container_for_its_children() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("h", "Heading", &[("level", json!(1))]));
+    tree.apply(&insert_patch(ROOT_ID, "h"));
+    add_text(&mut tree, "h", "t", "Child");
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    assert!(matches!(find_item(&pass, "h").kind, ItemKind::Container));
+    let (c, fs, weight, _) = heading_text_item(&pass, "t");
+    assert_eq!(c, "Child");
+    assert!((fs - 32.0).abs() < 0.01);
+    assert_eq!(weight, 700);
+}
+
+// -----------------------------------------------------------------
+// Text decoration (`.textDecoration("line-through")`, Tailwind
+// `underline` / `line-through`, `.underline()` / `.strikethrough()`)
+// -----------------------------------------------------------------
+
+fn text_decoration_of(pass: &LayoutPass, id: &str) -> TextDecoration {
+    match &find_item(pass, id).kind {
+        ItemKind::Text { decoration, .. } => *decoration,
+        other => panic!("{id}: expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn text_decoration_props_resolve_onto_the_text_item() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("page", "Column", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "page"));
+    let cases: &[(&str, &[(&str, Value)])] = &[
+        // Todo's done task: `.textDecoration("@{item.done ? 'line-through' : 'none'}")`.
+        ("strike", &[("0", json!("Learn Hypen")), ("textDecoration", json!("line-through"))]),
+        ("none", &[("0", json!("Build")), ("textDecoration", json!("none"))]),
+        // Tailwind `underline` lowers to `text-decoration-line`.
+        ("tw", &[("0", json!("Link")), ("textDecorationLine", json!("underline"))]),
+        // Swift-style boolean applicators.
+        ("flags", &[("0", json!("Both")), ("underline.0", json!(true)), ("strikethrough.0", json!(true))]),
+        (
+            "colored",
+            &[
+                ("0", json!("Red")),
+                ("textDecoration", json!("underline overline")),
+                ("textDecorationColor", json!("#ff0000")),
+            ],
+        ),
+    ];
+    for (id, props) in cases {
+        tree.apply(&create_patch(id, "Text", props));
+        tree.apply(&insert_patch("page", id));
+    }
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+
+    let strike = text_decoration_of(&pass, "strike");
+    assert!(strike.line_through && !strike.underline && !strike.overline);
+    assert!(text_decoration_of(&pass, "none").is_none());
+    let tw = text_decoration_of(&pass, "tw");
+    assert!(tw.underline && !tw.line_through);
+    let flags = text_decoration_of(&pass, "flags");
+    assert!(flags.underline && flags.line_through);
+    let colored = text_decoration_of(&pass, "colored");
+    assert!(colored.underline && colored.overline && !colored.line_through);
+    assert_eq!(colored.color, Some(Rgba(0xff, 0, 0, 0xff)));
+}
+
+#[test]
+fn text_decoration_propagates_from_ancestors() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "row",
+        "Row",
+        &[("textDecoration", json!("line-through"))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    // A descendant's `none` can't cancel the ancestor's line (CSS).
+    tree.apply(&create_patch(
+        "t",
+        "Text",
+        &[("0", json!("Done")), ("textDecoration", json!("none"))],
+    ));
+    tree.apply(&insert_patch("row", "t"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    assert!(text_decoration_of(&pass, "t").line_through);
+}
+
+#[test]
+fn decoration_rects_cross_each_wrapped_line_at_the_right_height() {
+    use crate::paint::vello_painter::decoration_rects;
+    let mut text = TextEngine::new();
+    let strike = TextDecoration {
+        line_through: true,
+        ..Default::default()
+    };
+    let one = decoration_rects(&mut text, "Learn Hypen", 16.0, Some(400.0), 400, 16.0, strike);
+    assert_eq!(one.len(), 1, "one line → one strike: {one:?}");
+    let (w, _) = text.measure_weighted_line_height("Learn Hypen", 16.0, None, 400, 16.0);
+    let r = one[0];
+    assert!((r.w - w).abs() < 2.0, "strike spans the glyphs: {r:?} vs width {w}");
+    assert!(r.h >= 1.0);
+    // Inside the line box, in its middle third — not at the baseline.
+    assert!(r.y > 3.0 && r.y + r.h < 13.0, "strike sits mid-glyph: {r:?}");
+
+    let underline = TextDecoration {
+        underline: true,
+        ..Default::default()
+    };
+    let u = decoration_rects(&mut text, "Learn Hypen", 16.0, Some(400.0), 400, 16.0, underline);
+    assert!(u[0].y > r.y + 4.0, "underline below the strike: {u:?} vs {r:?}");
+
+    // Wrapped text decorates every visual line.
+    let wrapped = decoration_rects(
+        &mut text,
+        "alpha beta gamma delta epsilon",
+        16.0,
+        Some(64.0),
+        400,
+        16.0,
+        strike,
+    );
+    assert!(wrapped.len() >= 3, "{wrapped:?}");
+    assert!(wrapped.windows(2).all(|p| p[1].y > p[0].y));
+    assert!(wrapped.iter().all(|r| r.w <= 64.5), "{wrapped:?}");
+
+    assert!(decoration_rects(&mut text, "x", 16.0, None, 400, 16.0, TextDecoration::default())
+        .is_empty());
+}

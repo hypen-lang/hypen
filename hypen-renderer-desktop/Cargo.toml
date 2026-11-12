@@ -43,6 +43,12 @@ video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
 # Native development HUD showing presented FPS plus this process's CPU and
 # resident-memory usage. Entirely compiled out of production builds.
 dev-overlay = ["dep:sysinfo"]
+# AVIF image decoding (`Image` src, `url(...)` backgrounds) through the
+# system dav1d library (`libdav1d-dev` / `brew install dav1d`). Off by
+# default so the base crate keeps building without it; without the feature
+# an AVIF source fails to decode and the element keeps its placeholder /
+# background colour. The home-screen example's wallpapers are AVIF.
+avif = ["image/avif-native"]
 
 [dependencies]
 hypen-engine = { version = "0.6.7", path = "../hypen-engine-rs" }
@@ -101,6 +107,9 @@ ureq = { version = "2.10", features = ["tls"] }
 # Phase 15: parse the `d` attribute of pre-resolved SVG icon paths
 # the engine emits for `Icon` elements. svgtypes is small + focused.
 svgtypes = "0.15"
+# SVG images (`data:image/svg+xml` glyphs, `.svg` sources). No default
+# features: no text shaping, no system fonts, no external raster loads.
+resvg = { version = "0.50", default-features = false }
 
 # Re-exported by winit; pinned here so we can implement raw-window-handle for
 # the wgpu surface without version-mismatch grief.

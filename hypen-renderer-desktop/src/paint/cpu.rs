@@ -376,6 +376,7 @@ impl CpuPainter {
                     max_lines: _,
                     padding: _,
                     line_height: _,
+                    decoration: _,
                 } => {
                     // Pre-measure the line so right/center alignment
                     // can offset within the laid-out rect. Wrap width
@@ -423,7 +424,7 @@ impl CpuPainter {
                                 text_x,
                                 text_y,
                                 *font_size * scale_factor,
-                                Rgba(0x90, 0x96, 0xa1, 0xff),
+                                crate::paint::PLACEHOLDER_COLOR,
                                 Some(inner_w),
                                 item.font_weight,
                             );
