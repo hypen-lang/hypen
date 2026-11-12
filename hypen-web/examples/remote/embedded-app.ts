@@ -74,7 +74,7 @@ async function main() {
 
   // Find the remote container and embed the remote app
   setTimeout(() => {
-    const remoteContainer = document.querySelector('[data-hypen-id*="remote-container"]') as HTMLElement;
+    const remoteContainer = document.getElementById("remote-container") as HTMLElement;
     if (remoteContainer) {
       // Create embedded remote app
       const remoteApp = new HypenAppComponent(remoteContainer, {

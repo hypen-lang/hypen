@@ -3059,11 +3059,14 @@ describe("`.motion(essential)` reduced-motion opt-out (#149)", () => {
   test("the global stylesheets exempt stamped nodes from the reduced-motion kill", () => {
     makeRenderer(); // injects both sheets
     const a11y = (globalThis as any).document.getElementById("hypen-a11y-styles");
+    // Scoped to renderer-created elements by `data-hypen-type` (always
+    // present), with `data-hypen-id` alongside for the Canvas mirror.
     expect(a11y.textContent).toContain(
-      "[data-hypen-id]:not([data-hypen-motion-essential])"
+      ":is([data-hypen-type], [data-hypen-id]):not([data-hypen-motion-essential])"
     );
     // The exemption lives INSIDE the reduced-motion media block, and no
-    // unguarded [data-hypen-id] kill remains.
+    // unguarded kill remains.
+    expect(a11y.textContent).not.toContain(":is([data-hypen-type], [data-hypen-id]) {");
     expect(a11y.textContent).not.toContain("[data-hypen-id] {\n    transition: none");
     const anim = (globalThis as any).document.getElementById("hypen-anim-styles");
     expect(anim.textContent).toContain(

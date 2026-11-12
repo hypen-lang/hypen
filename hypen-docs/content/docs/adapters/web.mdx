@@ -84,7 +84,9 @@ The `engine` argument is where user actions go: a `RemoteEngine`, the browser `E
 | `getComponentRegistry()` / `getApplicatorRegistry()` | Extend the renderer (below) |
 | `setDebugConfig(config)` / `resetDebugTracking()` / `getDebugStats()` | Re-render heatmap (below) |
 
-`DOMRendererOptions` has `routeFocus` (`"auto"` moves focus to the incoming route on navigation, `"off"` leaves focus alone) and `safeAreaInsets` (override the insets `SafeArea` pads by).
+`DOMRendererOptions` has `routeFocus` (`"auto"` moves focus to the incoming route on navigation, `"off"` leaves focus alone), `safeAreaInsets` (override the insets `SafeArea` pads by), and `stampNodeIds` (also write each element's engine node id as a `data-hypen-id` attribute).
+
+The renderer keeps the node id as a property on the element, not an attribute: writing one attribute per element was a measurable share of rendering a long list. `data-hypen-id` is therefore absent unless `stampNodeIds` is `true` or debug mode is on. Use `getNodeId(element)` from `@hypen-space/web/dom` to read an element's id in code, and turn `stampNodeIds` on if your end-to-end tests select elements with `[data-hypen-id="…"]`. `data-hypen-type` is always present.
 
 ### Debug Heatmap
 

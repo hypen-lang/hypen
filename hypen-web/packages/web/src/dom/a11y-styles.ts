@@ -14,21 +14,25 @@
  *    (Windows High Contrast), which strips box-shadow but honours outline; and
  *  - strengthens the outline under `prefers-contrast: more`.
  *
- * Scoped to `[data-hypen-id]` so it only affects Hypen-rendered elements and
- * never the host page.
+ * Scoped to Hypen-rendered elements so it never touches the host page. The
+ * scope is `[data-hypen-type]`, which every element the DOM renderer creates
+ * carries (and which template cloning copies for free); `[data-hypen-id]` is
+ * kept alongside for the Canvas renderer's accessibility mirror, which stamps
+ * that instead. The DOM renderer itself writes `data-hypen-id` only when
+ * asked to (`stampNodeIds`), so it cannot be the scope on its own.
  */
 
 const STYLE_ID = "hypen-a11y-styles";
 
 const A11Y_CSS = `
 @media (prefers-reduced-motion: reduce) {
-  [data-hypen-id]:not([data-hypen-motion-essential]) {
+  :is([data-hypen-type], [data-hypen-id]):not([data-hypen-motion-essential]) {
     transition: none !important;
     animation: none !important;
     scroll-behavior: auto !important;
   }
 }
-[data-hypen-id]:focus-visible {
+:is([data-hypen-type], [data-hypen-id]):focus-visible {
   outline: 2px solid #1a73e8;
   outline-offset: 2px;
 }
@@ -36,14 +40,14 @@ const A11Y_CSS = `
   /* Forced-colors mode removes box-shadow and author colors but honours
      outline: pin the focus indicator to an outline in the system Highlight
      color, and drop any box-shadow-based indicator a component style set. */
-  [data-hypen-id]:focus-visible {
+  :is([data-hypen-type], [data-hypen-id]):focus-visible {
     outline: 2px solid Highlight;
     box-shadow: none;
   }
 }
 @media (prefers-contrast: more) {
   /* A thicker outline for users who asked for higher contrast. */
-  [data-hypen-id]:focus-visible {
+  :is([data-hypen-type], [data-hypen-id]):focus-visible {
     outline-width: 3px;
   }
 }

@@ -36,6 +36,7 @@ import {
   DND_EVENT_NAMES,
   type DndEventName,
 } from "@hypen-space/core/dnd";
+import { getNodeId } from "../element-data.js";
 
 const log = frameworkLoggers.events;
 
@@ -361,7 +362,7 @@ function createEventHandler(
       if (engine) {
         noteControlledFieldWrite(element, eventType, payload);
         try {
-          dispatchUIAction(engine, element.dataset.hypenId,
+          dispatchUIAction(engine, getNodeId(element),
             current.actionName,
             withAnimateStamp(payload, current.animate)
           );
@@ -449,7 +450,7 @@ function createFileDragEnterHandler(): ApplicatorHandler {
       const engine = getEngine(element);
       if (!engine) return;
       try {
-        dispatchUIAction(engine, element.dataset.hypenId, current.actionName, payload);
+        dispatchUIAction(engine, getNodeId(element), current.actionName, payload);
       } catch (err) {
         log.error(`Error dispatching action "${current.actionName}":`, err);
       }
@@ -489,7 +490,7 @@ export function triggerElementAction(element: HTMLElement, value: unknown): void
   const engine = getEngine(element);
   if (!engine) return;
   try {
-    dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate));
+    dispatchUIAction(engine, getNodeId(element), actionName, withAnimateStamp(payload, animate));
   } catch (err) {
     log.error(`Error dispatching action "${actionName}":`, err);
   }
@@ -511,7 +512,7 @@ export function dispatchElementAction(
   const engine = getEngine(element);
   if (!engine) return false;
   try {
-    dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate), fromNode);
+    dispatchUIAction(engine, getNodeId(element), actionName, withAnimateStamp(payload, animate), fromNode);
     return true;
   } catch (err) {
     log.error(`Error dispatching action "${actionName}":`, err);
@@ -648,7 +649,7 @@ function createKeyHandler(defaultKey: string = "Enter"): ApplicatorHandler {
 
       const engine = getEngine(element);
       if (engine) {
-        dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate));
+        dispatchUIAction(engine, getNodeId(element), actionName, withAnimateStamp(payload, animate));
       }
     };
 
@@ -698,7 +699,7 @@ function createLongClickHandler(thresholdMs: number = 500): ApplicatorHandler {
 
         const engine = getEngine(element);
         if (engine) {
-          dispatchUIAction(engine, element.dataset.hypenId, actionName, withAnimateStamp(payload, animate));
+          dispatchUIAction(engine, getNodeId(element), actionName, withAnimateStamp(payload, animate));
         }
 
         longClickTimer = null;
@@ -943,7 +944,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
       const listener = () => {
         const engine = getEngine(element);
         if (engine) {
-          dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
+          dispatchUIAction(engine, getNodeId(element), "__hypen_bind", {
             path: bindPath,
             value: input.checked,
           });
@@ -958,7 +959,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
       const listener = () => {
         const engine = getEngine(element);
         if (engine) {
-          dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
+          dispatchUIAction(engine, getNodeId(element), "__hypen_bind", {
             path: bindPath,
             value: element.value,
           });
@@ -980,7 +981,7 @@ export const eventHandlers: Record<string, ApplicatorHandler> = {
         const engine = getEngine(element);
         if (engine) {
           noteLocalBindWrite(element, element.value);
-          dispatchUIAction(engine, element.dataset.hypenId, "__hypen_bind", {
+          dispatchUIAction(engine, getNodeId(element), "__hypen_bind", {
             path: bindPath,
             value: element.value,
           });

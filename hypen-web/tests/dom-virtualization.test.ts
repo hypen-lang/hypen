@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import type { Patch } from "../packages/core/src/types";
 import { DOMRenderer } from "../packages/web/src/dom/renderer";
+import { getNodeId } from "../packages/web/src/dom/element-data";
 import { Engine } from "../packages/server/src/engine";
 import { ensureFakeDomGlobals, FakeElement } from "./fake-dom";
 
@@ -219,7 +220,7 @@ describe("__virt.window layout", () => {
       ...rowPatches(10, 15),
       win(1000, 5, 15),
     ]);
-    expect(list.children.map((c) => c.dataset.hypenId)).toEqual(
+    expect(list.children.map((c) => getNodeId(c))).toEqual(
       Array.from({ length: 10 }, (_, i) => `r${i + 5}`)
     );
     expect(s.renderer.getNode("r0")).toBeUndefined();
@@ -514,7 +515,7 @@ describe("viewport reports", () => {
     const anchor = s.renderer.getNode("r12") as unknown as FakeElement;
     const before = anchor.getBoundingClientRect().top;
     // The new rows are taller, so the average (and leading spacer) moves.
-    s.layout.rowHeight = (row) => (Number(row.dataset.hypenId!.slice(1)) >= 20 ? 150 : 50);
+    s.layout.rowHeight = (row) => (Number(getNodeId(row)!.slice(1)) >= 20 ? 150 : 50);
     s.renderer.applyPatches([
       ...Array.from({ length: 10 }, (_, i) => ({ type: "remove", id: `r${i}` }) as Patch),
       ...rowPatches(20, 30),

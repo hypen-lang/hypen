@@ -6,6 +6,9 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- **DOM renderer: `data-hypen-id` is no longer written by default** — The engine's node id now lives on each element as a property, read with `getNodeId(element)` (exported from `@hypen-space/web/dom`), instead of as a `data-hypen-id` attribute. The id is the one per-element value template cloning cannot supply, so it cost one DOM attribute write per element: 17,000 for a 1,000-row list, about 20 ms of script. **If your CSS or end-to-end tests select `[data-hypen-id]`, pass `stampNodeIds: true` in `DOMRendererOptions`** (it is on automatically in debug mode); `data-hypen-type` is unchanged and always present. The built-in reduced-motion and focus-ring styles are now scoped by `data-hypen-type`.
+
 ### Fixed
 - **iOS renderer: remote images decode off the main actor at display size** — Remote images were decoded lazily on first draw, on the UI thread (measured up to 28 ms for a story-sized photo). `HypenImageCache` now decodes with ImageIO in a detached task at the requested display size, caches by URL and pixel dimensions, and `Image` / video-poster views pass their display bounds so the first draw uses already-decoded pixels. Synced from hypen-engine-rs PR #195.
 

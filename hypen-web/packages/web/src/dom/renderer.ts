@@ -250,7 +250,7 @@ import type { Semantics } from "@hypen-space/core/types";
 import { canvasHandler, canvasApplicators } from "./canvas/index.js";
 import { CanvasRenderer } from "../canvas/renderer.js";
 import { RerenderTracker, type DebugConfig, defaultDebugConfig } from "./debug.js";
-import { setEngine, disposeHypenElement } from "./element-data.js";
+import { setEngine, disposeHypenElement, getNodeId, setNodeId } from "./element-data.js";
 import { ensureA11yStyles } from "./a11y-styles.js";
 import { ensureAnimStyles } from "./anim-styles.js";
 import type { SafeAreaInsetOverrides } from "../safe-area.js";
@@ -288,6 +288,16 @@ export interface DOMRendererOptions {
   routeFocus?: "auto" | "off";
 
   /**
+   * Also write each element's engine node id as a `data-hypen-id` attribute.
+   * Off by default — the renderer keeps the id as a property on the element
+   * (`getNodeId`) and an attribute write per element is a measurable share
+   * of rendering a long list — and on by default in debug mode. Turn it on
+   * to see ids in devtools or to select elements by `[data-hypen-id="…"]`
+   * in end-to-end tests.
+   */
+  stampNodeIds?: boolean;
+
+  /**
    * Per-edge override for the insets the `SafeArea` component pads by.
    * Each edge is optional and merges over the browser's own
    * `env(safe-area-inset-*)` value, so `{ bottom: 0 }` zeroes only the
@@ -315,16 +325,6 @@ export interface DOMRendererOptions {
   hypenAppDevice?: HypenAppDeviceFactory;
 }
 
-/**
- * The node id, stamped on the element object itself beside `dataset.hypenId`
- * for the teardown sweep. Reading `dataset.hypenId` back off every
- * descendant of a removed subtree is a DOM attribute lookup per node (a
- * 1,000-row clear sweeps ~17k); a symbol-keyed expando is a plain property
- * read. Not a WeakMap: `WeakMap.set` is a V8 runtime call, and one per
- * created node cost a 1,000-row create ~40 ms — more than the sweep saved.
- */
-const ELEMENT_ID: unique symbol = Symbol("hypen.elementId");
-type ElementWithId = HTMLElement & { [ELEMENT_ID]?: string };
 
 /**
  * How one template node's `subs` prop is applied on instantiation — see
@@ -471,6 +471,8 @@ export class DOMRenderer {
 
   /** See `DOMRendererOptions.routeFocus` — `"off"` disables `focusIncomingRoute`. */
   private routeFocus: "auto" | "off";
+  /** Whether node ids are also written as `data-hypen-id` attributes. */
+  private stampNodeIds: boolean;
 
   /** Ids created with `semantics.role === "dialog"`, so insert/remove hooks can act. */
   private dialogIds = new Set<string>();
@@ -543,6 +545,7 @@ export class DOMRenderer {
     this.applicators = new ApplicatorRegistry();
     this.debugTracker = new RerenderTracker({ ...defaultDebugConfig, ...debugConfig });
     this.routeFocus = options?.routeFocus ?? "auto";
+    this.stampNodeIds = options?.stampNodeIds ?? isDebugMode();
 
     // Ownership precedence (normative): dnd > scrub > structural playbacks >
     // transaction > `.transition`. A node owned by either gesture runtime is
@@ -1297,10 +1300,11 @@ export class DOMRenderer {
       return;
     }
 
+    const stamp = this.stampNodeIds;
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
-      element.dataset.hypenId = ids[i];
-      (element as ElementWithId)[ELEMENT_ID] = ids[i];
+      setNodeId(element, ids[i]);
+      if (stamp) element.dataset.hypenId = ids[i];
       // No `setEngine` per node: `getEngine` resolves through the mounted
       // ancestors, and the per-element WeakMap write was ~17k per create.
       this.nodes.set(ids[i], element);
@@ -1448,8 +1452,8 @@ export class DOMRenderer {
     }
 
     element.dataset.hypenType = elementType.toLowerCase();
-    element.dataset.hypenId = id;
-    (element as ElementWithId)[ELEMENT_ID] = id;
+    setNodeId(element, id);
+    if (this.stampNodeIds) element.dataset.hypenId = id;
     setEngine(element, this.engine);
 
     // Slot marker: `.slot("name")` lowers to the `slot.0` prop. The engine
@@ -2215,7 +2219,7 @@ export class DOMRenderer {
       child !== null;
       child = child.nextElementSibling as HTMLElement | null
     ) {
-      const childId = (child as ElementWithId)[ELEMENT_ID] ?? child.dataset?.hypenId;
+      const childId = getNodeId(child);
       if (childId === undefined || this.nodes.get(childId) !== child) {
         wholesale = false;
       } else if (this.animator.isExitingRoot(child)) {
@@ -2328,7 +2332,7 @@ export class DOMRenderer {
     this.routeFocusMemory.delete(id);
     // A removed row under a hovered/held list is a structural change too.
     if (previousParent instanceof HTMLElement) {
-      this.dnd.noteStructural(previousParent.dataset?.hypenId ?? null, id);
+      this.dnd.noteStructural(getNodeId(previousParent) ?? null, id);
     }
 
     // The engine emits ONE Remove for a removed subtree's root on the keyed
@@ -2378,8 +2382,7 @@ export class DOMRenderer {
       if (desc === root) return;
       // Component-internal wrapper elements are never registered and fall
       // through to the (empty) attribute read.
-      const descId = (desc as ElementWithId)[ELEMENT_ID] ??
-        (desc as { dataset?: Record<string, string | undefined> }).dataset?.hypenId;
+      const descId = getNodeId(desc);
       // Only forget the id if it still maps to *this* element: a recycled id
       // pointing elsewhere must not be swept out from under its live node.
       if (descId === undefined || this.nodes.get(descId) !== desc) return;

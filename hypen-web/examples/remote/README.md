@@ -79,7 +79,7 @@ const localUI = `
 engine.renderSource(localUI);
 
 // Embed remote app
-const container = document.querySelector('[data-hypen-id*="remote-container"]');
+const container = document.getElementById("remote-container");
 const remoteApp = new HypenAppComponent(container, {
   url: "ws://localhost:3000",
   autoReconnect: true,

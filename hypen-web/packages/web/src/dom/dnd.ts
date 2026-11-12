@@ -147,6 +147,7 @@ import {
   toPlain,
   type PointerEventLike,
 } from "./gesture-utils.js";
+import { getNodeId } from "./element-data.js";
 
 const log = frameworkLoggers.renderer;
 
@@ -450,7 +451,7 @@ export class DomDnd {
       const node = this.nodes.get(id);
       if (!node) continue;
       let parent = node.element.parentElement;
-      while (parent && !this.nodes.get(parent.dataset.hypenId ?? "")?.pin) parent = parent.parentElement;
+      while (parent && !this.nodes.get(getNodeId(parent) ?? "")?.pin) parent = parent.parentElement;
       if (!parent) continue;
       const box = this.contentBox(parent);
       node.element.style.translate = `${(position.x ?? 0) * box.width}px ${(position.y ?? 0) * box.height}px`;
@@ -485,7 +486,7 @@ export class DomDnd {
     if (id === drag.source.id || id === drag.itemId) return true;
     for (const list of drag.lists.values()) {
       for (let i = 0; i < list.items.length; i++) {
-        if (list.shifts[i] !== 0 && list.items[i]!.dataset?.hypenId === id) return true;
+        if (list.shifts[i] !== 0 && getNodeId(list.items[i]) === id) return true;
       }
     }
     return false;
@@ -1424,7 +1425,7 @@ export class DomDnd {
 
   private openDrag(source: DndNode, origin: DndNode | null, mode: ActiveDrag["mode"]): ActiveDrag {
     const item = origin?.sort ? this.itemOf(origin, source.element) ?? source.element : source.element;
-    const itemId = item.dataset?.hypenId ?? null;
+    const itemId = getNodeId(item) ?? null;
     const originIndex = origin ? this.indexOf(origin, item) : null;
     const from: DndLocation = origin
       ? { zone: this.containerLabel(origin), index: originIndex }
@@ -1765,7 +1766,7 @@ export class DomDnd {
     }
     if (best) return this.zoneLabel(best);
     const parent = (source.element as { parentNode?: unknown }).parentNode as HTMLElement | null | undefined;
-    return parent?.dataset?.hypenId ?? source.id;
+    return getNodeId(parent) ?? source.id;
   }
 
   /**

@@ -5,6 +5,7 @@
  */
 
 export { DOMRenderer } from "./renderer.js";
+export { getNodeId } from "./element-data.js";
 export { ComponentRegistry } from "./components/index.js";
 export { ApplicatorRegistry } from "./applicators/index.js";
 export { EventManager } from "./events.js";

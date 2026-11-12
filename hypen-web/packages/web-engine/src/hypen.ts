@@ -12,7 +12,7 @@ import { HypenGlobalContext } from "@hypen-space/core/context";
 import type { I18n } from "@hypen-space/core/i18n";
 import { Router, Route, Link } from "@hypen-space/core/components";
 import { frameworkLoggers, setDebugMode } from "@hypen-space/core/logger";
-import { DOMRenderer } from "@hypen-space/web/dom";
+import { DOMRenderer, getNodeId } from "@hypen-space/web/dom";
 import type { DebugConfig } from "@hypen-space/web/dom";
 
 const log = frameworkLoggers.hypen;
@@ -380,9 +380,9 @@ export class Hypen {
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     // Get the route element's node ID from the renderer
-    const routeNodeId = routeElement.dataset.hypenId;
+    const routeNodeId = getNodeId(routeElement);
     if (!routeNodeId) {
-      throw new Error(`Route element is missing data-hypen-id attribute`);
+      throw new Error(`Route element has no engine node id (not created by the renderer)`);
     }
 
     // Get the current merged state

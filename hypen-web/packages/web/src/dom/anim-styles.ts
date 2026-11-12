@@ -28,7 +28,7 @@
  * documented cost of the overlay approach.
  *
  * Reduced motion: the global a11y stylesheet's `animation: none !important`
- * rule already neutralizes playback on `[data-hypen-id]` elements; this
+ * rule already neutralizes playback on Hypen-rendered elements; this
  * sheet only has to extend that to the shimmer overlay pseudo-element,
  * which the element-scoped a11y selector cannot reach.
  */
@@ -130,7 +130,7 @@ const ANIM_CSS = `
   ${playback("1500ms", "linear", "infinite", "hypen-shimmer")}
 }
 @media (prefers-reduced-motion: reduce) {
-  /* The a11y sheet's [data-hypen-id] { animation: none !important } covers
+  /* The a11y sheet's { animation: none !important } rule covers
      the element itself but cannot select the shimmer overlay pseudo. Like
      that rule, nodes stamped data-hypen-motion-essential (.motion(essential),
      #149) are exempt — their shimmer keeps sweeping. */

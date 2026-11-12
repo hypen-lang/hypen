@@ -1,6 +1,7 @@
 import { semanticAction } from "./helpers";
 import { describe, expect, test } from "bun:test";
 import { DOMRenderer } from "../packages/web/src/dom/renderer";
+import { getNodeId } from "../packages/web/src/dom/element-data";
 import type { Patch } from "../packages/core/src/types";
 import type { IEngine as Engine } from "../packages/core/src/app";
 import { ensureFakeDomGlobals, FakeElement } from "./fake-dom";
@@ -194,7 +195,7 @@ describe("DOMRenderer patch handling", () => {
     ]);
 
     const rootNode = renderer.getNode("root-1") as FakeElement;
-    const order = rootNode.children.map((child) => child.dataset.hypenId);
+    const order = rootNode.children.map((child) => getNodeId(child));
     expect(order).toEqual(["a", "c", "b"]);
   });
 
@@ -407,7 +408,7 @@ describe("DOMRenderer patch field name robustness", () => {
     ]);
 
     const parent = renderer.getNode("parent") as FakeElement;
-    const order = parent.children.map((c) => c.dataset.hypenId);
+    const order = parent.children.map((c) => getNodeId(c));
     expect(order).toEqual(["b", "a"]);
   });
 
@@ -430,7 +431,7 @@ describe("DOMRenderer patch field name robustness", () => {
     ]);
 
     const parent = renderer.getNode("parent") as FakeElement;
-    expect(parent.children.map((c) => c.dataset.hypenId)).toEqual(["b", "c", "a"]);
+    expect(parent.children.map((c) => getNodeId(c))).toEqual(["b", "c", "a"]);
   });
 
   test("insert into 'root' container appends to the renderer container", () => {

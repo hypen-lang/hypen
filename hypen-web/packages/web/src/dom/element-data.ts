@@ -47,6 +47,40 @@ export interface HypenElementData {
 const elementDataMap = new WeakMap<HTMLElement, HypenElementData>();
 
 // ============================================================================
+// Node identity
+// ============================================================================
+
+/**
+ * The engine's node id for a renderer-created element, kept on the element
+ * object itself under a symbol key.
+ *
+ * It is a property, not a `data-hypen-id` attribute: the id differs for every
+ * element, so it is the one thing template cloning cannot supply, and an
+ * attribute write per element was 17,000 DOM attribute writes for a
+ * 1,000-row list — about a third of the list's distance to a hand-written
+ * React render. A symbol-keyed expando is a plain property write and read.
+ * (Not a WeakMap either: `WeakMap.set` is a V8 runtime call, and one per
+ * created node cost a 1,000-row create ~40 ms.)
+ *
+ * The attribute is still written when the renderer is asked to
+ * (`DOMRendererOptions.stampNodeIds`, on by default in debug mode) so the
+ * id shows up in devtools and `[data-hypen-id]` selectors work in tests.
+ * Renderer code never reads the attribute; it reads this.
+ */
+const NODE_ID: unique symbol = Symbol("hypen.nodeId");
+type ElementWithNodeId = { [NODE_ID]?: string };
+
+/** The engine node id of `element`, or `undefined` if the renderer did not create it. */
+export function getNodeId(element: unknown): string | undefined {
+  return element == null ? undefined : (element as ElementWithNodeId)[NODE_ID];
+}
+
+/** Record the engine node id on `element`. */
+export function setNodeId(element: HTMLElement, id: string): void {
+  (element as ElementWithNodeId)[NODE_ID] = id;
+}
+
+// ============================================================================
 // Core API
 // ============================================================================
 

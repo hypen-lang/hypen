@@ -26,6 +26,7 @@ import { dispatchUIAction } from "@hypen-space/core";
 
 import { frameworkLoggers } from "@hypen-space/core/logger";
 import { getEngine, getMeta, setMeta } from "./element-data.js";
+import { getNodeId } from "./element-data.js";
 
 const log = frameworkLoggers.events;
 
@@ -75,7 +76,7 @@ export function dispatchAnimationComplete(
   if (!engine) return;
   const payload: Record<string, unknown> = { ...action.customPayload, ...completion };
   try {
-    dispatchUIAction(engine, element.dataset.hypenId, action.actionName, payload);
+    dispatchUIAction(engine, getNodeId(element), action.actionName, payload);
   } catch (err) {
     log.error(`Error dispatching action "${action.actionName}":`, err);
   }

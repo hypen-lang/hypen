@@ -130,6 +130,7 @@ import {
   animateKeyframesFor,
 } from "./anim-styles.js";
 import { dispatchAnimationComplete } from "./anim-complete.js";
+import { getNodeId } from "./element-data.js";
 
 const log = frameworkLoggers.renderer;
 
@@ -144,7 +145,7 @@ export const EXITING_ATTR = "data-hypen-exiting";
  * Attribute stamped on nodes whose `__anim.motion` prop is
  * `{essential: true}` (the `.motion(essential)` opt-out, #149). It is the
  * CSS face of the flag: the global reduced-motion kill in `a11y-styles.ts`
- * selects `[data-hypen-id]:not([data-hypen-motion-essential])`, so stamped
+ * selects Hypen-rendered elements `:not([data-hypen-motion-essential])`, so stamped
  * nodes keep their CSS transitions/animations under
  * `prefers-reduced-motion: reduce`. Set on create/SetProp when the prop is
  * present (and truthy), removed on RemoveProp.
@@ -848,7 +849,7 @@ export class DomAnimator {
     if (!siblings) return flips;
     for (const sibling of Array.from(siblings)) {
       if (sibling === removed) continue;
-      const id = (sibling as { dataset?: Record<string, string | undefined> }).dataset?.hypenId;
+      const id = getNodeId(sibling);
       if (!id || flips.has(id)) continue;
       if (!this.specs.get(id)?.layout) continue;
       if (this.exitingRoots.has(id)) continue; // exit wins over FLIP

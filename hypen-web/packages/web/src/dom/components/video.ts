@@ -71,6 +71,7 @@ import {
 } from "@hypen-space/core/types";
 import { extractActionDetails } from "../applicators/events.js";
 import { slotChildren, setVisible } from "../slots.js";
+import { getNodeId } from "../element-data.js";
 
 const log = frameworkLoggers.renderer;
 
@@ -524,7 +525,7 @@ function dispatchVideoEvent(
   if (!engine) return;
 
   try {
-    dispatchUIAction(engine, host.dataset.hypenId, actionName, { ...customPayload, ...contractPayload });
+    dispatchUIAction(engine, getNodeId(host), actionName, { ...customPayload, ...contractPayload });
   } catch (err) {
     log.error(`Error dispatching video action "${actionName}":`, err);
   }
@@ -739,7 +740,7 @@ function reportPlayback(el: HTMLElement, opts: { immediate?: boolean } = {}): vo
   const media = el as HTMLVideoElement;
   const write = (key: string, value: unknown): void => {
     try {
-      dispatchUIAction(engine, (state.root ?? el).dataset.hypenId, "__hypen_bind", { path: `${bindPath}.${key}`, value });
+      dispatchUIAction(engine, getNodeId(state.root ?? el), "__hypen_bind", { path: `${bindPath}.${key}`, value });
     } catch (err) {
       log.error("Error reporting video playback binding:", err);
     }
