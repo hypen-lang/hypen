@@ -262,6 +262,7 @@ These catch mistakes that otherwise fail silently at runtime (an empty text, a b
 | `unknown-action` | `@actions.x` has no `.onAction("x", …)` handler |
 | `unknown-component` | An element is neither built in nor a component in the project (a `.hypen` file, a single-file `.ts` component, or a `component`/`module` declaration or `import` in the same file) |
 | `item-outside-loop` | `@item…` is used outside any `ForEach`/`List`/`Grid`, and the component is the entry or is only ever rendered outside loops |
+| `unknown-theme-token` | `@theme.x.y` names a token the project's [theme file](/docs/guide/theming#the-theme-file) does not define, or defines only for some schemes. Also reports aliases in the file that point at a missing token or form a cycle |
 | `unknown-ignore-rule` | A `// hypen-check-ignore` directive names a rule that does not exist |
 
 The checks are conservative, because a check that fires on correct code gets switched off:
@@ -293,6 +294,21 @@ Exit codes: `0` clean, `1` findings, `2` couldn't check (missing path or
 parse error; parse errors print as `file:line:col: parse error: ...`). Use
 `hypen dev --a11y` to get the accessibility findings on every rebuild during
 development.
+
+### `hypen theme`
+
+Works with the project's [theme file](/docs/guide/theming#the-theme-file) (`theme.json`, or the path in hypen.json's `"theme"`).
+
+```bash
+hypen theme export                          # css, android and ios into ./theme-export
+hypen theme export --format android --outDir app/src/main/res
+```
+
+**Options:**
+- `--format <css|android|ios|all>` - One format, or all (default)
+- `-o, --outDir <dir>` - Output directory (default: `theme-export`); each format gets its own subdirectory
+
+See [Exporting tokens](/docs/guide/theming#exporting-tokens) for what each format contains. The command refuses to export a file with unresolved aliases.
 
 ### `hypen studio`
 

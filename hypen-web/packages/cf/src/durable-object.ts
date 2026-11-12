@@ -63,6 +63,7 @@
  */
 
 import type { HypenApp, HypenModule, HypenModuleDefinition } from "@hypen-space/core/app";
+import type { Theme } from "@hypen-space/core/theme";
 import { createLogger } from "@hypen-space/core/logger";
 import type { BaseEngine } from "@hypen-space/core/engine-base";
 import type { RemoteClient, RemoteMessage } from "@hypen-space/core/remote";
@@ -329,6 +330,12 @@ export interface HypenDurableObjectConfig {
    * SVG resource bundle for `Icon(@resources.foo)` references. Name → raw SVG.
    */
   resources?: Record<string, string>;
+  /**
+   * The app's theme (`createTheme(...)`). Each session forks it: its own
+   * scheme preference over the shared tokens, following its client's system
+   * scheme and restored from the session snapshot after hibernation.
+   */
+  theme?: Theme;
   /**
    * Mirror actions/state to other sockets sharing this DO (default false).
    * The device plane stays on: a mirrored dispatch runs with replay
@@ -644,6 +651,7 @@ export abstract class HypenDurableObject {
       moduleName: config.moduleName ?? "App",
       ui: config.template,
       resources: config.resources ?? {},
+      theme: config.theme ?? null,
       app: config.app ?? null,
       syncActions: config.syncActions ?? false,
       deviceDisabled: !deviceOn,

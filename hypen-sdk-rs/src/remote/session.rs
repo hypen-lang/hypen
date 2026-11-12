@@ -13,9 +13,10 @@ use hypen_engine::{Engine, Patch, TemplateExpander};
 use serde_json::Value;
 
 use crate::context::GlobalContext;
+use crate::data_source::{ContextSink, PendingContexts};
 use crate::device::{
-    Device, DeviceBinding, DeviceOwner, DevicePlane, DeviceServer, DeviceTransport, DispatchGuard,
-    SessionTransport, StateApplier,
+    in_dispatch, Device, DeviceBinding, DeviceOwner, DevicePlane, DeviceServer, DeviceTransport,
+    DispatchGuard, SessionTransport, StateApplier,
 };
 use crate::discovery::ComponentRegistry;
 use crate::error::{Result, SdkError};
@@ -23,7 +24,7 @@ use crate::module::{ActionHandler, ModuleDefinition};
 use crate::router::HypenRouter;
 use crate::state::State;
 
-use super::types::RemoteMessage;
+use super::types::{ColorSchemeMessage, RemoteMessage};
 
 /// Configuration for creating a [`RemoteSession`].
 pub struct SessionConfig {
@@ -264,6 +265,91 @@ pub struct RemoteSession {
     screen_scope: Arc<Mutex<Option<String>>>,
     /// The resume token the last `sessionAck` carried.
     resume_token: Mutex<Option<String>>,
+    /// Data-source contexts (`@theme.*`, …) on their way to the engine.
+    contexts: Arc<SessionContexts>,
+}
+
+/// The session engine's [`ContextSink`].
+///
+/// Handlers run with `inner` (the engine) locked, so a context set from one
+/// — `ctx.theme().unwrap().toggle()` — cannot go straight in. It is queued
+/// and applied by the dispatch that is running, after the handler returns
+/// and inside the same patch capture as the handler's state changes: one
+/// `patch` message carries both.
+struct SessionContexts {
+    pending: PendingContexts,
+    inner: Weak<Mutex<SessionInner>>,
+    module_name: String,
+    /// Where patches the session produces on its own go (`None`: an
+    /// in-process session, whose host only drains replies).
+    ui_sink: Option<super::OutboundSink>,
+}
+
+impl SessionContexts {
+    /// Apply the queue with `inner` held. Before the first render nothing
+    /// is on screen, so there is nothing to send; afterwards the resulting
+    /// patches go to `emit` as an ordinary `patch` message with the next
+    /// revision (none, and no revision, when nothing bound changed).
+    fn flush_locked(&self, inner: &mut SessionInner, emit: &mut dyn FnMut(&str)) {
+        if self.pending.is_empty() {
+            return;
+        }
+        if !inner.rendered {
+            self.pending.apply(&mut inner.engine);
+            return;
+        }
+        let patches = with_capture(&mut inner.engine, |engine| self.pending.apply(engine));
+        let patches = inner.template_expander.expand(patches);
+        if patches.is_empty() {
+            return;
+        }
+        inner.revision += 1;
+        let msg = RemoteMessage::Patch {
+            module: self.module_name.clone(),
+            patches,
+            revision: inner.revision,
+        };
+        if let Ok(json) = msg.to_json() {
+            emit(&json);
+        }
+    }
+
+    /// Apply the queue now when that is possible from here: not from inside
+    /// a dispatch (the dispatcher does it), and — once the UI is rendered —
+    /// only when there is a transport to carry the patches.
+    fn settle(&self) {
+        if in_dispatch() || self.pending.is_empty() {
+            return;
+        }
+        let Some(inner) = self.inner.upgrade() else {
+            return;
+        };
+        let _dispatch = DispatchGuard::enter();
+        let mut inner = inner.lock().unwrap();
+        match (&self.ui_sink, inner.rendered) {
+            (Some(sink), _) => self.flush_locked(&mut inner, &mut |m| sink(m.to_string())),
+            (None, false) => self.pending.apply(&mut inner.engine),
+            (None, true) => {}
+        }
+    }
+}
+
+impl ContextSink for SessionContexts {
+    fn set_context(&self, name: &str, data: Value) {
+        self.pending.push(name, data);
+        self.settle();
+    }
+
+    fn set_contexts(&self, contexts: Vec<(String, Value)>) {
+        for (name, data) in contexts {
+            self.pending.push(&name, data);
+        }
+        self.settle();
+    }
+
+    fn is_closed(&self) -> bool {
+        self.inner.strong_count() == 0
+    }
 }
 
 /// The device route of a [`SessionTransport`], for the plane.
@@ -341,6 +427,8 @@ struct HelloDevice {
     /// The exact `hello.device` JSON text (`None`: absent or ambiguous).
     raw: Option<String>,
     resume_token: Option<String>,
+    /// `hello.colorScheme`: the client's system color scheme, when valid.
+    color_scheme: Option<crate::theme::SystemScheme>,
 }
 
 struct SessionInner {
@@ -608,16 +696,28 @@ impl RemoteSession {
             });
         }
 
+        let inner = Arc::new(Mutex::new(SessionInner {
+            engine,
+            ui_source: config.ui_source,
+            revision: 0,
+            state_subscribed: false,
+            rendered: false,
+            acked_session_id: None,
+            template_expander: TemplateExpander::new(),
+        }));
+        let contexts = Arc::new(SessionContexts {
+            pending: PendingContexts::default(),
+            inner: Arc::downgrade(&inner),
+            module_name: config.module_name.clone(),
+            ui_sink: config.transport.as_ref().map(|transport| {
+                let transport = Arc::clone(transport);
+                Arc::new(move |m| transport.send_ui(m)) as super::OutboundSink
+            }),
+        });
+
         Self {
-            inner: Arc::new(Mutex::new(SessionInner {
-                engine,
-                ui_source: config.ui_source,
-                revision: 0,
-                state_subscribed: false,
-                rendered: false,
-                acked_session_id: None,
-                template_expander: TemplateExpander::new(),
-            })),
+            inner,
+            contexts,
             state,
             primary_handler,
             on_disconnect: None,
@@ -765,6 +865,110 @@ impl RemoteSession {
             modules,
             Some(transport),
         )
+    }
+
+    /// Give this session the app's theme: a [`fork`](crate::theme::Theme::fork)
+    /// of `theme` — the shared tokens, its own scheme preference — attached
+    /// to this session's engine, so `@theme.*` and `@appearance.*` resolve
+    /// in the first render. Handlers reach the fork as `ctx.theme()`, and
+    /// the host as [`theme`](Self::theme) (e.g. to forward the client's
+    /// system scheme with `set_system_scheme`). One client switching scheme
+    /// does not touch another's.
+    ///
+    /// Call it right after construction, before the hello — once per
+    /// session, with the one app-wide theme:
+    ///
+    /// ```rust,ignore
+    /// let session = RemoteSession::connect(def, components, transport).with_theme(&app_theme);
+    /// ```
+    ///
+    /// The client's system color scheme reaches the fork on its own: from
+    /// the hello's `colorScheme` member before the first render, and from
+    /// `colorScheme` messages afterwards (see
+    /// [`ColorSchemeMessage`](super::ColorSchemeMessage)). A host that calls
+    /// [`handle_hello`](Self::handle_hello) itself instead of passing the
+    /// hello text to [`handle_message`](Self::handle_message) forwards it
+    /// with `session.theme().unwrap().set_system_scheme(..)` first.
+    pub fn with_theme(self, theme: &crate::theme::Theme) -> Self {
+        self.with_theme_preference(theme, None)
+    }
+
+    /// [`with_theme`](Self::with_theme) for a session that is being
+    /// rebuilt for a returning client: the fork starts with `preference`
+    /// (a scheme name or `"system"`) instead of the app theme's own.
+    /// `None`, or a name the theme does not know, behaves like `with_theme`
+    /// / follows the system scheme.
+    ///
+    /// Sessions are built by the host, so keeping the preference across a
+    /// suspension is the host's move: read
+    /// [`theme_preference`](Self::theme_preference) when the client goes
+    /// away, keep it with the saved state
+    /// ([`SessionManager::suspend_session_with_theme`](super::SessionManager::suspend_session_with_theme)
+    /// does, and drops it on expiry), and pass it here on resume.
+    pub fn with_theme_preference(
+        self,
+        theme: &crate::theme::Theme,
+        preference: Option<&str>,
+    ) -> Self {
+        let fork = theme.fork(preference);
+        fork.attach(self.context_sink());
+        self.context.set_theme(fork);
+        self
+    }
+
+    /// The scheme preference of this session's theme (a scheme name or
+    /// `"system"`); `None` without a theme. What to save for a resume.
+    pub fn theme_preference(&self) -> Option<String> {
+        self.context.theme().map(|theme| theme.preference())
+    }
+
+    /// This session's theme (the fork made by [`with_theme`](Self::with_theme)).
+    pub fn theme(&self) -> Option<crate::theme::Theme> {
+        self.context.theme()
+    }
+
+    /// Set (or replace) a data-source context on this session's engine:
+    /// templates read it as `@name.path`, and nodes bound to a changed path
+    /// re-render.
+    ///
+    /// When the patches go out depends on where this is called from:
+    /// - before the hello: nothing is rendered yet; the first render uses it;
+    /// - from a handler of this session: with that dispatch's `patch`
+    ///   message, after the handler returns;
+    /// - from anywhere else, on a session with a transport: at once, as a
+    ///   `patch` message through [`SessionTransport::send_ui`];
+    /// - from anywhere else, on a session without a transport (in-process):
+    ///   with the next dispatch, or when the host calls
+    ///   [`flush_contexts`](Self::flush_contexts).
+    pub fn set_context(&self, name: &str, data: Value) {
+        self.contexts.set_context(name, data);
+    }
+
+    /// A handle that sets data-source contexts on this session's engine
+    /// with the timing of [`set_context`](Self::set_context), for publishers
+    /// such as [`Theme::attach`](crate::theme::Theme::attach). It holds the
+    /// session weakly.
+    pub fn context_sink(&self) -> Arc<dyn ContextSink> {
+        Arc::clone(&self.contexts) as Arc<dyn ContextSink>
+    }
+
+    /// Apply data-source contexts that are still queued and return the
+    /// resulting messages (at most one `patch`). Only an in-process session
+    /// that changes a context outside a handler needs this — see
+    /// [`set_context`](Self::set_context).
+    pub fn flush_contexts(&self) -> Vec<String> {
+        let mut messages = Vec::new();
+        self.flush_contexts_with(|m| messages.push(m.to_string()));
+        messages
+    }
+
+    /// [`flush_contexts`](Self::flush_contexts), handing the message to
+    /// `emit` while the session lock is held (revision order — see
+    /// [`handle_message_with`](Self::handle_message_with)).
+    pub fn flush_contexts_with<F: FnMut(&str)>(&self, mut emit: F) {
+        let _dispatch = DispatchGuard::enter();
+        let mut inner = self.inner.lock().unwrap();
+        self.contexts.flush_locked(&mut inner, &mut emit);
     }
 
     /// Use `server`'s settings (device options and opt-out, resume tokens,
@@ -1072,6 +1276,13 @@ impl RemoteSession {
         emit: &mut dyn FnMut(&str),
     ) {
         let _dispatch = DispatchGuard::enter();
+        // The client's system scheme applies before the first render, so a
+        // `"system"` preference paints the right scheme from the first
+        // frame. (Inside the dispatch guard the theme only queues its
+        // contexts; they are applied below, before the render.)
+        if let (Some(scheme), Some(theme)) = (hello.color_scheme, self.context.theme()) {
+            theme.set_system_scheme(scheme);
+        }
         let mut inner = self.inner.lock().unwrap();
 
         let server = self.server();
@@ -1138,6 +1349,9 @@ impl RemoteSession {
         // template patches before they cross the wire — remote clients of
         // any version must see plain patches.
         let patches = if !inner.rendered {
+            // Contexts set before the hello (the theme) are in the engine
+            // before it renders.
+            self.contexts.pending.apply(&mut inner.engine);
             inner.rendered = true;
             let ui = inner.ui_source.clone();
             let raw = render_and_capture(&mut inner.engine, &ui);
@@ -1163,6 +1377,8 @@ impl RemoteSession {
         if let Ok(json) = initial.to_json() {
             emit(&json);
         }
+        // A context queued on an already rendered session (a repeated hello).
+        self.contexts.flush_locked(&mut inner, emit);
 
         // 4. The device plane, after the ack that selects it: the broker
         // opens `core.capabilities` before any handler can request device
@@ -1214,6 +1430,7 @@ impl RemoteSession {
             state: Arc::downgrade(&self.state),
             module_name: self.module_name.clone(),
             ui_sink,
+            contexts: Arc::clone(&self.contexts),
         }));
         if let Err(e) = plane.start() {
             log::warn!("hypen device: core.capabilities not opened ({e}) — device plane closed");
@@ -1381,7 +1598,15 @@ impl RemoteSession {
             // connection stays UI-only), never guessed from.
             Err(_) => match Self::hello_without_device(json) {
                 Some(m) => m,
-                None => return,
+                None => {
+                    // Not part of the `RemoteMessage` union (see
+                    // [`ColorSchemeMessage`]); anything else unknown or
+                    // malformed is ignored, as before.
+                    if let Some(message) = ColorSchemeMessage::from_json(json) {
+                        self.handle_color_scheme(message.scheme, emit);
+                    }
+                    return;
+                }
             },
         };
 
@@ -1402,7 +1627,11 @@ impl RemoteSession {
                 };
                 self.hello_with(
                     session_id.as_deref(),
-                    HelloDevice { raw, resume_token },
+                    HelloDevice {
+                        raw,
+                        resume_token,
+                        color_scheme: ColorSchemeMessage::from_hello(json),
+                    },
                     emit,
                 )
             }
@@ -1472,6 +1701,29 @@ impl RemoteSession {
         if let Ok(json) = msg.to_json() {
             emit(&json);
         }
+        // `inner` is released here, after the emit (revision order).
+    }
+
+    /// A client's `colorScheme` report: its system color scheme changed.
+    ///
+    /// Per client, like `viewport`: only this session's theme hears it.
+    /// Ignored before `hello` and on a session without a theme. The
+    /// resulting patches go out as an ordinary `patch` message with the
+    /// next revision; while the session's preference is explicit the report
+    /// is only remembered — nothing is sent and the revision is kept.
+    fn handle_color_scheme(&self, scheme: crate::theme::SystemScheme, emit: &mut dyn FnMut(&str)) {
+        let Some(theme) = self.context.theme() else {
+            return;
+        };
+        if self.inner.lock().unwrap().acked_session_id.is_none() {
+            return;
+        }
+        // Inside the guard the theme queues its contexts instead of
+        // pushing them through the transport: they are this message's reply.
+        let _dispatch = DispatchGuard::enter();
+        theme.set_system_scheme(scheme);
+        let mut inner = self.inner.lock().unwrap();
+        self.contexts.flush_locked(&mut inner, emit);
         // `inner` is released here, after the emit (revision order).
     }
 
@@ -1599,6 +1851,7 @@ impl RemoteSession {
         }
 
         let state_arc = Arc::clone(&self.state);
+        let contexts = &self.contexts.pending;
         // Snapshot state before dispatch so we can detect which scopes
         // the handler (and any `router.*` route-enter hooks it triggers)
         // mutated. Without this flush, route-enter mutations to sibling
@@ -1623,6 +1876,10 @@ impl RemoteSession {
                 let _ = engine.dispatch_action(action_obj);
             }
             push_changed_scopes(engine, &state_arc, &pre);
+            // Contexts the handler set (a theme switch) could not reach the
+            // engine while it was dispatching; they land here, in the same
+            // capture as its state changes.
+            contexts.apply(engine);
         });
         if let Some(err) = refusal {
             // Nothing ran, so there is nothing to report and no revision to
@@ -1868,6 +2125,7 @@ struct SessionApplier {
     state: Weak<Mutex<HashMap<String, Value>>>,
     module_name: String,
     ui_sink: super::OutboundSink,
+    contexts: Arc<SessionContexts>,
 }
 
 impl StateApplier for SessionApplier {
@@ -1887,6 +2145,7 @@ impl StateApplier for SessionApplier {
         }
         let patches = with_capture(&mut inner.engine, |engine| {
             push_changed_scopes(engine, &state, &pre);
+            self.contexts.pending.apply(engine);
         });
         let sink = &self.ui_sink;
         finish_revision(&mut inner, patches, &self.module_name, &state, &mut |m| {

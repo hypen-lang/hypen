@@ -199,6 +199,10 @@ Text("Styled")
     .color(blue)
     .padding(16)
 
+// Theme tokens and per-scheme values (createTheme publishes `theme` / `appearance`)
+Text("Themed").color(@theme.color.primary)
+Text("Beta").color({default: "#8A6D00", dark: "#FFD54F"})   // engine-resolved; literals only
+
 // Two-way binding (syncs form element value with state automatically)
 Input(placeholder: "Name").bind(@state.name)
 Textarea(placeholder: "Bio").bind(@state.bio)

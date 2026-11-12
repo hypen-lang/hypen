@@ -141,7 +141,7 @@ async function findFixtures(dir: string): Promise<string[]> {
       if (entry.isDirectory()) {
         // `device/` is the Device Capability Protocol corpus, replayed by
         // the engine crate and every SDK's device suite.
-        if (entry.name === "portable" || entry.name === "variant" || entry.name === "device") continue;
+        if (entry.name === "portable" || entry.name === "variant" || entry.name === "device" || entry.name === "theme") continue;
         await walk(fullPath);
       } else if (entry.name.endsWith(".json")) {
         // `dnd/path-move.json` is a state-transform fixture (fixtures/dnd/README.md),

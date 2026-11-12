@@ -54,6 +54,15 @@ class ClientState(
     @Volatile
     var devicePlane: DevicePlane? = null
 
+    /**
+     * This session's theme — a fork of the one registered with
+     * [HypenServerBuilder.theme] (own scheme preference, shared tokens) —
+     * or `null` when the server has none.
+     */
+    @Volatile
+    var theme: Theme? = null
+        internal set
+
     internal val flushScheduled = AtomicBoolean(false)
 
     /**
@@ -199,6 +208,16 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
     private var componentWatcher: ComponentWatcher? = null
     private val serverScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
     private val resourceJsonList = mutableListOf<String>()
+
+    /** The app's theme ([HypenServerBuilder.theme]); every session forks it. */
+    private val theme: Theme?
+
+    /**
+     * Scheme preference of each session that changed it, so a session
+     * resumed within its TTL comes back in the scheme it was left in.
+     * Dropped when the session expires.
+     */
+    private val sessionSchemes = ConcurrentHashMap<String, String>()
     /**
      * When true, each new session (hello via [openConnection], or the legacy
      * [handleConnect]) builds a per-session [ManagedRouter]
@@ -282,6 +301,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         onConnectionCallback = builder.onConnectionCallback
         onDisconnectionCallback = builder.onDisconnectionCallback
         resourceJsonList.addAll(builder.resourceJsonList)
+        theme = builder.theme
         autoRouterEnabled = builder.autoRouterEnabled
         // The device plane is on by default; it never stops the server from
         // starting. Compression is independent of it: permessage-deflate
@@ -400,6 +420,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         sendMessage: suspend (String) -> Unit,
         ackExtras: (Session, JsonObjectBuilder) -> Unit = { _, _ -> },
         afterAck: suspend (ClientState) -> Unit = {},
+        colorScheme: SystemColorScheme? = null,
     ): Established {
         // Try to resume existing session
         var isRestored = false
@@ -479,6 +500,22 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         engine.setRenderCallback { patches ->
             synchronized(clientState.pendingPatches) { clientState.pendingPatches.addAll(patches) }
             if (clientState.ready) scheduleFlush(clientState)
+        }
+
+        // Theme: a per-session scheme preference over the server's shared
+        // tokens, published to this session's engine as the `theme` /
+        // `appearance` data sources before any module exists or renders.
+        // Later changes (a handler calling `context.theme.setScheme(...)`)
+        // re-render through the render callback above like a state update.
+        theme?.let { appTheme ->
+            val sessionTheme = appTheme.fork(sessionSchemes[session.id] ?: appTheme.preference)
+            // The client's own system scheme (`hello.colorScheme`) applies
+            // before the first publish, so a "system" preference paints the
+            // right scheme from the first frame.
+            colorScheme?.let { sessionTheme.setSystemScheme(it) }
+            clientState.theme = sessionTheme
+            sessionTheme.attach(engine)
+            sessionTheme.onChange { meta -> sessionSchemes[session.id] = meta.preference }
         }
 
         clientState.sendMessage = sendMessage
@@ -691,6 +728,8 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         val requested = (msg["sessionId"] as? JsonPrimitive)?.takeIf { it.isString }?.content?.takeIf { it.isNotEmpty() }
         val props = (msg["props"] as? JsonObject)?.mapValues { (_, v) -> v.toKotlinValue() } ?: emptyMap()
         val token = (msg["resumeToken"] as? JsonPrimitive)?.takeIf { it.isString }?.content
+        // Optional; anything but "light" / "dark" is ignored.
+        val colorScheme = parseColorScheme(msg["colorScheme"])
 
         // Device handshake selection (RFC 001 §2.2) is pure and computed
         // before any side effect. The member is strictly decoded from its
@@ -758,6 +797,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                 conn.client = client
                 deviceAck?.let { attachDevicePlane(conn, client, it) }
             },
+            colorScheme = colorScheme,
         )
         when (result) {
             is Established.Rejected -> conn.out.close(1008, "session in use")
@@ -1059,6 +1099,22 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                 applyViewport(client, req, sendMessage)
             }
 
+            "colorScheme" -> {
+                // The client's system color scheme changed (the initial
+                // value travels in `hello.colorScheme`). Per client, like
+                // `viewport`: only THIS session's theme hears it — not an
+                // action, never replayed to other sessions. Ignored when
+                // malformed or when the server has no theme; a session with
+                // an explicit scheme preference only remembers it.
+                val client = clients[connectionKey] ?: return
+                val scheme = parseColorScheme(msg["scheme"])
+                if (scheme == null) {
+                    log.debug("Malformed colorScheme message ignored")
+                    return
+                }
+                applyColorScheme(client, scheme, sendMessage)
+            }
+
             "dispatchAction", "action" -> {
                 val actionName = msg.stringMember("action")
                     ?: msg.stringMember("name")
@@ -1145,6 +1201,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
                     client.nestedModules.clear()
                     client.engine.close()
                     client.scope.cancel()
+                    sessionSchemes.remove(client.sessionId)
                     log.info("Session ${client.sessionId} expired")
                 }
             }
@@ -1213,6 +1270,31 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         // The render callback queues the patches on pendingPatches (with any
         // async-handler deltas not yet flushed); drain them all, in order.
         client.engine.setListViewport(req.listId, req.start, req.end)
+        val patches = synchronized(client.pendingPatches) {
+            client.pendingPatches.toList().also { client.pendingPatches.clear() }
+        }
+        if (patches.isEmpty()) return@withLock patches
+        client.revision++
+        sendPatchBatch(client, patches, send)
+        patches
+    }
+
+    /**
+     * Report a client's system color scheme to its session theme and stream
+     * the re-render as an ordinary `patch` message. Same bookkeeping as
+     * [applyViewport]: under [ClientState.mutex], and a report that changes
+     * nothing on screen (no theme, same scheme, an explicit preference)
+     * sends nothing and bumps no revision.
+     */
+    internal suspend fun applyColorScheme(
+        client: ClientState,
+        scheme: SystemColorScheme,
+        send: (suspend (String) -> Unit)? = null,
+    ): List<Patch> = client.mutex.withLock {
+        val theme = client.theme ?: return@withLock emptyList()
+        // The theme publishes to the session's engine before this returns;
+        // the render callback queues the patches on pendingPatches.
+        theme.setSystemScheme(scheme)
         val patches = synchronized(client.pendingPatches) {
             client.pendingPatches.toList().also { client.pendingPatches.clear() }
         }
@@ -1554,6 +1636,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         // route module the ManagedRouter mounts) bind to the connection's
         // device plane at construction.
         globalContext.devicePlane = client.devicePlane
+        globalContext.setTheme(client.theme)
         client.globalContext = globalContext
 
         // Attach the session's router so per-route modules can read
@@ -1692,6 +1775,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         // built against it bind to the connection's device plane.
         val globalContext = HypenGlobalContext()
         globalContext.devicePlane = client.devicePlane
+        globalContext.setTheme(client.theme)
         client.globalContext = globalContext
 
         // Create new module instance for this client (primary module)
@@ -1880,6 +1964,14 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
             return ViewportRequest(listId, start, end)
         }
 
+        /**
+         * A client-reported system color scheme — the JSON string `"light"`
+         * or `"dark"` (`hello.colorScheme`, or `scheme` of a `colorScheme`
+         * message) — or `null` for anything else. Never throws.
+         */
+        internal fun parseColorScheme(value: JsonElement?): SystemColorScheme? =
+            (value as? JsonPrimitive)?.takeIf { it.isString }?.content?.let { SystemColorScheme.of(it) }
+
         /** A non-negative JSON integer (`40`, `40.0`, `4e1`) clamped to `u32`, or `null`. */
         private fun JsonObject.u32Member(key: String): UInt? {
             val p = this[key] as? JsonPrimitive ?: return null
@@ -1921,6 +2013,7 @@ class HypenServerBuilder {
     internal var watchConfig: ComponentWatchConfig? = null
     internal val resourceJsonList = mutableListOf<String>()
     internal var autoRouterEnabled: Boolean = true
+    internal var theme: Theme? = null
     internal val allowedOrigins = mutableListOf<String>()
     internal var authenticator: (suspend (UpgradeRequest) -> Boolean)? = null
     internal val deviceConfig = DeviceServerConfig()
@@ -2016,6 +2109,23 @@ class HypenServerBuilder {
      */
     fun disableAutoRouter() {
         autoRouterEnabled = false
+    }
+
+    /**
+     * Register the app's theme ([createTheme]). Every session gets its own
+     * fork — an independent scheme preference over the shared tokens —
+     * published as the `theme` / `appearance` data sources before the first
+     * render and reachable from handlers as `context.theme`.
+     *
+     * ```kotlin
+     * HypenServer {
+     *     module("App", appModule)
+     *     theme(createTheme(tokens = tokens, schemes = mapOf("dark" to dark)))
+     * }
+     * ```
+     */
+    fun theme(theme: Theme) {
+        this.theme = theme
     }
 
     /**

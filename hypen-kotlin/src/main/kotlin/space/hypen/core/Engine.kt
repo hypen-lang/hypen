@@ -119,4 +119,18 @@ interface IEngine {
      * Get the current revision number.
      */
     fun getRevision(): ULong = 0u
+
+    /**
+     * Set (or replace) the data-source context [name] — what templates read
+     * as `@name.path` / `@{name.path}` — and re-render the nodes bound to
+     * values that changed. Returns the resulting patches, which are also
+     * delivered to the render callback like those of a state update.
+     */
+    fun setContext(name: String, data: Map<String, Any?>): List<Patch> = emptyList()
+
+    /**
+     * Remove the data-source context [name] and re-render the nodes bound
+     * to it. Returns the resulting patches (also sent to the render callback).
+     */
+    fun removeContext(name: String): List<Patch> = emptyList()
 }

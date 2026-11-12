@@ -201,7 +201,7 @@ fn collect_fixtures(dir: &Path, results: &mut Vec<PathBuf>) {
                 // engine crate and every SDK's device suite).
                 if path
                     .file_name()
-                    .map_or(false, |n| n == "portable" || n == "variant" || n == "device")
+                    .map_or(false, |n| n == "portable" || n == "variant" || n == "device" || n == "theme")
                 {
                     continue;
                 }

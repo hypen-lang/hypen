@@ -104,6 +104,41 @@ class NativeEngine : IEngine, AutoCloseable {
     }
 
     /**
+     * Set (or replace) the data-source context [name] and re-render the
+     * nodes bound to values that changed. Like a state update, the patches
+     * are returned and also handed to the render callback.
+     * @throws EngineError.State if [data] cannot be applied
+     */
+    override fun setContext(name: String, data: Map<String, Any?>): List<Patch> {
+        return try {
+            val patches = native.setContext(name, data.toJsonElement().toString()).map { it.toPatch() }
+            if (patches.isNotEmpty()) {
+                renderCallback?.invoke(patches)
+            }
+            patches
+        } catch (e: HypenException.StateException) {
+            throw EngineError.State(e.v1, e)
+        }
+    }
+
+    /**
+     * Remove the data-source context [name] and re-render the nodes bound
+     * to it. Patches are returned and also handed to the render callback.
+     * @throws EngineError.State if the engine refuses the call
+     */
+    override fun removeContext(name: String): List<Patch> {
+        return try {
+            val patches = native.removeContext(name).map { it.toPatch() }
+            if (patches.isNotEmpty()) {
+                renderCallback?.invoke(patches)
+            }
+            patches
+        } catch (e: HypenException.StateException) {
+            throw EngineError.State(e.v1, e)
+        }
+    }
+
+    /**
      * Register resources from a flat JSON map of name → raw SVG string.
      * Example: `{"heart": "<svg>...</svg>", "search": "<svg>...</svg>"}`
      */

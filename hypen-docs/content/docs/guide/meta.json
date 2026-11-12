@@ -19,6 +19,7 @@
     "persistence",
     "data-sources",
     "i18n",
+    "theming",
     "error-handling"
   ]
 }

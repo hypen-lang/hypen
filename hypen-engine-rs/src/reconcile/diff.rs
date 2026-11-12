@@ -215,6 +215,16 @@ fn create_element_node(
                     module_scope_ref,
                 );
             }
+            Value::SchemeSwitch { .. } => {
+                // Depends on the theme's active scheme (`appearance.scheme`):
+                // a scheme change dirties the node like any data-source
+                // binding and the new value flows out as SetProp/RemoveProp.
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &crate::ir::node::scheme_switch_binding(),
+                    module_scope_ref,
+                );
+            }
             _ => {}
         }
     }
@@ -582,6 +592,16 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
                 ctx.dependencies.add_dependency(
                     node_id,
                     &state_switch_binding(path),
+                    module_scope_ref,
+                );
+            }
+            Value::SchemeSwitch { .. } => {
+                // Depends on the theme's active scheme (`appearance.scheme`):
+                // a scheme change dirties the node like any data-source
+                // binding and the new value flows out as SetProp/RemoveProp.
+                ctx.dependencies.add_dependency(
+                    node_id,
+                    &crate::ir::node::scheme_switch_binding(),
                     module_scope_ref,
                 );
             }

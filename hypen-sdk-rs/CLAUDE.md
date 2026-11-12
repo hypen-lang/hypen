@@ -18,6 +18,8 @@ hypen-sdk-rs/src/
 ├── router.rs       # URL routing with pattern matching
 ├── context.rs      # GlobalContext for cross-module communication
 ├── events.rs       # Typed event emitter
+├── data_source.rs  # ContextSink: data-source contexts (`@name.*`) queued for an engine that is busy dispatching
+├── theme.rs        # Theme: design tokens + color schemes, published as the `theme` / `appearance` contexts
 ├── device/         # Device Capability Protocol (RFC 001): handler API + SessionTransport (mod.rs),
 │                   #   per-connection plane over hypen_engine::device::DeviceBroker (plane.rs),
 │                   #   DeviceServer: optional admission, device options/opt-out, resume tokens

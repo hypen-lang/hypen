@@ -29,6 +29,10 @@ fn css_to_camel_case(name: &str) -> String {
     result
 }
 
+/// Variant key `hypen-tailwind-parse` files `dark:` utilities under; also
+/// the scheme name the resulting switch matches.
+const TAILWIND_DARK_VARIANT: &str = "dark";
+
 /// Expand Tailwind classes into CSS properties
 /// Returns a Vec of (prop_name, value) pairs with `.0` suffix,
 /// consistent with regular applicator props.
@@ -54,6 +58,37 @@ fn expand_tailwind_classes(classes: &str) -> Result<Vec<(String, Value)>, String
     // Add variant properties with suffix notation
     // e.g., "padding@md.0" for responsive, "backgroundColor:hover.0" for state
     for (variant_key, css_props) in &output.variants {
+        // `dark:` is engine-resolved: it turns the property's base value into
+        // a scheme switch (`dark` case over the base as default), exactly
+        // like `.prop({ default: …, dark: … })`. Combined forms
+        // (`dark:md:…`) are not supported and keep their legacy key.
+        if variant_key == TAILWIND_DARK_VARIANT {
+            for css_prop in css_props {
+                let key = format!("{}.0", css_to_camel_case(&css_prop.property));
+                let mut cases = indexmap::IndexMap::new();
+                cases.insert(
+                    TAILWIND_DARK_VARIANT.to_string(),
+                    serde_json::Value::String(css_prop.value.clone()),
+                );
+                match props.iter_mut().find(|(k, _)| *k == key) {
+                    Some((_, value)) => {
+                        let default = match value {
+                            Value::Static(v) => Some(v.clone()),
+                            _ => None,
+                        };
+                        *value = Value::SchemeSwitch { cases, default };
+                    }
+                    None => props.push((
+                        key,
+                        Value::SchemeSwitch {
+                            cases,
+                            default: None,
+                        },
+                    )),
+                }
+            }
+            continue;
+        }
         for css_prop in css_props {
             let camel = css_to_camel_case(&css_prop.property);
             let prop_key = format!("{}{}.0", camel, variant_key);
@@ -389,10 +424,16 @@ fn process_applicators(
             } = &applicator.arguments.arguments[0]
             {
                 if !map.is_empty()
-                    && map
-                        .keys()
-                        .all(|k| crate::portable::variant::is_variant_token(k))
+                    && map.keys().all(|k| {
+                        crate::portable::variant::is_variant_token(k)
+                            || crate::portable::variant::is_scheme_token(k)
+                    })
                 {
+                    // Color-scheme keys (`light` / `dark`) are resolved by the
+                    // engine, not the renderer: together with `default` they
+                    // become ONE scheme-switched base prop (`<name>.0`), on
+                    // top of which breakpoint / state variants layer as usual.
+                    let scheme_base = lower_scheme_variants(&applicator.name, map);
                     // Emit in canonical precedence order (default, then
                     // breakpoints ascending, then states). The parser's map is
                     // a `HashMap`, so its iteration order is arbitrary — and
@@ -404,7 +445,16 @@ fn process_applicators(
                     entries.sort_by_key(|(variant, _)| {
                         crate::portable::variant::variant_token_rank(variant)
                     });
+                    if let Some(base) = &scheme_base {
+                        props.insert(format!("{}.0", applicator.name), base.clone());
+                    }
                     for (variant, value) in entries {
+                        if crate::portable::variant::is_scheme_token(variant)
+                            || (scheme_base.is_some()
+                                && variant == crate::portable::variant::DEFAULT_KEY)
+                        {
+                            continue;
+                        }
                         let prop_key = if variant == crate::portable::variant::DEFAULT_KEY {
                             format!("{}.0", applicator.name)
                         } else if crate::portable::variant::is_breakpoint(variant) {
@@ -1923,7 +1973,9 @@ pub(crate) fn parser_value_to_ir(value: &ParserValue) -> Value {
                     Value::Resource(s) => serde_json::json!(format!("@resources.{}", s)),
                     // Unreachable: parser_value_to_ir never produces a
                     // StateSwitch — it only exists via `.states` lowering.
-                    Value::StateSwitch { .. } => serde_json::Value::Null,
+                    Value::StateSwitch { .. } | Value::SchemeSwitch { .. } => {
+                        serde_json::Value::Null
+                    }
                 })
                 .collect();
             Value::Static(serde_json::json!(converted))
@@ -1955,7 +2007,7 @@ pub(crate) fn parser_value_to_ir(value: &ParserValue) -> Value {
                     }
                     // Unreachable: parser_value_to_ir never produces a
                     // StateSwitch — it only exists via `.states` lowering.
-                    Value::StateSwitch { .. } => {}
+                    Value::StateSwitch { .. } | Value::SchemeSwitch { .. } => {}
                 }
             }
             Value::Static(serde_json::Value::Object(json_map))
@@ -2042,6 +2094,52 @@ pub(crate) fn propagate_module_scope_ir_node(node: &mut IRNode, scope: &str) {
             *module_scope = Some(scope.to_string());
         }
     });
+}
+
+/// Lower the color-scheme keys of a value-map applicator
+/// (`.color({ default: "#111", dark: "#fff" })`) into the scheme-switched
+/// base value for `<name>.0`. `None` when the map has no `light` / `dark`
+/// key — or when the scheme form cannot be honoured, in which case the keys
+/// are dropped with a warning and `default` is lowered as usual.
+///
+/// Scheme values and the `default` beside them must be literals: the switch
+/// stores plain JSON, so a binding there could not be resolved (use a theme
+/// token — `@theme.color.ink` already follows the scheme — or an expression
+/// on `appearance.scheme`).
+fn lower_scheme_variants(
+    applicator: &str,
+    map: &std::collections::HashMap<String, ParserValue>,
+) -> Option<Value> {
+    use crate::portable::variant::{is_scheme_token, DEFAULT_KEY};
+
+    if !map.keys().any(|k| is_scheme_token(k)) {
+        return None;
+    }
+    let literal = |key: &str, value: &ParserValue| match parser_value_to_ir(value) {
+        Value::Static(v) => Some(v),
+        _ => {
+            crate::log_warn!(
+                crate::logger::LogScope::Engine,
+                ".{}: '{}' must be a literal when the map has light/dark keys; the light/dark values are ignored (use a theme token or an expression on appearance.scheme)",
+                applicator,
+                key
+            );
+            None
+        }
+    };
+
+    let default = match map.get(DEFAULT_KEY) {
+        Some(value) => Some(literal(DEFAULT_KEY, value)?),
+        None => None,
+    };
+    // `light` before `dark`, independent of the parser's map order.
+    let mut cases = indexmap::IndexMap::new();
+    for scheme in crate::portable::variant::SCHEMES {
+        if let Some(value) = map.get(*scheme) {
+            cases.insert((*scheme).to_string(), literal(scheme, value)?);
+        }
+    }
+    Some(Value::SchemeSwitch { cases, default })
 }
 
 #[cfg(test)]

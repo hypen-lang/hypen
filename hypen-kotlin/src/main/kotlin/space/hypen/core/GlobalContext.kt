@@ -70,6 +70,15 @@ interface GlobalContext {
     fun getRouter(): HypenRouter? = null
 
     /**
+     * The app's theme ([createTheme]), or `null` when none is registered:
+     * `context.theme?.setScheme("dark")`, `context.theme?.toggle()`,
+     * `context.theme?.scheme`, `context.theme?.token("color.primary")`.
+     * Under [HypenServer] this is the session's own fork.
+     */
+    val theme: Theme?
+        get() = null
+
+    /**
      * Device Capability Protocol access (RFC 001 §4) for the module whose
      * lifecycle callback (`onCreated` / `onActivated` / `onDeactivated` /
      * `onDestroyed`) received this context, scoped to that module's current
@@ -90,6 +99,8 @@ internal class DeviceScopedGlobalContext(
     override val device: DeviceContext,
 ) : GlobalContext by delegate {
     override fun getRouter(): HypenRouter? = delegate.getRouter()
+
+    override val theme: Theme? get() = delegate.theme
 
     /** The shared context this view wraps (e.g. a [HypenGlobalContext]). */
     val shared: GlobalContext get() = delegate
@@ -128,6 +139,20 @@ class HypenGlobalContext : GlobalContext {
     }
 
     override fun getRouter(): HypenRouter? = router
+
+    @Volatile
+    private var installedTheme: Theme? = null
+
+    override val theme: Theme? get() = installedTheme
+
+    /**
+     * Install the app's theme so handlers reach it as `context.theme`
+     * (done by [HypenServer]; call it yourself when embedding an engine,
+     * next to `theme.attach(engine)`).
+     */
+    fun setTheme(theme: Theme?) {
+        installedTheme = theme
+    }
 
     /**
      * Register a module with the context

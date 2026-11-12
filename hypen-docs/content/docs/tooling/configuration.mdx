@@ -29,6 +29,7 @@ All fields:
 | `port` | `number` | `3000` | Dev server port (`--port` overrides it) |
 | `outDir` | `string` | `"dist"` | Production build output directory (`--outDir` overrides it) |
 | `a11y` | `object` | none | `{ "ignoreRules": ["rule-id"], "dev": true }`. `ignoreRules` suppresses those rules in `hypen check` and `hypen dev --a11y`; `dev: true` prints findings on every `hypen dev` rebuild without the flag |
+| `theme` | `string` | `"./theme.json"` when it exists | Path of the [theme file](/docs/guide/theming#the-theme-file). `hypen check` validates `@theme.*` references against it and `hypen theme export` reads it |
 
 ### Server-based projects
 

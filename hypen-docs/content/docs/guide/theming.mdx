@@ -1,0 +1,215 @@
+---
+title: Theming
+description: Design tokens, light and dark schemes, and following the system appearance
+---
+
+# Theming
+
+Hypen apps are themed with **one theme instance per app**. It owns the design tokens and the active color scheme, and publishes them to the engine the same way a [data source](/docs/guide/data-sources) does, so templates bind tokens reactively and switching scheme re-renders exactly the props whose token changed.
+
+```
+createTheme(...) → setContext("theme", tokens) + setContext("appearance", { scheme }) → re-render
+```
+
+<Callout>
+Tokens are resolved by the engine, so they work on every renderer. The theme API exists in the TypeScript, Go, Kotlin and Rust SDKs; the Swift server SDK does not have it yet (see [Current limits](#current-limits)).
+</Callout>
+
+## Setup
+
+Declare the tokens once, with per-scheme overrides, and hand the theme to the runtime:
+
+```typescript
+import { createTheme } from "@hypen-space/core";
+import { Hypen } from "@hypen-space/web-engine";
+
+const theme = createTheme({
+  tokens: {
+    color: {
+      brand: "#0066ff",
+      primary: "{color.brand}", // an alias: follows whatever color.brand is
+      surface: "#ffffff",
+      ink: "#111111",
+    },
+    space: { sm: 8, md: 16, lg: 24 },
+    radius: { md: 8 },
+  },
+  schemes: {
+    dark: { color: { brand: "#66a3ff", surface: "#111111", ink: "#f5f5f5" } },
+  },
+});
+
+const hypen = new Hypen({ theme });
+await hypen.init();
+await hypen.render("App", "#app");
+```
+
+For a Remote UI server, register it on the server. Every session gets its own fork: its own scheme preference over the shared tokens.
+
+```typescript
+new RemoteServer().module("App", appModule).theme(theme).listen(3000);
+```
+
+### Other SDKs
+
+The Go, Kotlin and Rust SDKs have the same theme with the same resolution rules (they share one fixture). Registration follows each SDK's own shape:
+
+```go
+theme := hypen.NewTheme(hypen.ThemeOptions{Tokens: tokens, Schemes: map[string]hypen.Tokens{"dark": dark}})
+remote.NewRemoteServer().Theme(theme) // one fork per session; handlers: ctx.Theme().Toggle()
+```
+
+```kotlin
+val theme = createTheme(tokens = tokens, schemes = mapOf("dark" to dark))
+HypenServer { theme(theme) }          // one fork per session; handlers: ctx.context?.theme?.toggle()
+```
+
+```rust
+let theme = Theme::builder().tokens(tokens).scheme_tokens("dark", dark).build();
+let app = HypenApp::builder().theme(theme.clone());           // in-process modules
+let session = RemoteSession::new(/* … */).with_theme(&theme); // one fork per session
+```
+
+## The theme file
+
+Keep the tokens in a JSON file, `theme.json` in the project root (or wherever hypen.json's `"theme"` points), and pass it to `createTheme`. It is the JSON form of the options above:
+
+```json
+{
+  "tokens": {
+    "color": { "brand": "#0066ff", "primary": "{color.brand}", "surface": "#ffffff" },
+    "space": { "md": 16 }
+  },
+  "schemes": {
+    "dark": { "color": { "brand": "#66a3ff", "surface": "#111111" } }
+  }
+}
+```
+
+```typescript
+import themeJson from "../theme.json";
+
+const theme = createTheme(themeJson);
+```
+
+With the tokens in a file, the tooling can read them too:
+
+- [`hypen check`](/docs/tooling/cli#template-checks) reports `unknown-theme-token` for a `@theme.x.y` that the file does not define, or defines only for some schemes, and for aliases in the file that point nowhere or form a cycle.
+- The language server squiggles the same references while you type.
+- [`hypen theme export`](#exporting-tokens) writes the tokens for CSS, Android and iOS.
+
+## Using tokens in templates
+
+Tokens are read through the `theme` source, anywhere a binding is accepted:
+
+```hypen
+Column {
+    Text("Hello")
+        .color(@theme.color.ink)
+        .padding(@theme.space.md)
+    Text("Scheme: @{appearance.scheme}")
+}
+.backgroundColor(@theme.color.surface)
+.borderRadius(@theme.radius.md)
+```
+
+`appearance` carries `{ scheme, preference, system, schemes }`: the scheme in effect, what was asked for (a scheme name or `"system"`), what the platform reports, and the scheme names that have overrides.
+
+Token keys may use letters, digits and `_`. Other keys (`2-xl`, `on.surface`) cannot be addressed from a template and are reported when the theme is created.
+
+## Schemes
+
+A scheme is a set of overrides merged over the base tokens. `light` and `dark` always exist, even with no overrides; any other name you define (`sepia`, `highContrast`) is selected explicitly.
+
+The preference defaults to `"system"`, which follows the platform. In the browser, `Hypen` wires this to `prefers-color-scheme` for you; elsewhere, report it with `theme.setSystemScheme("dark")`.
+
+Handlers reach the theme as `context.theme`:
+
+```typescript
+app
+  .defineState({})
+  .onAction("toggleTheme", ({ context }) => context.theme?.toggle())
+  .onAction("useSepia", ({ context }) => context.theme?.setScheme("sepia"))
+  .onAction("followSystem", ({ context }) => context.theme?.setScheme("system"));
+```
+
+| Member | What it does |
+|---|---|
+| `scheme` | The scheme in effect (never `"system"`) |
+| `preference` | A scheme name or `"system"` |
+| `setScheme(name)` | Select a scheme or `"system"`; throws for an unknown name |
+| `toggle()` | Flip between `light` and `dark` |
+| `setSystemScheme(s)` | Report the platform's scheme |
+| `token(path)` / `has(path)` | Read a token in the active scheme |
+| `extend(tokens, scheme?)` | Merge more tokens into the base set or one scheme |
+| `cssVariables()` | The active tokens as CSS custom properties (`--color-primary`) |
+| `onChange(fn)` | Listen for scheme and token changes |
+
+A change updates `scheme` and `token()` immediately and reaches the engine in the next microtask, like a state mutation, so several changes in one handler render once.
+
+For a one-off value that differs by scheme without adding a token, use `light` / `dark` keys in a value map:
+
+```hypen
+Text("Beta").color({default: "#8A6D00", dark: "#FFD54F"})
+```
+
+The engine picks the entry for the active scheme and falls back to `default`; see [Color Scheme Variants](/docs/guide/styling#color-scheme-variants). The values must be literals, and only `light` and `dark` are recognised as keys. For a custom scheme, or a value computed from state, switch on `appearance.scheme` in an expression:
+
+```hypen
+Text("Beta").color("@{appearance.scheme == 'sepia' ? '#5B4636' : '#8A6D00'}")
+```
+
+## Remote UI
+
+Each session's theme follows **its client's** system scheme. `RemoteEngine` reads `prefers-color-scheme` where the runtime has `matchMedia`, sends it in the `hello` (so the first frame is already in the right scheme) and again whenever it changes. Hosts without `matchMedia` report it themselves:
+
+```typescript
+const engine = new RemoteEngine(url, { colorScheme: "dark" }); // or "auto" (default), or false
+engine.setColorScheme("light"); // when the platform's appearance changes
+```
+
+On the wire that is `hello.colorScheme` and a `{ "type": "colorScheme", "scheme": "light" | "dark" }` message; servers without a theme ignore both. The TypeScript, Go, Kotlin and Rust servers all read them. A session resumed within its TTL keeps its scheme preference; in the Rust SDK, where the host constructs sessions, pass it back with `suspend_session_with_theme` and `with_theme_preference`. An explicit `setScheme` in a handler still wins until the session goes back to `"system"`.
+
+## Aliases
+
+A token whose whole value is `"{path.to.token}"` takes the value of that token. Aliases are resolved after the scheme merge, so a semantic token defined once in the base set follows a scheme that overrides its target. They can chain and can point at a group. A missing or cyclic alias is reported and left as written.
+
+## The render root
+
+The DOM renderer sets `data-hypen-scheme` on the render root and, for `light` and `dark`, the CSS `color-scheme` property, so native form controls and scrollbars match. To style the page around the Hypen root from the same tokens:
+
+```typescript
+const apply = () => {
+  for (const [name, value] of Object.entries(theme.cssVariables())) {
+    document.documentElement.style.setProperty(name, value);
+  }
+};
+apply();
+theme.onChange(apply);
+```
+
+## Exporting tokens
+
+`hypen theme export` writes the theme file's tokens in each platform's own form, for the parts of an app that live outside Hypen (a native shell, a marketing page):
+
+```bash
+hypen theme export                      # css, android and ios into ./theme-export
+hypen theme export --format css --outDir public
+```
+
+| Format | Output |
+|---|---|
+| `css` | `theme.css`: custom properties on `:root`, each scheme's differences under `[data-hypen-scheme="…"]`, and `dark` under `prefers-color-scheme` as well |
+| `android` | `values/hypen_theme.xml` and `values-night/hypen_theme.xml`: hex colors as `<color>`, numbers as `<dimen>` in dp, booleans as `<bool>`, other strings as `<string>` |
+| `ios` | `HypenTheme.xcassets` with a color set per hex color (light and dark appearances) and `HypenTheme.swift` with the tokens as constants |
+
+Only `light` and `dark` have a native slot, so other schemes appear in the CSS output only. Colors must be hex (`#rgb`, `#rrggbb`, `#rrggbbaa`) to become native color resources; anything else is exported as a string and listed in the command's output.
+
+## Persistence
+
+The scheme preference is not stored for you in the browser; save `theme.preference` from `onChange` and pass it back as `createTheme({ scheme })`. A Remote UI session's preference is part of its [session snapshot](/docs/guide/persistence) and comes back on resume.
+
+## Current limits
+
+- The Android, iOS and desktop preview clients do not report their system scheme yet, so a `"system"` preference resolves to the theme's `systemScheme` (default `light`) for them until a handler calls `setSystemScheme`. The web client and the Go client do report it.
+- The Swift server SDK has no theme API.

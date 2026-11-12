@@ -52,6 +52,8 @@ export interface SessionSnapshot {
   device?: true;
   /** The session's active i18n locale, when the host registered `i18n`. */
   locale?: string;
+  /** The session's theme scheme preference, when the host registered `theme`. */
+  scheme?: string;
 }
 
 /** Above this many nodes the tree is not snapshotted (re-targeting is skipped). */

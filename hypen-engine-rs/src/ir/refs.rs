@@ -62,6 +62,9 @@ pub enum CheckRule {
     UnknownComponent,
     /// `@item…` used where no ForEach/List/Grid can supply a row.
     ItemOutsideLoop,
+    /// `@theme.x.y` naming a token the project's theme file does not define
+    /// (in every scheme, or only in some).
+    UnknownThemeToken,
     /// A `// hypen-check-ignore` directive names a rule id that does not
     /// exist, so that entry suppresses nothing.
     UnknownIgnoreRule,
@@ -74,6 +77,7 @@ pub const ALL_CHECK_RULES: &[CheckRule] = &[
     CheckRule::UnknownAction,
     CheckRule::UnknownComponent,
     CheckRule::ItemOutsideLoop,
+    CheckRule::UnknownThemeToken,
     CheckRule::UnknownIgnoreRule,
 ];
 
@@ -91,6 +95,11 @@ impl CheckRule {
 pub fn all_check_rule_ids() -> Vec<String> {
     ALL_CHECK_RULES.iter().map(|rule| rule.id()).collect()
 }
+
+/// The data-source provider a theme publishes its tokens under
+/// (`@theme.color.primary`). References to it are reported even from inside
+/// expressions, so `unknown-theme-token` can be judged there too.
+pub const THEME_PROVIDER: &str = "theme";
 
 /// The directive token that suppresses template-check findings.
 pub const CHECK_IGNORE_TOKEN: &str = "hypen-check-ignore";
@@ -580,9 +589,11 @@ impl Collector<'_> {
                     let from_expression = !direct.contains(&b.full_path_with_source());
                     // Expression extraction also turns any `ident.path`
                     // (`Math.round`, quoted text) into a data-source binding;
-                    // only a name an enclosing loop declares is meaningful.
+                    // only a name an enclosing loop declares is meaningful —
+                    // and the reserved `theme` provider, whose tokens the
+                    // host can check against the project's theme file.
                     if from_expression
-                        && matches!(b.source, BindingSource::DataSource(_))
+                        && matches!(&b.source, BindingSource::DataSource(name) if name != THEME_PROVIDER)
                         && ctx.frame_for(b).is_none()
                     {
                         continue;
@@ -598,7 +609,9 @@ impl Collector<'_> {
             // Lists/maps keep nested references as strings (`"@{item.id}"`,
             // `"@actions.x"`) — see `parser_value_to_ir`.
             Value::Static(json) => self.static_json(json, ctx, site),
-            Value::Resource(_) => {}
+            // Literal-only, and its one dependency (`appearance.scheme`) is
+            // engine-chosen rather than something the template wrote.
+            Value::Resource(_) | Value::SchemeSwitch { .. } => {}
         }
     }
 
@@ -893,6 +906,7 @@ mod tests {
             CheckRule::UnknownAction,
             CheckRule::UnknownComponent,
             CheckRule::ItemOutsideLoop,
+            CheckRule::UnknownThemeToken,
             CheckRule::UnknownIgnoreRule,
         ];
         for rule in every {
@@ -902,6 +916,7 @@ mod tests {
                 | CheckRule::UnknownAction
                 | CheckRule::UnknownComponent
                 | CheckRule::ItemOutsideLoop
+                | CheckRule::UnknownThemeToken
                 | CheckRule::UnknownIgnoreRule => {}
             }
             assert!(ALL_CHECK_RULES.contains(&rule));
@@ -914,9 +929,24 @@ mod tests {
                 "unknown-action",
                 "unknown-component",
                 "item-outside-loop",
+                "unknown-theme-token",
                 "unknown-ignore-rule",
             ]
         );
+    }
+
+    #[test]
+    fn theme_refs_inside_expressions_are_reported_and_located() {
+        let src = "Column {\n    Text(\"@{appearance.scheme == 'dark' ? theme.color.a : theme.color.b}\")\n    Text(\"@{Math.round(state.n)}\")\n}";
+        let r = refs(src);
+        let ds = of_kind(&r, RefKind::DataSource);
+        let names: Vec<&str> = ds.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["theme.color.a", "theme.color.b"]);
+        assert!(ds
+            .iter()
+            .all(|d| d.from_expression && d.root.as_deref() == Some("theme")));
+        assert_eq!(ds[0].line, Some(2));
+        assert!(ds[0].col < ds[1].col);
     }
 
     #[test]

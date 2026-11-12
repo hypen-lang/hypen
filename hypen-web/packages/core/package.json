@@ -63,6 +63,12 @@
       "import": "./dist/i18n.js",
       "default": "./dist/i18n.js"
     },
+    "./theme": {
+      "types": "./dist/theme.d.ts",
+      "bun": "./src/theme.ts",
+      "import": "./dist/theme.js",
+      "default": "./dist/theme.js"
+    },
     "./remote": {
       "types": "./dist/remote/index.d.ts",
       "bun": "./src/remote/index.ts",

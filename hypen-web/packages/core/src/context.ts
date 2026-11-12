@@ -7,6 +7,7 @@ import { getStateSnapshot } from "./state.js";
 import { TypedEventEmitter, type HypenFrameworkEvents } from "./events.js";
 import { frameworkLoggers } from "./logger.js";
 import type { I18n } from "./i18n.js";
+import type { Theme } from "./theme.js";
 
 const log = frameworkLoggers.context;
 
@@ -35,6 +36,7 @@ export class HypenGlobalContext<TEvents extends Record<string, unknown> = HypenF
   private modules = new Map<string, HypenModuleInstance>();
   private typedEvents: TypedEventEmitter<TEvents & Record<string, unknown>>;
   private _i18n: I18n | null = null;
+  private _theme: Theme | null = null;
 
   constructor() {
     this.typedEvents = new TypedEventEmitter<TEvents & Record<string, unknown>>();
@@ -58,6 +60,19 @@ export class HypenGlobalContext<TEvents extends Record<string, unknown> = HypenF
   /** Install the app's i18n instance (done by the Hypen / RemoteServer runtime). */
   setI18n(i18n: I18n | null): void {
     this._i18n = i18n;
+  }
+
+  /**
+   * The app's theme (`createTheme`), or `null` when the app has none.
+   * Handlers reach it as `context.theme`.
+   */
+  get theme(): Theme | null {
+    return this._theme;
+  }
+
+  /** Install the app's theme (done by the Hypen / RemoteServer runtime). */
+  setTheme(theme: Theme | null): void {
+    this._theme = theme;
   }
 
   /**

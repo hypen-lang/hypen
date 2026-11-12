@@ -794,13 +794,23 @@ fn deadlines_settle_through_the_timer_thread() {
     assert!(msgs
         .iter()
         .any(|m| m["id"] == req["id"] && m["control"] == json!({"cancel": true})));
-    let ui = rig.ui.lock().unwrap();
-    assert!(
-        ui[ui_before..]
+    // The timer thread writes the result into the session state first and
+    // sends the patch right after, so the state can be visible a moment
+    // before the patch is: wait for it instead of asserting at once.
+    let start = Instant::now();
+    loop {
+        let sent = rig.ui.lock().unwrap()[ui_before..]
             .iter()
-            .any(|m| m.contains("\"type\":\"patch\"")),
-        "patch via the sink"
-    );
+            .any(|m| m.contains("\"type\":\"patch\""));
+        if sent {
+            break;
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "patch via the sink"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
 }
 
 #[test]
