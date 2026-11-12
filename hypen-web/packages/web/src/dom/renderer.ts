@@ -1740,13 +1740,15 @@ export class DOMRenderer {
         if (currentTemplate !== nextText) {
           element.dataset.textTemplate = nextText;
         }
-      } else if (currentTemplate === undefined) {
-        // No template stored yet; treat this as the template.
-        element.dataset.textTemplate = nextText;
       }
-      // else: keep the stored value as-is. A stored template must survive
+      // else: keep whatever is stored. A stored template must survive
       // interpolated (plain) output or future state updates can't
       // re-interpolate; a stored plain value going stale changes nothing.
+      // And with nothing stored, a plain value is not stored either: the
+      // one reader ignores it, and a row cloned from a template has no
+      // marker for its item-bound text, so "store it the first time" was
+      // an attribute write on every such element's first text update —
+      // 1,000 of them when a list's rows all change once.
       this.syncTextBinding(id, element);
       log.debug(`Updated text content: "${value}"`);
       return;
