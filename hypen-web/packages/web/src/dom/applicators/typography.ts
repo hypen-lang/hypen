@@ -5,20 +5,68 @@
 import type { ApplicatorHandler } from "./types.js";
 import { toCssLength } from "./size.js";
 
-export const typographyHandlers: Record<string, ApplicatorHandler> = {
-  textAlign: (el, value) => {
-    const v = String(value);
-    el.style.textAlign = v;
-    // Mirror `font.ts#textAlign`: stretch + block so non-left alignments
-    // actually have room to act in a shrink-to-fit `Text` element.
-    if (v === "center" || v === "right" || v === "end" || v === "justify") {
-      if (!el.style.alignSelf) el.style.alignSelf = "stretch";
-      if (!el.style.width) el.style.width = "100%";
-      if (el.style.display === "inline-block" || !el.style.display) {
-        el.style.display = "block";
-      }
+/**
+ * The cross-axis fill a non-start `textAlign` asks for, as a stylesheet rule
+ * rather than inline styles.
+ *
+ * `text-align: center | right | end | justify` only shows when the box is
+ * wider than its text, so an aligned element fills its parent's width. That
+ * fill used to be written inline (`align-self: stretch; width: 100%`)
+ * without knowing the parent, which is wrong in a horizontal parent: in a
+ * Row, `align-self` is the VERTICAL axis (the text stretched to the row's
+ * height and sat at the top, ignoring the Row's vertical alignment) and
+ * `width: 100%` took the whole row (an unread badge filled its row). The
+ * native renderers fill the available width but never the cross axis of a
+ * row, and never override the row's own alignment.
+ *
+ * The rule fills only outside horizontal parents. Both selectors are
+ * zero-specificity (`:where`), so any explicit `alignSelf` / `width` — inline
+ * or a variant class — still wins, as the old `if (!el.style.alignSelf)`
+ * guards intended.
+ */
+const TEXT_FILL_STYLE_ID = "hypen-text-align-fill";
+const TEXT_FILL_CSS = `
+:where([data-hypen-text-fill]) { align-self: stretch; justify-self: stretch; }
+:where([data-hypen-type="row"], [data-hypen-type="center"], [data-hypen-type="badge"]) > :where([data-hypen-text-fill]) {
+  align-self: auto;
+  justify-self: auto;
+}
+`;
+
+function ensureTextFillStyles(): void {
+  if (typeof document === "undefined" || !document.head) return;
+  if (typeof document.getElementById === "function" && document.getElementById(TEXT_FILL_STYLE_ID)) {
+    return;
+  }
+  const style = document.createElement("style");
+  style.id = TEXT_FILL_STYLE_ID;
+  style.textContent = TEXT_FILL_CSS;
+  document.head.appendChild(style);
+}
+
+/** Shared by `font.ts` and this module (the later registration wins). */
+export const applyTextAlign: ApplicatorHandler = (el, value) => {
+  if (value === null || value === undefined) {
+    el.style.removeProperty("text-align");
+    delete el.dataset.hypenTextFill;
+    return;
+  }
+  const v = String(value);
+  el.style.textAlign = v;
+  if (v === "center" || v === "right" || v === "end" || v === "justify") {
+    ensureTextFillStyles();
+    el.dataset.hypenTextFill = "";
+    // A shrink-to-fit `Text` (inline-block) cannot take the fill.
+    if (el.style.display === "inline-block" || !el.style.display) {
+      el.style.display = "block";
     }
-  },
+  } else {
+    delete el.dataset.hypenTextFill;
+  }
+};
+
+export const typographyHandlers: Record<string, ApplicatorHandler> = {
+  textAlign: applyTextAlign,
 
   textTransform: (el, value) => {
     el.style.textTransform = String(value);

@@ -897,6 +897,8 @@ describe("DOMRenderer size applicator removal", () => {
     renderer.applyPatches(
       sizes.map((s) => ({ type: "removeProp", id: "list", name: `${s}.0` }) as Patch),
     );
-    for (const s of sizes) expect((el.style as any)[s]).toBe("");
+    // Removed outright now (`removeProperty`); fake-dom reports an unset
+    // declaration as `undefined` where a real CSSStyleDeclaration says "".
+    for (const s of sizes) expect((el.style as any)[s] ?? "").toBe("");
   });
 });

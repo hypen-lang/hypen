@@ -382,6 +382,12 @@ export class DOMRenderer {
        */
       mask: boolean[];
       /**
+       * The prototype's template-node elements, in engine (DFS) order. Each
+       * clone element is linked to its prototype element so a later
+       * RemoveProp knows what the prototype's applicators wrote.
+       */
+      protoNodes: HTMLElement[];
+      /**
        * Template nodes whose text carries a client-side `@{state.…}`
        * template, with the segments compiled once: every clone registers
        * exactly these bindings, so instantiation does not probe each Text
@@ -1208,12 +1214,14 @@ export class DOMRenderer {
 
     const proto = build(root);
     const mask: boolean[] = [];
+    const protoNodes: HTMLElement[] = [];
     const textBindings: Array<{ index: number; template: string; segments: TemplateSegment[]; paths: string[] }> = [];
     let index = 0;
     walkElements(proto, (el) => {
       const isTemplateNode = el.dataset.hypenType !== undefined;
       mask.push(isTemplateNode);
       if (!isTemplateNode) return;
+      protoNodes.push(el);
       const template = types[index] === "text" ? el.dataset.textTemplate : undefined;
       if (template && template.includes("@{")) {
         textBindings.push({ index, template, ...compileTextBinding(template) });
@@ -1226,6 +1234,7 @@ export class DOMRenderer {
       statics,
       types,
       mask,
+      protoNodes,
       textBindings,
       subAppliers: [],
     });
@@ -1304,6 +1313,8 @@ export class DOMRenderer {
       // No `setEngine` per node: `getEngine` resolves through the mounted
       // ancestors, and the per-element WeakMap write was ~17k per create.
       this.nodes.set(ids[i], element);
+      const protoNode = entry.protoNodes[i];
+      if (protoNode) this.applicators.linkClone(element, protoNode);
       // Seed the prop cache from the prototype's static props, exactly as
       // onCreate does from a Create patch. A clone that skipped this had an
       // empty set, so the first SetProp on it recomputed every other prop
