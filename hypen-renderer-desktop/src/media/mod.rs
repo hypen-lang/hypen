@@ -582,7 +582,9 @@ pub(crate) fn prop_truthy(node: &crate::tree::Node, name: &str) -> bool {
 
 /// The node's `playlist` prop as an ordered list of URLs. Entries are
 /// trimmed but NOT filtered — indexes must stay aligned with the
-/// authored array (contract payloads carry the index).
+/// authored array (contract payloads carry the index). Each entry is
+/// resolved under the node's own asset origin
+/// ([`crate::paint::image::node_source`]); a refused one becomes `""`.
 pub(crate) fn resolve_playlist(node: &crate::tree::Node) -> Vec<String> {
     node.props
         .get("playlist")
@@ -590,7 +592,12 @@ pub(crate) fn resolve_playlist(node: &crate::tree::Node) -> Vec<String> {
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .map(|v| v.as_str().map(str::trim).unwrap_or_default().to_string())
+                .map(|v| {
+                    let s = v.as_str().map(str::trim).unwrap_or_default();
+                    crate::paint::image::node_source(node, s)
+                        .map(std::borrow::Cow::into_owned)
+                        .unwrap_or_default()
+                })
                 .collect()
         })
         .unwrap_or_default()

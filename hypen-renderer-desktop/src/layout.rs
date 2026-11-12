@@ -5878,18 +5878,23 @@ fn dim_to_dimension(d: Dim, scale: f32) -> Dimension {
 
 /// Resolve a Video node's `poster` prop. Empty / whitespace strings
 /// collapse to `None` (a record with no poster serialises to `""`).
+/// Resolved under the node's own asset origin
+/// ([`crate::paint::image::node_source`]); a refused source is `None`.
 pub(crate) fn resolve_media_poster(node: &crate::tree::Node, viewport: Viewport) -> Option<String> {
     crate::style::prop_str_at(node, "poster", viewport)
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_string)
+        .and_then(|s| crate::paint::image::node_source(node, s))
+        .map(std::borrow::Cow::into_owned)
 }
 
 /// Resolve a Video node's current track: `(src, playlist index)`.
 /// Follows the cross-platform contract (`hypen-docs/content/docs/guide/components.mdx`):
 /// a non-empty `playlist` supersedes `src` / `source` / positional
 /// `0`, starting at `startIndex` clamped to the valid range. `index`
-/// is `0` for single-src playback.
+/// is `0` for single-src playback. The source is resolved under the
+/// node's own asset origin ([`crate::paint::image::node_source`]); a
+/// refused one is `None`.
 pub(crate) fn resolve_media_src(
     node: &crate::tree::Node,
     viewport: Viewport,
@@ -5910,7 +5915,8 @@ pub(crate) fn resolve_media_src(
                 .and_then(|v| v.as_str())
                 .map(str::trim)
                 .filter(|s| !s.is_empty())
-                .map(str::to_string);
+                .and_then(|s| crate::paint::image::node_source(node, s))
+                .map(std::borrow::Cow::into_owned);
             return (src, idx as u64);
         }
     }
@@ -5919,7 +5925,8 @@ pub(crate) fn resolve_media_src(
         .or_else(|| node.props.get("0").and_then(|v| v.as_str()))
         .map(str::trim)
         .filter(|s| !s.is_empty())
-        .map(str::to_string);
+        .and_then(|s| crate::paint::image::node_source(node, s))
+        .map(std::borrow::Cow::into_owned);
     (src, 0)
 }
 
@@ -6144,7 +6151,8 @@ fn image_natural_size(node: &crate::tree::Node) -> Option<(f32, f32)> {
         .get("src")
         .or_else(|| node.props.get("0"))
         .and_then(|value| value.as_str())
-        .and_then(probe_natural_size)
+        .and_then(|src| crate::paint::image::node_source(node, src))
+        .and_then(|src| probe_natural_size(&src))
         .filter(|(w, h)| *w > 0.0 && *h > 0.0)
 }
 
@@ -7414,8 +7422,9 @@ fn emit_items(
                         if et.eq_ignore_ascii_case("Avatar") && !declares_corner_radius(node) {
                             item_border.radius = rect.w.min(rect.h) * 0.5 / scale;
                         }
-                        let src =
-                            crate::style::prop_str_at(node, "src", viewport).map(str::to_string);
+                        let src = crate::style::prop_str_at(node, "src", viewport)
+                            .and_then(|s| crate::paint::image::node_source(node, s))
+                            .map(std::borrow::Cow::into_owned);
                         let fit = parse_object_fit(crate::style::prop_str_at(
                             node,
                             "objectFit",
@@ -8157,7 +8166,9 @@ pub(crate) fn refresh_item_paint(
                 }
             } else {
                 ItemKind::Image {
-                    src: crate::style::prop_str_at(node, "src", viewport).map(str::to_string),
+                    src: crate::style::prop_str_at(node, "src", viewport)
+                        .and_then(|s| crate::paint::image::node_source(node, s))
+                        .map(std::borrow::Cow::into_owned),
                     fit: parse_object_fit(crate::style::prop_str_at(node, "objectFit", viewport)),
                 }
             };

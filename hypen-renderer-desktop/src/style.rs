@@ -1943,7 +1943,9 @@ pub fn prop_background_image_url(node: &Node, viewport: Viewport) -> Option<Stri
         };
         for layer in split_top_level(raw) {
             if let Some(url) = extract_url(layer.trim()) {
-                return Some(url);
+                // Resolved under the node's own asset origin; a refused
+                // source draws no image.
+                return crate::paint::image::node_source_owned(node, url);
             }
         }
     }
@@ -2618,6 +2620,28 @@ pub fn parse_background_value(value: &str) -> Option<ParsedBackground> {
 /// Returns `None` for the common solid-colour node so the painter's
 /// existing fast paths are undisturbed.
 pub fn prop_background_layers(node: &Node, viewport: Viewport) -> Option<ParsedBackground> {
+    let mut parsed = prop_background_layers_authored(node, viewport)?;
+    // `url(...)` layers resolve under the node's own asset origin
+    // (`paint::image::node_source`); a refused source drops its layer.
+    if parsed
+        .layers
+        .iter()
+        .any(|l| matches!(l, BackgroundLayer::Image(_)))
+    {
+        parsed.layers = std::mem::take(&mut parsed.layers)
+            .into_iter()
+            .filter_map(|layer| match layer {
+                BackgroundLayer::Image(uri) => {
+                    crate::paint::image::node_source_owned(node, uri).map(BackgroundLayer::Image)
+                }
+                other => Some(other),
+            })
+            .collect();
+    }
+    Some(parsed)
+}
+
+fn prop_background_layers_authored(node: &Node, viewport: Viewport) -> Option<ParsedBackground> {
     if let Some(raw) = prop_str_at(node, "background", viewport) {
         if let Some(parsed) = parse_background_value(raw) {
             return Some(parsed);

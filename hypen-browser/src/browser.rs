@@ -873,6 +873,20 @@ impl HypenModule for BrowserModule {
         self.shell.mount();
     }
 
+    /// The browser window mixes a local shell (no images of its own)
+    /// with remote tabs and embeds from any number of servers, so it has
+    /// no single asset origin. Each remote node carries its own server's
+    /// origin (stamped by its `RemoteModule`, see
+    /// `paint::image::ASSET_ORIGIN_PROP`) and resolves against that; the
+    /// window-wide fallback refuses local files outright, so nothing in
+    /// this window — whatever a server streams — can read the local
+    /// filesystem.
+    fn asset_origin(&self) -> Option<Arc<str>> {
+        Some(Arc::from(
+            hypen_renderer_desktop::paint::image::NO_LOCAL_ASSETS_ORIGIN,
+        ))
+    }
+
     /// A windowed list's viewport report goes to the stream that owns the
     /// list element — routed and de-prefixed exactly like a node-addressed
     /// UI envelope (see [`route_ui_envelope`]).
@@ -3032,6 +3046,39 @@ mod tests {
                 expander: hypen_engine::TemplateExpander::new(),
             },
         );
+    }
+
+    /// The browser window mixes a local shell with remote tabs from any
+    /// server, so its window-wide asset origin must refuse local files
+    /// (a remote page must never get `Image("/etc/passwd")` read off the
+    /// local disk), and each tab node must keep the per-node origin its
+    /// `RemoteModule` stamped through the browser's id rewriting.
+    #[test]
+    fn browser_window_refuses_local_assets_and_keeps_per_node_origins() {
+        use hypen_renderer_desktop::paint::image::{ASSET_ORIGIN_PROP, NO_LOCAL_ASSETS_ORIGIN};
+        let (module, _captured) = fresh_browser_with_capture();
+        assert_eq!(module.asset_origin().as_deref(), Some(NO_LOCAL_ASSETS_ORIGIN));
+
+        install_tab(&module, "tab-A", "a1:", &[], true);
+        let mut props = indexmap::IndexMap::new();
+        props.insert("src".to_string(), json!("art/1.png"));
+        props.insert(ASSET_ORIGIN_PROP.to_string(), json!("http://tab-a.test"));
+        let stamped = Patch::Create {
+            id: "img".into(),
+            element_type: "Image".into(),
+            props: Arc::new(props),
+            semantics: None,
+        };
+        module.inner.lock().unwrap().viewport_id = Some("viewport".into());
+        let out = process_tab_patches(&module.inner, "tab-A", &[stamped]);
+        let origin = out.iter().find_map(|p| match p {
+            Patch::Create { id, props, .. } if id.as_ref() == "a1:img" => props
+                .get(ASSET_ORIGIN_PROP)
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        });
+        assert_eq!(origin.as_deref(), Some("http://tab-a.test"));
     }
 
     #[test]

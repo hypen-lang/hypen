@@ -855,6 +855,127 @@ fn image_element_emits_image_kind_with_src() {
     }
 }
 
+/// hypen-browser's case: ONE window whose tree mixes a local shell with
+/// remote tabs / embeds from several servers, painted under one window
+/// scope. Each remote node must resolve its image-like sources against
+/// the server that streamed it (carried on the node by its
+/// `RemoteModule`), never against the window and never to a local file;
+/// the local shell's own nodes keep their authored local paths.
+#[test]
+fn image_sources_resolve_per_owning_node_not_per_window() {
+    let mut tree = Tree::new();
+    // Local shell node: no owner stamp.
+    tree.apply(&create_patch(
+        "local",
+        "Image",
+        &[("src", json!("/tmp/local.png"))],
+    ));
+    tree.apply(&insert_patch("root", "local"));
+
+    // Two remote apps, stamped exactly as their RemoteModules deliver.
+    let own = |origin: &str, patches: Vec<Patch>| {
+        crate::remote::own_patches(
+            patches,
+            &Arc::from(origin),
+            &mut hypen_engine::TemplateExpander::new(),
+        )
+    };
+    let server_a = own(
+        "http://a.test:8787",
+        vec![
+            create_patch("a_art", "Image", &[("src", json!("/art/1.png"))]),
+            create_patch("a_passwd", "Image", &[("src", json!("/etc/passwd"))]),
+            create_patch("a_file", "Image", &[("src", json!("file:///etc/passwd"))]),
+            create_patch("a_drive", "Avatar", &[("src", json!("C:\\secret.png"))]),
+            create_patch("a_rel", "Avatar", &[("src", json!("etc/passwd"))]),
+            create_patch(
+                "a_bg",
+                "Column",
+                &[("background", json!("url('/bg.png') center / cover"))],
+            ),
+            create_patch(
+                "a_bg_file",
+                "Column",
+                &[("backgroundImage", json!("url(file:///etc/passwd)"))],
+            ),
+            create_patch("a_video", "Video", &[("poster", json!("/etc/hosts"))]),
+            create_patch(
+                "a_video_file",
+                "Video",
+                &[("poster", json!("file:///etc/hosts"))],
+            ),
+        ],
+    );
+    let server_b = own(
+        "https://b.test",
+        vec![create_patch(
+            "b_art",
+            "Image",
+            &[("src", json!("/art/1.png"))],
+        )],
+    );
+    for p in server_a.iter().chain(server_b.iter()) {
+        tree.apply(p);
+        if let Patch::Create { id, .. } = p {
+            tree.apply(&insert_patch("root", id));
+        }
+    }
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let src = |id: &str| match &find_item(&pass, id).kind {
+        ItemKind::Image { src, .. } => src.clone(),
+        other => panic!("expected ItemKind::Image for {id}, got {other:?}"),
+    };
+    assert_eq!(src("local").as_deref(), Some("/tmp/local.png"));
+    assert_eq!(
+        src("a_art").as_deref(),
+        Some("http://a.test:8787/art/1.png")
+    );
+    assert_eq!(src("b_art").as_deref(), Some("https://b.test/art/1.png"));
+    assert_eq!(
+        src("a_passwd").as_deref(),
+        Some("http://a.test:8787/etc/passwd")
+    );
+    assert_eq!(src("a_file"), None, "file: from a remote app is refused");
+    assert_eq!(
+        src("a_drive"),
+        None,
+        "a drive path from a remote app is refused"
+    );
+    assert_eq!(
+        src("a_rel").as_deref(),
+        Some("http://a.test:8787/etc/passwd")
+    );
+    assert_eq!(
+        find_item(&pass, "a_bg").background_image.as_deref(),
+        Some("http://a.test:8787/bg.png")
+    );
+    assert_eq!(find_item(&pass, "a_bg_file").background_image, None);
+    let viewport = vp(800.0);
+    assert_eq!(
+        resolve_media_poster(tree.get("a_video").unwrap(), viewport).as_deref(),
+        Some("http://a.test:8787/etc/hosts")
+    );
+    assert_eq!(
+        resolve_media_poster(tree.get("a_video_file").unwrap(), viewport),
+        None
+    );
+
+    // Whatever the window's scope (local here: no scope entered), no
+    // remote node's source plans as a local file read.
+    for id in ["a_art", "b_art", "a_passwd", "a_rel"] {
+        let key = src(id).unwrap();
+        assert!(
+            matches!(
+                crate::paint::image::plan_source(&key, None),
+                crate::paint::image::SourcePlan::Http(_)
+            ),
+            "{id}: {key}"
+        );
+    }
+}
+
 #[test]
 fn image_default_size_when_width_height_unset() {
     // An Image without width/height props uses a sensible default

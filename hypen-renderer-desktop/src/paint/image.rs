@@ -691,6 +691,16 @@ fn is_http(src: &str) -> bool {
 // and the worker thread never needs to know whose request it is serving.
 // Outside any scope (embedders painting directly, tests) behaviour is
 // local, exactly as before remote mode existed.
+//
+// A window can also hold nodes from SEVERAL owners — hypen-browser grafts
+// remote tabs and embeds from different servers into its local shell. So
+// the origin also travels with each node: every `RemoteModule` stamps its
+// server's origin on the nodes it creates (`ASSET_ORIGIN_PROP`, which the
+// server cannot write), and the style / media resolvers turn a stamped
+// node's source into its self-describing key (`node_source`) before any
+// cache sees it. The window scope then only decides for unstamped (local)
+// nodes; a host that shows no local images of its own enters
+// `NO_LOCAL_ASSETS_ORIGIN` so even a missed resolver cannot read a file.
 // ---------------------------------------------------------------------------
 
 /// How the loader obtains one source's encoded bytes.
@@ -841,6 +851,64 @@ pub(crate) fn cache_key(src: &str) -> Option<std::borrow::Cow<'_, str>> {
             SourcePlan::Local(_) | SourcePlan::Refused => None,
         }
     })
+}
+
+/// Reserved node prop naming the asset origin of the owner that CREATED
+/// the node. [`crate::remote::RemoteModule`] stamps it (its own server's
+/// origin) on every node it creates and drops any server write to it,
+/// so a node streamed by a remote app carries its origin with it,
+/// wherever it ends up — e.g. grafted into a local shell's tree by
+/// hypen-browser alongside other tabs and embeds from other servers.
+/// See [`node_source`].
+pub const ASSET_ORIGIN_PROP: &str = "__hypen.assetOrigin";
+
+/// A window-level asset origin that refuses local files without being a
+/// real server: relative sources resolve to an unfetchable host. For a
+/// host (like hypen-browser) whose window shows remote content but has
+/// no single server of its own; each remote node still resolves against
+/// its own [`ASSET_ORIGIN_PROP`].
+pub const NO_LOCAL_ASSETS_ORIGIN: &str = "http://invalid.invalid";
+
+/// The source `node` names with `src` (any image-like prop: `src`,
+/// `poster`, a background `url(...)`, a media track), resolved for
+/// loading under the node's OWN asset origin ([`ASSET_ORIGIN_PROP`]).
+///
+/// A node that carries an origin (a remote app's node) gets a
+/// self-describing source — the `data:` URI or an absolute `http(s)`
+/// URL — or `None` when it names a refused scheme (`file:`, `C:\`, …),
+/// so it can never reach a local file whatever window scope later loads
+/// it, and two servers' `/art/1` never share a cache entry. A node with
+/// no origin (a local module's) keeps its source as authored; the
+/// window's scope ([`enter_asset_origin`]) then applies as before.
+pub fn node_source<'a>(
+    node: &crate::tree::Node,
+    src: &'a str,
+) -> Option<std::borrow::Cow<'a, str>> {
+    use std::borrow::Cow;
+    let Some(origin) = node
+        .props
+        .get(ASSET_ORIGIN_PROP)
+        .and_then(serde_json::Value::as_str)
+    else {
+        return Some(Cow::Borrowed(src));
+    };
+    match plan_source(src, Some(origin)) {
+        SourcePlan::Data => Some(Cow::Borrowed(src)),
+        SourcePlan::Http(url) if url == src => Some(Cow::Borrowed(src)),
+        SourcePlan::Http(url) => Some(Cow::Owned(url)),
+        SourcePlan::Local(_) | SourcePlan::Refused => {
+            log::warn!("image: refusing non-HTTP source from a remote app: {src}");
+            None
+        }
+    }
+}
+
+/// [`node_source`] for an owned source.
+pub(crate) fn node_source_owned(node: &crate::tree::Node, src: String) -> Option<String> {
+    match node_source(node, &src)? {
+        std::borrow::Cow::Borrowed(_) => Some(src),
+        std::borrow::Cow::Owned(s) => Some(s),
+    }
 }
 
 fn is_data_uri(src: &str) -> bool {

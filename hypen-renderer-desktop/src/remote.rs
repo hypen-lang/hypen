@@ -131,6 +131,55 @@ pub(crate) struct Inner {
     /// wired its callback. Drained on the first `on_patches` call so
     /// no initial tree is lost to the connect/wire-up race.
     pending: Vec<Patch>,
+    /// This connection's asset origin, stamped on every node it creates
+    /// (see [`own_patches`]). `None` only for test fixtures.
+    asset_origin: Option<Arc<str>>,
+    /// Lowers the server's `RegisterTemplate` / `Instantiate` before
+    /// stamping, so template-instantiated nodes carry the origin too.
+    expander: hypen_engine::TemplateExpander,
+}
+
+/// Make a server's patch batch carry its owner: lower templates, stamp
+/// `origin` as [`crate::paint::image::ASSET_ORIGIN_PROP`] on every
+/// `Create`, and drop any server write to that reserved prop. The
+/// origin then travels with each node wherever the batch is forwarded
+/// (a window, or hypen-browser's tab / embed grafting), so the node's
+/// image-like sources resolve against THIS server and never reach a
+/// local file (`paint::image::node_source`).
+pub(crate) fn own_patches(
+    patches: Vec<Patch>,
+    origin: &Arc<str>,
+    expander: &mut hypen_engine::TemplateExpander,
+) -> Vec<Patch> {
+    use crate::paint::image::ASSET_ORIGIN_PROP;
+    expander
+        .expand(patches)
+        .into_iter()
+        .filter_map(|patch| match patch {
+            Patch::Create {
+                id,
+                element_type,
+                mut props,
+                semantics,
+            } => {
+                Arc::make_mut(&mut props)
+                    .insert(ASSET_ORIGIN_PROP.to_string(), Value::from(&**origin));
+                Some(Patch::Create {
+                    id,
+                    element_type,
+                    props,
+                    semantics,
+                })
+            }
+            Patch::SetProp { ref name, .. } | Patch::RemoveProp { ref name, .. }
+                if name == ASSET_ORIGIN_PROP =>
+            {
+                log::warn!("remote: dropping a server write to the reserved {ASSET_ORIGIN_PROP}");
+                None
+            }
+            other => Some(other),
+        })
+        .collect()
 }
 
 /// How a [`RemoteModule`] connects.
@@ -207,9 +256,12 @@ impl RemoteModule {
         // this connection's own (`HypenModule::asset_origin`), not
         // process state: other modules in the process are unaffected.
         let asset_origin: Arc<str> = crate::paint::image::http_origin_for(&url)
-            .unwrap_or_else(|| "http://invalid.invalid".to_string())
+            .unwrap_or_else(|| crate::paint::image::NO_LOCAL_ASSETS_ORIGIN.to_string())
             .into();
-        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::clone(&asset_origin)),
+            ..Inner::default()
+        }));
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<RemoteMessage>();
 
         let inner_for_worker = Arc::clone(&inner);
@@ -245,18 +297,26 @@ impl RemoteModule {
 /// wired we fire the callback; otherwise we buffer for the first
 /// `on_patches` call to drain. Lock is released before firing the
 /// callback so the renderer's queue mutex doesn't contend with ours.
+///
+/// Every batch is first made to carry its owner ([`own_patches`]), so
+/// no consumer ever sees an unstamped node from this connection.
 pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
-    let cb = {
+    let (cb, owned) = {
         let mut guard = inner.lock().expect("remote inner poisoned");
+        let guard = &mut *guard;
+        let owned = match guard.asset_origin.as_ref() {
+            Some(origin) => own_patches(patches.to_vec(), origin, &mut guard.expander),
+            None => patches.to_vec(),
+        };
         if let Some(cb) = guard.callback.as_ref() {
-            Some(Arc::clone(cb))
+            (Some(Arc::clone(cb)), owned)
         } else {
-            guard.pending.extend_from_slice(patches);
-            None
+            guard.pending.extend(owned);
+            (None, Vec::new())
         }
     };
     if let Some(cb) = cb {
-        cb(patches);
+        cb(&owned);
     }
 }
 
@@ -810,6 +870,121 @@ mod tests {
         let g = inner.lock().unwrap();
         assert_eq!(g.pending.len(), 2);
         assert!(g.callback.is_none());
+    }
+
+    fn origin_of(patch: &Patch) -> Option<&str> {
+        match patch {
+            Patch::Create { props, .. } => props
+                .get(crate::paint::image::ASSET_ORIGIN_PROP)
+                .and_then(Value::as_str),
+            _ => None,
+        }
+    }
+
+    /// Every node a connection creates carries that connection's asset
+    /// origin — template-instantiated ones included — and the server can
+    /// neither forge nor clear it (a cleared/forged stamp would put the
+    /// node back in the window's scope, e.g. a local one).
+    #[test]
+    fn own_patches_stamps_every_created_node_and_guards_the_stamp() {
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let origin: Arc<str> = Arc::from("http://a.test:8787");
+        let mut expander = hypen_engine::TemplateExpander::new();
+        let mut forged = IndexMap::new();
+        forged.insert(ASSET_ORIGIN_PROP.to_string(), Value::Null);
+        forged.insert("src".to_string(), json!("/x.png"));
+        let raw = vec![
+            Patch::Create {
+                id: "img".into(),
+                element_type: "Image".into(),
+                props: Arc::new(forged),
+                semantics: None,
+            },
+            Patch::RegisterTemplate {
+                template_id: "row".into(),
+                root: json!({
+                    "elementType": "Row",
+                    "props": {},
+                    "children": [
+                        {"elementType": "Image", "props": {"src": "/t.png"}, "children": []},
+                    ],
+                }),
+            },
+            Patch::Instantiate {
+                template_id: "row".into(),
+                parent_id: "root".into(),
+                before_id: None,
+                nodes: vec!["r".into(), "r_img".into()],
+                subs: Vec::new(),
+                semantics: Vec::new(),
+            },
+            Patch::SetProp {
+                id: "img".into(),
+                name: ASSET_ORIGIN_PROP.into(),
+                value: Value::Null,
+            },
+            Patch::RemoveProp {
+                id: "img".into(),
+                name: ASSET_ORIGIN_PROP.into(),
+            },
+            Patch::SetProp {
+                id: "img".into(),
+                name: "src".into(),
+                value: json!("/y.png"),
+            },
+        ];
+        let out = own_patches(raw, &origin, &mut expander);
+        let creates: Vec<(&str, Option<&str>)> = out
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Create { id, .. } => Some((id.as_ref(), origin_of(p))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            creates,
+            vec![
+                ("img", Some("http://a.test:8787")),
+                ("r", Some("http://a.test:8787")),
+                ("r_img", Some("http://a.test:8787")),
+            ]
+        );
+        assert!(!out.iter().any(|p| matches!(
+            p,
+            Patch::RegisterTemplate { .. } | Patch::Instantiate { .. }
+        )));
+        assert!(!out.iter().any(|p| matches!(
+            p,
+            Patch::SetProp { name, .. } | Patch::RemoveProp { name, .. } if name == ASSET_ORIGIN_PROP
+        )));
+        assert!(out
+            .iter()
+            .any(|p| matches!(p, Patch::SetProp { name, .. } if name == "src")));
+    }
+
+    /// The stamp is applied at the delivery choke point, so both the
+    /// pre-wiring buffer and a wired callback only ever see owned nodes.
+    #[test]
+    fn delivered_patches_carry_the_connection_origin() {
+        let inner = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::from("https://b.test")),
+            ..Inner::default()
+        }));
+        deliver_patches(&inner, &[fake_patch("early", "Image")]);
+        let got: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&got);
+        let cb: PatchCallback =
+            Arc::new(move |p: &[Patch]| sink.lock().unwrap().extend_from_slice(p));
+        let pending = {
+            let mut g = inner.lock().unwrap();
+            g.callback = Some(Arc::clone(&cb));
+            std::mem::take(&mut g.pending)
+        };
+        cb(&pending);
+        deliver_patches(&inner, &[fake_patch("late", "Image")]);
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|p| origin_of(p) == Some("https://b.test")));
     }
 
     #[test]
