@@ -444,7 +444,16 @@ export abstract class BaseEngine {
       throw classifyEngineError(err);
     }
     log.debug("State changed (sparse):", { scope, paths });
+    this.afterMutation();
   }
+
+  /**
+   * Called after a state update has been applied and its patches delivered.
+   * A no-op here; an engine wrapper that defers work out of the update (the
+   * browser engine parks removed nodes and frees them when idle) schedules
+   * it from this hook.
+   */
+  protected afterMutation(): void {}
 
   /**
    * Apply a full-state patch. See [updateStateSparse] for `scope` and
@@ -471,6 +480,7 @@ export abstract class BaseEngine {
       this.unwrapForWasm(statePatch),
       animation == null ? null : this.unwrapForWasm(animation),
     );
+    this.afterMutation();
   }
 
   /**
@@ -883,6 +893,7 @@ export abstract class BaseEngine {
   setListViewport(listId: string, start: number, end: number): void {
     const engine = this.ensureInitialized();
     engine.setListViewport(listId, start >>> 0, end >>> 0);
+    this.afterMutation();
   }
 
   // ── Resource System ─────────────────────────────────────────────────

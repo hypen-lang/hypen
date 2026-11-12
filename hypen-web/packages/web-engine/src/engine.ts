@@ -110,6 +110,7 @@ export class Engine extends BaseEngine {
 
       this.wasmEngine = new WasmEngineClass();
       this.wasmEngine.registerDefaultPrimitives();
+      this.enableDeferredRelease();
 
       // Hand the engine's portable helpers to `@hypen-space/core` so
       // every subsequent `createObservableState` / `HypenRouter.matchPath`
@@ -122,6 +123,56 @@ export class Engine extends BaseEngine {
       log.error("Failed to initialize WASM engine:", error);
       throw error;
     }
+  }
+
+  /** Whether an idle-time release of removed engine nodes is already queued. */
+  private releaseQueued = false;
+
+  /**
+   * Have the engine park the nodes an update removes instead of freeing
+   * them inside that update, and free them when the browser is idle.
+   *
+   * Clearing a 1,000-row list removes ~17,000 engine nodes, and freeing
+   * them cost more than taking them out of the tree — time spent between
+   * the user's click and the next paint, for memory nobody is waiting on.
+   * (A garbage-collected runtime gets this for free; WASM's allocator
+   * frees eagerly.) Only enabled where `requestIdleCallback` exists, and
+   * only on an engine build that has the hooks; the engine itself bounds
+   * the backlog if no idle period ever comes.
+   */
+  private enableDeferredRelease(): void {
+    const engine = this.wasmEngine;
+    if (
+      typeof engine?.setDeferredRelease !== "function" ||
+      typeof engine.pendingRelease !== "function" ||
+      typeof engine.releaseRemoved !== "function" ||
+      typeof globalThis.requestIdleCallback !== "function"
+    ) {
+      return;
+    }
+    engine.setDeferredRelease(true);
+    this.deferredRelease = true;
+  }
+
+  private deferredRelease = false;
+
+  protected override afterMutation(): void {
+    if (!this.deferredRelease || this.releaseQueued) return;
+    const engine = this.wasmEngine;
+    if (!engine || engine.pendingRelease() === 0) return;
+    this.releaseQueued = true;
+    globalThis.requestIdleCallback(
+      () => {
+        this.releaseQueued = false;
+        // The engine may have been torn down while this was queued.
+        try {
+          this.wasmEngine?.releaseRemoved();
+        } catch {
+          /* freed engine: nothing left to release */
+        }
+      },
+      { timeout: 2000 },
+    );
   }
 
   /**

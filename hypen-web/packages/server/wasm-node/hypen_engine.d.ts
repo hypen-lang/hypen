@@ -332,6 +332,10 @@ export class WasmEngine {
      */
     onDataSourceAction(handler: Function): void;
     /**
+     * How many removed nodes are waiting for `releaseRemoved`.
+     */
+    pendingRelease(): number;
+    /**
      * Register all standard Hypen primitives (Text, Column, Row, Button, etc.)
      */
     registerDefaultPrimitives(): void;
@@ -347,6 +351,10 @@ export class WasmEngine {
      * Register resources from a JavaScript object (name -> SVG string map).
      */
     registerResources(resources_js: any): void;
+    /**
+     * Free the removed nodes parked since the last call.
+     */
+    releaseRemoved(): void;
     /**
      * Remove a data source context entirely.
      */
@@ -390,6 +398,13 @@ export class WasmEngine {
      * Set (or replace) a named data source context.
      */
     setContext(name: string, data_js: any): void;
+    /**
+     * Park removed nodes instead of freeing them during the update that
+     * removes them; the host then calls [`releaseRemoved`](Self::release_removed)
+     * when it is idle. See `InstanceTree::set_deferred_release`. Turning it
+     * off releases anything parked.
+     */
+    setDeferredRelease(deferred: boolean): void;
     /**
      * Report the item range `[start, end)` (visible rows plus overscan) of
      * the lazy list whose element is `listId`; emits the patches that move
