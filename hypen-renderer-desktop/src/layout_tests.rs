@@ -9514,9 +9514,9 @@ fn heading_without_own_text_stays_a_container_for_its_children() {
 }
 
 /// A `level` that changes after creation re-sizes the heading, like the
-/// Canvas, SwiftUI and Compose renderers (all re-derive the size from the
-/// current level). The DOM is the outlier only because it cannot re-tag a
-/// live `<hN>`. The incremental path (Taffy restyle + paint-only gate)
+/// Canvas, SwiftUI, Compose and DOM renderers (all re-derive the size from
+/// the current level; the DOM without re-tagging its `<hN>`). The
+/// incremental path (Taffy restyle + paint-only gate)
 /// must agree with a fresh layout — `level` was missing from the layout
 /// prop list, so a live write was treated as paint-only and the size only
 /// caught up on some unrelated full layout.

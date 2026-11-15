@@ -179,7 +179,7 @@ const COMPONENT_HTML_ATTRS: Record<string, Set<string>> = {
   avatar: bothSpellings(["0", "src", "source", "initials", "size"]),
   badge: bothSpellings(["0", "text", "theme"]),
   // `level` picks the tag at create; a later change routes here so the
-  // handler can express it as aria-level. `__icon*` are engine-injected SVG
+  // handler can express it as aria-level plus the new level's size. `__icon*` are engine-injected SVG
   // payloads that the generic applicator path drops (it strips `__` keys).
   heading: bothSpellings(["0", "text", "level"]),
   icon: bothSpellings(["0", "name", "size", "color", "__iconPaths", "__iconViewBox"]),

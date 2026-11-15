@@ -9006,9 +9006,10 @@ pub(crate) fn resolve_font_weight(node: &crate::tree::Node, viewport: Viewport) 
 /// (a Heading's `level` is a layout prop for exactly this reason — see
 /// `is_heading_level_write`). That is the cross-renderer contract: Canvas
 /// (`canvas/utils.ts`), SwiftUI (`HeadingComponent`), Compose
-/// (`HeadingComponent.kt`) and the DOM (which applies the new level's
-/// size and weight inline, since it cannot re-tag a live `<hN>`) all
-/// derive the size from the CURRENT level.
+/// (`HeadingComponent.kt`) and the DOM (which keeps its `<hN>` but sizes
+/// it like the new level through `data-hypen-level` + zero-specificity
+/// rules, since it cannot re-tag a live element) all derive the size from
+/// the CURRENT level.
 fn heading_level_at(node: &crate::tree::Node, viewport: Viewport) -> u8 {
     prop_f32_at(node, "level", viewport)
         .filter(|l| l.is_finite())
