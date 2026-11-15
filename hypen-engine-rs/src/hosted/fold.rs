@@ -9,7 +9,9 @@
 //! 2. **Subscriptions** the reducer requested (so one created here does not
 //!    fire on the very change that created it — step 1 already picked who to
 //!    notify).
-//! 3. **Effects** (`Log` engine-side, `Navigate`/`Delay` via the embedder).
+//! 3. **Effects** (`Log` engine-side, `Navigate`/`Delay` via the embedder),
+//!    then the **deferred HTTP requests** the reducer queued: each is
+//!    admitted (see `http`) and handed to the embedder as `Effect::Http`.
 //! 4. **Follow-ups**, queued in this order: `emit` (always the emitting scope),
 //!    cross-module dispatch (needs the `dispatches` grant; the target is a
 //!    hosted module or an in-process scope's handler), subscriber
@@ -48,6 +50,7 @@ impl HostedModules {
             emit,
             cross_dispatch,
             subscribe_requests,
+            http_requests,
         } = output;
 
         // 1. State.
@@ -87,6 +90,11 @@ impl HostedModules {
         // 3. Side effects.
         for effect in effects {
             self.perform_effect(scope.as_str(), effect);
+        }
+        // 3b. Deferred HTTP requests. A refused one is completed as `denied`
+        //     by a follow-up queued here, ahead of the reducer's own.
+        if !http_requests.is_empty() {
+            self.admit_http_requests(scope, depth, http_requests, cascade);
         }
 
         // 4a. `emit` always targets the emitting module's own scope.
@@ -199,10 +207,10 @@ impl HostedModules {
             .notifications_for(scope.as_str(), &changed))
     }
 
-    /// Perform an engine-native effect. `Log` is handled here directly. HTTP
-    /// is *not* an effect: modules call `wasi:http` through their language's
-    /// own client. `Navigate` and `Delay` need the embedder (a router / a
-    /// timer), so they go to the installed effect handler.
+    /// Perform an effect a reducer returned. `Log` is handled here directly.
+    /// `Navigate` and `Delay` need the embedder (a router / a timer), so they
+    /// go to the installed effect handler. (`Http` is not something a reducer
+    /// returns: the engine creates it in `admit_http_requests`.)
     ///
     /// With no handler installed the engine cannot perform them. That is not
     /// a failure of the dispatch (the reducer ran and its state stands), so
@@ -231,6 +239,17 @@ impl HostedModules {
                 Level::Warn,
                 LogScope::Engine,
                 &format!("[{scope}] Delay({ms}ms -> {then}) dropped (no effect handler)"),
+            ),
+            // No host produces this (it carries an engine-issued id); one that
+            // did would be asking the embedder to perform a request that was
+            // never admitted.
+            (Effect::Http(_), _) => log(
+                Level::Warn,
+                LogScope::Engine,
+                &format!(
+                    "[{scope}] ignored an `Http` effect in a reducer output; requests are \
+                     queued through `hypen:http/deferred`"
+                ),
             ),
         }
     }

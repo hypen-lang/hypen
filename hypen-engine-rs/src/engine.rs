@@ -4,11 +4,14 @@ use crate::{
     error::EngineError,
     hosted::{
         paths::{collect_merge_changes, collect_sparse_changes},
-        CascadeReport, EngineCtx, HostedModules, LifecycleHook, PatchOutlet,
+        CascadeReport, EngineCtx, HostedModules, HttpCompletionError, HttpDelivery,
+        LifecycleHook, PatchOutlet,
     },
     ir::{ComponentRegistry, IRNode, NodeId, ResourceRegistry},
     lifecycle::{ModuleInstance, ResourceCache},
-    module_host::{Effect, ModuleHost, ModuleInstanceId},
+    module_host::{
+        Effect, HttpDenial, HttpOutcome, HttpRequestId, HttpUrl, ModuleHost, ModuleInstanceId,
+    },
     reconcile::Patch,
     state::StateChange,
 };
@@ -144,10 +147,15 @@ impl Engine {
         (&mut self.hosted, ctx)
     }
 
-    /// Install a handler for engine-native effects (`Navigate`, `Delay`) that
-    /// the engine surfaces but can't perform itself — the host provides the
-    /// router / timer. See [`Effect`](crate::module_host::Effect). `Log` is
-    /// handled engine-side and never reaches this handler.
+    /// Install a handler for the effects the engine surfaces but can't
+    /// perform itself (`Navigate`, `Delay`, `Http`) — the host provides the
+    /// router / timer / HTTP client. See [`Effect`](crate::module_host::Effect).
+    /// `Log` is handled engine-side and never reaches this handler.
+    ///
+    /// An `Effect::Http` handed to the handler is a request in flight: the
+    /// embedder performs it and reports the outcome with
+    /// [`complete_http_request`](Self::complete_http_request), exactly once.
+    /// With no handler installed, deferred HTTP requests are refused.
     pub fn set_effect_handler<F>(&mut self, handler: F)
     where
         F: Fn(&str, &Effect) + Send + Sync + 'static,
@@ -653,6 +661,68 @@ impl Engine {
     ) -> Result<(), EngineError> {
         let (hosted, mut ctx) = self.hosted_parts();
         hosted.dispatch_trusted(&mut ctx, scope, name, payload)
+    }
+
+    /// Complete a deferred HTTP request (`hypen:http/deferred`): the trusted
+    /// entry the embedder calls once it has performed the request an
+    /// [`Effect::Http`](crate::module_host::Effect::Http) handed it.
+    ///
+    /// Builds the completion payload documented in
+    /// `wit/deps/hypen-http/http.wit` from `outcome`, releases the module's
+    /// in-flight slot and runs the request's `then` action in the module that
+    /// queued it — a cascade root like
+    /// [`dispatch_module_action`](Self::dispatch_module_action), with the
+    /// same error semantics and the same
+    /// [report](Self::last_module_cascade_report).
+    ///
+    /// - `Ok(Delivered)`: `then` ran.
+    /// - `Ok(ModuleGone)`: the module was destroyed or reloaded while the
+    ///   request was in flight; the outcome was dropped (and logged).
+    /// - `Err(UnknownRequest)`: no request is in flight under `id` — never
+    ///   issued, or completed already. Nothing ran.
+    /// - `Err(Cascade(e))`: `then` was delivered and its cascade failed.
+    ///
+    /// A response the contract cannot carry is delivered as the matching
+    /// failure (a body over `MAX_HTTP_RESPONSE_BODY_BYTES` as `too-large`).
+    pub fn complete_http_request(
+        &mut self,
+        id: HttpRequestId,
+        outcome: HttpOutcome,
+    ) -> Result<HttpDelivery, HttpCompletionError> {
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.complete_http(&mut ctx, id, outcome)
+    }
+
+    /// Whether the deferred HTTP request in flight under `id` may be
+    /// redirected to `url`, by the grant of the module that queued it. `None`
+    /// for an id that is not in flight. (An embedder that kept the
+    /// [`HttpEffect`](crate::module_host::HttpEffect) can ask its `grant`
+    /// directly, without the engine.)
+    pub fn http_redirect_check(
+        &self,
+        id: HttpRequestId,
+        url: &HttpUrl,
+    ) -> Option<Result<(), HttpDenial>> {
+        self.hosted.http_redirect_check(id, url)
+    }
+
+    /// How many deferred HTTP requests one module may have in flight
+    /// (default `DEFAULT_HTTP_IN_FLIGHT_PER_MODULE`). Further requests are
+    /// refused — reported as `FailureCause::HttpLimit` and completed to the
+    /// module as `denied` — until one completes.
+    pub fn module_http_in_flight_limit(&self) -> usize {
+        self.hosted.http_in_flight_limit()
+    }
+
+    /// Set the per-module in-flight cap (clamped to at least 1).
+    pub fn set_module_http_in_flight_limit(&mut self, limit: usize) {
+        self.hosted.set_http_in_flight_limit(limit);
+    }
+
+    /// How many deferred HTTP requests the module under `scope` has in
+    /// flight right now.
+    pub fn module_http_in_flight(&self, scope: &str) -> usize {
+        self.hosted.http_in_flight(scope)
     }
 
     /// Resolve a UI envelope for hosts that own their action dispatch loop.

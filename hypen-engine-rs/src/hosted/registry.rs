@@ -10,23 +10,28 @@ use super::names::{canonical_scope, ActionSet, ScopeName};
 use super::ClosureActions;
 use crate::action_routing::scoped_action_name;
 use crate::engine_core::EngineCore;
-use crate::module_host::{ModuleInstanceId, ModuleManifest};
+use crate::module_host::{HttpGrant, ModuleInstanceId, ModuleManifest};
 use indexmap::IndexMap;
+use std::sync::Arc;
 
-/// The cross-module capabilities the engine enforces for one hosted scope.
+/// The capabilities the engine enforces for one hosted scope.
 ///
-/// Mirrors the `reads` / `dispatches` lists of a [`ModuleManifest`]. The
-/// engine checks them itself when it folds a reducer's output (cross-module
-/// dispatch, `subscribe`) and uses `reads` to decide which sibling snapshots a
-/// module is handed at all — it does not rely on the
-/// [`ModuleHost`](crate::module_host::ModuleHost) having enforced them. Names
-/// are module scopes and compare case-insensitively; there is no wildcard.
+/// Mirrors the `reads` / `dispatches` lists and the `http` / `http_hosts`
+/// grant of a [`ModuleManifest`]. The engine checks them itself when it folds
+/// a reducer's output (cross-module dispatch, `subscribe`, deferred HTTP
+/// requests) and uses `reads` to decide which sibling snapshots a module is
+/// handed at all — it does not rely on the
+/// [`ModuleHost`](crate::module_host::ModuleHost) having enforced them. Scope
+/// names compare case-insensitively; there is no wildcard.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleGrants {
     /// Scopes whose state this module may read and subscribe to.
     pub reads: Vec<String>,
     /// Scopes this module may dispatch actions to.
     pub dispatches: Vec<String>,
+    /// What the module may request over deferred HTTP
+    /// (`hypen:http/deferred`). Default: nothing.
+    pub http: HttpGrant,
 }
 
 impl ModuleGrants {
@@ -45,7 +50,14 @@ impl ModuleGrants {
         Self {
             reads: reads.into_iter().map(Into::into).collect(),
             dispatches: dispatches.into_iter().map(Into::into).collect(),
+            http: HttpGrant::Denied,
         }
+    }
+
+    /// The same grants with deferred HTTP allowed as `http` says.
+    pub fn with_http(mut self, http: HttpGrant) -> Self {
+        self.http = http;
+        self
     }
 }
 
@@ -54,6 +66,7 @@ impl From<&ModuleManifest> for ModuleGrants {
         Self {
             reads: manifest.reads.clone(),
             dispatches: manifest.dispatches.clone(),
+            http: manifest.http_grant(),
         }
     }
 }
@@ -69,6 +82,9 @@ impl From<&ModuleManifest> for ModuleGrants {
 pub(crate) struct Grants {
     reads: Vec<String>,
     dispatches: Vec<String>,
+    /// Shared with each `Effect::Http` the module causes (the embedder
+    /// re-checks it on redirect hops), hence the `Arc`.
+    http: Arc<HttpGrant>,
 }
 
 impl From<ModuleGrants> for Grants {
@@ -86,6 +102,7 @@ impl From<ModuleGrants> for Grants {
         Self {
             reads: canonical(grants.reads),
             dispatches: canonical(grants.dispatches),
+            http: Arc::new(grants.http),
         }
     }
 }
@@ -102,6 +119,11 @@ impl Grants {
         self.dispatches.iter().any(|granted| granted == scope)
     }
 
+    /// What the module may request over deferred HTTP.
+    pub(crate) fn http(&self) -> &Arc<HttpGrant> {
+        &self.http
+    }
+
     /// The scopes whose snapshots the module is handed on a call.
     pub(crate) fn readable(&self) -> &[String] {
         &self.reads
@@ -113,7 +135,17 @@ pub(crate) struct HostedModule {
     pub(crate) id: ModuleInstanceId,
     pub(crate) actions: ActionSet,
     pub(crate) grants: Grants,
+    /// Which wiring of the scope this is (see [`Wiring`]).
+    pub(crate) wiring: Wiring,
 }
+
+/// Identifies one wiring of a scope: every `register` / `rewire` gets the
+/// next number, engine-wide. Work that outlives a call — an HTTP request in
+/// flight — remembers the wiring it belongs to, so its completion can tell
+/// "the instance that asked" from a later instance under the same scope
+/// (instance ids are the host's and may be reused; these are not).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) struct Wiring(pub(crate) u64);
 
 /// Hosted module instances by scope.
 #[derive(Default)]
@@ -208,6 +240,7 @@ mod tests {
             id: ModuleInstanceId(id),
             actions: ActionSet::parse(&scope, actions).unwrap(),
             grants: Grants::default(),
+            wiring: Wiring::default(),
         }
     }
 

@@ -1389,3 +1389,7 @@ fn the_report_as_json_names_root_origin_and_cause() {
         ]
     );
 }
+
+// Deferred HTTP: admission, requests in flight, completion.
+#[path = "http_tests.rs"]
+mod http;

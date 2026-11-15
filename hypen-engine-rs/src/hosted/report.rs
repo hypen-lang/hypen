@@ -52,6 +52,41 @@ pub enum Origin {
     /// Not a run at all: the module asked to subscribe to `target` at `path`
     /// with this action as `on_change`, and the request itself was refused.
     SubscribeRequest { target: String, path: String },
+    /// Not a run at all: the module queued this deferred HTTP request
+    /// (`hypen:http/deferred.send`) with the failure's action as `then`, and
+    /// the request was refused. `url` is shortened for display.
+    HttpRequest { method: String, url: String },
+    /// The completion (`ok: false`, `denied`) of a deferred HTTP request that
+    /// was refused in this same cascade.
+    HttpRefusal,
+}
+
+impl Origin {
+    /// [`Origin::HttpRequest`] for a guest-supplied method and URL, both
+    /// bounded and made printable (they are untrusted and may be huge).
+    pub(crate) fn http_request(method: &str, url: &str) -> Self {
+        fn shown(s: &str, max: usize) -> String {
+            let mut out: String = s.chars().take(max).flat_map(char::escape_default).collect();
+            if s.chars().nth(max).is_some() {
+                out.push('…');
+            }
+            out
+        }
+        Origin::HttpRequest {
+            method: shown(method, 16),
+            url: shown(url, 128),
+        }
+    }
+}
+
+/// Which deferred-HTTP cap a request ran into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HttpLimit {
+    /// More requests in one reducer call than `MAX_HTTP_REQUESTS_PER_CALL`.
+    PerCall(usize),
+    /// The module already has this many requests in flight
+    /// (`Engine::module_http_in_flight_limit`).
+    InFlight(usize),
 }
 
 /// What started a cascade.
@@ -157,6 +192,20 @@ pub enum FailureCause {
     StateEncoding(String),
     /// The reducer returned unusable state; nothing of its output was applied.
     InvalidState(InvalidState),
+    /// A deferred HTTP request from a module whose grants do not include
+    /// `http`.
+    HttpNotGranted,
+    /// A deferred HTTP request to a host outside the module's `httpHosts`
+    /// allowlist. `host` is `host:port`.
+    HttpDenied { host: String },
+    /// A deferred HTTP request that is malformed or over a size bound
+    /// (carries which part and why).
+    HttpInvalid(String),
+    /// A deferred HTTP request over a count cap.
+    HttpLimit(HttpLimit),
+    /// A deferred HTTP request on an engine whose embedder installed no
+    /// effect handler: nothing can perform it.
+    HttpUnavailable,
 }
 
 impl FailureCause {
@@ -169,14 +218,42 @@ impl FailureCause {
             | FailureCause::DispatchDenied { .. }
             | FailureCause::ReadDenied { .. }
             | FailureCause::SubscriptionLimit { .. }
-            | FailureCause::PayloadNotJson(_) => "refused",
-            FailureCause::DepthExceeded { .. } | FailureCause::BudgetExhausted { .. } => "dropped",
+            | FailureCause::PayloadNotJson(_)
+            | FailureCause::HttpNotGranted
+            | FailureCause::HttpDenied { .. }
+            | FailureCause::HttpInvalid(_)
+            | FailureCause::HttpUnavailable => "refused",
+            FailureCause::DepthExceeded { .. }
+            | FailureCause::BudgetExhausted { .. }
+            | FailureCause::HttpLimit(_) => "dropped",
             FailureCause::Host(_)
             | FailureCause::Handler(_)
             | FailureCause::NoHost
             | FailureCause::NoStateSlot
             | FailureCause::StateEncoding(_)
             | FailureCause::InvalidState(_) => "failed",
+        }
+    }
+
+    /// The `error.message` a module is given when its deferred HTTP request
+    /// is refused for this cause.
+    pub(crate) fn http_refusal_message(&self) -> String {
+        match self {
+            FailureCause::HttpNotGranted => "the module's manifest does not grant `http`".into(),
+            FailureCause::HttpDenied { host } => {
+                format!("host '{host}' is not in the manifest's `httpHosts` allowlist")
+            }
+            FailureCause::HttpInvalid(why) => why.clone(),
+            FailureCause::HttpLimit(HttpLimit::PerCall(limit)) => {
+                format!("too many requests in one call (limit {limit})")
+            }
+            FailureCause::HttpLimit(HttpLimit::InFlight(limit)) => {
+                format!("too many requests in flight (limit {limit}); wait for one to complete")
+            }
+            FailureCause::HttpUnavailable => {
+                "this host does not perform HTTP requests (no effect handler installed)".into()
+            }
+            other => format!("refused ({})", other.code()),
         }
     }
 }
@@ -214,6 +291,9 @@ impl CascadeFailure {
                 Origin::SubscribeRequest { .. } => {
                     write!(f, "on_change '{action}' is not an action of '{scope}'")
                 }
+                Origin::HttpRequest { .. } => {
+                    write!(f, "`then` '{action}' is not an action of '{scope}'")
+                }
                 _ => write!(f, "module '{scope}' does not accept that action"),
             },
             FailureCause::DispatchDenied { missing_grant } => {
@@ -250,6 +330,19 @@ impl CascadeFailure {
             FailureCause::NoStateSlot => f.write_str("module has no state slot"),
             FailureCause::StateEncoding(e) => write!(f, "module state could not be encoded: {e}"),
             FailureCause::InvalidState(reason) => write!(f, "{reason}"),
+            FailureCause::HttpNotGranted => write!(
+                f,
+                "'{scope}' has no `http` grant — set `http: true` in the manifest of '{scope}'"
+            ),
+            FailureCause::HttpDenied { host } => write!(
+                f,
+                "host '{host}' is not in the `httpHosts` allowlist of '{scope}' — add it to \
+                 `httpHosts` in the manifest of '{scope}'"
+            ),
+            FailureCause::HttpInvalid(why) => write!(f, "{why}"),
+            FailureCause::HttpLimit(_) | FailureCause::HttpUnavailable => {
+                f.write_str(&cause.http_refusal_message())
+            }
         }
     }
 }
@@ -272,11 +365,19 @@ impl fmt::Display for CascadeFailure {
             write!(f, " {verb}: ")?;
             return self.write_cause(f);
         }
+        if let Origin::HttpRequest { method, url } = origin {
+            write!(f, "[{scope}] http request {method} {url} {verb}: ")?;
+            return self.write_cause(f);
+        }
         write!(f, "[{scope}] '{action}' {verb}: ")?;
         self.write_cause(f)?;
         match origin {
             // The root is named by the report's header.
-            Origin::Root | Origin::Lifecycle(_) | Origin::SubscribeRequest { .. } => Ok(()),
+            Origin::Root
+            | Origin::Lifecycle(_)
+            | Origin::SubscribeRequest { .. }
+            | Origin::HttpRequest { .. } => Ok(()),
+            Origin::HttpRefusal => write!(f, " (completion of a refused http request)"),
             Origin::Emit => write!(f, " (emitted by '{scope}')"),
             Origin::CrossDispatch { from } => write!(f, " (dispatched by '{from}')"),
             Origin::SubscriptionChange { target, path } if path.is_empty() => {
@@ -373,7 +474,8 @@ impl LifecycleHook {
 
 impl Origin {
     /// `{ kind, ... }`: `root`, `lifecycle` (`hook`), `emit`, `crossDispatch`
-    /// (`from`), `subscriptionChange` / `subscribeRequest` (`target`, `path`).
+    /// (`from`), `subscriptionChange` / `subscribeRequest` (`target`, `path`),
+    /// `httpRequest` (`method`, `url`), `httpRefusal`.
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
         match self {
@@ -389,6 +491,10 @@ impl Origin {
             Origin::SubscribeRequest { target, path } => {
                 json!({ "kind": "subscribeRequest", "target": target, "path": path })
             }
+            Origin::HttpRequest { method, url } => {
+                json!({ "kind": "httpRequest", "method": method, "url": url })
+            }
+            Origin::HttpRefusal => json!({ "kind": "httpRefusal" }),
         }
     }
 }
@@ -426,13 +532,21 @@ impl FailureCause {
             FailureCause::NoStateSlot => "noStateSlot",
             FailureCause::StateEncoding(_) => "stateEncoding",
             FailureCause::InvalidState(_) => "invalidState",
+            FailureCause::HttpNotGranted => "httpNotGranted",
+            FailureCause::HttpDenied { .. } => "httpDenied",
+            FailureCause::HttpInvalid(_) => "httpInvalid",
+            FailureCause::HttpLimit(_) => "httpLimit",
+            FailureCause::HttpUnavailable => "httpUnavailable",
         }
     }
 
     /// `{ code, ... }` with the variant's data: `missingGrant` and `grant`
     /// (`"dispatches"` / `"reads"`) for the two denials, `limit`, `budget` +
     /// `dropped`, `detail` (a decoder / handler message), `host`
-    /// (`{ code, message }`), `reason` (`notJson` / `notAnObject`).
+    /// (`{ code, message }`), `reason` (`notJson` / `notAnObject`); for the
+    /// deferred-HTTP refusals `grant` (`"http"` / `"httpHosts"`) with, for
+    /// `httpDenied`, the refused `host` (`host:port`), and for `httpLimit`
+    /// `limit` + `per` (`"call"` / `"module"`).
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
         let code = self.code();
@@ -440,7 +554,18 @@ impl FailureCause {
             FailureCause::UnknownModule
             | FailureCause::NotAccepted
             | FailureCause::NoHost
-            | FailureCause::NoStateSlot => json!({ "code": code }),
+            | FailureCause::NoStateSlot
+            | FailureCause::HttpUnavailable => json!({ "code": code }),
+            FailureCause::HttpNotGranted => json!({ "code": code, "grant": "http" }),
+            FailureCause::HttpDenied { host } => {
+                json!({ "code": code, "grant": "httpHosts", "host": host })
+            }
+            FailureCause::HttpLimit(HttpLimit::PerCall(limit)) => {
+                json!({ "code": code, "limit": limit, "per": "call" })
+            }
+            FailureCause::HttpLimit(HttpLimit::InFlight(limit)) => {
+                json!({ "code": code, "limit": limit, "per": "module" })
+            }
             FailureCause::DispatchDenied { missing_grant } => {
                 json!({ "code": code, "grant": "dispatches", "missingGrant": missing_grant })
             }
@@ -454,6 +579,7 @@ impl FailureCause {
             }
             FailureCause::PayloadNotJson(detail)
             | FailureCause::Handler(detail)
+            | FailureCause::HttpInvalid(detail)
             | FailureCause::StateEncoding(detail) => json!({ "code": code, "detail": detail }),
             FailureCause::Host(e) => json!({
                 "code": code,

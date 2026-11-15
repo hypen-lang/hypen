@@ -171,6 +171,7 @@ mod tests {
             id: ModuleInstanceId(0),
             actions: ActionSet::parse(&scope, vec!["changed".into(), "other".into()]).unwrap(),
             grants: Grants::from(ModuleGrants::new(reads.iter().copied(), [""; 0])),
+            wiring: Default::default(),
         };
         (scope, module)
     }

@@ -27,8 +27,14 @@
 //! budgeted and reported exactly like a dispatch to a hosted module.
 //!
 //! **Fold order** (see `fold`). State (replaced wholesale; unusable state
-//! rejects the whole output) → requested subscriptions → effects → follow-ups
-//! (`emit`, then cross-dispatch, then subscriber notifications).
+//! rejects the whole output) → requested subscriptions → effects → deferred
+//! HTTP requests → follow-ups (`emit`, then cross-dispatch, then subscriber
+//! notifications).
+//!
+//! **Deferred HTTP** (see `http`). A reducer queues requests; the engine
+//! admits each against the module's `http` grant and in-flight cap and hands
+//! it to the embedder as `Effect::Http`; `Engine::complete_http_request` runs
+//! the module's `then` action with the outcome.
 //!
 //! **Cascade** (see `cascade`). Follow-ups drain FIFO from one queue,
 //! bounded by [`MAX_CASCADE_DEPTH`] and the dispatch budget
@@ -51,6 +57,7 @@
 //! | `registry` | the instance table, [`ModuleGrants`], routing records in the core |
 //! | `cascade` | the work queue, budget and depth caps, the drain loop, the host call |
 //! | `fold` | applying one reducer output |
+//! | `http` | deferred HTTP: admission, requests in flight, completion |
 //! | `subscriptions` | cross-module subscriptions and who a change notifies |
 //! | `snapshots` | the encoded-state cache lent to host calls |
 //! | `paths` | changed-path collection and overlap |
@@ -58,6 +65,7 @@
 
 pub(crate) mod cascade;
 pub(crate) mod fold;
+pub(crate) mod http;
 pub(crate) mod names;
 pub(crate) mod paths;
 pub(crate) mod registry;
@@ -68,11 +76,12 @@ pub(crate) mod subscriptions;
 #[cfg(test)]
 mod tests;
 
+pub use http::{HttpCompletionError, HttpDelivery};
 pub use names::{ActionSet, InvalidName, ScopeName};
 pub use registry::ModuleGrants;
 pub use report::{
-    CascadeFailure, CascadeReport, CascadeRoot, FailureCause, InvalidState, LifecycleHook, Origin,
-    MAX_REPORTED_FAILURES,
+    CascadeFailure, CascadeReport, CascadeRoot, FailureCause, HttpLimit, InvalidState,
+    LifecycleHook, Origin, MAX_REPORTED_FAILURES,
 };
 
 use crate::action_routing::{split_scoped_action, UI_ACTION};
@@ -84,7 +93,7 @@ use crate::module_host::{Effect, HostAction, ModuleHost, ModuleInstanceId};
 use crate::reconcile::Patch;
 use cascade::{Call, Cascade};
 use names::canonical_scope;
-use registry::{Grants, HostedModule, Registry};
+use registry::{Grants, HostedModule, Registry, Wiring};
 use snapshots::EncodedStates;
 use subscriptions::{Notification, Subscriptions};
 
@@ -99,8 +108,10 @@ pub const DEFAULT_MODULE_DISPATCH_BUDGET: usize = 1024;
 /// Most subscriptions a single module may hold.
 pub const MAX_SUBSCRIPTIONS_PER_MODULE: usize = 256;
 
-/// Handler for engine-native effects (`Navigate` / `Delay`) the host performs.
-/// Receives the originating module scope and the effect.
+/// Handler for the effects the embedder performs: `Navigate`, `Delay` and
+/// `Http` (a deferred request the engine admitted — perform it, then call
+/// `Engine::complete_http_request`). Receives the originating module scope
+/// and the effect.
 pub type EffectHandler = Box<dyn Fn(&str, &Effect) + Send + Sync>;
 
 /// The engine's in-process action handlers — host-language closures (the
@@ -210,6 +221,10 @@ pub(crate) struct HostedModules {
     /// The report of the most recent cascade, if it had failures.
     last_report: Option<CascadeReport>,
     cascades_concluded: u64,
+    /// Deferred HTTP requests the embedder is performing.
+    http: http::InFlight,
+    /// The number the next wiring gets (see [`Wiring`]).
+    next_wiring: u64,
 }
 
 impl Default for HostedModules {
@@ -230,6 +245,8 @@ impl HostedModules {
             cascade_state: CascadeState::Idle,
             last_report: None,
             cascades_concluded: 0,
+            http: http::InFlight::default(),
+            next_wiring: 1,
         }
     }
 
@@ -293,8 +310,9 @@ impl HostedModules {
 
     /// Forget every wired instance, subscription and cached state — the
     /// engine core they pointed into is being replaced. The host, the effect
-    /// handler and the budget stay. Returns the instance ids that were wired,
-    /// for the caller to destroy host-side.
+    /// handler and the budget stay, and so do the HTTP requests in flight:
+    /// their completions find no module and are dropped. Returns the instance
+    /// ids that were wired, for the caller to destroy host-side.
     #[cfg_attr(not(feature = "module-loader-bridged"), allow(dead_code))]
     pub(crate) fn clear(&mut self) -> Vec<ModuleInstanceId> {
         let ids = self.registry.iter().map(|(_, module)| module.id).collect();
@@ -341,6 +359,7 @@ impl HostedModules {
             id,
             actions,
             grants: Grants::from(grants),
+            wiring: self.next_wiring(),
         };
         self.registry.wire(ctx.core, scope, module);
         Ok(())
@@ -369,9 +388,16 @@ impl HostedModules {
             id: new_id,
             actions,
             grants: Grants::from(grants),
+            wiring: self.next_wiring(),
         };
         self.registry.wire(ctx.core, scope, module);
         Ok(())
+    }
+
+    fn next_wiring(&mut self) -> Wiring {
+        let wiring = Wiring(self.next_wiring);
+        self.next_wiring = self.next_wiring.wrapping_add(1);
+        wiring
     }
 
     /// Forget the instance wired under `scope` (canonical) and its cached
