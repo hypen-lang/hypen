@@ -1253,6 +1253,42 @@ impl HypenEngine {
     }
 }
 
+impl HypenEngine {
+    fn dispatch_action_from(
+        &self,
+        action_name: String,
+        payload_json: Option<String>,
+        client: bool,
+    ) -> Result<(), HypenError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| HypenError::ActionError(e.to_string()))?;
+
+        let payload = payload_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| HypenError::ActionError(format!("invalid payload: {e}")))?;
+        let mut action = crate::dispatch::Action::new(action_name);
+        action.payload = payload;
+        let action = if client {
+            state.core.route_client_action(action)
+        } else {
+            state.core.route_ui_action(action)
+        }
+        .map_err(|e| HypenError::ActionError(e.to_string()))?;
+        if state.core.registered_actions.contains(&action.name) {
+            state.pending_actions.push(Action {
+                name: action.name,
+                payload_json: action.payload.map(|p| p.to_string()),
+            });
+        }
+
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1561,41 +1597,5 @@ mod tests {
                 .any(|p| p.props_json.as_deref().is_some_and(|j| j.contains("home"))),
             "the matched route renders: {patches:?}"
         );
-    }
-}
-
-impl HypenEngine {
-    fn dispatch_action_from(
-        &self,
-        action_name: String,
-        payload_json: Option<String>,
-        client: bool,
-    ) -> Result<(), HypenError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|e| HypenError::ActionError(e.to_string()))?;
-
-        let payload = payload_json
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| HypenError::ActionError(format!("invalid payload: {e}")))?;
-        let mut action = crate::dispatch::Action::new(action_name);
-        action.payload = payload;
-        let action = if client {
-            state.core.route_client_action(action)
-        } else {
-            state.core.route_ui_action(action)
-        }
-        .map_err(|e| HypenError::ActionError(e.to_string()))?;
-        if state.core.registered_actions.contains(&action.name) {
-            state.pending_actions.push(Action {
-                name: action.name,
-                payload_json: action.payload.map(|p| p.to_string()),
-            });
-        }
-
-        Ok(())
     }
 }
