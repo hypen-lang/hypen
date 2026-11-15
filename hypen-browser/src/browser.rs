@@ -3850,13 +3850,13 @@ mod tests {
         assert_eq!(tree.children_of("zz1"), ["zz2".to_string()]);
         let column = tree.get("zz1").unwrap();
         assert_eq!(column.props.get("slot"), Some(&json!("header")));
-        assert!(column.props.get("backgroundImage").is_none());
+        assert!(!column.props.contains_key("backgroundImage"));
         let text = tree.get("zz2").unwrap();
         assert_eq!(
             text.text_content().as_deref(),
             Some("w".repeat(40).as_str())
         );
-        assert!(text.props.get("title").is_none());
+        assert!(!text.props.contains_key("title"));
         let dump = serialize_tree(tree);
         assert!(
             dump.contains(&format!(

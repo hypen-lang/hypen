@@ -1189,7 +1189,7 @@ fn http_only_demuxer_scan_counts_a_buffer_list_once() {
         return;
     }
     let mut padding = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#".to_vec();
-    padding.extend(std::iter::repeat(b'x').take(5 << 19)); // 2.5 MiB
+    padding.extend(std::iter::repeat_n(b'x', 5 << 19)); // 2.5 MiB
     padding.push(b'\n');
     let Some(refusal) = push_manifest_list_to_guarded_hlsdemux2(vec![
         padding,

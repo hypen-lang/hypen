@@ -534,6 +534,7 @@ impl StallWatch {
 
     /// True when armed, no media has left the demuxer yet, and no media
     /// byte arrived for longer than `timeout`.
+    #[cfg(test)]
     pub(crate) fn stalled(&self, timeout: std::time::Duration) -> bool {
         self.verdict(false, timeout, timeout) == StallVerdict::TimedOut
     }
