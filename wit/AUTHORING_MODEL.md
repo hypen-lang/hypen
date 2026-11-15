@@ -321,23 +321,29 @@ composition) that doesn't change this loading model.
 
 Routing is keyed by **`(scope, action)`**, not by bare action name, so two
 modules exporting the same action name (e.g. two `Counter()`s, each with
-`increment`) no longer collide. The engine resolves the owning scope in
-priority order:
+`increment`) no longer collide. Who may name a scope depends on who is asking:
 
-1. **Explicit qualifier** — `scope:action` (used by the REPL / HTTP API,
-   e.g. `Counter:increment`).
-2. **Dispatching node** — a UI dispatch carries the `sender` node id of the
-   clicked element; the engine maps it back to that node's `module_scope`
-   (`EngineCore::scope_of_node`). The runtime DOM client stamps each element
-   with its node id and sends it on every dispatch; the browser
-   `dispatchAction(name, payload, scope?)` takes an optional scope.
-3. **Unambiguous bare name** — if exactly one scope exports the name, it
-   routes there (so single-module apps need no qualifier). If more than one
-   does, the dispatch errors with guidance instead of guessing.
+1. **Renderer input** (`Engine::dispatch_action`) is client-controlled and is
+   resolved by the UI-envelope rules only: a `__hypen_dispatch` envelope
+   carries the dispatching node's id and the engine derives the scope from
+   *node ownership*; a bare name routes only when exactly one scope handles
+   it (otherwise the dispatch errors with guidance instead of guessing).
+   There is no `scope:action` qualifier on this path.
+2. **Trusted host code** (REPL, timers resuming a `Delay`, server glue) names
+   the scope explicitly with `Engine::dispatch_module_action(scope, name,
+   payload)`. The reference runtime maps its operator conveniences onto these
+   two: `Counter:increment` in the REPL / dev HTTP API goes through the
+   trusted call, and a `sender` node id becomes a `__hypen_dispatch` envelope.
+   The browser `dispatchAction(name, payload, scope?)` uses the trusted call
+   when `scope` is given.
+3. **Module follow-ups** (`emit`, cross-module dispatch, subscription
+   `on_change`) are never routed by name string: `emit` stays in the emitting
+   scope, and the others go to the scope the engine checked a grant for.
 
-Proven by `qualified_actions_route_to_their_own_module_scope` (qualifier
-path) and `serve_app_routes_dispatch_by_sender_node_scope` (renderer/node
-path) in `tests/test_hypen_runtime.rs`.
+Proven by `qualified_actions_route_to_their_own_module_scope` and
+`serve_app_routes_dispatch_by_sender_node_scope` in
+`tests/test_hypen_runtime.rs`, and by `tests/test_module_host_routing.rs` /
+`tests/test_module_host_cascade.rs` engine-side.
 
 **`--app` loader — closed gaps.** Both former limitations are now resolved:
 
@@ -380,14 +386,14 @@ re-dispatches `on_change` to the subscriber. A subscription fires on
 *subsequent* changes, never the one that created it.
 
 The three couplings the scoping flagged are handled:
-- **Cycles** — a `dispatch_depth` guard bounds the whole module-dispatch
-  cascade (`emit` / cross-dispatch / subscribe re-entry) at
-  `MAX_DISPATCH_DEPTH = 32`, so a subscription cycle drops with a warning
-  instead of overflowing the host. (This also retro-guards `emit`/cross-dispatch,
-  which were previously unbounded.)
-- **Lifecycle** — a scope's subscriptions are cleared on
-  `register_module_instance` / `rewire_module_instance` (hot reload / teardown),
-  so a stale subscription can't fire on a replaced instance.
+- **Cycles and fan-out** — follow-ups drain from a FIFO work queue bounded by
+  a depth cap (`MAX_CASCADE_DEPTH = 32`) and a per-dispatch reducer-invocation
+  budget (`Engine::module_dispatch_budget`, default 1024). Hitting either is
+  reported as an error once the queue has drained; it never hangs the host.
+- **Lifecycle** — a scope's *own* subscriptions are cleared on
+  `register_module_instance` / `rewire_module_instance` (hot reload), so a
+  stale subscription can't fire on a replaced instance; `destroy_module`
+  clears them in both directions (as subscriber and as target).
 - **Registration site** — subscriptions register from the `dispatch` output the
   engine folds **and** from `on_activated`. The lifecycle path is now folded:
   `ModuleHost::on_activated` receives the sibling states, installs the ACL

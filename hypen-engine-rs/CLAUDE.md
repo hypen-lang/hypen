@@ -217,13 +217,22 @@ feature's tests targeted rather than as the whole suite:
 cargo test --features module-loader --lib --bins --test test_module_host --test test_module_host_async --test test_hypen_runtime
 cargo test --features uniffi,module-loader --test test_uniffi_host
 cargo test --test test_module_host_routing   # engine-side routing with a mock host, default features
+cargo test --test test_module_host_cascade   # reducer-output fold (ACLs, cascade queue, state, teardown), mock host
 ```
 
-With a module instance wired (`Engine::register_module_instance`), `Engine::dispatch_action` still
-resolves `__hypen_dispatch` envelopes through `route_ui_action` first (node ownership is the only
-routing authority) and then hands a resolved `__hypen_scoped:<scope>:<name>` to the owning module
-instance; `scope:action`, sender-node and unambiguous bare names are the non-renderer forms. With
-no instance wired, dispatch is exactly `route_ui_action` + the closure dispatcher.
+`Engine::dispatch_action` is the renderer-facing entry: its input is client-controlled, and with or
+without a module instance wired it is resolved by `route_ui_action` first (a `__hypen_dispatch`
+envelope by node ownership, a registered `__hypen_scoped:<scope>:<name>`, or a bare name exactly
+one scope handles). A resolved scoped name owned by a hosted instance drives that module, anything
+else the closure dispatcher. There is no `scope:action` qualifier and no sender-node shortcut;
+trusted embedder code (REPL, timers, tests) uses `Engine::dispatch_module_action(scope, name, payload)`.
+
+Folding a reducer output (`dispatch`, `on_activated`, `on_deactivated`) never routes by string:
+`emit` stays in the emitting scope, cross-dispatch and `subscribe` are re-checked against the
+`ModuleGrants` given at `register_module_instance`, and follow-ups drain from a FIFO queue bounded
+by `MAX_CASCADE_DEPTH` and `Engine::module_dispatch_budget` (a failed follow-up is collected and
+reported after the queue is empty). The scope's state is replaced wholesale with what the reducer
+returned; the old/new comparison only yields the changed paths to invalidate.
 
 ## Key Dependencies
 
