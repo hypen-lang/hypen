@@ -1,7 +1,7 @@
 {
   "name": "@hypen-space/module-host",
   "version": "0.6.7",
-  "description": "Hypen module host - browser/Node WASM Component host (runtime jco transpile, capability gating, storage backends) driven by the engine's BridgedHost",
+  "description": "Hypen module host - browser/Node/Bun host for Hypen WASM Component modules (runtime jco bindgen, link-time capability gating, scoped storage) driven by the engine's BridgedHost",
   "type": "module",
   "main": "./dist/index.js",
   "module": "./dist/index.js",
@@ -34,19 +34,19 @@
   },
   "files": [
     "dist",
-    "src"
+    "src",
+    "README.md"
   ],
   "scripts": {
     "build": "bun run build.ts",
-    "build:types": "tsc --emitDeclarationOnly",
     "prepublishOnly": "bun run build",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
     "clean": "rm -rf dist"
   },
   "dependencies": {
-    "@bytecodealliance/jco": "^1.13.0",
-    "@bytecodealliance/preview2-shim": "^0.17.9"
+    "@bytecodealliance/jco-transpile": "^0.24.0",
+    "@bytecodealliance/preview2-shim": "^0.31.1"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -69,13 +69,17 @@
     "module-host"
   ],
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.0.0"
   },
+  "sideEffects": false,
   "author": "Hypen",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/hypen-lang/hypen.git",
     "directory": "hypen-web/packages/module-host"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }

@@ -1,12 +1,13 @@
 /**
  * Build script for @hypen-space/module-host
  *
- * Compiles TypeScript to JavaScript for npm distribution and for plain-node
- * consumers (e.g. the wit-spikes/web-host harness re-exports the built
- * dist/*.js via relative imports).
+ * Compiles TypeScript to JavaScript (ESM + .d.ts) for npm distribution and
+ * for plain-Node consumers. Only src/ is built: tests and fixtures never
+ * reach dist/.
  *
- * Dependencies (@bytecodealliance/jco, @bytecodealliance/preview2-shim) stay
- * external — they are runtime deps resolved by the consumer's module graph.
+ * Dependencies (@bytecodealliance/jco-transpile, @bytecodealliance/
+ * preview2-shim) stay external — they are runtime deps resolved by the
+ * consumer's module graph (and loaded lazily, on the first prepare()).
  */
 
 import { $ } from "bun";
@@ -27,9 +28,8 @@ const result = await Bun.build({
   target: "browser",
   format: "esm",
   sourcemap: "external",
-  // Shared chunks so the module-level singletons (the storage backends, the
-  // per-call ACL context) live in ONE module instance even when consumers
-  // import different entrypoints (dist/storage.js + dist/js-module-host.js).
+  // Shared chunks so classes (HostStorage, backends) keep one identity when
+  // consumers import several entrypoints (dist/storage.js + dist/index.js).
   splitting: true,
   // Keep npm deps as import statements instead of bundling them.
   packages: "external",

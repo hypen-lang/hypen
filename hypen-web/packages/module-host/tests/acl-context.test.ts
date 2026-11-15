@@ -4,11 +4,11 @@
  * subscribe gating, and context install/drain/restore around reducer calls.
  *
  * Uses FAKE bindings injected via `registerPrepared` — no wasm involved.
- * The heavier wasm-driven end-to-end tests live in wit-spikes/web-host.
+ * The wasm-driven end-to-end tests live in tests/e2e-*.test.ts.
  */
 
 import { describe, expect, test } from "bun:test";
-import { JsModuleHost, engineStateImport } from "../src/index.ts";
+import { JsModuleHost, type EngineStateImport } from "../src/index.ts";
 import type {
   ActionMessage,
   ModuleBindings,
@@ -22,22 +22,22 @@ const dec = new TextDecoder();
 const emptyOut = { state: undefined, effects: [], emit: [] };
 
 /** Host with fake bindings whose dispatch/onActivated run `reducer`. */
-function makeHost(
-  manifest: ModuleManifest,
-  reducer: (state: Uint8Array, action: ActionMessage) => unknown = () => emptyOut,
-) {
+type Reducer = (state: Uint8Array, action: ActionMessage, es: EngineStateImport) => unknown;
+
+function makeHost(manifest: ModuleManifest, reducer: Reducer = () => emptyOut) {
   const host = new JsModuleHost();
+  const es = host.engineState;
   const bindings: ModuleBindings = {
     init: (config) => config,
     actions: () => ["probe"],
-    dispatch: (state, action) => reducer(state, action),
-    onActivated: (state) => reducer(state, { name: "@activated", payload: new Uint8Array() }),
+    dispatch: (state, action) => reducer(state, action, es),
+    onActivated: (state) => reducer(state, { name: "@activated", payload: new Uint8Array() }, es),
     onDeactivated: () => emptyOut,
     onDestroyed: () => {},
   };
   host.registerPrepared("fake", bindings, manifest);
   const id = host.instantiate("fake");
-  return { host, id };
+  return { host, id, es };
 }
 
 const probe = (): ActionMessage => ({ name: "probe", payload: enc.encode("{}") });
@@ -57,9 +57,9 @@ function catchThrown(fn: () => unknown): any {
 
 describe("engine-state read ACL", () => {
   test("read of a granted sibling returns its snapshot", () => {
-    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, () => ({
+    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, (_s, _a, es) => ({
       ...emptyOut,
-      state: engineStateImport.read("profile"),
+      state: es.read("profile"),
     }));
     const out = host.dispatch(id, new Uint8Array(), probe(), [
       sibling("profile", '{"name":"ada"}'),
@@ -68,8 +68,8 @@ describe("engine-state read ACL", () => {
   });
 
   test("read without the grant throws permission-denied(reads)", () => {
-    const { host, id } = makeHost({ reads: [], dispatches: [] }, () =>
-      engineStateImport.read("profile"),
+    const { host, id } = makeHost({ reads: [], dispatches: [] }, (_s, _a, es) =>
+      es.read("profile"),
     );
     const err = catchThrown(() =>
       host.dispatch(id, new Uint8Array(), probe(), [sibling("profile", "{}")]),
@@ -78,15 +78,16 @@ describe("engine-state read ACL", () => {
   });
 
   test("read of a granted-but-absent sibling throws not-found", () => {
-    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, () =>
-      engineStateImport.read("profile"),
+    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, (_s, _a, es) =>
+      es.read("profile"),
     );
     const err = catchThrown(() => host.dispatch(id, new Uint8Array(), probe(), []));
     expect(err).toEqual({ tag: "not-found" });
   });
 
   test("read outside any reducer call throws (no active context)", () => {
-    const err = catchThrown(() => engineStateImport.read("anything"));
+    const es = new JsModuleHost().engineState;
+    const err = catchThrown(() => es.read("anything"));
     expect(err).toEqual({ tag: "permission-denied", val: "reads" });
   });
 });
@@ -94,9 +95,9 @@ describe("engine-state read ACL", () => {
 describe("engine-state cross-dispatch queue", () => {
   test("granted dispatch is queued (not reentrant) and drained into the output", () => {
     let reentered = 0;
-    const { host, id } = makeHost({ reads: [], dispatches: ["cart"] }, (_s, action) => {
+    const { host, id } = makeHost({ reads: [], dispatches: ["cart"] }, (_s, action, es) => {
       if (action.name === "ping") reentered++;
-      engineStateImport.dispatch("cart", { name: "ping", payload: enc.encode("{}") });
+      es.dispatch("cart", { name: "ping", payload: enc.encode("{}") });
       return emptyOut;
     });
 
@@ -109,8 +110,8 @@ describe("engine-state cross-dispatch queue", () => {
   });
 
   test("queue is per call — a second dispatch starts empty", () => {
-    const { host, id } = makeHost({ reads: [], dispatches: ["cart"] }, () => {
-      engineStateImport.dispatch("cart", { name: "ping", payload: new Uint8Array() });
+    const { host, id } = makeHost({ reads: [], dispatches: ["cart"] }, (_s, _a, es) => {
+      es.dispatch("cart", { name: "ping", payload: new Uint8Array() });
       return emptyOut;
     });
     host.dispatch(id, new Uint8Array(), probe(), []);
@@ -119,8 +120,8 @@ describe("engine-state cross-dispatch queue", () => {
   });
 
   test("dispatch without the grant throws permission-denied(dispatches)", () => {
-    const { host, id } = makeHost({ reads: [], dispatches: [] }, () =>
-      engineStateImport.dispatch("cart", { name: "ping", payload: new Uint8Array() }),
+    const { host, id } = makeHost({ reads: [], dispatches: [] }, (_s, _a, es) =>
+      es.dispatch("cart", { name: "ping", payload: new Uint8Array() }),
     );
     const err = catchThrown(() => host.dispatch(id, new Uint8Array(), probe(), []));
     expect(err).toEqual({ tag: "permission-denied", val: "dispatches" });
@@ -129,8 +130,8 @@ describe("engine-state cross-dispatch queue", () => {
 
 describe("engine-state subscribe gating", () => {
   test("subscribe rides the reads grant and lands in subscribeRequests", () => {
-    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, () => {
-      engineStateImport.subscribe("profile", "name", "onProfileName");
+    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, (_s, _a, es) => {
+      es.subscribe("profile", "name", "onProfileName");
       return emptyOut;
     });
     const out = host.dispatch(id, new Uint8Array(), probe(), []);
@@ -140,8 +141,8 @@ describe("engine-state subscribe gating", () => {
   });
 
   test("subscribe without the reads grant throws permission-denied(reads)", () => {
-    const { host, id } = makeHost({ reads: [], dispatches: [] }, () =>
-      engineStateImport.subscribe("profile", "name", "onProfileName"),
+    const { host, id } = makeHost({ reads: [], dispatches: [] }, (_s, _a, es) =>
+      es.subscribe("profile", "name", "onProfileName"),
     );
     const err = catchThrown(() => host.dispatch(id, new Uint8Array(), probe(), []));
     expect(err).toEqual({ tag: "permission-denied", val: "reads" });
@@ -150,26 +151,26 @@ describe("engine-state subscribe gating", () => {
 
 describe("context lifecycle around reducer calls", () => {
   test("context is torn down after dispatch returns", () => {
-    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, () => emptyOut);
+    const { host, id, es } = makeHost({ reads: ["profile"], dispatches: [] }, () => emptyOut);
     host.dispatch(id, new Uint8Array(), probe(), [sibling("profile", "{}")]);
     // Back outside a call: even a previously granted read must fail.
-    const err = catchThrown(() => engineStateImport.read("profile"));
+    const err = catchThrown(() => es.read("profile"));
     expect(err).toEqual({ tag: "permission-denied", val: "reads" });
   });
 
   test("context is torn down even when the reducer throws", () => {
-    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, () => {
+    const { host, id, es } = makeHost({ reads: ["profile"], dispatches: [] }, () => {
       throw new Error("reducer exploded");
     });
     expect(() => host.dispatch(id, new Uint8Array(), probe(), [])).toThrow("reducer exploded");
-    const err = catchThrown(() => engineStateImport.read("profile"));
+    const err = catchThrown(() => es.read("profile"));
     expect(err).toEqual({ tag: "permission-denied", val: "reads" });
   });
 
   test("onActivated installs the same ACL context as dispatch", () => {
-    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, (_s, action) => {
+    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, (_s, action, es) => {
       if (action.name === "@activated") {
-        engineStateImport.subscribe("profile", "avatar", "onAvatar");
+        es.subscribe("profile", "avatar", "onAvatar");
       }
       return emptyOut;
     });
@@ -177,6 +178,25 @@ describe("context lifecycle around reducer calls", () => {
     expect(out.subscribeRequests).toEqual([
       { module: "profile", path: "avatar", onChange: "onAvatar" },
     ]);
+  });
+});
+
+describe("per-host isolation", () => {
+  test("a call context on one host is invisible to another host's engineState", () => {
+    const other = new JsModuleHost();
+    let leaked: unknown = null;
+    const { host, id } = makeHost({ reads: ["profile"], dispatches: [] }, () => {
+      leaked = catchThrown(() => other.engineState.read("profile"));
+      return emptyOut;
+    });
+    host.dispatch(id, new Uint8Array(), probe(), [sibling("profile", "{}")]);
+    expect(leaked).toEqual({ tag: "permission-denied", val: "reads" });
+  });
+
+  test("omitted reads/dispatches deny everything", () => {
+    const { host, id } = makeHost({}, (_s, _a, es) => es.read("profile"));
+    const err = catchThrown(() => host.dispatch(id, new Uint8Array(), probe(), [sibling("profile", "{}")]));
+    expect(err).toEqual({ tag: "permission-denied", val: "reads" });
   });
 });
 
@@ -193,8 +213,8 @@ describe("host surface basics (fake bindings)", () => {
   });
 
   test("re-register with empty bytes keeps prepared bindings, refreshes manifest", () => {
-    const { host, id } = makeHost({ reads: [], dispatches: [] }, () =>
-      engineStateImport.read("profile"),
+    const { host, id } = makeHost({ reads: [], dispatches: [] }, (_s, _a, es) =>
+      es.read("profile"),
     );
     // Engine-style re-register (empty bytes) with a widened manifest.
     host.register("fake", new Uint8Array(0), { reads: ["profile"], dispatches: [] });

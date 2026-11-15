@@ -6,18 +6,35 @@
  * capability contract (declare -> grant -> enforce) and pipeline details.
  */
 
-export { JsModuleHost, engineStateImport, buildImportMap } from "./js-module-host.ts";
+export { JsModuleHost, buildImportMap } from "./js-module-host.ts";
+export type { JsModuleHostOptions, EngineStateImport } from "./js-module-host.ts";
 export {
-  LocalBucket,
-  CloudBucket,
-  BrowserLocalStore,
-  MemoryLocalStore,
-  dumpStores,
+  HostStorage,
+  MemoryStorageBackend,
+  LocalStorageBackend,
+  defaultStorageBackend,
+  createStorageImports,
+  DEFAULT_STORAGE_QUOTAS,
+  STORAGE_SCOPES,
   LS_PREFIX,
 } from "./storage.ts";
-export type { LocalStoreBackend, BucketEntryInfo } from "./storage.ts";
+export type {
+  StorageBackend,
+  StorageLike,
+  StorageScope,
+  StorageQuotas,
+  StorageError,
+  HostStorageOptions,
+  BucketRef,
+  BucketEntryInfo,
+  KvBucket,
+  CloudBucket,
+  StorageImports,
+} from "./storage.ts";
+export { normalizeManifest } from "./types.ts";
 export type {
   ModuleManifest,
+  NormalizedManifest,
   ModuleBindings,
   ActionMessage,
   SiblingState,

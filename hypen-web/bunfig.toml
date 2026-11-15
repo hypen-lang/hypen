@@ -8,4 +8,4 @@
 # `@hypen-space/server` or `@hypen-space/web-engine`.
 
 [test]
-preload = ["./tests/_preload.ts", "./packages/module-host/tests/_preload.ts"]
+preload = ["./tests/_preload.ts"]
