@@ -690,8 +690,7 @@ impl VelloPainter {
         }
 
         let key = subtree_cache_key(root_id, items, &self.interaction);
-        let outer_clip = items[0].clip_to;
-        let outer_clip_radius = items[0].clip_radius;
+        let (outer_clip, outer_clip_radius) = fragment_outer_clip(items);
         let current_origin_y = items[0].rect.y;
 
         // Cache lookup. `self.subtree_cache` and `self.scene` are
@@ -2846,6 +2845,51 @@ fn affine2_to_kurbo(t: crate::layout::Affine2) -> Affine {
     Affine::new([a as f64, b as f64, c as f64, d as f64, e as f64, f as f64])
 }
 
+/// The ONE clip a cached fragment is replayed under. Every item of the
+/// run is drawn inside it (an item whose own clip differs pushes that
+/// clip too, nested), so it must contain every item's clip — the first
+/// item's clip only qualifies when it does.
+///
+/// A run need not start at its scroll subtree's root: bitmap-bearing
+/// items split a subtree into several runs, so a run can open with a
+/// clipped card's child. Home Screen's Settings showed it — the run after
+/// the wallpaper card's last swatch began inside that `overflow-hidden`
+/// card, and the card's clip, used for the whole run, erased the
+/// Appearance card below it. The widest item clip (normally the scroll
+/// container's, carried by the run's direct children) is used instead,
+/// or no outer clip at all when no single item clip contains the rest.
+fn fragment_outer_clip(items: &[crate::layout::LayoutItem]) -> (Option<LayoutRect>, f32) {
+    fn within(inner: Option<LayoutRect>, outer: Option<LayoutRect>) -> bool {
+        match (inner, outer) {
+            (_, None) => true,
+            (None, Some(_)) => false,
+            (Some(i), Some(o)) => {
+                const EPS: f32 = 0.01;
+                i.x >= o.x - EPS
+                    && i.y >= o.y - EPS
+                    && i.x + i.w <= o.x + o.w + EPS
+                    && i.y + i.h <= o.y + o.h + EPS
+            }
+        }
+    }
+    let contains_all = |clip: Option<LayoutRect>| items.iter().all(|it| within(it.clip_to, clip));
+    let first = &items[0];
+    if contains_all(first.clip_to) {
+        return (first.clip_to, first.clip_radius);
+    }
+    let mut seen: Vec<Option<LayoutRect>> = Vec::new();
+    for it in items {
+        if seen.contains(&it.clip_to) {
+            continue;
+        }
+        if contains_all(it.clip_to) {
+            return (it.clip_to, it.clip_radius);
+        }
+        seen.push(it.clip_to);
+    }
+    (None, 0.0)
+}
+
 /// Bounding box of every item's VISUAL rect (transform-aware AABB) in
 /// the subtree slice. Used as the visibility test for the whole slice —
 /// if this is off-screen the painter skips the cache lookup and the
@@ -3730,6 +3774,75 @@ mod tests {
         painter.build_scene(&layout, (800, 600), 1.0, 0.0);
         assert_eq!(painter.subtree_cache_misses(), 4);
         assert_eq!(painter.subtree_cache_hits(), 8);
+    }
+
+    /// A run that opens inside a clipped card must not clip the cards
+    /// after it to that card (Home Screen Settings: the Appearance card
+    /// vanished below the Wallpaper card).
+    #[test]
+    fn a_fragment_is_replayed_under_a_clip_that_contains_every_item() {
+        let scroll = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 430.0,
+            h: 934.0,
+        };
+        let card1 = LayoutRect {
+            x: 20.0,
+            y: 102.0,
+            w: 390.0,
+            h: 590.0,
+        };
+        // Tail of card 1 (clipped to it), then card 2 and its child.
+        let mut tail = item_in("tail", "content", 21.0, 631.0, 388.0, 60.0);
+        tail.clip_to = Some(card1);
+        tail.clip_radius = 16.0;
+        let mut card2 = item_in("card2", "content", 20.0, 712.0, 390.0, 290.0);
+        card2.clip_to = Some(scroll);
+        let mut row = item_in("row", "content", 21.0, 761.0, 388.0, 60.0);
+        row.clip_to = Some(LayoutRect {
+            x: 20.0,
+            y: 712.0,
+            w: 390.0,
+            h: 222.0,
+        });
+        let items = vec![tail, card2, row];
+        assert_eq!(fragment_outer_clip(&items), (Some(scroll), 0.0));
+
+        let mut painter = VelloPainter::new();
+        let layout = LayoutPass {
+            items,
+            content_size: (430.0, 1002.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+        painter.build_scene(&layout, (430, 934), 1.0, 0.0);
+        let cached: Vec<_> = painter.subtree_cache.values().map(|c| c.clip_to).collect();
+        assert_eq!(cached, vec![Some(scroll)], "replayed under the scroll clip");
+
+        // A run whose first item already contains the rest keeps it.
+        let mut a = item_in("a", "x", 0.0, 0.0, 10.0, 10.0);
+        a.clip_to = Some(scroll);
+        a.clip_radius = 4.0;
+        let mut b = item_in("b", "x", 0.0, 0.0, 10.0, 10.0);
+        b.clip_to = Some(card1);
+        assert_eq!(fragment_outer_clip(&[a.clone(), b.clone()]), (Some(scroll), 4.0));
+        // Disjoint clips: no single outer clip — each item clips itself.
+        b.clip_to = None;
+        a.clip_to = Some(card1);
+        let mut c = item_in("c", "x", 0.0, 0.0, 10.0, 10.0);
+        c.clip_to = Some(LayoutRect {
+            x: 0.0,
+            y: 800.0,
+            w: 10.0,
+            h: 10.0,
+        });
+        assert_eq!(fragment_outer_clip(&[a, c]).0, None);
     }
 
     #[test]
