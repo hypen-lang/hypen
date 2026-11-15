@@ -35,20 +35,13 @@ use std::sync::Arc;
 
 use hypen_renderer_desktop::RemoteModule;
 
-/// Embeds nested deeper than this are refused (with a log line) — a
-/// guard against an app that embeds itself recursively.
-pub const MAX_EMBED_DEPTH: usize = 4;
-
-/// Where the embed's connection currently stands, as far as slot
-/// visibility is concerned. `Loading` until the first patch batch
-/// lands (a socket that's "connected" but hasn't sent a tree yet still
-/// shows the splash), `Error` on a terminal connection failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbedStatus {
-    Loading,
-    Connected,
-    Error,
-}
+// The element-level helpers are shared with the desktop renderer's own
+// `HypenApp` support (`hypen_renderer_desktop::embed`), so a window that
+// connects to an app straight away and a browser tab read hosts, URLs and
+// slots the same way.
+pub use hypen_renderer_desktop::embed::{
+    embed_url, is_hypenapp, slot_of, EmbedStatus, MAX_EMBED_DEPTH,
+};
 
 /// One live `HypenApp` embed.
 pub struct Embed {
@@ -157,33 +150,6 @@ impl Embed {
         }
         out
     }
-}
-
-/// `true` when a Create's element type is the HypenApp embed component.
-pub fn is_hypenapp(element_type: &str) -> bool {
-    element_type.eq_ignore_ascii_case("hypenapp")
-}
-
-/// Pull the WebSocket URL off a HypenApp node's props: positional
-/// (`"0"` — what the engine emits for `HypenApp("wss://…")`) or named
-/// (`url`), with the flattened `.0` spellings accepted for safety.
-pub fn embed_url(props: &IndexMap<String, Value>) -> Option<String> {
-    for key in ["0", "0.0", "url", "url.0"] {
-        if let Some(v) = props.get(key).and_then(|v| v.as_str()) {
-            if !v.trim().is_empty() {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-/// A node's slot tag (`.slot("loading")` flattens to `slot.0`).
-pub fn slot_of(props: &IndexMap<String, Value>) -> Option<&str> {
-    props
-        .get("slot.0")
-        .or_else(|| props.get("slot"))
-        .and_then(|v| v.as_str())
 }
 
 /// `true` for prop keys whose VALUE is an action reference: the bare

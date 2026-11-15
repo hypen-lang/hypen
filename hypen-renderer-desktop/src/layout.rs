@@ -5536,6 +5536,12 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "lineclamp"
             | "line-clamp"
             | "gap"
+            | "rowgap"
+            | "row-gap"
+            | "columngap"
+            | "column-gap"
+            | "flexwrap"
+            | "flex-wrap"
             | "flex"
             | "flexgrow"
             | "flex-grow"
@@ -7446,6 +7452,82 @@ fn apply_size_props(style: &mut Style, node: &crate::tree::Node, vs: &VariantSta
             || prop_f32_with(node, "flex", vs).is_some();
         keep_authored_size_out_of_ratio_transfer(style, authored_w, authored_h, shrink_authored);
     }
+    apply_display_and_wrap_props(style, node, vs, scale);
+}
+
+/// CSS `display: none`, `flex-wrap`, the per-axis gaps
+/// (`row-gap` / `column-gap`) and `auto` margins, breakpoint- and
+/// state-aware like every
+/// other layout prop. Runs from [`apply_size_props`] because that is
+/// the one helper every style builder (both `build_subtree` and
+/// `node_style_with`, every element kind) calls.
+///
+/// * `display` — `none` (tw `hidden`, `.display("none")`) takes the
+///   node out of layout and paint (`emit_items` skips it); any other
+///   value (`block` / `flex` / `inline` …, e.g. the `sm:block` that
+///   re-shows a `hidden` node) keeps the kind's own display, since a
+///   Column/Row/Text already lays out like the CSS box it maps to.
+///   Without this the Files toolbar's `hidden sm:block` Upload label
+///   and the list view's `hidden md:flex` columns always showed.
+/// * `flex-wrap` — `wrap` / `wrap-reverse` let a flex line break, so the
+///   Files selection bar (`flex-wrap`) moves its buttons to a second row
+///   instead of overflowing the window.
+/// * `column-gap` / `row-gap` (tw `gap-x-*` / `gap-y-*`) override the
+///   matching axis of `gap` (Taffy: width = column gap, height = row gap).
+fn apply_display_and_wrap_props(
+    style: &mut Style,
+    node: &crate::tree::Node,
+    vs: &VariantState,
+    scale: f32,
+) {
+    if let Some(display) = prop_str_with(node, "display", vs) {
+        if display.trim().eq_ignore_ascii_case("none") {
+            style.display = Display::None;
+        }
+    }
+    if let Some(wrap) = prop_str_with(node, "flexWrap", vs) {
+        style.flex_wrap = match wrap.trim().to_ascii_lowercase().as_str() {
+            "wrap" => FlexWrap::Wrap,
+            "wrap-reverse" | "wrapreverse" => FlexWrap::WrapReverse,
+            "nowrap" | "no-wrap" => FlexWrap::NoWrap,
+            _ => style.flex_wrap,
+        };
+    }
+    if let Some(v) = prop_f32_with(node, "columnGap", vs) {
+        style.gap.width = length(v * scale);
+    }
+    if let Some(v) = prop_f32_with(node, "rowGap", vs) {
+        style.gap.height = length(v * scale);
+    }
+    // `margin: auto` per side (tw `ml-auto`, `mx-auto`): the flex item
+    // absorbs the free space on that side, e.g. the Files selection bar's
+    // `ml-auto` button group sits at the right end of its (wrapped) line.
+    // The numeric margin readers treat `auto` as 0, so only the sides
+    // authored as `auto` are overridden here.
+    let is_auto = |name: &str| {
+        prop_str_with(node, name, vs).is_some_and(|v| v.trim().eq_ignore_ascii_case("auto"))
+    };
+    let all = is_auto("margin");
+    if all || is_auto("marginLeft") {
+        style.margin.left = LengthPercentageAuto::auto();
+    }
+    if all || is_auto("marginRight") {
+        style.margin.right = LengthPercentageAuto::auto();
+    }
+    if all || is_auto("marginTop") {
+        style.margin.top = LengthPercentageAuto::auto();
+    }
+    if all || is_auto("marginBottom") {
+        style.margin.bottom = LengthPercentageAuto::auto();
+    }
+}
+
+/// `true` when a Taffy node is `display: none` — it has no geometry and
+/// must emit nothing (no paint, no hit target, no a11y node).
+fn is_display_none(taffy: &TaffyTree<NodeContext>, node: NodeId) -> bool {
+    taffy
+        .style(node)
+        .is_ok_and(|style| style.display == Display::None)
 }
 
 /// CSS carries a min / max constraint through `aspect-ratio` onto the
@@ -7850,10 +7932,34 @@ fn emit_items(
     // children flex naturally to their full content extent — using
     // `size` here would have `natural_bounds.1` stop at viewport.h,
     // collapsing `content_size` and snapping page scroll to 0.
-    let extent_h = layout.content_size.height.max(layout.size.height);
-    let extent_w = layout.content_size.width.max(layout.size.width);
+    //
+    // A box that clips its overflow (`overflow: hidden`, not a scroller)
+    // is the exception: like CSS, what it hides doesn't make the page
+    // scrollable. Home Screen's app frame (`overflow-hidden`) holds an
+    // embedded app whose `min-h-screen` root is taller than the frame's
+    // body; counting it gave the window a page scrollbar Chrome doesn't
+    // have. Its own box still counts; its descendants report into a
+    // scratch accumulator below.
+    let clips_extent = renderer_for_taffy
+        .get(&node_id)
+        .and_then(|rid| tree.get(rid))
+        .is_some_and(|node| clips_overflow_node(node, viewport) && !is_scrollable_node(node, viewport));
+    let (extent_w, extent_h) = if clips_extent {
+        (layout.size.width, layout.size.height)
+    } else {
+        (
+            layout.content_size.width.max(layout.size.width),
+            layout.content_size.height.max(layout.size.height),
+        )
+    };
     natural_bounds.0 = natural_bounds.0.max(x + extent_w);
     natural_bounds.1 = natural_bounds.1.max(y_natural + extent_h);
+    let mut clipped_bounds = (0.0_f32, 0.0_f32);
+    let natural_bounds: &mut (f32, f32) = if clips_extent {
+        &mut clipped_bounds
+    } else {
+        natural_bounds
+    };
 
     // Viewport cull. When `cull_viewport` is `Some`, subtrees fully
     // outside the visible region plus [`CULL_BUFFER_VH`] of slack on
@@ -8699,6 +8805,9 @@ fn emit_items(
         flow_children.into_iter().chain(overlay_children).collect()
     };
     for child in paint_children {
+        if is_display_none(taffy, child) {
+            continue;
+        }
         let child_is_absolute = taffy
             .style(child)
             .map(|style| style.position == Position::Absolute)
