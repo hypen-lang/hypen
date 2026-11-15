@@ -15,7 +15,7 @@
 
 use crate::layout::{ItemKind, LayoutPass, Rect as LayoutRect, TextAlign};
 use crate::style::{
-    BorderLineStyle, Rgba, BORDER_SIDES_ALL, BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT,
+    BorderLineStyle, CornerRadii, Rgba, BORDER_SIDES_ALL, BORDER_SIDE_BOTTOM, BORDER_SIDE_LEFT,
     BORDER_SIDE_RIGHT, BORDER_SIDE_TOP,
 };
 use crate::text::TextEngine;
@@ -70,7 +70,7 @@ struct CachedSubtree {
     /// Radius of `clip_to` in physical pixels. Stored with the cached
     /// fragment because changing a clipping ancestor's radius changes the
     /// pixels even when the descendant scene itself is unchanged.
-    clip_radius: f32,
+    clip_radius: CornerRadii,
     /// Renderer node ids of every item encoded into this fragment.
     /// Backs [`VelloPainter::invalidate_subtrees_containing`]: a
     /// paint-only patch batch drops exactly the entries whose id set
@@ -810,7 +810,7 @@ impl VelloPainter {
         item: &crate::layout::LayoutItem,
         scale_factor: f32,
         outer_clip: Option<LayoutRect>,
-        outer_clip_radius: f32,
+        outer_clip_radius: CornerRadii,
     ) {
         // Skip the per-item clip if it matches the outer clip we
         // already pushed at the subtree level — `draw_item` would
@@ -819,7 +819,7 @@ impl VelloPainter {
         // scrollable ancestor), leave it alone. The clip is threaded
         // as a parameter so no per-item `LayoutItem` clone is needed.
         if item.clip_to == outer_clip && item.clip_radius == outer_clip_radius {
-            self.draw_item_with(item, scale_factor, None, 0.0, item.transform);
+            self.draw_item_with(item, scale_factor, None, CornerRadii::ZERO, item.transform);
         } else {
             self.draw_item(item, scale_factor);
         }
@@ -845,7 +845,7 @@ impl VelloPainter {
         item: &crate::layout::LayoutItem,
         scale_factor: f32,
         clip_to: Option<LayoutRect>,
-        clip_radius: f32,
+        clip_radius: CornerRadii,
         transform: crate::layout::Affine2,
     ) {
         // Per-item transform (static `translateX` / `translateY` /
@@ -868,7 +868,7 @@ impl VelloPainter {
                 item,
                 scale_factor,
                 None,
-                0.0,
+                CornerRadii::ZERO,
                 crate::layout::Affine2::IDENTITY,
             );
             let sub_scene = std::mem::replace(&mut self.scene, prev_scene);
@@ -987,81 +987,79 @@ impl VelloPainter {
             }
         }
 
-        let radius = item.border.radius * scale_factor;
+        // Per-corner radii (`rounded-t-*`), physical px. Every fill, image,
+        // gradient, border and clip below takes the full set; single-radius
+        // consumers (blurred shadows, the Card default shadow, the focus
+        // ring) use the largest corner.
+        let radius = item.border.radii().scaled(scale_factor);
         if let Some(shadows) = item.shadow.as_deref() {
             // An outer CSS shadow is clipped to OUTSIDE the border box: a
             // translucent / transparent surface never shows its own shadow
             // through, and a `0 0 0 2px` ring around a hollow chip stays a
             // ring. Even-odd clip = the shadows' reach minus the box.
-            let mut reach = 0.0_f32;
-            for s in shadows.iter().filter(|s| !s.inset) {
-                reach = reach.max(s.x.abs().max(s.y.abs()) + s.spread.max(0.0) + s.blur * 1.5);
-            }
-            let reach = (reach + 1.0) * scale_factor;
-            let mut clip = BezPath::new();
-            clip.extend(
-                KRect::new(
-                    (item.rect.x - reach) as f64,
-                    (item.rect.y - reach) as f64,
-                    (item.rect.x + item.rect.w + reach) as f64,
-                    (item.rect.y + item.rect.h + reach) as f64,
-                )
-                .path_elements(0.1),
-            );
-            clip.extend(rounded_rect_path(item.rect, radius).path_elements(0.1));
-            self.scene.push_layer(
-                Fill::EvenOdd,
-                vello::peniko::BlendMode::default(),
-                1.0,
-                Affine::IDENTITY,
-                &clip,
-            );
-            // CSS paints the first layer on top, so draw back to front.
-            // `inset` layers are not drawn (no inner-shadow primitive).
-            for shadow_style in shadows.iter().rev().filter(|s| !s.inset) {
-                let spread = shadow_style.spread * scale_factor;
-                let x0 = item.rect.x + shadow_style.x * scale_factor - spread;
-                let y0 = item.rect.y + shadow_style.y * scale_factor - spread;
-                let x1 = item.rect.x + item.rect.w + shadow_style.x * scale_factor + spread;
-                let y1 = item.rect.y + item.rect.h + shadow_style.y * scale_factor + spread;
-                if x1 <= x0 || y1 <= y0 {
-                    continue;
-                }
-                let shadow = KRect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64);
-                // Clamp to the shadow box: Vello's blurred-rect shader uses
-                // the raw radius in its normalisation term, so a
-                // `rounded-full` 9999 radius turned the coverage NEGATIVE
-                // and the "shadow" lightened the backdrop instead.
-                let corner = if radius > 0.0 {
-                    (radius + spread).max(0.0).min((x1 - x0).min(y1 - y0) * 0.5)
-                } else {
-                    0.0
-                };
-                // A CSS blur radius B is a Gaussian with σ = B / 2.
-                let sigma = shadow_style.blur * 0.5 * scale_factor;
-                if sigma <= 0.0 {
-                    fill_rect(
-                        &mut self.scene,
-                        LayoutRect {
-                            x: x0,
-                            y: y0,
-                            w: x1 - x0,
-                            h: y1 - y0,
-                        },
-                        shadow_style.color,
-                        corner,
+            //
+            // The clip layer is only needed when something could show
+            // through the box: an opaque background colour, painted right
+            // after over the whole (rounded) border box, hides exactly the
+            // part the clip would remove — so the common white card skips
+            // the layer (and its path) entirely.
+            let outer = || shadows.iter().filter(|s| !s.inset);
+            if outer().next().is_some() {
+                // (The gradient-only branch below replaces the colour
+                // instead of painting it, so it does not count.)
+                let colour_painted = item.background_layers.is_some()
+                    || item.background_image.is_some()
+                    || item.background_gradient.is_none();
+                let covered = colour_painted && background.is_some_and(|b| b.3 == 255);
+                let clipped = !covered;
+                if clipped {
+                    let mut reach = 0.0_f32;
+                    for s in outer() {
+                        reach = reach
+                            .max(s.x.abs().max(s.y.abs()) + s.spread.max(0.0) + s.blur * 1.5);
+                    }
+                    let reach = (reach + 1.0) * scale_factor;
+                    let mut clip = BezPath::new();
+                    clip.extend(
+                        KRect::new(
+                            (item.rect.x - reach) as f64,
+                            (item.rect.y - reach) as f64,
+                            (item.rect.x + item.rect.w + reach) as f64,
+                            (item.rect.y + item.rect.h + reach) as f64,
+                        )
+                        .path_elements(0.1),
                     );
-                } else {
-                    self.scene.draw_blurred_rounded_rect(
+                    clip.extend(rounded_rect_path(item.rect, radius).path_elements(0.1));
+                    self.scene.push_layer(
+                        Fill::EvenOdd,
+                        vello::peniko::BlendMode::default(),
+                        1.0,
                         Affine::IDENTITY,
-                        shadow,
-                        color_to_peniko(shadow_style.color),
-                        corner as f64,
-                        sigma as f64,
+                        &clip,
                     );
                 }
+                // CSS paints the first layer on top, so draw back to front.
+                for shadow_style in outer().collect::<Vec<_>>().into_iter().rev() {
+                    let spread = shadow_style.spread * scale_factor;
+                    let shadow_rect = LayoutRect {
+                        x: item.rect.x + shadow_style.x * scale_factor - spread,
+                        y: item.rect.y + shadow_style.y * scale_factor - spread,
+                        w: item.rect.w + 2.0 * spread,
+                        h: item.rect.h + 2.0 * spread,
+                    };
+                    let sigma = shadow_style.blur * 0.5 * scale_factor;
+                    draw_shadow_shape(
+                        &mut self.scene,
+                        shadow_rect,
+                        radius.grown(spread),
+                        shadow_style.color,
+                        sigma,
+                    );
+                }
+                if clipped {
+                    self.scene.pop_layer();
+                }
             }
-            self.scene.pop_layer();
         } else if matches!(item.kind, ItemKind::Card) {
             let shadow = KRect::new(
                 item.rect.x as f64,
@@ -1073,7 +1071,7 @@ impl VelloPainter {
                 Affine::IDENTITY,
                 shadow,
                 Color::from_rgba8(0, 0, 0, 26),
-                radius.min(item.rect.w.min(item.rect.h) * 0.5) as f64,
+                radius.max().min(item.rect.w.min(item.rect.h) * 0.5) as f64,
                 (2.0 * scale_factor) as f64,
             );
         }
@@ -1170,6 +1168,13 @@ impl VelloPainter {
             fill_gradient_rect(&mut self.scene, item.rect, grad, radius);
         } else if let Some(bg) = background {
             fill_rect(&mut self.scene, item.rect, bg, radius);
+        }
+        // `inset` box-shadow layers: above the background, below the border
+        // and content, inside the padding box (CSS Backgrounds 3 §7.1).
+        if let Some(shadows) = item.shadow.as_deref() {
+            if shadows.iter().any(|s| s.inset) {
+                draw_inset_shadows(&mut self.scene, item.rect, &item.border, shadows, scale_factor);
+            }
         }
         if item.border.is_visible() {
             if item.border.is_partial() {
@@ -1660,7 +1665,7 @@ impl VelloPainter {
             // own corner radius so focus on a circle (rounded-full
             // Image / Avatar) follows the shape instead of stamping an
             // awkward 11px-radius rect over it.
-            draw_focus_ring(&mut self.scene, item.rect, scale_factor, radius);
+            draw_focus_ring(&mut self.scene, item.rect, scale_factor, radius.max());
         }
 
         if alpha_layer_active {
@@ -2213,7 +2218,7 @@ impl VelloPainter {
         rect: LayoutRect,
         src: Option<&str>,
         fit: crate::layout::ObjectFit,
-        radius: f32,
+        radius: impl Into<CornerRadii>,
     ) {
         // We share the global image cache (`crate::paint::image::cache()`)
         // for decoded source bitmaps, and the per-painter cache below
@@ -2226,6 +2231,7 @@ impl VelloPainter {
             // No source — let the page background show through.
             return;
         };
+        let radius: CornerRadii = radius.into();
         let _ = (rect.w, rect.h, fit, radius); // size/fit/radius feed the transform, not the key.
 
         if !self.image_cache.contains_key(src) {
@@ -2278,7 +2284,7 @@ impl VelloPainter {
         // own content box; Desktop previously did so only when `radius > 0`,
         // allowing a square-cornered/responsive Grid image to paint over the
         // card text below after a wide-window resize.
-        let clip_shape = rounded_rect_path(rect, radius.max(0.0));
+        let clip_shape = rounded_rect_path(rect, radius);
         self.scene.push_layer(
             vello::peniko::Fill::NonZero,
             vello::peniko::BlendMode::default(),
@@ -2301,7 +2307,7 @@ impl VelloPainter {
         &mut self,
         rect: LayoutRect,
         frame: &crate::media::VideoFrame,
-        radius: f32,
+        radius: impl Into<CornerRadii>,
     ) {
         use vello::peniko::{Blob, ImageAlphaType, ImageData, ImageFormat};
         if frame.width == 0 || frame.height == 0 || rect.w <= 0.0 || rect.h <= 0.0 {
@@ -2323,7 +2329,8 @@ impl VelloPainter {
         let dx = rect.x as f64 + (rect.w as f64 - frame.width as f64 * s) * 0.5;
         let dy = rect.y as f64 + (rect.h as f64 - frame.height as f64 * s) * 0.5;
         let transform = Affine::translate((dx, dy)).pre_scale(s);
-        if radius > 0.0 {
+        let radius: CornerRadii = radius.into();
+        if !radius.is_zero() {
             let clip_shape = rounded_rect_path(rect, radius);
             self.scene.push_layer(
                 vello::peniko::Fill::NonZero,
@@ -2359,7 +2366,7 @@ fn fill_gradient_rect(
     scene: &mut Scene,
     rect: LayoutRect,
     grad: &crate::style::LinearGradient,
-    radius: f32,
+    radius: impl Into<CornerRadii>,
 ) {
     if rect.w <= 0.0 || rect.h <= 0.0 || grad.stops.is_empty() {
         return;
@@ -2381,15 +2388,9 @@ fn fill_gradient_rect(
         .collect();
     gradient.stops = vello::peniko::ColorStops(color_stops.into());
     let brush = Brush::Gradient(gradient);
-    if radius > 0.0 {
-        let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
-        let kr = RoundedRect::new(
-            rect.x as f64,
-            rect.y as f64,
-            (rect.x + rect.w) as f64,
-            (rect.y + rect.h) as f64,
-            r as f64,
-        );
+    let radius: CornerRadii = radius.into();
+    if !radius.is_zero() {
+        let kr = rounded_rect_path(rect, radius);
         scene.fill(Fill::NonZero, Affine::IDENTITY, &brush, None, &kr);
     } else {
         let kr = KRect::new(
@@ -2412,7 +2413,7 @@ fn fill_radial_gradient_rect(
     scene: &mut Scene,
     rect: LayoutRect,
     grad: &crate::style::RadialGradient,
-    radius: f32,
+    radius: impl Into<CornerRadii>,
     scale: f32,
 ) {
     if rect.w <= 0.0 || rect.h <= 0.0 || grad.stops.is_empty() {
@@ -2446,15 +2447,9 @@ fn fill_radial_gradient_rect(
     let brush = Brush::Gradient(gradient);
     let brush_transform =
         Affine::translate((cx as f64, cy as f64)) * Affine::scale_non_uniform(rx as f64, ry as f64);
-    if radius > 0.0 {
-        let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
-        let kr = RoundedRect::new(
-            rect.x as f64,
-            rect.y as f64,
-            (rect.x + rect.w) as f64,
-            (rect.y + rect.h) as f64,
-            r as f64,
-        );
+    let radius: CornerRadii = radius.into();
+    if !radius.is_zero() {
+        let kr = rounded_rect_path(rect, radius);
         scene.fill(
             Fill::NonZero,
             Affine::IDENTITY,
@@ -2684,20 +2679,130 @@ pub(crate) fn decoration_rects(
     out
 }
 
-fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {
+/// One shadow shape: `rect` with `radii`, in `color`, blurred by a
+/// Gaussian of standard deviation `sigma` (0 = a hard-edged fill).
+/// Vello's blurred-rect primitive takes one radius: per-corner radii use
+/// the largest (the corners are soft anyway), clamped to the box so a
+/// `rounded-full` 9999 never turns its coverage negative.
+fn draw_shadow_shape(scene: &mut Scene, rect: LayoutRect, radii: CornerRadii, color: Rgba, sigma: f32) {
     if rect.w <= 0.0 || rect.h <= 0.0 || color.3 == 0 {
         return;
     }
-    let brush = Brush::Solid(color_to_peniko(color));
-    if radius > 0.0 {
-        let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
-        let kr = RoundedRect::new(
+    if sigma <= 0.0 {
+        fill_rect(scene, rect, color, radii);
+        return;
+    }
+    let corner = radii.fit(rect.w, rect.h).max().min(rect.w.min(rect.h) * 0.5);
+    scene.draw_blurred_rounded_rect(
+        Affine::IDENTITY,
+        KRect::new(
             rect.x as f64,
             rect.y as f64,
             (rect.x + rect.w) as f64,
             (rect.y + rect.h) as f64,
-            r as f64,
+        ),
+        color_to_peniko(color),
+        corner as f64,
+        sigma as f64,
+    );
+}
+
+/// CSS `inset` box-shadow layers. Each is the padding box filled with the
+/// shadow colour MINUS a "hole": the padding box offset by the layer's
+/// `x`/`y` and shrunk by its spread, blurred — clipped to the padding box.
+/// The hole is cut with a `DestOut` layer, so the colour fades in from the
+/// edges exactly where the blurred hole fades out. Painted back to front
+/// (CSS: the first layer is on top).
+fn draw_inset_shadows(
+    scene: &mut Scene,
+    border_box: LayoutRect,
+    border: &crate::style::Border,
+    shadows: &[crate::layout::BoxShadow],
+    scale: f32,
+) {
+    let side = |bit: u8| {
+        if border.is_visible() && border.sides & bit != 0 {
+            border.width * scale
+        } else {
+            0.0
+        }
+    };
+    let (bt, br, bb, bl) = (
+        side(BORDER_SIDE_TOP),
+        side(BORDER_SIDE_RIGHT),
+        side(BORDER_SIDE_BOTTOM),
+        side(BORDER_SIDE_LEFT),
+    );
+    let padding_box = LayoutRect {
+        x: border_box.x + bl,
+        y: border_box.y + bt,
+        w: (border_box.w - bl - br).max(0.0),
+        h: (border_box.h - bt - bb).max(0.0),
+    };
+    if padding_box.w <= 0.0 || padding_box.h <= 0.0 {
+        return;
+    }
+    let outer = border.radii().scaled(scale).fit(border_box.w, border_box.h);
+    let inner = CornerRadii {
+        tl: (outer.tl - bl.max(bt)).max(0.0),
+        tr: (outer.tr - br.max(bt)).max(0.0),
+        br: (outer.br - br.max(bb)).max(0.0),
+        bl: (outer.bl - bl.max(bb)).max(0.0),
+    };
+    let clip = rounded_rect_path(padding_box, inner);
+    for shadow in shadows.iter().rev().filter(|s| s.inset && s.color.3 > 0) {
+        let spread = shadow.spread * scale;
+        let sigma = shadow.blur * 0.5 * scale;
+        let hole = LayoutRect {
+            x: padding_box.x + shadow.x * scale + spread,
+            y: padding_box.y + shadow.y * scale + spread,
+            w: padding_box.w - 2.0 * spread,
+            h: padding_box.h - 2.0 * spread,
+        };
+        scene.push_layer(
+            Fill::NonZero,
+            vello::peniko::BlendMode::default(),
+            1.0,
+            Affine::IDENTITY,
+            &clip,
         );
+        // Far enough past the padding box that the blur of the hole's
+        // edge never reaches the end of the colour.
+        let pad = (sigma * 3.0 + shadow.x.abs().max(shadow.y.abs()) * scale + 1.0) as f64;
+        let colour = KRect::new(
+            padding_box.x as f64 - pad,
+            padding_box.y as f64 - pad,
+            (padding_box.x + padding_box.w) as f64 + pad,
+            (padding_box.y + padding_box.h) as f64 + pad,
+        );
+        scene.fill(
+            Fill::NonZero,
+            Affine::IDENTITY,
+            &Brush::Solid(color_to_peniko(shadow.color)),
+            None,
+            &colour,
+        );
+        scene.push_layer(
+            Fill::NonZero,
+            vello::peniko::BlendMode::new(vello::peniko::Mix::Normal, vello::peniko::Compose::DestOut),
+            1.0,
+            Affine::IDENTITY,
+            &colour,
+        );
+        draw_shadow_shape(scene, hole, inner.grown(-spread), Rgba(0, 0, 0, 255), sigma);
+        scene.pop_layer();
+        scene.pop_layer();
+    }
+}
+
+fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: impl Into<CornerRadii>) {
+    if rect.w <= 0.0 || rect.h <= 0.0 || color.3 == 0 {
+        return;
+    }
+    let brush = Brush::Solid(color_to_peniko(color));
+    let radius: CornerRadii = radius.into();
+    if !radius.is_zero() {
+        let kr = rounded_rect_path(rect, radius);
         scene.fill(Fill::NonZero, Affine::IDENTITY, &brush, None, &kr);
     } else {
         let kr = KRect::new(
@@ -2710,7 +2815,7 @@ fn fill_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32) {
     }
 }
 
-fn stroke_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: f32, width: f32) {
+fn stroke_rect(scene: &mut Scene, rect: LayoutRect, color: Rgba, radius: impl Into<CornerRadii>, width: f32) {
     stroke_rect_styled(scene, rect, color, radius, width, BorderLineStyle::Solid);
 }
 
@@ -2718,7 +2823,7 @@ fn stroke_rect_styled(
     scene: &mut Scene,
     rect: LayoutRect,
     color: Rgba,
-    radius: f32,
+    radius: impl Into<CornerRadii>,
     width: f32,
     line_style: BorderLineStyle,
 ) {
@@ -2736,15 +2841,9 @@ fn stroke_rect_styled(
             .with_caps(Cap::Round)
             .with_dashes(0.0, [width64 * 0.1, width64 * 2.0]),
     };
-    if radius > 0.0 {
-        let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
-        let kr = RoundedRect::new(
-            rect.x as f64,
-            rect.y as f64,
-            (rect.x + rect.w) as f64,
-            (rect.y + rect.h) as f64,
-            r as f64,
-        );
+    let radius: CornerRadii = radius.into();
+    if !radius.is_zero() {
+        let kr = rounded_rect_path(rect, radius);
         scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &kr);
     } else {
         let kr = KRect::new(
@@ -2972,7 +3071,7 @@ fn affine2_to_kurbo(t: crate::layout::Affine2) -> Affine {
 /// Appearance card below it. The widest item clip (normally the scroll
 /// container's, carried by the run's direct children) is used instead,
 /// or no outer clip at all when no single item clip contains the rest.
-fn fragment_outer_clip(items: &[crate::layout::LayoutItem]) -> (Option<LayoutRect>, f32) {
+fn fragment_outer_clip(items: &[crate::layout::LayoutItem]) -> (Option<LayoutRect>, CornerRadii) {
     fn within(inner: Option<LayoutRect>, outer: Option<LayoutRect>) -> bool {
         match (inner, outer) {
             (_, None) => true,
@@ -2991,17 +3090,26 @@ fn fragment_outer_clip(items: &[crate::layout::LayoutItem]) -> (Option<LayoutRec
     if contains_all(first.clip_to) {
         return (first.clip_to, first.clip_radius);
     }
-    let mut seen: Vec<Option<LayoutRect>> = Vec::new();
+    // O(n), not a contains-check per distinct clip: a clip that contains
+    // every other one has the largest area of them all (an unclipped item
+    // — `None` — is contained only by `None`), so the largest is the only
+    // candidate left to verify.
+    let mut widest: Option<&crate::layout::LayoutItem> = None;
     for it in items {
-        if seen.contains(&it.clip_to) {
-            continue;
+        let Some(rect) = it.clip_to else {
+            return (None, it.clip_radius);
+        };
+        if widest
+            .and_then(|w| w.clip_to)
+            .is_none_or(|w| rect.w * rect.h > w.w * w.h)
+        {
+            widest = Some(it);
         }
-        if contains_all(it.clip_to) {
-            return (it.clip_to, it.clip_radius);
-        }
-        seen.push(it.clip_to);
     }
-    (None, 0.0)
+    match widest {
+        Some(it) if contains_all(it.clip_to) => (it.clip_to, it.clip_radius),
+        _ => (None, CornerRadii::ZERO),
+    }
 }
 
 /// Bounding box of every item's VISUAL rect (transform-aware AABB) in
@@ -3061,7 +3169,14 @@ fn fragment_geometry_digest(items: &[crate::layout::LayoutItem]) -> u64 {
             }
             None => h.write_u8(0),
         }
-        h.write_u32(item.clip_radius.to_bits());
+        for r in [
+            item.clip_radius.tl,
+            item.clip_radius.tr,
+            item.clip_radius.br,
+            item.clip_radius.bl,
+        ] {
+            h.write_u32(r.to_bits());
+        }
         for v in item.transform.0 {
             h.write_u32(v.to_bits());
         }
@@ -3128,7 +3243,11 @@ fn item_has_bitmap(item: &crate::layout::LayoutItem) -> bool {
 /// Push an outer-clip layer (the scrollable ancestor's rect) onto
 /// `scene`. Returns `true` if a layer was pushed and the caller must
 /// `pop_layer()` to balance. `Option::None` → no clip → no-op.
-fn push_outer_clip(scene: &mut Scene, outer_clip: Option<LayoutRect>, clip_radius: f32) -> bool {
+fn push_outer_clip(
+    scene: &mut Scene,
+    outer_clip: Option<LayoutRect>,
+    clip_radius: CornerRadii,
+) -> bool {
     let Some(clip) = outer_clip else { return false };
     let r = rounded_rect_path(clip, clip_radius);
     scene.push_layer(
@@ -3232,14 +3351,18 @@ fn draw_play_glyph(scene: &mut Scene, rect: LayoutRect, scale: f32) {
     );
 }
 
-fn rounded_rect_path(rect: LayoutRect, radius: f32) -> RoundedRect {
-    let r = radius.min(rect.w * 0.5).min(rect.h * 0.5).max(0.0);
-    RoundedRect::new(
-        rect.x as f64,
-        rect.y as f64,
-        (rect.x + rect.w) as f64,
-        (rect.y + rect.h) as f64,
-        r as f64,
+/// `rect` with per-corner radii (or one radius: `f32` converts), fitted
+/// by CSS's overlapping-curves rule ([`CornerRadii::fit`]).
+fn rounded_rect_path(rect: LayoutRect, radius: impl Into<CornerRadii>) -> RoundedRect {
+    let r = radius.into().fit(rect.w, rect.h);
+    RoundedRect::from_rect(
+        KRect::new(
+            rect.x as f64,
+            rect.y as f64,
+            (rect.x + rect.w) as f64,
+            (rect.y + rect.h) as f64,
+        ),
+        vello::kurbo::RoundedRectRadii::new(r.tl as f64, r.tr as f64, r.br as f64, r.bl as f64),
     )
 }
 
@@ -3476,7 +3599,7 @@ mod tests {
             scrollable: None,
             font_weight: 400,
             clip_to: None,
-            clip_radius: 0.0,
+            clip_radius: CornerRadii::ZERO,
             subtree_root: None,
             background_gradient: None,
             background_layers: None,
@@ -3613,6 +3736,93 @@ mod tests {
             hud_paths > plain_paths,
             "the native HUD must append its surface and glyph paths after app content"
         );
+    }
+
+    fn one_item_scene(it: LayoutItem) -> Scene {
+        let mut painter = VelloPainter::new();
+        let layout = LayoutPass {
+            items: vec![it],
+            content_size: (200.0, 200.0),
+            by_node_id: std::collections::HashMap::new(),
+            actionable_ids: vec![],
+            focusable_ids: vec![],
+            scrollable_ids: vec![],
+            hoverable_ids: vec![],
+            a11y: std::collections::HashMap::new(),
+            a11y_hash: 0,
+        };
+        painter.build_scene(&layout, (200, 200), 1.0, 0.0).clone()
+    }
+
+    fn shadow(inset: bool) -> crate::layout::BoxShadow {
+        crate::layout::BoxShadow {
+            x: 0.0,
+            y: 2.0,
+            blur: 6.0,
+            spread: 0.0,
+            color: Rgba(0, 0, 0, 80),
+            inset,
+        }
+    }
+
+    /// Inset layers used to be parsed and dropped. They now paint: a clip
+    /// layer, the colour, and a `DestOut` layer cutting the blurred hole.
+    #[test]
+    fn inset_box_shadows_are_painted() {
+        let mut plain = item("box", 20.0, 20.0, 120.0, 60.0);
+        plain.background = Some(Rgba(255, 255, 255, 255));
+        let mut inset = plain.clone();
+        inset.shadow = Some(vec![shadow(true)].into());
+        let (a, b) = (one_item_scene(plain), one_item_scene(inset));
+        assert!(
+            b.encoding().n_paths >= a.encoding().n_paths + 2,
+            "inset shadow adds its colour fill and blurred hole"
+        );
+        assert!(
+            b.encoding().n_clips >= a.encoding().n_clips + 2,
+            "clipped to the padding box, hole cut in its own layer"
+        );
+    }
+
+    /// An outer shadow under an opaque background needs no even-odd clip
+    /// layer (the background hides what it would remove); a translucent
+    /// surface keeps it.
+    #[test]
+    fn outer_shadows_skip_the_clip_layer_under_an_opaque_background() {
+        let mut opaque = item("box", 20.0, 20.0, 120.0, 60.0);
+        opaque.background = Some(Rgba(255, 255, 255, 255));
+        opaque.shadow = Some(vec![shadow(false)].into());
+        let mut glass = opaque.clone();
+        glass.background = Some(Rgba(255, 255, 255, 128));
+        assert_eq!(one_item_scene(opaque).encoding().n_clips, 0);
+        assert!(one_item_scene(glass).encoding().n_clips > 0);
+    }
+
+    /// Per-corner radii reach the fill: a `rounded-t-*` box is a rounded
+    /// rect whose bottom corners are square.
+    #[test]
+    fn per_corner_radii_shape_the_background() {
+        let rect = LayoutRect {
+            x: 0.0,
+            y: 0.0,
+            w: 100.0,
+            h: 40.0,
+        };
+        let r = rounded_rect_path(
+            rect,
+            CornerRadii {
+                tl: 12.0,
+                tr: 12.0,
+                br: 0.0,
+                bl: 0.0,
+            },
+        );
+        let radii = r.radii();
+        assert_eq!((radii.top_left, radii.top_right), (12.0, 12.0));
+        assert_eq!((radii.bottom_right, radii.bottom_left), (0.0, 0.0));
+        // CSS overlapping curves: 60 + 60 on a 100px side scale by 100/120.
+        let fitted = CornerRadii::uniform(60.0).fit(100.0, 400.0);
+        assert!((fitted.tl - 50.0).abs() < 1e-4, "{fitted:?}");
     }
 
     #[test]
@@ -3890,6 +4100,37 @@ mod tests {
         assert_eq!(painter.subtree_cache_hits(), 8);
     }
 
+    /// The single-pass outer-clip search still finds the containing clip
+    /// when it is the LAST of many distinct nested clips, and gives up
+    /// (no outer clip) when the widest does not contain the rest.
+    #[test]
+    fn the_outer_clip_search_is_one_pass_over_distinct_clips() {
+        let clip = |x: f32, w: f32| LayoutRect {
+            x,
+            y: 0.0,
+            w,
+            h: 100.0,
+        };
+        let mut items: Vec<LayoutItem> = (0..50)
+            .map(|i| {
+                let mut it = item_in(&format!("i{i}"), "r", 0.0, 0.0, 1.0, 1.0);
+                it.clip_to = Some(clip(100.0 - i as f32, 10.0 + i as f32));
+                it
+            })
+            .collect();
+        let mut outer = item_in("outer", "r", 0.0, 0.0, 1.0, 1.0);
+        outer.clip_to = Some(clip(0.0, 400.0));
+        outer.clip_radius = 6.0.into();
+        items.push(outer);
+        assert_eq!(
+            fragment_outer_clip(&items),
+            (Some(clip(0.0, 400.0)), 6.0.into())
+        );
+        // A wide clip elsewhere: nothing contains everything.
+        items.last_mut().unwrap().clip_to = Some(clip(500.0, 400.0));
+        assert_eq!(fragment_outer_clip(&items).0, None);
+    }
+
     /// A run that opens inside a clipped card must not clip the cards
     /// after it to that card (Home Screen Settings: the Appearance card
     /// vanished below the Wallpaper card).
@@ -3910,7 +4151,7 @@ mod tests {
         // Tail of card 1 (clipped to it), then card 2 and its child.
         let mut tail = item_in("tail", "content", 21.0, 631.0, 388.0, 60.0);
         tail.clip_to = Some(card1);
-        tail.clip_radius = 16.0;
+        tail.clip_radius = 16.0.into();
         let mut card2 = item_in("card2", "content", 20.0, 712.0, 390.0, 290.0);
         card2.clip_to = Some(scroll);
         let mut row = item_in("row", "content", 21.0, 761.0, 388.0, 60.0);
@@ -3921,7 +4162,7 @@ mod tests {
             h: 222.0,
         });
         let items = vec![tail, card2, row];
-        assert_eq!(fragment_outer_clip(&items), (Some(scroll), 0.0));
+        assert_eq!(fragment_outer_clip(&items), (Some(scroll), CornerRadii::ZERO));
 
         let mut painter = VelloPainter::new();
         let layout = LayoutPass {
@@ -3942,10 +4183,10 @@ mod tests {
         // A run whose first item already contains the rest keeps it.
         let mut a = item_in("a", "x", 0.0, 0.0, 10.0, 10.0);
         a.clip_to = Some(scroll);
-        a.clip_radius = 4.0;
+        a.clip_radius = 4.0.into();
         let mut b = item_in("b", "x", 0.0, 0.0, 10.0, 10.0);
         b.clip_to = Some(card1);
-        assert_eq!(fragment_outer_clip(&[a.clone(), b.clone()]), (Some(scroll), 4.0));
+        assert_eq!(fragment_outer_clip(&[a.clone(), b.clone()]), (Some(scroll), 4.0.into()));
         // Disjoint clips: no single outer clip — each item clips itself.
         b.clip_to = None;
         a.clip_to = Some(card1);
@@ -3967,7 +4208,7 @@ mod tests {
         assert_eq!(painter.subtree_cache_misses(), 3);
 
         for item in &mut layout.items {
-            item.clip_radius = 16.0;
+            item.clip_radius = 16.0.into();
         }
         painter.build_scene(&layout, (800, 600), 1.0, 0.0);
 

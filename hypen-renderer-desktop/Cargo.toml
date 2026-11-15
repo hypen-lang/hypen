@@ -192,6 +192,13 @@ sys-locale = "0.3"
 # icu_properties with its compiled data).
 unicode-linebreak = "0.1.5"
 icu_properties = "2"
+# `text-transform: capitalize` like Blink: UAX #29 word starts (an `_` or
+# an apostrophe inside a word does not start a new one) mapped with ICU's
+# simple titlecase (`u_totitle`). unicode-segmentation is already in the
+# build (via cosmic-text); icu_casemap is pinned to the ICU4X release the
+# rest of the build uses.
+unicode-segmentation = "1.12"
+icu_casemap = "~2.2"
 
 # Process CPU/RSS sampling for the opt-in development HUD. Keep only the
 # system feature: disk, network, users, and hardware sensors are irrelevant.

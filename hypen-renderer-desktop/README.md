@@ -12,6 +12,32 @@ zero FPS.
 It samples once per second without forcing the demand-driven renderer to run
 continuously. Production builds do not include the sampler dependency or HUD.
 
+## Web fonts (`fontFamily`)
+
+Like the DOM renderer's `fontFamily` applicator, a windowed app fetches every
+named family in a `fontFamily` list that is not a CSS keyword from Google Fonts
+(`fonts.googleapis.com` CSS, `fonts.gstatic.com` files) and, once it lands,
+prefers it over an installed family of the same name (Chrome's `@font-face`
+precedence). Until then the list resolves past it (`font-display: swap`).
+
+Opting out is one call or one variable — nothing is fetched and lists resolve
+to installed families and their generic keyword:
+
+```rust,ignore
+DesktopApp::new().web_fonts(false).run();
+```
+
+```sh
+HYPEN_WEB_FONTS=0 cargo run --example remote   # 0/off/false/no; 1/on forces it on
+```
+
+The environment variable overrides the builder either way. Because font names
+come from (possibly remote) app content, fetching is bounded: two worker
+threads, at most 24 families per process, names limited to plausible Google
+family names (≤ 64 chars), font files only from `fonts.gstatic.com` (≤ 18 per
+family, ≤ 4 MiB each), and a 48 MiB total budget. Tests and headless
+measurement never fetch.
+
 ## Images in remote vs. local mode
 
 `Image` `src`, `url(...)` backgrounds, avatars and Video posters (and, with

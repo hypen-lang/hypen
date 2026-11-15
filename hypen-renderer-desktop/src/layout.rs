@@ -509,16 +509,26 @@ impl Rect {
 /// a [`LayoutItem`]. Preserve a rounded outline only when the intersection is
 /// wholly owned by one input; a partial overlap cannot be represented by one
 /// rounded rectangle without incorrectly rounding a stationary cut edge.
-fn intersect_clip_rects(a: Rect, a_radius: f32, b: Rect, b_radius: f32) -> (Rect, f32) {
+fn intersect_clip_rects(
+    a: Rect,
+    a_radius: crate::style::CornerRadii,
+    b: Rect,
+    b_radius: crate::style::CornerRadii,
+) -> (Rect, crate::style::CornerRadii) {
     let intersection = a.intersection(b);
     let radius = if intersection == a && intersection == b {
-        a_radius.max(b_radius)
+        crate::style::CornerRadii {
+            tl: a_radius.tl.max(b_radius.tl),
+            tr: a_radius.tr.max(b_radius.tr),
+            br: a_radius.br.max(b_radius.br),
+            bl: a_radius.bl.max(b_radius.bl),
+        }
     } else if intersection == a {
         a_radius
     } else if intersection == b {
         b_radius
     } else {
-        0.0
+        crate::style::CornerRadii::ZERO
     };
     (intersection, radius)
 }
@@ -1008,7 +1018,7 @@ pub struct LayoutItem {
     /// must clip descendants with the same outline as its own background;
     /// keeping only the rectangle lets full-bleed overlays repaint the four
     /// corner pixels square.
-    pub clip_radius: f32,
+    pub clip_radius: crate::style::CornerRadii,
     /// Renderer-tree id of the "direct child of the nearest
     /// scrollable ancestor" this item belongs to. Items with the
     /// same `subtree_root` form one painter-side cache unit — each
@@ -1202,7 +1212,9 @@ pub struct TaffyState {
     /// Taffy nodes whose `size.width` was replaced by a computed
     /// fit-content length in the content-sizing pre-pass, mapped to the
     /// value that was written. See [`apply_fit_content_widths`].
-    fit_widths: HashMap<NodeId, f32>,
+    /// The flag records whether the fit CLAMPED the node below its
+    /// max-content width (see [`apply_fit_content_widths`]).
+    fit_widths: HashMap<NodeId, (f32, bool)>,
     /// Nodes whose authored `width` is a `calc(P% ± L)` expression, with
     /// the logical-px expression. Rescanned whenever style inputs are
     /// dirty; resolved after every layout by `apply_calc_widths`.
@@ -1262,6 +1274,12 @@ pub struct TaffyState {
     deps_complete: bool,
     /// Viewport the current styles were resolved against.
     last_style_viewport: Option<(u32, u32)>,
+    /// Logical viewport the current styles resolve against. Kept for the
+    /// parent-dependent settles (`settle_parent_alignment_style`,
+    /// `apply_stack_overlay_styles`), which run from patch / link paths that
+    /// are not handed one, so they resolve breakpoint variants of
+    /// `textAlign` the same way `node_style_with` did.
+    style_viewport: Viewport,
     /// `true` when the fit-content pre-pass needs to re-run (cold start,
     /// restyle, patched content). Scroll-only frames leave it `false` so
     /// they keep the previous frame's widths and run a single layout.
@@ -1331,6 +1349,7 @@ impl TaffyState {
             viewport_deps: HashMap::new(),
             deps_complete: false,
             last_style_viewport: None,
+            style_viewport: Viewport::default(),
             fit_pass_dirty: true,
             last_root_viewport: None,
             safe_area: SafeAreaInsets::default(),
@@ -1435,6 +1454,7 @@ impl TaffyState {
         scale: f32,
         viewport: Viewport,
     ) {
+        self.style_viewport = viewport;
         crate::style::viewport_trace::begin();
         let active_states = self.interaction.active_states_for(rid, node);
         let style = node_style_with(
@@ -1683,6 +1703,7 @@ impl TaffyState {
         scale: f32,
         viewport: Viewport,
     ) -> bool {
+        self.style_viewport = viewport;
         let mut all_applied = true;
         // The fit-content pre-pass re-runs only when the batch could
         // actually change content sizing: structural patches, layout-
@@ -2098,7 +2119,7 @@ impl TaffyState {
             .map(|parent| parent.element_type.as_str())
             .unwrap_or("");
         let blocks_fill = parent_style
-            .is_some_and(|parent_style| blocks_auto_cross_fill(parent_type, parent_style));
+            .is_some_and(|parent_style| !grants_auto_cross_fill(parent_type, parent_style));
         if node.element_type.eq_ignore_ascii_case("Row") {
             let children: Vec<NodeId> = self.tree.children(tid).unwrap_or_default();
             apply_row_width_demand(
@@ -2112,7 +2133,8 @@ impl TaffyState {
         } else if is_actionable_type(&node.element_type) {
             apply_actionable_parent_alignment(node, &mut style, parent_align_items);
         } else if text_fill_candidate(node) {
-            settle_text_fill(&mut style, cancels_text_fill(parent_type));
+            let requested = text_fill_requested(node, self.style_viewport);
+            settle_text_fill(&mut style, requested, cancels_text_fill(parent_type));
         } else {
             return;
         }
@@ -2203,6 +2225,7 @@ impl TaffyState {
     }
 
     fn apply_stack_overlay_styles(&mut self, parent_tid: NodeId, tree: &Tree) {
+        let viewport = self.style_viewport;
         let children: Vec<NodeId> = self.tree.children(parent_tid).unwrap_or_default();
         for &child in &children {
             let Ok(mut s) = self.tree.style(child).cloned() else {
@@ -2212,7 +2235,7 @@ impl TaffyState {
                 .renderer_for_taffy
                 .get(&child)
                 .and_then(|rid| tree.get(rid))
-                .is_some_and(text_requests_stack_track_width);
+                .is_some_and(|node| text_fill_requested(node, viewport));
             place_in_stack_cell(&mut s, text_fill);
             if self.tree.style(child).is_ok_and(|current| *current == s) {
                 continue;
@@ -2655,44 +2678,9 @@ impl TaffyState {
             renderer_for_taffy,
             ..
         } = self;
-        // Text fill (the DOM's `data-hypen-text-fill`): a Text whose own
-        // `textAlign` is center / right / end / justify takes the full
-        // width of a vertical parent, so the alignment has room to act —
-        // at its intrinsic width a centred title in a content-sized
-        // Column stayed flush left. Row / Center / Badge parents keep it
-        // intrinsic, as on the web. Not width DEMAND: the parent stays
-        // content-sized (see the demand walk below).
-        for (tid, rid) in renderer_for_taffy.iter() {
-            let Some(node) = tree.get(rid) else { continue };
-            if !text_fills_parent_width(node) {
-                continue;
-            }
-            let Some(parent) = taffy.parent(*tid) else { continue };
-            let vertical_parent = taffy.style(parent).is_ok_and(|style| {
-                style.display == Display::Flex
-                    && matches!(
-                        style.flex_direction,
-                        FlexDirection::Column | FlexDirection::ColumnReverse
-                    )
-            });
-            let excluded_parent = renderer_for_taffy
-                .get(&parent)
-                .and_then(|prid| tree.get(prid))
-                .is_some_and(|p| {
-                    ["Row", "Center", "Badge"]
-                        .iter()
-                        .any(|t| p.element_type.eq_ignore_ascii_case(t))
-                });
-            if !vertical_parent || excluded_parent {
-                continue;
-            }
-            let Ok(style) = taffy.style(*tid) else { continue };
-            if style.align_self.is_none() && style.size.width.is_auto() {
-                let mut style = style.clone();
-                style.align_self = Some(AlignSelf::Stretch);
-                let _ = taffy.set_style(*tid, style);
-            }
-        }
+        // The Text fill (`data-hypen-text-fill`) is NOT handled here: it is
+        // settled per node against its parent by `settle_text_fill`, and the
+        // demand walk below never counts a Text's stretch as demand.
         // Fixpoint: promoting one node to `Stretch` can make its parent
         // demand width too. Converges in a couple of rounds in practice;
         // the bound is a backstop, and the `changed` early-out is what
@@ -2724,10 +2712,12 @@ impl TaffyState {
                             && style.align_self != Some(AlignSelf::Stretch) => {}
                     _ => continue,
                 }
-                // ...and the DOM only stretches it inside a vertical
-                // carrier; under a Button / Row / Stack the fill is a
-                // different axis or explicitly off.
-                let blocked_by_parent = taffy.parent(*tid).is_some_and(|parent| {
+                // ...and the DOM only stretches it inside a parent that
+                // grants the fill (`applyAutomaticStretch`'s vertical
+                // carriers, plus block-flow / stretching parents — see
+                // [`grants_auto_cross_fill`]). Under a Button / Row / Stack
+                // / Center the fill is a different axis or explicitly off.
+                let granted_by_parent = taffy.parent(*tid).is_some_and(|parent| {
                     let parent_type = renderer_for_taffy
                         .get(&parent)
                         .and_then(|prid| tree.get(prid))
@@ -2735,9 +2725,9 @@ impl TaffyState {
                         .unwrap_or("");
                     taffy
                         .style(parent)
-                        .is_ok_and(|parent_style| blocks_auto_cross_fill(parent_type, parent_style))
+                        .is_ok_and(|parent_style| grants_auto_cross_fill(parent_type, parent_style))
                 });
-                if blocked_by_parent {
+                if !granted_by_parent {
                     continue;
                 }
                 let demands_width = intrinsic
@@ -2746,17 +2736,20 @@ impl TaffyState {
                         .unwrap_or_default()
                         .iter()
                         .any(|child| {
-                            // A Text's text-align fill is not width demand: the
-                            // DOM rule fills the Text but never its ancestors.
-                            let text_fill = renderer_for_taffy
+                            // DOM `childCarriesDemand`: a relative width, or a
+                            // child that itself passes demand up. A Text leaf
+                            // never does — its text-align fill (or an authored
+                            // `alignSelf`) stretches the Text but none of its
+                            // ancestors.
+                            let text_leaf = renderer_for_taffy
                                 .get(child)
                                 .and_then(|crid| tree.get(crid))
-                                .is_some_and(text_fill_candidate);
-                            !text_fill
-                                && taffy.style(*child).is_ok_and(|child_style| {
-                                    child_style.size.width.into_raw().uses_percentage()
-                                        || child_style.align_self == Some(AlignSelf::Stretch)
-                                })
+                                .is_some_and(is_text_leaf);
+                            taffy.style(*child).is_ok_and(|child_style| {
+                                child_style.size.width.into_raw().uses_percentage()
+                                    || (!text_leaf
+                                        && child_style.align_self == Some(AlignSelf::Stretch))
+                            })
                         });
                 if demands_width {
                     let Ok(mut style) = taffy.style(*tid).cloned() else {
@@ -3056,7 +3049,7 @@ impl LayoutPass {
             &mut content_size,
             cull_viewport,
             None,
-            0.0,
+            crate::style::CornerRadii::ZERO,
             None,
         );
 
@@ -3147,6 +3140,7 @@ impl LayoutPass {
             None => 0,
         };
         let viewport_logical = logical_viewport(viewport, scale);
+        state.style_viewport = viewport_logical;
         // Interaction state feeds layout-affecting state variants. A
         // change since the last compute means the resolved per-node
         // styles are stale and need a restyle so the new active states
@@ -3469,7 +3463,7 @@ impl LayoutPass {
             &mut content_size,
             cull_viewport,
             None,
-            0.0,
+            crate::style::CornerRadii::ZERO,
             None,
         );
 
@@ -3789,11 +3783,11 @@ impl LayoutPass {
         // frame, which is measurable on image-heavy feeds in debug builds.
         // Compute into a compact side vector first, then apply it in one
         // mutable pass so no renderer ids need to be cloned.
-        let effective: Vec<Option<(Rect, f32)>> = self
+        let effective: Vec<Option<(Rect, crate::style::CornerRadii)>> = self
             .items
             .iter()
             .map(|item| {
-                let mut clip: Option<(Rect, f32)> = None;
+                let mut clip: Option<(Rect, crate::style::CornerRadii)> = None;
                 let mut ancestor = tree.parent_of(&item.node_id);
                 while let Some(id) = ancestor {
                     if id == crate::tree::ROOT_ID {
@@ -3803,7 +3797,8 @@ impl LayoutPass {
                         if is_scrollable_node(node, viewport) || clips_overflow_node(node, viewport)
                         {
                             let ancestor_item = &self.items[idx];
-                            let next = (ancestor_item.rect, ancestor_item.border.radius * scale);
+                            let next =
+                                (ancestor_item.rect, ancestor_item.border.radii().scaled(scale));
                             clip = Some(match clip {
                                 None => next,
                                 Some((current, current_radius)) => {
@@ -3826,7 +3821,7 @@ impl LayoutPass {
                 }
                 None => {
                     item.clip_to = None;
-                    item.clip_radius = 0.0;
+                    item.clip_radius = crate::style::CornerRadii::ZERO;
                 }
             }
         }
@@ -4228,7 +4223,7 @@ fn apply_fit_content_widths<M>(
     taffy: &mut TaffyTree<NodeContext>,
     root: NodeId,
     measure: &mut M,
-    overrides: &mut HashMap<NodeId, f32>,
+    overrides: &mut HashMap<NodeId, (f32, bool)>,
 ) -> bool
 where
     M: FnMut(
@@ -4242,10 +4237,18 @@ where
     // Undo last frame's overrides so candidate detection sees the
     // authored (auto-width) style again. Skip nodes whose width has
     // since been replaced by a real authored value or a restyle.
-    // Remember them: the layout read below still reflects their
-    // clamped width, so an overflow check alone would drop them.
-    let previous: Vec<NodeId> = overrides.keys().copied().collect();
-    for (node, width) in std::mem::take(overrides) {
+    // Remember the ones the fit actually CLAMPED: the layout read below
+    // still reflects their clamped width, so an overflow check alone would
+    // drop them. A fit that came out at max-content left the layout as it
+    // would be without it — the overflow / zero-basis checks see such a
+    // node fresh — so it is not carried, and a node whose parent grew back
+    // past its content leaves the set instead of being re-fitted forever.
+    let previous: std::collections::HashSet<NodeId> = overrides
+        .iter()
+        .filter(|(_, (_, clamped))| *clamped)
+        .map(|(node, _)| *node)
+        .collect();
+    for (node, (width, _)) in std::mem::take(overrides) {
         let Ok(style) = taffy.style(node) else {
             continue;
         };
@@ -4342,7 +4345,7 @@ where
         let mut style = style.clone();
         style.size.width = Dimension::length(fit);
         let _ = taffy.set_style(node, style);
-        overrides.insert(node, fit);
+        overrides.insert(node, (fit, max_content > avail + FIT_CACHE_NUDGE_PX));
         settled.insert(0, (node, fit));
     }
     true
@@ -4614,7 +4617,7 @@ fn collect_fit_candidates(
     taffy: &TaffyTree<NodeContext>,
     node: NodeId,
     out: &mut Vec<FitCandidate>,
-    previous: &[NodeId],
+    previous: &std::collections::HashSet<NodeId>,
 ) {
     // Copy out only the two fields the child check needs — cloning the
     // whole `Style` (grid template Vecs included) for every node on
@@ -4715,54 +4718,6 @@ fn has_zero_basis_growable_row(taffy: &TaffyTree<NodeContext>, node: NodeId) -> 
 
 #[allow(clippy::too_many_arguments)]
 fn build_subtree(
-    taffy: &mut TaffyTree<NodeContext>,
-    tree: &Tree,
-    node_id: &str,
-    scale: f32,
-    viewport: Viewport,
-    renderer_for_taffy: &mut HashMap<NodeId, String>,
-    interaction: &LayoutInteraction,
-    safe_area: SafeAreaInsets,
-) -> Option<NodeId> {
-    let id = build_subtree_node(
-        taffy,
-        tree,
-        node_id,
-        scale,
-        viewport,
-        renderer_for_taffy,
-        interaction,
-        safe_area,
-    )?;
-    // Every branch below builds its own style; `display` applies to all of
-    // them, so it is settled once here (mirrors `node_style_with`'s tail).
-    if let Some(node) = tree.get(node_id) {
-        let vs = VariantState::paint(viewport, interaction.active_states_for(node_id, node));
-        if let Ok(style) = taffy.style(id) {
-            let mut next = style.clone();
-            apply_display_prop(&mut next, node, &vs);
-            if next.display != style.display {
-                let _ = taffy.set_style(id, next);
-            }
-        }
-    }
-    Some(id)
-}
-
-/// CSS `display: none` — `.display("none")`, used by Messages to swap its
-/// list / conversation panes. The node stays in the Taffy tree (patches and
-/// state survive), takes no space, and `emit_items` emits nothing for it or
-/// its subtree. Any other value keeps the element type's own display.
-fn apply_display_prop(style: &mut Style, node: &crate::tree::Node, vs: &VariantState) {
-    if crate::style::prop_str_with(node, "display", vs)
-        .is_some_and(|v| v.trim().eq_ignore_ascii_case("none"))
-    {
-        style.display = Display::None;
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn build_subtree_node(
     taffy: &mut TaffyTree<NodeContext>,
     tree: &Tree,
     node_id: &str,
@@ -5219,7 +5174,7 @@ fn build_subtree_node(
                     if let Ok(mut s) = taffy.style(c).cloned() {
                         let text_fill = tree
                             .get(child_id)
-                            .is_some_and(text_requests_stack_track_width);
+                            .is_some_and(|node| text_fill_requested(node, viewport));
                         place_in_stack_cell(&mut s, text_fill);
                         let _ = taffy.set_style(c, s);
                     }
@@ -5867,7 +5822,6 @@ pub(crate) fn node_style_with(
     apply_position_props(&mut style, node, &vs, scale);
     apply_virt_padding(&mut style, node, scale, vs.viewport);
     apply_grid_placement_props(node, &vs, &mut style);
-    apply_display_prop(&mut style, node, &vs);
     style
 }
 
@@ -6571,20 +6525,6 @@ fn apply_position_props(
 /// with five items at `w-20` apiece overflowing into the viewport
 /// margin instead of clipping at the row's right edge.
 fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport: Viewport) {
-    use crate::style::prop_str_at;
-
-    fn parse(s: &str) -> Option<Overflow> {
-        match s.trim().to_ascii_lowercase().as_str() {
-            "visible" => Some(Overflow::Visible),
-            "hidden" | "clip" => Some(Overflow::Hidden),
-            // Taffy 0.10 has Scroll behave like Hidden for layout
-            // purposes (we handle the scroll offset ourselves);
-            // either way the parent clips overflow.
-            "scroll" | "auto" => Some(Overflow::Scroll),
-            _ => None,
-        }
-    }
-
     // Hypen-DSL `.scrollable(...)` applicator. Sets the *axis* the
     // container scrolls on (and therefore clips on); the orthogonal
     // axis stays `Visible` so legitimately overflowing content (e.g.
@@ -6624,15 +6564,22 @@ fn apply_overflow_props(style: &mut Style, node: &crate::tree::Node, viewport: V
         style.overflow = taffy::Point { x, y };
     }
 
-    // CSS-style props win when explicitly set.
-    if let Some(o) = prop_str_at(node, "overflow", viewport).and_then(parse) {
-        style.overflow = taffy::Point { x: o, y: o };
-    }
-    if let Some(o) = prop_str_at(node, "overflowX", viewport).and_then(parse) {
-        style.overflow.x = o;
-    }
-    if let Some(o) = prop_str_at(node, "overflowY", viewport).and_then(parse) {
-        style.overflow.y = o;
+    // CSS-style props win when explicitly set — as their COMPUTED values
+    // ([`css_overflow_axes`]), so `overflow-x: hidden` alone also makes
+    // the y axis a scroll axis, like the browser.
+    if let Some((x, y)) = css_overflow_axes(node, viewport) {
+        let to_taffy = |o: CssOverflow| match o {
+            CssOverflow::Visible => Overflow::Visible,
+            CssOverflow::Hidden | CssOverflow::Clip => Overflow::Hidden,
+            // Taffy 0.10 has Scroll behave like Hidden for layout
+            // purposes (we handle the scroll offset ourselves);
+            // either way the parent clips overflow.
+            CssOverflow::Scroll | CssOverflow::Auto => Overflow::Scroll,
+        };
+        style.overflow = taffy::Point {
+            x: to_taffy(x),
+            y: to_taffy(y),
+        };
     }
 
     // Classic flexbox-overflow gotcha: Taffy (like CSS) defaults
@@ -6862,8 +6809,69 @@ pub(crate) fn resolve_max_lines(node: &crate::tree::Node, viewport: Viewport) ->
 }
 
 fn resolve_box_shadow(node: &crate::tree::Node, viewport: Viewport) -> Option<BoxShadows> {
+    // A CSS string (every Tailwind `shadow-*` / `ring-*`, `.boxShadow("…")`)
+    // is the common form and the same few strings recur on every card:
+    // parse each once and share the `Arc` (a paint-only patch re-resolves
+    // the item's shadow; it no longer re-tokenises and re-allocates it).
+    if let Some((_, css)) = box_shadow_css(node, viewport) {
+        return cached_css_box_shadow(css, viewport);
+    }
     let layers = resolve_box_shadow_layers(node, viewport);
     (!layers.is_empty()).then(|| layers.into())
+}
+
+/// The shadow props in precedence order: `(bare name, flattened `.0` key,
+/// default blur of the object form)`. Constant keys — the lookup used to
+/// `format!` three strings per resolution.
+const SHADOW_PROPS: [(&str, &str, f32); 3] = [
+    ("boxShadow", "boxShadow.0", 0.0),
+    ("box-shadow", "box-shadow.0", 0.0),
+    ("shadow", "shadow.0", 4.0),
+];
+
+/// The first shadow prop, when it is a CSS string (an object or number
+/// earlier in [`SHADOW_PROPS`] wins, as in [`resolve_box_shadow_layers`]).
+fn box_shadow_css(node: &crate::tree::Node, viewport: Viewport) -> Option<(&'static str, &str)> {
+    for (name, dotted, _) in SHADOW_PROPS {
+        let value = node.props.get(dotted).or_else(|| node.props.get(name));
+        if value.is_some_and(|v| v.is_object() || v.is_number()) {
+            return None;
+        }
+        if let Some(css) = crate::style::prop_str_at(node, name, viewport) {
+            return Some((name, css));
+        }
+    }
+    None
+}
+
+/// [`parse_css_box_shadow`] memoised per CSS string (bounded; viewport
+/// units make the viewport part of the key).
+fn cached_css_box_shadow(css: &str, viewport: Viewport) -> Option<BoxShadows> {
+    type Key = (Box<str>, u32, u32);
+    thread_local! {
+        static CACHE: std::cell::RefCell<HashMap<Key, Option<BoxShadows>>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
+    let uses_viewport = css.contains("vw") || css.contains("vh") || css.contains("vm");
+    let (w, h) = if uses_viewport {
+        (viewport.w.to_bits(), viewport.h.to_bits())
+    } else {
+        (0, 0)
+    };
+    CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        let key: Key = (css.into(), w, h);
+        if let Some(hit) = cache.get(&key) {
+            return hit.clone();
+        }
+        let layers = parse_css_box_shadow(css, Some(viewport));
+        let value: Option<BoxShadows> = (!layers.is_empty()).then(|| layers.into());
+        if cache.len() >= 256 {
+            cache.clear();
+        }
+        cache.insert(key, value.clone());
+        value
+    })
 }
 
 /// Every authoring form of a box shadow, mirroring the DOM applicators
@@ -6874,13 +6882,14 @@ fn resolve_box_shadow(node: &crate::tree::Node, viewport: Viewport) -> Option<Bo
 /// player, the Calories ring, Hypeflix posters) and every Tailwind
 /// `shadow-*` / `ring-*` utility painted nothing.
 fn resolve_box_shadow_layers(node: &crate::tree::Node, viewport: Viewport) -> Vec<BoxShadow> {
-    for (name, default_blur) in [("boxShadow", 0.0), ("box-shadow", 0.0), ("shadow", 4.0)] {
-        let value = node
-            .props
-            .get(&format!("{name}.0"))
-            .or_else(|| node.props.get(name));
+    for (name, dotted, default_blur) in SHADOW_PROPS {
+        let value = node.props.get(dotted).or_else(|| node.props.get(name));
         if let Some(object) = value.and_then(serde_json::Value::as_object) {
-            return shadow_from_object(object, default_blur, viewport)
+            // The DOM `shadow` applicator writes `x y blur color` only —
+            // an object's `spread` / `inset` are honoured by `boxShadow`
+            // alone.
+            let full_box_shadow = name != "shadow";
+            return shadow_from_object(object, default_blur, full_box_shadow, viewport)
                 .into_iter()
                 .collect();
         }
@@ -6921,9 +6930,14 @@ fn elevation_like_shadow(n: f32) -> BoxShadow {
     }
 }
 
+/// One shadow layer from an applicator object, with the DOM's defaults
+/// (`applicators/effects.ts`): offsets 0, blur `default_blur` (0 for
+/// `boxShadow`, 4 for `shadow`), colour `rgba(0,0,0,0.2)` (alpha 51).
+/// `spread` / `inset` only when `full_box_shadow` (the `boxShadow` form).
 fn shadow_from_object(
     object: &serde_json::Map<String, serde_json::Value>,
     default_blur: f32,
+    full_box_shadow: bool,
     viewport: Viewport,
 ) -> Option<BoxShadow> {
     let number = |names: &[&str]| {
@@ -6942,12 +6956,17 @@ fn shadow_from_object(
         x: number(&["x", "offsetX"]).unwrap_or(0.0),
         y: number(&["y", "offsetY"]).unwrap_or(0.0),
         blur: number(&["blur", "radius"]).unwrap_or(default_blur).max(0.0),
-        spread: number(&["spread"]).unwrap_or(0.0),
+        spread: if full_box_shadow {
+            number(&["spread"]).unwrap_or(0.0)
+        } else {
+            0.0
+        },
         color,
-        inset: object
-            .get("inset")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false),
+        inset: full_box_shadow
+            && object
+                .get("inset")
+                .and_then(serde_json::Value::as_bool)
+                .unwrap_or(false),
     })
 }
 
@@ -7205,16 +7224,35 @@ fn cancels_text_fill(parent_type: &str) -> bool {
         .any(|t| t.eq_ignore_ascii_case(parent_type))
 }
 
-/// Parents under which the DOM never auto-stretches a child across the
-/// cross axis (`cross-axis-width.ts` only stretches inside a vertical
-/// carrier — Column / List): a horizontal flex parent (its cross axis is
+/// Parents that give an unsized, width-demanding child their finite width
+/// (an ALLOWLIST, like the DOM):
+///
+/// * `Column` / `List` — the DOM's `VERTICAL_CARRIERS`, where
+///   `applyAutomaticStretch` (`cross-axis-width.ts`) writes
+///   `align-self: stretch` on a demanding child;
+/// * `Box` / `Container` / `Card` — plain block `<div>`s in the DOM, where a
+///   block-level (flex) child takes the containing block's width by normal
+///   flow. Desktop models them as `align-items: start` flex columns, so
+///   the same `Stretch` stands in for the block fill;
+/// * the synthetic root, `App`, `Router`, `Route`, `SafeArea` and `Grid` —
+///   DOM containers whose `align-items` / `justify-items` is the initial
+///   `normal` (= stretch), so the child is stretched there anyway.
+///
+/// Everything else keeps the child content-sized: a Row (its cross axis is
 /// vertical), a Button (`align-items: flex-start`), a Center, a Stack
-/// (`justify-items: start`) and a Badge.
-fn blocks_auto_cross_fill(parent_type: &str, parent_style: &Style) -> bool {
-    lays_out_horizontally(parent_style)
-        || ["Button", "Center", "Stack", "Badge"]
-            .iter()
-            .any(|t| t.eq_ignore_ascii_case(parent_type))
+/// (`justify-items: start`), a Badge, a Link (inline `<a>`), a Tabs bar …
+/// A Column / List turned horizontal (`flexDirection: row`) is a row, too.
+fn grants_auto_cross_fill(parent_type: &str, parent_style: &Style) -> bool {
+    const GRANTING: &[&str] = &[
+        // DOM VERTICAL_CARRIERS
+        "Column", "List",
+        // block flow
+        "Box", "Container", "Card",
+        // `align-items: normal`
+        "", "App", "Router", "Route", "SafeArea", "Grid",
+    ];
+    !lays_out_horizontally(parent_style)
+        && GRANTING.iter().any(|t| t.eq_ignore_ascii_case(parent_type))
 }
 
 /// DOM carriers of horizontal width demand (`DEMAND_CARRIERS` in
@@ -7268,12 +7306,26 @@ fn apply_actionable_parent_alignment(
     }
 }
 
-/// Settle a Text's provisional cross-axis fill (see [`text_fill_requested`])
-/// against its parent. `node_style_with` writes the fill as `Stretch`; in a
-/// parent whose DOM CSS cancels it, the Text follows the parent instead.
-fn settle_text_fill(style: &mut Style, cancelled: bool) {
-    if cancelled && style.align_self == Some(AlignSelf::Stretch) {
-        style.align_self = None;
+/// Settle a Text's cross-axis fill (see [`text_fill_requested`]) against
+/// its CURRENT parent — the one implementation of the DOM's
+/// `[data-hypen-text-fill]` rule. `node_style_with` writes the fill as a
+/// provisional `Stretch`; in a parent whose DOM CSS cancels it (Row /
+/// Center / Badge) the Text follows the parent instead, and when it is
+/// moved back under any other parent the fill is restored — both
+/// directions, so a Text moved from a Row into a Column without a restyle
+/// does not keep the Row's `align_self: None` and lose its fill.
+/// `requested == false` (start alignment, or no fill asked) leaves the
+/// style alone: any `Stretch` then belongs to someone else (a Stack cell).
+fn settle_text_fill(style: &mut Style, requested: bool, cancelled: bool) {
+    if !requested {
+        return;
+    }
+    if cancelled {
+        if style.align_self == Some(AlignSelf::Stretch) {
+            style.align_self = None;
+        }
+    } else if style.align_self.is_none() {
+        style.align_self = Some(AlignSelf::Stretch);
     }
 }
 
@@ -7895,7 +7947,7 @@ fn emit_items(
     parent_clip_to: Option<Rect>,
     // Rounded outline belonging to `parent_clip_to`, already scaled to
     // physical pixels. Zero keeps the common rectangular clip fast path.
-    parent_clip_radius: f32,
+    parent_clip_radius: crate::style::CornerRadii,
     // `subtree_root`: renderer-tree id of the direct child of the
     // nearest scrollable ancestor that this item belongs to. Threaded
     // through so each emitted LayoutItem can carry its painter-side
@@ -7940,25 +7992,42 @@ fn emit_items(
     // body; counting it gave the window a page scrollbar Chrome doesn't
     // have. Its own box still counts; its descendants report into a
     // scratch accumulator below.
-    let clips_extent = renderer_for_taffy
+    //
+    // Per axis, like CSS: only an axis whose computed overflow is not
+    // `visible` keeps its descendants off the page extent — clipped or
+    // scrolled, its content is reached inside the box. A non-visible axis
+    // makes the other axis `auto` unless it is `clip` (see
+    // [`css_overflow_axes`]), so `overflow-x: hidden` alone is a vertical
+    // scroll container whose content scrolls in the box, while
+    // `overflow-x: clip` leaves the vertical extent on the page.
+    let (clips_extent_x, clips_extent_y) = renderer_for_taffy
         .get(&node_id)
         .and_then(|rid| tree.get(rid))
-        .is_some_and(|node| clips_overflow_node(node, viewport) && !is_scrollable_node(node, viewport));
-    let (extent_w, extent_h) = if clips_extent {
-        (layout.size.width, layout.size.height)
+        .and_then(|node| css_overflow_axes(node, viewport))
+        .map_or((false, false), |(ox, oy)| {
+            (ox != CssOverflow::Visible, oy != CssOverflow::Visible)
+        });
+    let extent_w = if clips_extent_x {
+        layout.size.width
     } else {
-        (
-            layout.content_size.width.max(layout.size.width),
-            layout.content_size.height.max(layout.size.height),
-        )
+        layout.content_size.width.max(layout.size.width)
+    };
+    let extent_h = if clips_extent_y {
+        layout.size.height
+    } else {
+        layout.content_size.height.max(layout.size.height)
     };
     natural_bounds.0 = natural_bounds.0.max(x + extent_w);
     natural_bounds.1 = natural_bounds.1.max(y_natural + extent_h);
+    // Descendants of a clipping axis report into a scratch accumulator;
+    // the open axis forwards to the real one after the walk.
+    let clips_some_extent = clips_extent_x || clips_extent_y;
+    let outer_bounds: &mut (f32, f32) = natural_bounds;
     let mut clipped_bounds = (0.0_f32, 0.0_f32);
-    let natural_bounds: &mut (f32, f32) = if clips_extent {
+    let natural_bounds: &mut (f32, f32) = if clips_some_extent {
         &mut clipped_bounds
     } else {
-        natural_bounds
+        &mut *outer_bounds
     };
 
     // Viewport cull. When `cull_viewport` is `Some`, subtrees fully
@@ -8019,7 +8088,7 @@ fn emit_items(
             let is_divider = node.element_type.eq_ignore_ascii_case("Divider")
                 || node.element_type.eq_ignore_ascii_case("Separator");
             if is_badge && !declares_corner_radius(node) {
-                item_border.radius = 4.0;
+                item_border.set_radii(crate::style::corner_radii_at(node, viewport, 4.0));
             }
             // The DSL says `.borderRadius(8)` even when there's no
             // border line — round the fill anyway. The painter checks
@@ -8068,7 +8137,7 @@ fn emit_items(
                 // its rounded outline; a partial overlap falls back to the
                 // exact rectangular intersection because one rounded rect
                 // cannot encode two independently clipped corner sets.
-                let own_radius = item_border.radius * scale;
+                let own_radius = item_border.radii().scaled(scale);
                 match child_clip_to {
                     None => {
                         child_clip_to = Some(rect);
@@ -8377,7 +8446,11 @@ fn emit_items(
                         });
                     } else {
                         if et.eq_ignore_ascii_case("Avatar") && !declares_corner_radius(node) {
-                            item_border.radius = rect.w.min(rect.h) * 0.5 / scale;
+                            item_border.set_radii(crate::style::corner_radii_at(
+                                node,
+                                viewport,
+                                rect.w.min(rect.h) * 0.5 / scale,
+                            ));
                         }
                         let src = crate::style::prop_str_at(node, "src", viewport)
                             .and_then(|s| crate::paint::image::node_source(node, s))
@@ -8616,7 +8689,7 @@ fn emit_items(
                     // (e.g. Story close ✕) only paint what the DSL sets.
                     let is_card = et.eq_ignore_ascii_case("Card");
                     if is_card && !declares_corner_radius(node) {
-                        item_border.radius = 8.0;
+                        item_border.set_radii(crate::style::corner_radii_at(node, viewport, 8.0));
                     }
                     out.push(LayoutItem {
                         node_id: rid.to_string(),
@@ -8905,6 +8978,15 @@ fn emit_items(
         let content_h = (max_child_bottom_natural + trailing - y_natural).max(0.0);
         if let Some(meta) = out[idx].scrollable.as_mut() {
             meta.content_h = content_h;
+        }
+    }
+    // Forward the descendants' extent on an axis this box does not clip.
+    if clips_some_extent {
+        if !clips_extent_x {
+            outer_bounds.0 = outer_bounds.0.max(clipped_bounds.0);
+        }
+        if !clips_extent_y {
+            outer_bounds.1 = outer_bounds.1.max(clipped_bounds.1);
         }
     }
 }
@@ -9233,7 +9315,7 @@ pub(crate) fn refresh_item_paint(
     }
     let is_card = matches!(item.kind, ItemKind::Card);
     if is_card && !declares_corner_radius(node) {
-        item_border.radius = 8.0;
+        item_border.set_radii(crate::style::corner_radii_at(node, viewport, 8.0));
     }
     item.background =
         background_explicit.or_else(|| is_card.then_some(Rgba(0xff, 0xff, 0xff, 0xff)));
@@ -9561,30 +9643,85 @@ pub(crate) fn is_scrollable_node(node: &crate::tree::Node, viewport: Viewport) -
     {
         return true;
     }
-    let v = crate::style::prop_str_at(node, "overflowY", viewport)
-        .or_else(|| crate::style::prop_str_at(node, "overflow", viewport))
-        .or_else(|| crate::style::prop_str_at(node, "overflowX", viewport));
-    matches!(
-        v.map(str::trim).map(str::to_ascii_lowercase).as_deref(),
-        Some("scroll") | Some("auto"),
-    )
+    // CSS computed `overflow-y` (see [`css_overflow_axes`]): `auto` /
+    // `scroll`, including the `visible` → `auto` promotion when only
+    // `overflow-x` is non-visible.
+    css_overflow_axes(node, viewport)
+        .is_some_and(|(_, y)| matches!(y, CssOverflow::Auto | CssOverflow::Scroll))
+}
+
+/// A CSS `overflow-x` / `overflow-y` keyword.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum CssOverflow {
+    Visible,
+    Hidden,
+    Clip,
+    Scroll,
+    Auto,
+}
+
+impl CssOverflow {
+    fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "visible" => Some(Self::Visible),
+            "hidden" => Some(Self::Hidden),
+            "clip" => Some(Self::Clip),
+            "scroll" => Some(Self::Scroll),
+            "auto" | "overlay" => Some(Self::Auto),
+            _ => None,
+        }
+    }
+
+    /// `visible` / `clip` — the values that do not make a scroll container.
+    fn is_visible_or_clip(self) -> bool {
+        matches!(self, Self::Visible | Self::Clip)
+    }
+}
+
+/// The COMPUTED `(overflow-x, overflow-y)` of a node, or `None` when no
+/// CSS overflow prop is authored. `overflow` is the shorthand (one value
+/// for both axes, or `x y`); the longhands `overflowX` / `overflowY` win
+/// over it. Then CSS Overflow 3 §3: when one axis is neither `visible` nor
+/// `clip`, a `visible` on the other axis computes to `auto` and a `clip`
+/// to `hidden` — so `overflow-x: hidden` alone makes the box a VERTICAL
+/// scroll container (`overflow-y: auto`), whose hidden content is reached by
+/// scrolling the box rather than the page.
+pub(crate) fn css_overflow_axes(
+    node: &crate::tree::Node,
+    viewport: Viewport,
+) -> Option<(CssOverflow, CssOverflow)> {
+    let read = |name: &str| crate::style::prop_str_at(node, name, viewport);
+    let shorthand = read("overflow").map(|raw| {
+        let mut parts = raw.split_whitespace().filter_map(CssOverflow::parse);
+        let x = parts.next();
+        (x, parts.next().or(x))
+    });
+    let long_x = read("overflowX").and_then(CssOverflow::parse);
+    let long_y = read("overflowY").and_then(CssOverflow::parse);
+    if shorthand.is_none() && long_x.is_none() && long_y.is_none() {
+        return None;
+    }
+    let (sx, sy) = shorthand.unwrap_or((None, None));
+    let mut x = long_x.or(sx).unwrap_or(CssOverflow::Visible);
+    let mut y = long_y.or(sy).unwrap_or(CssOverflow::Visible);
+    if !x.is_visible_or_clip() || !y.is_visible_or_clip() {
+        let promote = |o: CssOverflow| match o {
+            CssOverflow::Visible => CssOverflow::Auto,
+            CssOverflow::Clip => CssOverflow::Hidden,
+            other => other,
+        };
+        x = promote(x);
+        y = promote(y);
+    }
+    Some((x, y))
 }
 
 /// Whether descendants must be clipped to this node even when it is not
 /// scrollable. CSS `overflow: hidden|clip` constrains paint without creating
 /// scroll metadata or changing the scroll offset.
 fn clips_overflow_node(node: &crate::tree::Node, viewport: Viewport) -> bool {
-    ["overflow", "overflowX", "overflowY"]
-        .into_iter()
-        .any(|name| {
-            matches!(
-                crate::style::prop_str_at(node, name, viewport)
-                    .map(str::trim)
-                    .map(str::to_ascii_lowercase)
-                    .as_deref(),
-                Some("hidden") | Some("clip")
-            )
-        })
+    css_overflow_axes(node, viewport)
+        .is_some_and(|(x, y)| matches!(x, CssOverflow::Hidden | CssOverflow::Clip) || matches!(y, CssOverflow::Hidden | CssOverflow::Clip))
 }
 
 /// Pull an `@actions.X` reference off `props.action` / `props.onClick`
@@ -10006,23 +10143,6 @@ fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign 
         cursor = tree.parent_of(current);
     }
     TextAlign::Start
-}
-
-/// The DOM's `applyTextAlign` text fill: a Text leaf whose OWN
-/// `textAlign` is center / right / end / justify fills its parent's width.
-fn text_fills_parent_width(node: &crate::tree::Node) -> bool {
-    is_text_leaf(node)
-        && crate::style::prop_str(node, "textAlign").is_some_and(|v| {
-            matches!(
-                v.trim().to_ascii_lowercase().as_str(),
-                "center" | "right" | "end" | "justify"
-            )
-        })
-}
-
-fn text_requests_stack_track_width(node: &crate::tree::Node) -> bool {
-    is_text_leaf(node)
-        && crate::style::prop_str(node, "textAlign").is_some()
 }
 
 fn parse_named_weight(s: &str) -> u16 {

@@ -28,6 +28,18 @@
 //!   neither shows while the embedded tree is live. Unslotted children
 //!   render unconditionally, like the web.
 //!
+//! Breadth and targets are bounded by an [`EmbedPolicy`] the host app can
+//! configure ([`EmbeddingModule::with_policy`], [`crate::DesktopApp::embed_policy`]):
+//! at most [`EmbedPolicy::max_embeds`] live embeds and
+//! [`EmbedPolicy::max_per_owner`] per embedding stream, all on ONE shared
+//! remote runtime thread; only `ws:` / `wss:` targets; from secure content
+//! (`https:` / `wss:`) only `wss:` (the browser's mixed-content rule the DOM
+//! `HypenApp` is subject to); and no private / loopback target from public
+//! content (Chrome's Private Network Access rule) unless the host allows it
+//! — content that is itself local (an in-process module, a `localhost` dev
+//! server) may embed local apps, as the launcher does. A refused embed shows
+//! its `error` slot.
+//!
 //! Lifecycle mirrors the web component: a Router `Detach` of the host's
 //! subtree keeps the embed connected (a cached route re-attaches warm,
 //! without a splash), while a real `Remove` of the host or an ancestor —
@@ -98,6 +110,178 @@ pub enum EmbedSignal {
     Retrying,
     /// The connection gave up for good.
     Failed,
+    /// The server is about to send a whole tree (`initialTree`): a fresh
+    /// session after a reconnect. The next batch replaces the embed's old
+    /// roots, as the DOM `HypenApp` clears on `onInitialTree`.
+    InitialTree,
+}
+
+/// Limits on what `HypenApp` embeds the window will open (see the module
+/// docs). Remote content decides how many HypenApp elements it creates and
+/// where they point, so the host app bounds both.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EmbedPolicy {
+    /// Live embeds in the whole window (nested ones included).
+    pub max_embeds: usize,
+    /// Live embeds one stream (the window's app, or one embed) may open.
+    pub max_per_owner: usize,
+    /// When `Some`, the only `host` / `host:port` targets allowed (case-
+    /// insensitive); listed private hosts are then allowed from any
+    /// content. `None`: any public host.
+    pub allowed_hosts: Option<Vec<String>>,
+    /// Let PUBLIC content embed private / loopback targets too.
+    pub allow_private_targets: bool,
+}
+
+impl Default for EmbedPolicy {
+    fn default() -> Self {
+        Self {
+            max_embeds: 8,
+            max_per_owner: 4,
+            allowed_hosts: None,
+            allow_private_targets: false,
+        }
+    }
+}
+
+impl EmbedPolicy {
+    pub fn max_embeds(mut self, n: usize) -> Self {
+        self.max_embeds = n;
+        self
+    }
+
+    pub fn max_per_owner(mut self, n: usize) -> Self {
+        self.max_per_owner = n;
+        self
+    }
+
+    /// Restrict targets to these `host` / `host:port` entries.
+    pub fn allow_hosts<I: IntoIterator<Item = S>, S: Into<String>>(mut self, hosts: I) -> Self {
+        self.allowed_hosts = Some(hosts.into_iter().map(Into::into).collect());
+        self
+    }
+
+    pub fn allow_private_targets(mut self, on: bool) -> Self {
+        self.allow_private_targets = on;
+        self
+    }
+
+    /// Whether content served from `owner` (a `ws(s):` / `http(s):` URL or
+    /// origin; `None` = the host app's own in-process module) may embed
+    /// `target`. `Err` carries the reason, for the log.
+    pub fn check_target(&self, owner: Option<&str>, target: &str) -> Result<(), String> {
+        let Some(t) = UrlParts::parse(target) else {
+            return Err(format!("{target:?} is not a URL"));
+        };
+        if !matches!(t.scheme.as_str(), "ws" | "wss") {
+            return Err(format!("{target:?}: only ws: / wss: targets"));
+        }
+        let owner = owner.and_then(UrlParts::parse);
+        if owner.as_ref().is_some_and(UrlParts::is_secure) && t.scheme != "wss" {
+            return Err(format!("{target:?}: insecure target from secure content"));
+        }
+        if let Some(allowed) = &self.allowed_hosts {
+            let listed = allowed.iter().any(|a| {
+                let a = a.trim().to_ascii_lowercase();
+                a == t.host || a == t.host_port()
+            });
+            return if listed {
+                Ok(())
+            } else {
+                Err(format!("{target:?}: host not in the allowlist"))
+            };
+        }
+        // Private Network Access: a public page may not reach a private
+        // address. Local content (no owner URL, or a private one) may.
+        let owner_is_local = owner.as_ref().is_none_or(UrlParts::is_private);
+        if t.is_private() && !owner_is_local && !self.allow_private_targets {
+            return Err(format!("{target:?}: private target from public content"));
+        }
+        Ok(())
+    }
+}
+
+/// Just what [`EmbedPolicy`] needs out of a URL.
+struct UrlParts {
+    scheme: String,
+    /// Lower-case host, IPv6 without brackets.
+    host: String,
+    port: Option<u16>,
+}
+
+impl UrlParts {
+    fn parse(url: &str) -> Option<Self> {
+        let (scheme, rest) = url.trim().split_once("://")?;
+        let authority = rest.split(['/', '?', '#']).next()?;
+        let authority = authority.rsplit_once('@').map_or(authority, |(_, a)| a);
+        let (host, port) = if let Some(v6) = authority.strip_prefix('[') {
+            let (host, after) = v6.split_once(']')?;
+            (host, after.strip_prefix(':'))
+        } else {
+            match authority.rsplit_once(':') {
+                Some((h, p)) => (h, Some(p)),
+                None => (authority, None),
+            }
+        };
+        if host.is_empty() {
+            return None;
+        }
+        let port = match port {
+            Some(p) => Some(p.parse().ok()?),
+            None => None,
+        };
+        Some(Self {
+            scheme: scheme.to_ascii_lowercase(),
+            host: host.to_ascii_lowercase(),
+            port,
+        })
+    }
+
+    fn host_port(&self) -> String {
+        match self.port {
+            Some(p) if self.host.contains(':') => format!("[{}]:{p}", self.host),
+            Some(p) => format!("{}:{p}", self.host),
+            None => self.host.clone(),
+        }
+    }
+
+    fn is_secure(&self) -> bool {
+        matches!(self.scheme.as_str(), "https" | "wss")
+    }
+
+    /// Loopback, private, link-local, CGNAT or unspecified addresses, and
+    /// the `localhost` / `.local` names — what Chrome's Private Network
+    /// Access treats as non-public. (A public name that RESOLVES to a
+    /// private address is not caught here.)
+    fn is_private(&self) -> bool {
+        let host = self.host.trim_end_matches('.');
+        if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
+            return true;
+        }
+        match host.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(v4)) => is_private_v4(v4),
+            Ok(std::net::IpAddr::V6(v6)) => {
+                if let Some(v4) = v6.to_ipv4_mapped() {
+                    return is_private_v4(v4);
+                }
+                let first = v6.segments()[0];
+                v6.is_loopback()
+                    || v6.is_unspecified()
+                    || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                    || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+            }
+            Err(_) => false,
+        }
+    }
+}
+
+fn is_private_v4(v4: std::net::Ipv4Addr) -> bool {
+    let [a, b, ..] = v4.octets();
+    v4.is_loopback()
+        || v4.is_private()
+        || v4.is_link_local()
+        || v4.is_unspecified()
+        || (a == 100 && (64..128).contains(&b)) // CGNAT 100.64/10
 }
 
 /// Receives an embed connection's [`EmbedSignal`]s.
@@ -113,11 +297,14 @@ pub type EmbedConnector = Arc<dyn Fn(&str, EmbedSignalSink) -> Arc<dyn HypenModu
 /// device factory), logged in as [`EMBED_MODULE_NAME`].
 pub fn remote_embed_connector() -> EmbedConnector {
     Arc::new(|url: &str, signal: EmbedSignalSink| {
+        // Every embed shares one remote runtime thread.
         let remote = RemoteModule::connect_with(
             url,
             EMBED_MODULE_NAME,
-            RemoteOptions::default().device(None),
+            RemoteOptions::default().device(None).shared_runtime(true),
         );
+        let tree_signal = Arc::clone(&signal);
+        remote.on_initial_tree(move || tree_signal(EmbedSignal::InitialTree));
         remote.on_status(move |status| match status {
             ConnectionStatus::Reconnecting { .. } => signal(EmbedSignal::Retrying),
             ConnectionStatus::Failed { .. } => signal(EmbedSignal::Failed),
@@ -259,6 +446,12 @@ struct Embed {
     /// no Detach / Attach is ever emitted twice.
     detached: HashSet<Arc<str>>,
     status: EmbedStatus,
+    /// Refused by the [`EmbedPolicy`]: never connected, shows its error
+    /// slot, does not count toward the limits.
+    refused: bool,
+    /// An `initialTree` was announced after a tree had rendered: the next
+    /// batch replaces the old roots.
+    reset_pending: bool,
 }
 
 impl Embed {
@@ -274,6 +467,8 @@ impl Embed {
             error_slots: Vec::new(),
             detached: HashSet::new(),
             status: EmbedStatus::Loading,
+            refused: false,
+            reset_pending: false,
         }
     }
 
@@ -332,6 +527,9 @@ struct State {
     embeds: IndexMap<String, Embed>,
     next_id: u64,
     sink: Option<OwnedPatchCallback>,
+    policy: EmbedPolicy,
+    /// Origin of the window's own module (`None`: an in-process module).
+    root_origin: Option<Arc<str>>,
 }
 
 /// Side effects collected under the lock and run after it is released.
@@ -342,6 +540,35 @@ struct Deferred {
 }
 
 impl State {
+    /// Why the [`EmbedPolicy`] refuses an embed of `url` by stream `owner`.
+    fn refusal(&self, owner: Option<&str>, url: &str) -> Option<String> {
+        let owner_url = match owner {
+            None => self.root_origin.as_deref(),
+            Some(prefix) => self.embeds.get(prefix).map(|e| e.url.as_str()),
+        };
+        if let Err(reason) = self.policy.check_target(owner_url, url) {
+            return Some(reason);
+        }
+        let live = || self.embeds.values().filter(|e| !e.refused);
+        if live().count() >= self.policy.max_embeds {
+            return Some(format!(
+                "{} live embeds (max_embeds)",
+                self.policy.max_embeds
+            ));
+        }
+        if live()
+            .filter(|e| e.owner_prefix.as_deref() == owner)
+            .count()
+            >= self.policy.max_per_owner
+        {
+            return Some(format!(
+                "{} embeds from one stream (max_per_owner)",
+                self.policy.max_per_owner
+            ));
+        }
+        None
+    }
+
     fn depth_of(&self, owner: Option<&str>) -> usize {
         let mut depth = 0;
         let mut cur = owner.map(str::to_string);
@@ -478,13 +705,19 @@ impl State {
                     log::warn!("hypen embed: HypenApp {host} has no url");
                     return;
                 };
+                let refusal = self.refusal(owner, &url);
                 self.next_id += 1;
                 let prefix = format!("e{}:", self.next_id);
-                log::info!("hypen embed {prefix} → {url} (host {host})");
-                self.embeds.insert(
-                    prefix.clone(),
-                    Embed::new(host, owner.map(str::to_string), url),
-                );
+                let mut embed = Embed::new(host.clone(), owner.map(str::to_string), url);
+                if let Some(reason) = refusal {
+                    log::warn!("hypen embed: HypenApp {host} refused: {reason}");
+                    embed.refused = true;
+                    embed.status = EmbedStatus::Error;
+                    self.embeds.insert(prefix, embed);
+                    return;
+                }
+                log::info!("hypen embed {prefix} → {} (host {host})", embed.url);
+                self.embeds.insert(prefix.clone(), embed);
                 d.to_connect.push(prefix);
             }
             Patch::Insert { parent_id, id, .. } | Patch::Attach { parent_id, id, .. } => {
@@ -574,15 +807,12 @@ impl State {
             return; // closed while the batch was in flight
         };
         let host = Arc::clone(&embed.host_id);
-        let mut new_roots: Vec<Arc<str>> = Vec::new();
-        let mut created: HashSet<Arc<str>> = HashSet::new();
-        let mut has_detach = false;
         let mut rewritten = Vec::with_capacity(patches.len());
-        let parent_of = |parent: &Arc<str>| -> (Arc<str>, bool) {
+        let parent_of = |parent: &Arc<str>| -> Arc<str> {
             if parent.as_ref() == ROOT_ID {
-                (Arc::clone(&host), true)
+                Arc::clone(&host)
             } else {
-                (prefix_id(prefix, parent), false)
+                prefix_id(prefix, parent)
             }
         };
         for patch in patches {
@@ -594,7 +824,6 @@ impl State {
                     semantics,
                 } => {
                     let id = prefix_id(prefix, &id);
-                    created.insert(Arc::clone(&id));
                     Patch::Create {
                         id,
                         element_type,
@@ -624,13 +853,9 @@ impl State {
                     id,
                     before_id,
                 } => {
-                    let (parent_id, is_root) = parent_of(&parent_id);
                     let id = prefix_id(prefix, &id);
-                    if is_root {
-                        new_roots.push(Arc::clone(&id));
-                    }
                     Patch::Insert {
-                        parent_id,
+                        parent_id: parent_of(&parent_id),
                         id,
                         before_id: before_id.map(|b| prefix_id(prefix, &b)),
                     }
@@ -640,13 +865,9 @@ impl State {
                     id,
                     before_id,
                 } => {
-                    let (parent_id, is_root) = parent_of(&parent_id);
                     let id = prefix_id(prefix, &id);
-                    if is_root {
-                        new_roots.push(Arc::clone(&id));
-                    }
                     Patch::Attach {
-                        parent_id,
+                        parent_id: parent_of(&parent_id),
                         id,
                         before_id: before_id.map(|b| prefix_id(prefix, &b)),
                     }
@@ -656,7 +877,7 @@ impl State {
                     id,
                     before_id,
                 } => Patch::Move {
-                    parent_id: parent_of(&parent_id).0,
+                    parent_id: parent_of(&parent_id),
                     id: prefix_id(prefix, &id),
                     before_id: before_id.map(|b| prefix_id(prefix, &b)),
                 },
@@ -671,12 +892,9 @@ impl State {
                 Patch::ClearChildren { id } => Patch::ClearChildren {
                     id: prefix_id(prefix, &id),
                 },
-                Patch::Detach { id } => {
-                    has_detach = true;
-                    Patch::Detach {
-                        id: prefix_id(prefix, &id),
-                    }
-                }
+                Patch::Detach { id } => Patch::Detach {
+                    id: prefix_id(prefix, &id),
+                },
                 p @ Patch::BatchAnimation { .. } => p,
                 // A `RemoteModule` lowers templates before delivery; any
                 // that reach here could only expand into unstamped nodes.
@@ -689,11 +907,15 @@ impl State {
         }
 
         let embed = self.embeds.get_mut(prefix).expect("embed present");
-        // A root CREATED in a batch with no Router Detach means the server
-        // re-sent its tree (a fresh session after a reconnect): remove the
-        // old roots first, even when the ids repeat (the prelude Remove is
-        // followed by the re-Create, so nothing flashes).
-        let replaces = !has_detach && new_roots.iter().any(|r| created.contains(r));
+        // The connection announced an `initialTree` (EmbedSignal::
+        // InitialTree) after a tree had rendered: the server re-sent its
+        // whole tree (a fresh session after a reconnect). Remove the old
+        // roots first, even when the ids repeat (the prelude Remove is
+        // followed by the re-Create, so nothing flashes). Only that
+        // explicit marker counts — an ordinary batch that creates and
+        // inserts a root (a top-level conditional swapping one of several
+        // roots, a Router's first visit) is incremental.
+        let replaces = std::mem::take(&mut embed.reset_pending);
         let mut prelude = Vec::new();
         if replaces && !embed.app_roots.is_empty() {
             for old in embed.app_roots.drain(..) {
@@ -756,6 +978,12 @@ impl State {
             return;
         };
         let to_error = match signal {
+            EmbedSignal::InitialTree => {
+                if !embed.app_roots.is_empty() {
+                    embed.reset_pending = true;
+                }
+                return;
+            }
             EmbedSignal::Failed => true,
             // A retry after a live tree keeps showing that tree (the web
             // embed does the same while it reconnects).
@@ -867,6 +1095,37 @@ impl Core {
     }
 }
 
+/// Rewrite a UI-action envelope's node ids (`node`, `fromNode`, and a
+/// nested `payload.fromNode`) from the merged id space into the space of
+/// the stream with `prefix` (`None` = the window module). An id from a
+/// different stream means nothing there and becomes `null`.
+fn localize_envelope(mut envelope: Value, prefix: Option<&str>) -> Value {
+    let localize = |id: &str| -> Value {
+        match (stream_prefix_of(id), prefix) {
+            (None, None) => Value::String(id.to_string()),
+            (Some(p), Some(q)) if p == q => Value::String(id[p.len()..].to_string()),
+            _ => Value::Null,
+        }
+    };
+    if let Some(obj) = envelope.as_object_mut() {
+        for key in ["node", "fromNode"] {
+            if let Some(id) = obj.get(key).and_then(Value::as_str).map(str::to_string) {
+                obj.insert(key.into(), localize(&id));
+            }
+        }
+        if let Some(inner) = obj.get_mut("payload").and_then(Value::as_object_mut) {
+            if let Some(id) = inner
+                .get("fromNode")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            {
+                inner.insert("fromNode".into(), localize(&id));
+            }
+        }
+    }
+    envelope
+}
+
 /// A [`HypenModule`] that renders `HypenApp` embeds found in the wrapped
 /// module's stream (see the module docs). [`crate::DesktopApp::connect`]
 /// wraps every remote connection in one.
@@ -883,13 +1142,24 @@ impl EmbeddingModule {
 
     /// Wrap `root` with a custom embed connector.
     pub fn with_connector(root: Arc<dyn HypenModule>, connector: EmbedConnector) -> Self {
+        let state = State {
+            root_origin: root.asset_origin(),
+            ..State::default()
+        };
         Self {
             root,
             core: Arc::new(Core {
-                state: Mutex::new(State::default()),
+                state: Mutex::new(state),
                 connector,
             }),
         }
+    }
+
+    /// Replace the [`EmbedPolicy`] (limits and allowed targets) for embeds
+    /// created from now on.
+    pub fn with_policy(self, policy: EmbedPolicy) -> Self {
+        self.core.lock().policy = policy;
+        self
     }
 
     /// Number of live embeds (diagnostics / tests).
@@ -919,6 +1189,31 @@ impl HypenModule for EmbeddingModule {
     }
 
     fn dispatch_action(&self, name: &str, payload: Option<Value>) {
+        // A node-addressed UI envelope (`__hypen_dispatch` — what the
+        // drag-and-drop runtime sends: `{node, fromNode, action, payload}`)
+        // belongs to the stream that owns its node, with the ids in that
+        // stream's own space; anything else is the window module's.
+        if name == hypen_engine::action_routing::UI_ACTION {
+            let node = payload
+                .as_ref()
+                .and_then(|p| p.get("node"))
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            if let (Some(node), Some(envelope)) = (node, payload.as_ref()) {
+                let prefix = stream_prefix_of(&node);
+                let envelope = localize_envelope(envelope.clone(), prefix);
+                match prefix {
+                    None => self.root.dispatch_action(name, Some(envelope)),
+                    Some(_) => match self.core.owner_of(&node) {
+                        Some((module, _)) => module.dispatch_action(name, Some(envelope)),
+                        None => log::debug!(
+                            "hypen embed: dropping a UI action for closed embed node {node}"
+                        ),
+                    },
+                }
+                return;
+            }
+        }
         self.root.dispatch_action(name, payload);
     }
 

@@ -93,6 +93,8 @@ pub struct TextEngine {
     /// cached shaped text outside this engine (layout measures, encoded
     /// scene fragments) knows to drop it.
     font_generation: u64,
+    /// Memo of the browser line-break tailoring (see [`AsciiJoinCache`]).
+    ascii_joins: AsciiJoinCache,
     /// How many times [`Self::line_runs`] actually shaped (cache misses).
     #[cfg(test)]
     pub(crate) line_runs_shapes: usize,
@@ -114,6 +116,7 @@ impl TextEngine {
             web_faces_merged: 0,
             web_font_generation: crate::web_fonts::generation(),
             font_generation: 0,
+            ascii_joins: AsciiJoinCache::default(),
             #[cfg(test)]
             line_runs_shapes: 0,
         }
@@ -366,7 +369,7 @@ impl TextEngine {
             return hit;
         }
 
-        let display = display_text(text, self.family.transform);
+        let display = display_text_with(text, self.family.transform, &mut self.ascii_joins);
         let buffer = self.shape(&display.text, font_size, wrap_width, weight, line_height);
 
         let mut max_w: f32 = 0.0;
@@ -501,7 +504,7 @@ impl TextEngine {
         // matching the two paths, the draw could emit lines the
         // measure cache didn't account for (or vice versa) and the
         // raster cache key would diverge from the actual layout.
-        let display = display_text(text, self.family.transform);
+        let display = display_text_with(text, self.family.transform, &mut self.ascii_joins);
         let buffer = self.shape(&display.text, font_size, wrap_width, weight, line_height);
         let (factor, box_w) = self.line_offsets(&buffer);
 
@@ -824,7 +827,7 @@ impl TextEngine {
         {
             self.line_runs_shapes += 1;
         }
-        let display = display_text(text, self.family.transform);
+        let display = display_text_with(text, self.family.transform, &mut self.ascii_joins);
         let buffer = self.shape(&display.text, font_size, wrap_width, weight, line_height);
         let (factor, box_w) = self.line_offsets(&buffer);
         buffer
@@ -871,7 +874,7 @@ impl TextEngine {
         line_height: f32,
     ) -> Vec<crate::textarea::VisualLine> {
         use crate::textarea::{GlyphBox, VisualLine};
-        let display = display_text(text, self.family.transform);
+        let display = display_text_with(text, self.family.transform, &mut self.ascii_joins);
         let buffer = self.shape(&display.text, font_size, wrap_width, weight, line_height);
         // Byte offsets below index the shaped (display) text; report
         // them in `text`'s own offsets.
@@ -1031,6 +1034,74 @@ impl TextTransform {
 /// opportunity the shaper would otherwise take.
 const WORD_JOINER: char = '\u{2060}';
 
+/// ASCII characters after which UAX #14 can offer a break before another
+/// printable ASCII character — so the only ones the browser tailoring in
+/// [`display_text`] can ever have to remove. Found exhaustively (every
+/// pair, in letter / digit / punctuation contexts) and pinned by
+/// `ascii_break_prefilter_is_sound`; `-` and `?` are left out because
+/// Chrome keeps the breaks after them.
+const ASCII_BREAK_AFTER: &[u8] = b"!$%)+,./:;\\]|}";
+
+/// Whether `s` has a character pair the tailoring could join: one of
+/// [`ASCII_BREAK_AFTER`] directly followed by a printable ASCII
+/// character. Prose (`Hello, world.` — a space after the comma) has none,
+/// so it skips the UAX #14 pass and the rebuilt string entirely.
+fn may_need_ascii_joins(s: &str) -> bool {
+    s.as_bytes()
+        .windows(2)
+        .any(|pair| ASCII_BREAK_AFTER.contains(&pair[0]) && pair[1].is_ascii_graphic())
+}
+
+/// The byte offsets of `s` where [`display_text`] inserts a
+/// [`WORD_JOINER`], or `None` when there are none.
+fn ascii_joins(s: &str) -> Option<Vec<usize>> {
+    if !may_need_ascii_joins(s) {
+        return None;
+    }
+    let bytes = s.as_bytes();
+    let joins: Vec<usize> = unicode_linebreak::linebreaks(s)
+        .filter(|&(at, opportunity)| {
+            opportunity == unicode_linebreak::BreakOpportunity::Allowed
+                && at > 0
+                && at < bytes.len()
+                && bytes[at - 1].is_ascii_graphic()
+                && bytes[at].is_ascii_graphic()
+                && bytes[at - 1] != b'-'
+                && bytes[at - 1] != b'?'
+        })
+        .map(|(at, _)| at)
+        .collect();
+    (!joins.is_empty()).then_some(joins)
+}
+
+/// Memo of [`ascii_joins`] per shaped string, so a string that does need
+/// the tailoring pays the UAX #14 pass once rather than on every shape
+/// (measure misses, draws, line runs). Bounded: cleared at
+/// [`Self::CAP`] entries. Strings the prefilter rejects are not stored.
+#[derive(Default)]
+struct AsciiJoinCache {
+    map: rustc_hash::FxHashMap<Box<str>, Option<Arc<[usize]>>>,
+}
+
+impl AsciiJoinCache {
+    const CAP: usize = 512;
+
+    fn joins(&mut self, s: &str) -> Option<Arc<[usize]>> {
+        if !may_need_ascii_joins(s) {
+            return None;
+        }
+        if let Some(hit) = self.map.get(s) {
+            return hit.clone();
+        }
+        let joins: Option<Arc<[usize]>> = ascii_joins(s).map(Arc::from);
+        if self.map.len() >= Self::CAP {
+            self.map.clear();
+        }
+        self.map.insert(s.into(), joins.clone());
+        joins
+    }
+}
+
 /// The string actually shaped for `text`, with a map back to `text`'s
 /// byte offsets when it differs.
 struct DisplayText<'a> {
@@ -1057,7 +1128,17 @@ impl DisplayText<'_> {
 /// stays one unbreakable word and overflows, where plain UAX #14 (what
 /// cosmic-text implements) breaks after every `/`, `!`, `}` before a
 /// letter. Each such opportunity gets a [`WORD_JOINER`].
+#[cfg(test)]
 fn display_text(text: &str, transform: TextTransform) -> DisplayText<'_> {
+    display_text_with(text, transform, &mut AsciiJoinCache::default())
+}
+
+/// [`display_text`] with the engine's [`AsciiJoinCache`].
+fn display_text_with<'a>(
+    text: &'a str,
+    transform: TextTransform,
+    joins_cache: &mut AsciiJoinCache,
+) -> DisplayText<'a> {
     // 1. text-transform, char by char with each output char's source.
     let mut chars: Option<Vec<(char, usize)>> = None;
     match transform {
@@ -1075,26 +1156,23 @@ fn display_text(text: &str, transform: TextTransform) -> DisplayText<'_> {
             chars = Some(out);
         }
         TextTransform::Capitalize => {
-            // The first letter of each word. Like a browser's word
-            // segmentation, an apostrophe between letters (`O'Neil`) and
-            // a leading digit (`3rd`) keep the word going; a hyphen,
-            // space or bracket starts a new one.
+            // Blink's `Capitalize`: the first character of every UAX #29
+            // word segment goes through ICU's simple titlecase
+            // (`u_totitle`). So an apostrophe (`O'neil`), a `.` (`e.g.`)
+            // or an `_` (ExtendNumLet: `Foo_bar`) inside a word keeps it
+            // going, a leading digit owns the word (`3rd`), and a hyphen,
+            // space, quote or bracket is a segment of its own — the next
+            // word starts after it. Titlecase, not uppercase: `ǆ` → `ǅ`,
+            // and Georgian keeps its Mkhedruli letters.
+            use unicode_segmentation::UnicodeSegmentation;
+            let case = icu_casemap::CaseMapper::new();
             let mut out = Vec::with_capacity(text.len());
-            let mut prev: Option<char> = None;
-            let mut before_prev: Option<char> = None;
-            for (at, c) in text.char_indices() {
-                let in_word = match prev {
-                    Some(p) if p.is_alphanumeric() => true,
-                    Some('\'' | '\u{2019}') => before_prev.is_some_and(char::is_alphanumeric),
-                    _ => false,
-                };
-                if c.is_alphabetic() && !in_word {
-                    out.extend(c.to_uppercase().map(|u| (u, at)));
-                } else {
-                    out.push((c, at));
+            for (start, word) in text.split_word_bound_indices() {
+                let mut chars = word.char_indices();
+                if let Some((_, first)) = chars.next() {
+                    out.push((case.simple_titlecase(first), start));
                 }
-                before_prev = prev;
-                prev = Some(c);
+                out.extend(chars.map(|(at, c)| (c, start + at)));
             }
             chars = Some(out);
         }
@@ -1105,29 +1183,8 @@ fn display_text(text: &str, transform: TextTransform) -> DisplayText<'_> {
     };
 
     // 2. Break opportunities between printable ASCII characters.
-    let needs_tailoring = transformed
-        .bytes()
-        .any(|b| b.is_ascii_punctuation() && b != b'-' && b != b'?');
-    let mut joins: Vec<usize> = Vec::new();
-    if needs_tailoring {
-        let bytes = transformed.as_bytes();
-        for (at, opportunity) in unicode_linebreak::linebreaks(&transformed) {
-            if opportunity != unicode_linebreak::BreakOpportunity::Allowed
-                || at == 0
-                || at >= bytes.len()
-            {
-                continue;
-            }
-            let (before, after) = (bytes[at - 1], bytes[at]);
-            if before.is_ascii_graphic()
-                && after.is_ascii_graphic()
-                && before != b'-'
-                && before != b'?'
-            {
-                joins.push(at);
-            }
-        }
-    }
+    let joins = joins_cache.joins(&transformed);
+    let joins: &[usize] = joins.as_deref().unwrap_or(&[]);
 
     if chars.is_none() && joins.is_empty() {
         return DisplayText {
@@ -1140,7 +1197,7 @@ fn display_text(text: &str, transform: TextTransform) -> DisplayText<'_> {
         chars.unwrap_or_else(|| text.char_indices().map(|(at, c)| (c, at)).collect());
     let mut out = String::with_capacity(transformed.len() + joins.len() * 3);
     let mut map = Vec::with_capacity(out.capacity() + 1);
-    let mut joins = joins.into_iter().peekable();
+    let mut joins = joins.iter().copied().peekable();
     let mut shaped_at = 0usize;
     for (c, source) in sources {
         if joins.peek() == Some(&shaped_at) {
@@ -1463,6 +1520,17 @@ fn resolve_family_list(list: &str, db: &fontdb::Database) -> ResolvedFamily {
         if let Some(generic) = GenericFamily::from_css(name) {
             return ResolvedFamily::Generic(generic);
         }
+        // Like the DOM renderer, ask for every named family as a web font
+        // (when enabled), installed or not. Once its faces have landed they
+        // win over an installed family of the same name: in Chrome the
+        // Google Fonts `@font-face` rule for "Roboto" takes precedence over
+        // a local Roboto. Until then the installed family (what Chrome draws
+        // before the stylesheet arrives) or the rest of the list is used, as
+        // with `font-display: swap`.
+        crate::web_fonts::request(name);
+        if let Some(web) = installed_family(db, &crate::web_fonts::web_family_name(name)) {
+            return ResolvedFamily::Named(web);
+        }
         let candidates =
             std::iter::once(name).chain(metric_compatible_aliases(name).iter().copied());
         for candidate in candidates {
@@ -1470,10 +1538,6 @@ fn resolve_family_list(list: &str, db: &fontdb::Database) -> ResolvedFamily {
                 return ResolvedFamily::Named(found);
             }
         }
-        // Not installed: like the DOM renderer, fetch it as a web font
-        // (when enabled); until it lands the list goes on, as with
-        // `font-display: swap`.
-        crate::web_fonts::request(name);
     }
     ResolvedFamily::Generic(GenericFamily::SansSerif)
 }
@@ -2053,6 +2117,34 @@ mod tests {
         }
     }
 
+    /// Chrome prefers the `@font-face` web font over an installed family
+    /// of the same name; until the web faces land the local one is used.
+    #[test]
+    fn a_landed_web_font_shadows_the_installed_family_of_the_same_name() {
+        let sys = system_font_db();
+        let Some(face) = sys.faces().next().cloned() else {
+            return;
+        };
+        let mut db = fontdb::Database::new();
+        let mut local = face.clone();
+        local.families = vec![("Roboto".into(), fontdb::Language::English_UnitedStates)];
+        db.push_face_info(local);
+        assert_eq!(
+            resolve_family_list("Roboto, sans-serif", &db),
+            ResolvedFamily::Named("Roboto".into()),
+            "before the web font lands: the installed family"
+        );
+        let mut web = face;
+        let web_name = crate::web_fonts::web_family_name("Roboto");
+        web.families = vec![(web_name.clone(), fontdb::Language::English_UnitedStates)];
+        db.push_face_info(web);
+        assert_eq!(
+            resolve_family_list("Roboto, sans-serif", &db),
+            ResolvedFamily::Named(web_name.as_str().into()),
+            "once it lands: the web font, like Chrome's @font-face"
+        );
+    }
+
     #[test]
     fn family_list_picks_the_first_installed_family() {
         let db = system_font_db();
@@ -2140,6 +2232,16 @@ mod tests {
             TextTransform::Capitalize,
         );
         assert_eq!(cap.text, "Hello World-Wide E-Mail O'neil 3rd 'Quoted' (Paren)");
+        // UAX #29: `_` is ExtendNumLet and `.` MidNumLet — neither starts
+        // a word (Chrome: `Foo_bar`, `E.g.`).
+        let cap = display_text("foo_bar snake_case_name e.g. x", TextTransform::Capitalize);
+        assert_eq!(cap.text, "Foo_bar Snake_case_name E.g. X");
+        // Titlecase, not uppercase: the `dž` digraph becomes `Dž`, not
+        // `DŽ`, and Georgian Mkhedruli has no title form (uppercasing would
+        // switch it to Mtavruli).
+        let cap = display_text("\u{01C6}emal \u{10D0}\u{10D1}", TextTransform::Capitalize);
+        assert_eq!(cap.text, "\u{01C5}emal \u{10D0}\u{10D1}");
+        assert_eq!(cap.source_offset(0), 0);
         // Offsets map back onto the source even when a char expands.
         let sharp = display_text("aßb", TextTransform::Uppercase);
         assert_eq!(sharp.text, "ASSB");
@@ -2173,8 +2275,50 @@ mod tests {
         assert!(breaks.contains(&after("a-")), "{breaks:?}");
         assert!(breaks.contains(&after("c?")), "{breaks:?}");
         assert!(joined.text.contains(WORD_JOINER));
-        // Plain prose is shaped as written.
+        // Plain prose is shaped as written — and never reaches the UAX #14
+        // pass: no candidate pair.
         assert!(display_text("Hello, world. Fine!", TextTransform::None).map.is_none());
+        assert!(!super::may_need_ascii_joins("Hello, world. Fine! (Yes) a - b?"));
+        assert!(super::may_need_ascii_joins("and/or"));
+    }
+
+    /// Every ASCII character after which UAX #14 offers a break before a
+    /// printable ASCII character is in the prefilter's set, so skipping a
+    /// string without such a pair can never skip a join.
+    #[test]
+    fn ascii_break_prefilter_is_sound() {
+        let graphic: Vec<char> = (0x21u8..0x7f).map(char::from).collect();
+        for &a in &graphic {
+            if a == '-' || a == '?' {
+                continue;
+            }
+            for &b in &graphic {
+                for pre in ["", "x", "1", "x1", "1.", "(", "x.", "$1"] {
+                    for post in ["", "x", "1", "(", "."] {
+                        let s = format!("{pre}{a}{b}{post}");
+                        let at = pre.len() + 1;
+                        let breaks = unicode_linebreak::linebreaks(&s).any(|(i, o)| {
+                            i == at && o == unicode_linebreak::BreakOpportunity::Allowed
+                        });
+                        assert!(
+                            !breaks || super::ASCII_BREAK_AFTER.contains(&(a as u8)),
+                            "{s:?}: a break after {a:?} the prefilter would miss"
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn the_break_tailoring_is_computed_once_per_string() {
+        let mut t = TextEngine::new();
+        let url = "https://x.com/SpaceX/status/2121316300702056595";
+        t.measure(url, 16.0, None);
+        t.measure(url, 20.0, None);
+        t.measure("Plain prose, nothing to join.", 16.0, None);
+        assert_eq!(t.ascii_joins.map.len(), 1, "one tailored string memoised");
+        assert!(t.ascii_joins.map.values().all(Option::is_some));
     }
 
     #[test]
@@ -2277,6 +2421,47 @@ mod tests {
                 .unwrap()
         };
         assert!(first_ink(&mid, 20) > first_ink(&left, 20) + 10);
+    }
+
+    /// Fails without CSS weight matching: a family with only 500 and 800
+    /// faces asked for 600 must draw the 800 face (CSS: above 500, heavier
+    /// first) — shaped at the raw 600, the nearest face (500) or a
+    /// fallback family is what comes out.
+    #[test]
+    fn css_weight_matching_picks_the_heavier_face_for_600() {
+        let db = system_font_db();
+        let face = |weight: u16| {
+            db.faces()
+                .find(|f| {
+                    f.families.iter().any(|(n, _)| n == "DejaVu Sans")
+                        && f.weight.0 == weight
+                        && f.style == fontdb::Style::Normal
+                        && f.stretch == fontdb::Stretch::Normal
+                })
+                .cloned()
+        };
+        let (Some(regular), Some(bold)) = (face(400), face(700)) else {
+            eprintln!("skipped: DejaVu Sans regular/bold not installed");
+            return;
+        };
+        let family = "Hypen Weight Matching Probe";
+        let mut t = TextEngine::new();
+        for (mut info, weight) in [(regular, 500), (bold, 800)] {
+            info.families = vec![(family.into(), fontdb::Language::English_UnitedStates)];
+            info.weight = fontdb::Weight(weight);
+            t.fonts.db_mut().push_face_info(info);
+        }
+        let probe = FontFamily::from_css(&format!("'{family}', serif"));
+        let text = "Hamburgefonstiv Things That Turbo Pascal";
+        let (w500, w600, w800) = t.with_family(&probe, |t| {
+            (
+                t.measure_weighted(text, 16.0, None, 500),
+                t.measure_weighted(text, 16.0, None, 600),
+                t.measure_weighted(text, 16.0, None, 800),
+            )
+        });
+        assert!(w800.0 > w500.0 + 4.0, "probe faces differ: {w500:?} {w800:?}");
+        assert_eq!(w600, w800, "600 draws the 800 (bold) face");
     }
 
     #[test]

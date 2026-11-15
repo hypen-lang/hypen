@@ -386,6 +386,8 @@ fn a_resent_tree_after_reconnect_replaces_the_old_roots() {
     h.take();
     h.conn(0).push(todo_tree());
     h.take();
+    // The connection announces the re-sent tree (`initialTree`).
+    h.signal(0, EmbedSignal::InitialTree);
     h.conn(0).push(vec![
         create("1", "Column", &[("fresh", json!(true))]),
         insert("root", "1"),
@@ -483,4 +485,209 @@ fn a_host_without_a_url_or_too_deep_does_not_connect() {
         ]);
     }
     assert_eq!(h.conns.lock().unwrap().len(), MAX_EMBED_DEPTH);
+}
+
+/// An embedded app with several roots whose top-level conditional swaps
+/// one of them creates + inserts a root in an ordinary batch — that is NOT
+/// a re-sent tree: the other root must survive (only `initialTree` resets).
+#[test]
+fn a_top_level_conditional_swap_in_a_multi_root_app_is_incremental() {
+    let mut h = Harness::new();
+    h.root.push(launcher_frame());
+    h.take();
+    h.conn(0).push(vec![
+        create("1", "Column", &[]),
+        insert("root", "1"),
+        create("2", "Text", &[("0", json!("banner"))]),
+        insert("root", "2"),
+    ]);
+    h.take();
+    assert_eq!(h.children("host"), vec!["note", "e1:1", "e1:2"]);
+    // `When` swaps the banner: remove 2, create + insert 3 under root.
+    h.conn(0).push(vec![
+        Patch::Remove {
+            id: "2".into(),
+            transition: false,
+        },
+        create("3", "Text", &[("0", json!("other banner"))]),
+        insert("root", "3"),
+    ]);
+    h.take();
+    assert_eq!(
+        h.children("host"),
+        vec!["note", "e1:1", "e1:3"],
+        "the untouched root stays"
+    );
+    // A reconnect's initialTree, by contrast, replaces every old root.
+    h.signal(0, EmbedSignal::InitialTree);
+    h.conn(0)
+        .push(vec![create("1", "Column", &[]), insert("root", "1")]);
+    h.take();
+    assert_eq!(h.children("host"), vec!["note", "e1:1"]);
+}
+
+/// Drag and drop inside an embed: the DnD runtime sends node-addressed
+/// `__hypen_dispatch` envelopes through `dispatch_action`; they reach the
+/// embed that owns the node, with its ids un-prefixed.
+#[test]
+fn node_addressed_ui_envelopes_route_to_the_owning_embed() {
+    let mut h = Harness::new();
+    h.root.push(launcher_frame());
+    h.take();
+    h.conn(0).push(todo_tree());
+    h.take();
+    let ui = hypen_engine::action_routing::UI_ACTION;
+    h.module.dispatch_action(
+        ui,
+        Some(json!({
+            "node": "e1:1",
+            "fromNode": "e1:2",
+            "action": "__hypen_reorder",
+            "payload": {"path": "state.items", "from": 0, "to": 1}
+        })),
+    );
+    // A host-zone drop of an embed row: the foreign origin means nothing
+    // to the window's engine.
+    h.module.dispatch_action(
+        ui,
+        Some(json!({"node": "frame", "fromNode": "e1:2", "action": "drop", "payload": {}})),
+    );
+    assert_eq!(
+        *h.conn(0).actions.lock().unwrap(),
+        vec![(
+            ui.to_string(),
+            Some(json!({
+                "node": "1",
+                "fromNode": "2",
+                "action": "__hypen_reorder",
+                "payload": {"path": "state.items", "from": 0, "to": 1}
+            }))
+        )]
+    );
+    assert_eq!(
+        *h.root.actions.lock().unwrap(),
+        vec![(
+            ui.to_string(),
+            Some(json!({"node": "frame", "fromNode": null, "action": "drop", "payload": {}}))
+        )]
+    );
+}
+
+#[test]
+fn the_embed_policy_bounds_breadth_and_targets() {
+    let mut h = Harness::new();
+    // One stream creating many HypenApps: only `max_per_owner` connect.
+    let mut batch = vec![create("col", "Column", &[]), insert("root", "col")];
+    for i in 0..20 {
+        let id = format!("h{i}");
+        batch.push(create(
+            &id,
+            "HypenApp",
+            &[("0", json!(format!("ws://app{i}.test/ws")))],
+        ));
+        batch.push(insert("col", &id));
+    }
+    h.root.push(batch);
+    h.take();
+    let policy = EmbedPolicy::default();
+    assert_eq!(h.conns.lock().unwrap().len(), policy.max_per_owner);
+    // Removing a live one frees its slot for the next host.
+    h.root.push(vec![Patch::Remove {
+        id: "h0".into(),
+        transition: false,
+    }]);
+    h.root.push(vec![
+        create("late", "HypenApp", &[("0", json!("ws://late.test/ws"))]),
+        insert("col", "late"),
+    ]);
+    h.take();
+    assert_eq!(h.conns.lock().unwrap().len(), policy.max_per_owner + 1);
+    assert_eq!(
+        h.conns.lock().unwrap().last().unwrap().url,
+        "ws://late.test/ws"
+    );
+}
+
+#[test]
+fn embed_targets_follow_mixed_content_and_private_network_rules() {
+    let p = EmbedPolicy::default();
+    // Local content (in-process module / localhost dev server) may embed
+    // local apps — the launcher.
+    assert!(p.check_target(None, "ws://localhost:8789/ws").is_ok());
+    assert!(p
+        .check_target(Some("http://localhost:8787"), "ws://127.0.0.1:8789/ws")
+        .is_ok());
+    // Public content may not reach private / loopback targets…
+    for private in [
+        "ws://localhost:3000/ws",
+        "ws://127.0.0.1/ws",
+        "ws://[::1]:9000/ws",
+        "ws://10.0.0.5/ws",
+        "ws://192.168.1.2/ws",
+        "ws://169.254.169.254/ws",
+        "ws://printer.local/ws",
+    ] {
+        assert!(
+            p.check_target(Some("http://apps.example.com"), private)
+                .is_err(),
+            "{private}"
+        );
+    }
+    // …unless the host app allows it.
+    assert!(p
+        .clone()
+        .allow_private_targets(true)
+        .check_target(Some("http://apps.example.com"), "ws://127.0.0.1/ws")
+        .is_ok());
+    // Mixed content: secure content embeds only wss.
+    assert!(p
+        .check_target(
+            Some("https://apps.example.com"),
+            "ws://other.example.com/ws"
+        )
+        .is_err());
+    assert!(p
+        .check_target(
+            Some("wss://apps.example.com/ws"),
+            "wss://other.example.com/ws"
+        )
+        .is_ok());
+    // Only WebSocket targets.
+    assert!(p.check_target(None, "http://example.com/").is_err());
+    assert!(p.check_target(None, "file:///etc/passwd").is_err());
+    // An allowlist is exclusive.
+    let listed = EmbedPolicy::default().allow_hosts(["apps.example.com", "localhost:8789"]);
+    assert!(listed
+        .check_target(Some("https://a.b"), "wss://apps.example.com/ws")
+        .is_ok());
+    assert!(listed.check_target(None, "ws://localhost:8789/ws").is_ok());
+    assert!(listed.check_target(None, "ws://localhost:8790/ws").is_err());
+}
+
+#[test]
+fn a_refused_embed_shows_its_error_slot_and_never_connects() {
+    let mut h = Harness::new();
+    h.module = EmbeddingModule::with_connector(Arc::clone(&h.root) as Arc<dyn HypenModule>, {
+        let conns = Arc::clone(&h.conns);
+        Arc::new(move |url: &str, signal: EmbedSignalSink| {
+            let module = Arc::new(Fake::default());
+            conns.lock().unwrap().push(Conn {
+                url: url.into(),
+                module: Arc::clone(&module),
+                signal,
+            });
+            module as Arc<dyn HypenModule>
+        })
+    })
+    .with_policy(EmbedPolicy::default().allow_hosts(["allowed.test"]));
+    let out = Arc::clone(&h.out);
+    h.module
+        .on_owned_patches(Arc::new(move |p: Vec<Patch>| out.lock().unwrap().extend(p)));
+    h.root.push(launcher_frame());
+    h.take();
+    assert!(
+        h.conns.lock().unwrap().is_empty(),
+        "todo.test is not allowed"
+    );
+    assert_eq!(h.children("host"), vec!["error", "note"]);
 }

@@ -1119,12 +1119,106 @@ pub enum BorderLineStyle {
     Dotted,
 }
 
+/// Per-corner border radii, CSS order: top-left, top-right, bottom-right,
+/// bottom-left. Logical px in a [`Border`], physical once
+/// [`Self::scaled`]. `From<f32>` makes a uniform set, so every paint
+/// helper that takes a radius takes either.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CornerRadii {
+    pub tl: f32,
+    pub tr: f32,
+    pub br: f32,
+    pub bl: f32,
+}
+
+impl CornerRadii {
+    pub const ZERO: CornerRadii = CornerRadii::uniform(0.0);
+
+    pub const fn uniform(r: f32) -> Self {
+        Self {
+            tl: r,
+            tr: r,
+            br: r,
+            bl: r,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.tl <= 0.0 && self.tr <= 0.0 && self.br <= 0.0 && self.bl <= 0.0
+    }
+
+    pub fn is_uniform(&self) -> bool {
+        self.tl == self.tr && self.tr == self.br && self.br == self.bl
+    }
+
+    /// The largest corner (for single-radius consumers: blurred shadows,
+    /// the focus ring).
+    pub fn max(&self) -> f32 {
+        self.tl.max(self.tr).max(self.br).max(self.bl)
+    }
+
+    pub fn scaled(self, k: f32) -> Self {
+        Self {
+            tl: self.tl * k,
+            tr: self.tr * k,
+            br: self.br * k,
+            bl: self.bl * k,
+        }
+    }
+
+    /// Grow (or shrink, negative) every rounded corner by `d`, keeping
+    /// square corners square — CSS's rule for a box-shadow's spread.
+    pub fn grown(self, d: f32) -> Self {
+        let g = |r: f32| if r > 0.0 { (r + d).max(0.0) } else { 0.0 };
+        Self {
+            tl: g(self.tl),
+            tr: g(self.tr),
+            br: g(self.br),
+            bl: g(self.bl),
+        }
+    }
+
+    /// CSS's overlapping-curves rule (CSS Backgrounds 3 §5.5): when two
+    /// radii on one side add up to more than the side, every radius is
+    /// scaled down by the same factor. Negative radii clamp to 0.
+    pub fn fit(self, w: f32, h: f32) -> Self {
+        let c = Self {
+            tl: self.tl.max(0.0),
+            tr: self.tr.max(0.0),
+            br: self.br.max(0.0),
+            bl: self.bl.max(0.0),
+        };
+        let ratio = |side: f32, sum: f32| if sum > side { side.max(0.0) / sum } else { 1.0 };
+        let f = ratio(w, c.tl + c.tr)
+            .min(ratio(w, c.bl + c.br))
+            .min(ratio(h, c.tl + c.bl))
+            .min(ratio(h, c.tr + c.br));
+        if f < 1.0 {
+            c.scaled(f)
+        } else {
+            c
+        }
+    }
+}
+
+impl From<f32> for CornerRadii {
+    fn from(r: f32) -> Self {
+        Self::uniform(r)
+    }
+}
+
 /// Resolved border style for a node.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Border {
     pub width: f32,
     pub color: Rgba,
+    /// The uniform radius — or, when [`Self::corners`] is set, its largest
+    /// corner (what single-radius consumers use).
     pub radius: f32,
+    /// Per-corner radii (`rounded-t-*`, `borderTopLeftRadius`, a
+    /// `{topLeft, …}` object, a multi-value `borderRadius` string), when
+    /// they are not all equal. `None`: every corner is `radius`.
+    pub corners: Option<CornerRadii>,
     /// Bitmask of which sides this border draws on. `BORDER_SIDES_ALL`
     /// (the default) is the standard "stroke the full rounded rect"
     /// path. A subset means tw `border-b` / `border-t` etc. — those
@@ -1141,6 +1235,7 @@ impl Default for Border {
             width: 0.0,
             color: Rgba::TRANSPARENT,
             radius: 0.0,
+            corners: None,
             sides: BORDER_SIDES_ALL,
             style: BorderLineStyle::Solid,
         }
@@ -1158,6 +1253,102 @@ impl Border {
     pub fn is_partial(&self) -> bool {
         self.sides != 0 && self.sides != BORDER_SIDES_ALL
     }
+
+    /// Every corner's radius (logical px).
+    pub fn radii(&self) -> CornerRadii {
+        self.corners.unwrap_or(CornerRadii::uniform(self.radius))
+    }
+
+    /// Set the radii, keeping `radius` / `corners` normalised.
+    pub fn set_radii(&mut self, radii: CornerRadii) {
+        if radii.is_uniform() {
+            self.radius = radii.tl;
+            self.corners = None;
+        } else {
+            self.radius = radii.max();
+            self.corners = Some(radii);
+        }
+    }
+}
+
+/// Per-corner radii from the props, over a uniform `radius`: a multi-value
+/// `borderRadius` / `cornerRadius` string (`"12px 12px 0 0"`), a corner
+/// object (`{topLeft, topRight, bottomRight, bottomLeft}` and the logical
+/// `topStart` / `topEnd` / `bottomStart` / `bottomEnd`, LTR — the DOM
+/// `applyCornerRadii`), then the per-corner longhands (`borderTopLeftRadius`
+/// …, what Tailwind `rounded-t-*` / `rounded-tl-*` lower to), later ones
+/// winning per corner like inline CSS.
+/// [`corner_radii_with`] at a viewport — for element defaults (a Card's
+/// 8px, a Badge's 4px, a round Avatar) that per-corner props refine, as
+/// the DOM's inline `rounded-t-*` longhands refine its component default.
+pub fn corner_radii_at(node: &Node, viewport: Viewport, radius: f32) -> CornerRadii {
+    corner_radii_with(node, &VariantState::layout(viewport), radius)
+}
+
+fn corner_radii_with(node: &Node, vs: &VariantState, radius: f32) -> CornerRadii {
+    let viewport = Some(vs.viewport);
+    let mut c = CornerRadii::uniform(radius);
+    for name in ["borderRadius", "cornerRadius"] {
+        if let Some(text) = prop_str_with(node, name, vs) {
+            let values: Vec<f32> = text
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .filter_map(|t| parse_length(t, viewport))
+                .collect();
+            c = match values.as_slice() {
+                [a, b] => CornerRadii { tl: *a, tr: *b, br: *a, bl: *b },
+                [a, b, d] => CornerRadii { tl: *a, tr: *b, br: *d, bl: *b },
+                [a, b, d, e] => CornerRadii { tl: *a, tr: *b, br: *d, bl: *e },
+                _ => c,
+            };
+        }
+        let object = node
+            .props
+            .get(&format!("{name}.0"))
+            .or_else(|| node.props.get(name))
+            .and_then(Value::as_object);
+        if let Some(obj) = object {
+            let get = |k: &str| obj.get(k).and_then(|v| value_to_f32(v, viewport));
+            c = CornerRadii {
+                tl: get("topLeft").unwrap_or(0.0),
+                tr: get("topRight").unwrap_or(0.0),
+                br: get("bottomRight").unwrap_or(0.0),
+                bl: get("bottomLeft").unwrap_or(0.0),
+            };
+            if let Some(v) = get("topStart") {
+                c.tl = v;
+            }
+            if let Some(v) = get("topEnd") {
+                c.tr = v;
+            }
+            if let Some(v) = get("bottomEnd") {
+                c.br = v;
+            }
+            if let Some(v) = get("bottomStart") {
+                c.bl = v;
+            }
+        }
+    }
+    for (names, idx) in [
+        (["borderTopLeftRadius", "borderStartStartRadius"], 0),
+        (["borderTopRightRadius", "borderStartEndRadius"], 1),
+        (["borderBottomRightRadius", "borderEndEndRadius"], 2),
+        (["borderBottomLeftRadius", "borderEndStartRadius"], 3),
+    ] {
+        for name in names {
+            if let Some(v) = prop_f32_with(node, name, vs) {
+                match idx {
+                    0 => c.tl = v,
+                    1 => c.tr = v,
+                    2 => c.br = v,
+                    _ => c.bl = v,
+                }
+            }
+        }
+    }
+    c
 }
 
 /// Resolve border / borderWidth / borderColor / borderRadius / cornerRadius.
@@ -1243,7 +1434,7 @@ pub fn border(node: &Node) -> Border {
         line_style = parse_border_line_style(value);
     }
 
-    Border {
+    let mut out = Border {
         width,
         // A width without an explicit colour falls back to opaque black —
         // matches the DOM applicator's "default solid black" behaviour.
@@ -1253,9 +1444,16 @@ pub fn border(node: &Node) -> Border {
             Rgba::TRANSPARENT
         }),
         radius,
+        corners: None,
         sides: BORDER_SIDES_ALL,
         style: line_style,
-    }
+    };
+    out.set_radii(corner_radii_with(
+        node,
+        &VariantState::layout(Viewport::default()),
+        radius,
+    ));
+    out
 }
 
 /// Viewport-aware [`border`] — honours `borderWidth@md` etc.
@@ -1448,7 +1646,7 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
         BORDER_SIDES_ALL
     };
 
-    Border {
+    let mut out = Border {
         width,
         color: color.unwrap_or(if width > 0.0 {
             Rgba::BLACK
@@ -1456,9 +1654,12 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
             Rgba::TRANSPARENT
         }),
         radius,
+        corners: None,
         sides,
         style: line_style,
-    }
+    };
+    out.set_radii(corner_radii_with(node, vs, radius));
+    out
 }
 
 /// True if the user supplied any border-* prop on this node — even
@@ -1499,6 +1700,12 @@ pub(crate) fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32>
     }
 }
 
+/// Crate-visible [`parse_length`] for CSS value lists parsed outside this
+/// module (`box-shadow`).
+pub(crate) fn parse_css_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
+    parse_length(s, viewport)
+}
+
 /// Parse a CSS-ish length. `%` is *not* handled here — it is a
 /// container-relative unit, so it resolves in [`parse_percent`] /
 /// [`Dim::Percent`] where taffy can apply it against the real parent.
@@ -1518,12 +1725,6 @@ pub(crate) fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32>
 /// lowers `h-screen` to `height: "100vh"`, so before these suffixes were
 /// understood the parse failed and the height prop was dropped in
 /// silence rather than erroring.
-/// Crate-visible [`parse_length`] for CSS value lists parsed outside this
-/// module (`box-shadow`).
-pub(crate) fn parse_css_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
-    parse_length(s, viewport)
-}
-
 fn parse_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
     let trimmed = s.trim();
     // Order matters: `vmin`/`vmax` must be tried before `vw`/`vh`, whose
@@ -2179,14 +2380,6 @@ fn parse_border_line_style(value: &str) -> BorderLineStyle {
     }
 }
 
-/// Parse the CSS `border` shorthand — `1px solid #333`, `2px #f00`,
-/// `solid red`. Returns `(width, colour, style)`.
-///
-/// Order-independent per CSS: whichever token parses as a length is the
-/// width, whichever parses as a colour is the colour, and the style
-/// keyword is ignored. Returns `None` when nothing usable was found, so
-/// callers can distinguish "not a shorthand" from "shorthand with
-/// defaults".
 /// Split a CSS value on top-level whitespace, keeping functional notation
 /// (`rgba(0, 0, 0, 0.1)`, `rgb(0 0 0 / 0.1)`) in one token.
 pub(crate) fn split_css_tokens(s: &str) -> Vec<&str> {
@@ -2237,6 +2430,14 @@ pub(crate) fn split_css_commas(s: &str) -> Vec<&str> {
     out
 }
 
+/// Parse the CSS `border` shorthand — `1px solid #333`, `2px #f00`,
+/// `solid red`. Returns `(width, colour, style)`.
+///
+/// Order-independent per CSS: whichever token parses as a length is the
+/// width, whichever parses as a colour is the colour, and the style
+/// keyword is ignored. Returns `None` when nothing usable was found, so
+/// callers can distinguish "not a shorthand" from "shorthand with
+/// defaults".
 fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>, BorderLineStyle)> {
     const STYLES: &[&str] = &[
         "none", "hidden", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset",

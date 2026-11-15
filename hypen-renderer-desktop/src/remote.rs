@@ -128,6 +128,11 @@ pub(crate) struct Inner {
     /// Callback set by `on_status`. Fires every time the worker
     /// transitions between states in [`ConnectionStatus`].
     status_callback: Option<StatusCallback>,
+    /// Callback set by [`RemoteModule::on_initial_tree`]: fired on the
+    /// worker thread right BEFORE the patches of an `initialTree` message
+    /// are delivered — the protocol's explicit "this is a whole new tree"
+    /// marker (a fresh session after a reconnect re-sends one).
+    initial_tree_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Latest status the worker reached. Replayed to a late
     /// `on_status` wiring so the UI doesn't miss the initial
     /// "Connecting" state because of the wire-up race.
@@ -214,6 +219,11 @@ pub struct RemoteOptions {
     /// `None` connects UI-only (no `hello.device`, device calls on the server
     /// answer `unavailable`).
     pub device: Option<DeviceConfig>,
+    /// Run the connection on the process-wide shared remote runtime (one
+    /// thread, one tokio runtime for every such connection) instead of a
+    /// thread + runtime of its own. `HypenApp` embeds use it, so a page
+    /// with many embeds does not cost a thread each. Default `false`.
+    pub shared_runtime: bool,
 }
 
 impl Default for RemoteOptions {
@@ -221,6 +231,7 @@ impl Default for RemoteOptions {
         RemoteOptions {
             headers: Vec::new(),
             device: Some(DeviceConfig::native()),
+            shared_runtime: false,
         }
     }
 }
@@ -237,6 +248,54 @@ impl RemoteOptions {
         self.device = device;
         self
     }
+
+    /// See [`Self::shared_runtime`] (the field).
+    pub fn shared_runtime(mut self, on: bool) -> Self {
+        self.shared_runtime = on;
+        self
+    }
+}
+
+/// One connection's worker, handed to the shared runtime thread.
+struct SharedWorkerJob {
+    url: String,
+    module_name: String,
+    outbound_rx: mpsc::UnboundedReceiver<RemoteMessage>,
+    inner: Arc<Mutex<Inner>>,
+    options: RemoteOptions,
+}
+
+/// The process-wide shared remote runtime ([`RemoteOptions::shared_runtime`]):
+/// one thread running a current-thread tokio runtime with a `LocalSet`, on
+/// which each job's worker is a local task. Started on first use.
+fn shared_worker_sender() -> &'static mpsc::UnboundedSender<SharedWorkerJob> {
+    static SENDER: std::sync::OnceLock<mpsc::UnboundedSender<SharedWorkerJob>> =
+        std::sync::OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SharedWorkerJob>();
+        std::thread::Builder::new()
+            .name("hypen-remote-shared".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio rt");
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    while let Some(job) = rx.recv().await {
+                        tokio::task::spawn_local(run_worker(
+                            job.url,
+                            job.module_name,
+                            job.outbound_rx,
+                            job.inner,
+                            job.options,
+                        ));
+                    }
+                });
+            })
+            .expect("spawn shared remote worker");
+        tx
+    })
 }
 
 pub struct RemoteModule {
@@ -306,6 +365,24 @@ impl RemoteModule {
         let inner_for_worker = Arc::clone(&inner);
         let module_for_worker = module_name.clone();
         let url_for_worker = url.clone();
+        if options.shared_runtime {
+            let job = SharedWorkerJob {
+                url: url_for_worker,
+                module_name: module_for_worker,
+                outbound_rx,
+                inner: inner_for_worker,
+                options,
+            };
+            if shared_worker_sender().send(job).is_err() {
+                log::warn!("remote: the shared runtime is gone; {url} not connected");
+            }
+            return Self {
+                module_name,
+                inner,
+                outbound: outbound_tx,
+                asset_origin,
+            };
+        }
         std::thread::Builder::new()
             .name(format!("hypen-remote:{module_name}"))
             .spawn(move || {
@@ -765,7 +842,17 @@ pub(crate) fn handle_incoming(
     // Patch batches are decoded patch by patch (see
     // `decode_patches_lenient`); everything else as a whole message.
     match value.get("type").and_then(Value::as_str) {
-        Some("patch") | Some("initialTree") => {
+        Some(kind @ ("patch" | "initialTree")) => {
+            if kind == "initialTree" {
+                let cb = inner
+                    .lock()
+                    .expect("remote inner poisoned")
+                    .initial_tree_callback
+                    .clone();
+                if let Some(cb) = cb {
+                    cb();
+                }
+            }
             let patches = decode_patches_lenient(value.get("patches"));
             if !patches.is_empty() {
                 deliver_patches(inner, patches);
@@ -845,6 +932,20 @@ impl RemoteModule {
     /// Fires immediately with the current state if one was already
     /// recorded, so wiring `on_status` after the worker started
     /// doesn't drop the initial `Connecting` event on the floor.
+    /// Called (on the worker thread) just before the patches of every
+    /// `initialTree` message are delivered: the server is sending a whole
+    /// tree, replacing whatever an earlier session rendered. Mirrors the
+    /// web `RemoteEngine.onInitialTree` the DOM `HypenApp` clears on.
+    pub fn on_initial_tree<F>(&self, cb: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.inner
+            .lock()
+            .expect("remote inner poisoned")
+            .initial_tree_callback = Some(Arc::new(cb));
+    }
+
     pub fn on_status<F>(&self, cb: F)
     where
         F: Fn(&ConnectionStatus) + Send + Sync + 'static,

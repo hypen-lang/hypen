@@ -3002,8 +3002,8 @@ fn rounded_video_overflow_passes_its_exact_radius_to_controls_slot() {
 
     assert_eq!(controls.clip_to, Some(video.rect));
     assert_eq!(play.clip_to, Some(video.rect));
-    assert_eq!(controls.clip_radius, 32.0);
-    assert_eq!(play.clip_radius, 32.0);
+    assert_eq!(controls.clip_radius, 32.0.into());
+    assert_eq!(play.clip_radius, 32.0.into());
 }
 
 // -----------------------------------------------------------------
@@ -3039,7 +3039,7 @@ fn actionable_clip_item(
         scrollable: None,
         font_weight: 400,
         clip_to,
-        clip_radius: 0.0,
+        clip_radius: crate::style::CornerRadii::ZERO,
         subtree_root: None,
         background_gradient: None,
         background_layers: None,
@@ -10065,6 +10065,9 @@ fn letter_spacing_and_text_transform_inherit_to_text_items() {
             Text("7-day forecast").fontSize(12)
             Text("kicker").tw("text-[10px] tracking-widest")
             Text("Plain").textTransform("none").letterSpacing("normal")
+            Text("forecast").fontSize(12).letterSpacing("normal")
+            Text("forecast").fontSize(12).letterSpacing("normal").textTransform("none")
+            Text("forecast").fontSize(12).textTransform("none")
         }.letterSpacing(0.8).textTransform("uppercase")"#,
         json!({}),
     );
@@ -10087,10 +10090,19 @@ fn letter_spacing_and_text_transform_inherit_to_text_items() {
     for key in ["letterSpacing", "letter-spacing.0", "textTransform", "text-transform"] {
         assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
     }
-    // The transform is a shaping input: an uppercased string measures
-    // wider than the lowercase source.
-    let upper = pass.item_by_id(&kids[2]).unwrap().rect.w;
-    assert!(upper > 0.0);
+    // Both are shaping inputs. The same word at the same size: the
+    // inherited uppercase measures wider than the lowercase source…
+    let width = |i: usize| pass.item_by_id(&kids[i]).unwrap().rect.w;
+    let (upper, lower, spaced) = (width(3), width(4), width(5));
+    assert!(
+        upper > lower * 1.15,
+        "FORECAST ({upper}) should be wider than forecast ({lower})"
+    );
+    // …and the inherited 0.8px letter-spacing adds ~0.8px per glyph.
+    assert!(
+        (spaced - lower - 8.0 * 0.8).abs() < 1.5,
+        "letter-spacing: {spaced} vs {lower}"
+    );
 }
 
 /// A caption beside a username in a Row (Social's post caption) wraps
@@ -10159,6 +10171,7 @@ fn text_with_its_own_center_alignment_fills_its_column() {
     let row_title = rect(&tree.children_of(&row)[0]);
     let (natural, _) = text.measure("Row title", 16.0, None);
     assert!(row_title.w <= natural + 1.0, "Row keeps the Text intrinsic: {row_title:?}");
+}
 
 // ---------------------------------------------------------------------------
 // Chrome-parity layout & box styling (diff-layout).
@@ -11089,6 +11102,7 @@ fn fit_content_probe_does_not_leak_min_content_heights() {
         body.y + body.h <= sub.y + sub.h + 0.5,
         "text column ends with its last line: body={body:?} sub={sub:?}"
     );
+}
 
 // ---------------------------------------------------------------------
 // `display: none`, responsive display variants, flex-wrap, axis gaps
@@ -11362,4 +11376,361 @@ fn overflow_hidden_content_does_not_extend_the_page() {
     });
     let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
     assert!(pass.content_size.1 >= 899.5, "{:?}", pass.content_size);
+}
+
+/// Review follow-up: the text fill is settled against the Text's CURRENT
+/// parent in both directions. A centred Text moved (no restyle) from a Row
+/// — where the DOM cancels the fill — into a Column must take the fill
+/// back; moved back into the Row it must lose it again.
+#[test]
+fn text_fill_follows_the_text_when_moved_between_row_and_column() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let build = vec![
+        create_patch("col", "Column", &[]),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch(
+            "t",
+            "Text",
+            &[("0", json!("Mon")), ("textAlign", json!("center"))],
+        ),
+        insert_patch("row", "t"),
+        create_patch(
+            "body",
+            "Text",
+            &[("0", json!("A considerably longer line of plain body text"))],
+        ),
+        insert_patch("col", "body"),
+    ];
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(800.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen| {
+        LayoutPass::compute_with_state(
+            state,
+            tree,
+            text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let pass = compute(&mut state, &tree, &mut text, 1);
+    let body_w = find_item(&pass, "body").rect.w;
+    assert!(
+        find_item(&pass, "t").rect.w < body_w * 0.5,
+        "intrinsic in the Row: {:?}",
+        find_item(&pass, "t").rect
+    );
+
+    let to_column = vec![Patch::Move {
+        parent_id: "col".into(),
+        id: "t".into(),
+        before_id: Some("body".into()),
+    }];
+    tree.apply_batch(&to_column);
+    assert!(state.apply_patches(&to_column, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 2);
+    let (t, col) = (find_item(&pass, "t").rect, find_item(&pass, "col").rect);
+    assert!(
+        (t.w - col.w).abs() < 0.5 && (t.x - col.x).abs() < 0.5,
+        "moved into the Column the centred Text fills it: {t:?} vs {col:?}"
+    );
+
+    let back = vec![Patch::Move {
+        parent_id: "row".into(),
+        id: "t".into(),
+        before_id: None,
+    }];
+    tree.apply_batch(&back);
+    assert!(state.apply_patches(&back, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 3);
+    assert!(
+        find_item(&pass, "t").rect.w < find_item(&pass, "body").rect.w * 0.5,
+        "back in the Row it is intrinsic again: {:?}",
+        find_item(&pass, "t").rect
+    );
+}
+
+/// The DOM fills only under a centre / right / end / justify alignment —
+/// a start-aligned Text in a Stack keeps its intrinsic width (Stack is
+/// `justify-items: start`), while a centred one takes the track.
+#[test]
+fn stack_text_takes_the_track_only_for_a_filling_alignment() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "stack", "Stack", &[("width", json!(300))]);
+    node(
+        &mut tree,
+        "stack",
+        "start",
+        "Text",
+        &[("0", json!("Start")), ("textAlign", json!("start"))],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "centre",
+        "Text",
+        &[("0", json!("Centre")), ("textAlign", json!("center"))],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    assert!(
+        find_item(&pass, "start").rect.w < 150.0,
+        "start-aligned Text stays intrinsic: {:?}",
+        find_item(&pass, "start").rect
+    );
+    assert!(
+        (find_item(&pass, "centre").rect.w - 300.0).abs() < 0.5,
+        "centred Text fills the Stack track: {:?}",
+        find_item(&pass, "centre").rect
+    );
+}
+
+/// The automatic cross-axis stretch is an ALLOWLIST of parents (DOM
+/// `applyAutomaticStretch` + block flow): a demanding Column under a
+/// Column fills it, under a Tabs-like horizontal / Link parent it does not.
+#[test]
+fn auto_cross_fill_is_granted_only_by_allowlisted_parents() {
+    let column_style = Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        ..Default::default()
+    };
+    let parent_types = ["Column", "List", "Box", "Card", "Link"];
+    for parent_type in parent_types {
+        let mut tree = Tree::new();
+        node(&mut tree, "root", "outer", "Column", &[("width", json!(400))]);
+        node(&mut tree, "outer", "parent", parent_type, &[("padding", json!(0))]);
+        node(&mut tree, "parent", "demanding", "Column", &[]);
+        node(&mut tree, "demanding", "bar", "Box", &[("width", json!("50%")), ("height", json!(4))]);
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let parent = find_item(&pass, "parent").rect;
+        let demanding = find_item(&pass, "demanding").rect;
+        let granted = parent_type != "Link";
+        assert!(
+            grants_auto_cross_fill(parent_type, &column_style) == granted,
+            "{parent_type}: allowlist"
+        );
+        if granted {
+            assert!(
+                (demanding.w - parent.w).abs() < 0.5,
+                "{parent_type}: demanding child fills {parent:?}, got {demanding:?}"
+            );
+        }
+    }
+    // Horizontal parents never grant it, whatever their type.
+    let row = Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        ..Default::default()
+    };
+    assert!(!grants_auto_cross_fill("Column", &row));
+    for blocked in ["Row", "Button", "Center", "Stack", "Badge", "Tabs", "Link"] {
+        assert!(!grants_auto_cross_fill(blocked, &column_style), "{blocked}");
+    }
+}
+
+/// CSS computed overflow: `overflow-x: hidden` alone makes `overflow-y`
+/// `auto` (a vertical scroll container); `overflow-x: clip` leaves y
+/// visible, so the vertical extent still reaches the page while the
+/// horizontal one does not.
+#[test]
+fn overflow_axes_follow_css_computed_values() {
+    let mk = |props: &[(&str, Value)]| {
+        let mut tree = Tree::new();
+        node(&mut tree, "root", "n", "Column", props);
+        tree.get("n").unwrap().clone()
+    };
+    let v = vp(800.0);
+    use CssOverflow::*;
+    assert_eq!(css_overflow_axes(&mk(&[]), v), None);
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflowX", json!("hidden"))]), v),
+        Some((Hidden, Auto))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflowX", json!("clip"))]), v),
+        Some((Clip, Visible))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflow", json!("hidden")), ("overflowY", json!("visible"))]), v),
+        Some((Hidden, Auto))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflowX", json!("clip")), ("overflowY", json!("scroll"))]), v),
+        Some((Hidden, Scroll))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflow", json!("hidden clip"))]), v),
+        Some((Hidden, Hidden))
+    );
+    assert!(is_scrollable_node(&mk(&[("overflowX", json!("hidden"))]), v));
+    assert!(!is_scrollable_node(&mk(&[("overflowX", json!("clip"))]), v));
+    assert!(!is_scrollable_node(&mk(&[("overflow", json!("hidden"))]), v));
+}
+
+#[test]
+fn overflow_x_clip_keeps_the_vertical_extent_on_the_page() {
+    let page = |overflow_x: &str| {
+        let mut tree = Tree::new();
+        node(
+            &mut tree,
+            "root",
+            "frame",
+            "Column",
+            &[("width", json!(200)), ("height", json!(100)), ("overflowX", json!(overflow_x))],
+        );
+        node(
+            &mut tree,
+            "frame",
+            "tall",
+            "Box",
+            &[("width", json!(600)), ("height", json!(2000)), ("flexShrink", json!(0))],
+        );
+        let mut text = TextEngine::new();
+        LayoutPass::compute(&tree, &mut text, (400, 300), 1.0).content_size
+    };
+    let (w, h) = page("clip");
+    assert!(h >= 2000.0, "y stays visible under overflow-x: clip: {h}");
+    assert!(w < 600.0, "the clipped x overflow is off the page: {w}");
+    // `hidden` makes the box a vertical scroller: its content scrolls
+    // inside the 100px frame and widens nothing.
+    let (w, _) = page("hidden");
+    assert!(w < 600.0, "the hidden x overflow is off the page: {w}");
+}
+
+/// `.shadow({...})` / `.boxShadow({...})` object defaults match the DOM
+/// applicators exactly (`applicators/effects.ts`): `shadow` → blur 4,
+/// `rgba(0,0,0,0.2)`, no spread / inset; `boxShadow` → blur 0 and honours
+/// `spread` / `inset`.
+#[test]
+fn shadow_object_defaults_match_the_dom_applicators() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "s",
+        "Box",
+        &[("shadow.0", json!({ "y": 2, "spread": 5, "inset": true }))],
+    );
+    node(
+        &mut tree,
+        "root",
+        "b",
+        "Box",
+        &[("boxShadow.0", json!({ "y": 2, "spread": 5, "inset": true }))],
+    );
+    let v = vp(800.0);
+    let s = resolve_box_shadow_layers(tree.get("s").unwrap(), v);
+    assert_eq!(s.len(), 1);
+    assert_eq!((s[0].x, s[0].y, s[0].blur, s[0].spread), (0.0, 2.0, 4.0, 0.0));
+    assert_eq!(s[0].color, Rgba(0, 0, 0, 51));
+    assert!(!s[0].inset, "the DOM `shadow` applicator writes no inset");
+    let b = resolve_box_shadow_layers(tree.get("b").unwrap(), v);
+    assert_eq!((b[0].blur, b[0].spread, b[0].inset), (0.0, 5.0, true));
+    assert_eq!(b[0].color, Rgba(0, 0, 0, 51));
+}
+
+/// Review follow-up: the fit-content pre-pass carries last frame's
+/// fitted nodes only while the fit actually clamped them. Once the window
+/// is wide enough for the Row's content the node drops out instead of
+/// staying a candidate (and being re-probed) forever.
+#[test]
+fn fit_content_candidates_drop_out_once_they_fit_again() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "col", "Column", &[("width", json!("100%"))]);
+    node(&mut tree, "col", "row", "Row", &[]);
+    add_text(&mut tree, "row", "user", "amara_reads");
+    add_text(
+        &mut tree,
+        "row",
+        "caption",
+        "A quiet corner and a book I did not mean to finish today.",
+    );
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let mut compute = |state: &mut TaffyState, width: u32, gen: u64| {
+        LayoutPass::compute_with_state(
+            state,
+            &tree,
+            &mut text,
+            (width, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let narrow = compute(&mut state, 260, 1);
+    assert!(
+        find_item(&narrow, "row").rect.w <= 260.5,
+        "the Row is clamped to the window: {:?}",
+        find_item(&narrow, "row").rect
+    );
+    assert_eq!(state.fit_width_override_len(), 1, "fitted while narrow");
+    compute(&mut state, 1200, 2);
+    let wide = compute(&mut state, 1100, 3);
+    assert!(find_item(&wide, "row").rect.w < 1000.0);
+    assert_eq!(
+        state.fit_width_override_len(),
+        0,
+        "no longer clamped, so no longer a fit candidate"
+    );
+}
+
+/// Per-corner radii (Tailwind `rounded-t-*` / `rounded-tl-*`, a corner
+/// object, a multi-value string) reach the item's border and the clip its
+/// `overflow-hidden` children get; a Card's 8px default stays on the
+/// corners the author did not set, like the DOM's inline longhands.
+#[test]
+fn per_corner_radii_reach_the_border_and_the_child_clip() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Card { Text("card") }.tw("rounded-t-xl")
+            Column { Text("clipped") }.tw("rounded-tl-2xl rounded-br-lg overflow-hidden")
+            Column { Text("object") }.cornerRadius({ topLeft: 4, bottomRight: 10 })
+            Column { Text("string") }.borderRadius("12px 12px 0 0")
+            Column { Text("uniform") }.tw("rounded-lg")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let kids = tree.children_of(&first_of_type(&tree, "Column"));
+    let radii = |i: usize| pass.item_by_id(&kids[i]).unwrap().border.radii();
+    use crate::style::CornerRadii;
+    let c = |tl, tr, br, bl| CornerRadii { tl, tr, br, bl };
+    assert_eq!(radii(0), c(12.0, 12.0, 8.0, 8.0), "Card default under rounded-t-xl");
+    assert_eq!(radii(1), c(16.0, 0.0, 8.0, 0.0));
+    assert_eq!(radii(2), c(4.0, 0.0, 10.0, 0.0));
+    assert_eq!(radii(3), c(12.0, 12.0, 0.0, 0.0));
+    assert_eq!(radii(4), CornerRadii::uniform(8.0));
+    assert!(pass.item_by_id(&kids[4]).unwrap().border.corners.is_none());
+    let clipped_text = &tree.children_of(&kids[1])[0];
+    assert_eq!(
+        pass.item_by_id(clipped_text).unwrap().clip_radius,
+        c(16.0, 0.0, 8.0, 0.0),
+        "the overflow-hidden clip keeps the per-corner shape"
+    );
+}
+
+/// Shadow strings are parsed once and shared: a paint-only refresh of an
+/// item re-resolves its shadow without re-tokenising the CSS.
+#[test]
+fn css_box_shadows_are_parsed_once_and_shared() {
+    let mut tree = Tree::new();
+    let css = json!("0 1px 3px rgba(0,0,0,0.1), 0 1px 2px -1px rgba(0,0,0,0.1)");
+    node(&mut tree, "root", "a", "Box", &[("boxShadow", css.clone())]);
+    node(&mut tree, "root", "b", "Box", &[("boxShadow", css)]);
+    let v = vp(800.0);
+    let a = resolve_box_shadow(tree.get("a").unwrap(), v).expect("shadow");
+    let b = resolve_box_shadow(tree.get("b").unwrap(), v).expect("shadow");
+    assert_eq!(a.len(), 2);
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "one parse, one shared list");
 }

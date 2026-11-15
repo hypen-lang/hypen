@@ -36,6 +36,8 @@ pub struct DesktopApp {
     screenshot_delay: Option<std::time::Duration>,
     startup_actions: Vec<(String, serde_json::Value)>,
     startup_action_settle: std::time::Duration,
+    web_fonts: bool,
+    embed_policy: crate::embed::EmbedPolicy,
 }
 
 /// Default pause before the first [`DesktopApp::startup_actions`] entry
@@ -60,6 +62,8 @@ impl DesktopApp {
             screenshot_delay: None,
             startup_actions: Vec::new(),
             startup_action_settle: DEFAULT_STARTUP_ACTION_SETTLE,
+            web_fonts: true,
+            embed_policy: crate::embed::EmbedPolicy::default(),
         }
     }
 
@@ -97,6 +101,28 @@ impl DesktopApp {
     #[cfg(feature = "dev-overlay")]
     pub fn dev_overlay_top(mut self, top: f32) -> Self {
         self.dev_overlay_top = top.max(0.0);
+        self
+    }
+
+    /// Fetch named `fontFamily` entries from Google Fonts, like the DOM
+    /// renderer's `fontFamily` applicator does (default: on). Pass `false`
+    /// for an app that must not touch the network for fonts (privacy,
+    /// offline, kiosk): lists then resolve to installed families and their
+    /// generic keyword. The `HYPEN_WEB_FONTS` environment variable (`0` /
+    /// `off` / `false` / `no`, or `1` / `on`) overrides this either way.
+    /// Fetching is bounded (a 2-thread pool, at most 24 families, Google's
+    /// two font origins only, a byte budget) — see `src/web_fonts.rs`.
+    pub fn web_fonts(mut self, on: bool) -> Self {
+        self.web_fonts = on;
+        self
+    }
+
+    /// Limits for `HypenApp` embeds in the connected app's tree: how many
+    /// may be live, and which targets they may open (see
+    /// [`crate::embed::EmbedPolicy`]). Applies to [`Self::connect`] /
+    /// [`Self::connect_with`] calls made AFTER it in the builder chain.
+    pub fn embed_policy(mut self, policy: crate::embed::EmbedPolicy) -> Self {
+        self.embed_policy = policy;
         self
     }
 
@@ -311,7 +337,10 @@ impl DesktopApp {
     /// element's box (see [`crate::embed`]).
     pub fn connect(self, url: impl Into<String>, module_name: impl Into<String>) -> Self {
         let remote = RemoteModule::connect(url, module_name);
-        self.module(Arc::new(crate::EmbeddingModule::new(Arc::new(remote))))
+        let policy = self.embed_policy.clone();
+        self.module(Arc::new(
+            crate::EmbeddingModule::new(Arc::new(remote)).with_policy(policy),
+        ))
     }
 
     /// [`Self::connect`] with explicit [`crate::RemoteOptions`]:
@@ -332,7 +361,10 @@ impl DesktopApp {
         options: crate::RemoteOptions,
     ) -> Self {
         let remote = RemoteModule::connect_with(url, module_name, options);
-        self.module(Arc::new(crate::EmbeddingModule::new(Arc::new(remote))))
+        let policy = self.embed_policy.clone();
+        self.module(Arc::new(
+            crate::EmbeddingModule::new(Arc::new(remote)).with_policy(policy),
+        ))
     }
 
     /// Convenience for stateless demos. Builds an internal module with no
@@ -439,7 +471,8 @@ impl DesktopApp {
         crate::paint::image::set_waker(proxy.clone());
         // `fontFamily` lists naming a web font fetch it like the DOM
         // renderer does; a landed family wakes the loop to relayout.
-        {
+        // Opt-out: `.web_fonts(false)` / `HYPEN_WEB_FONTS=0`.
+        if crate::web_fonts::allowed(self.web_fonts) {
             let proxy = proxy.clone();
             crate::web_fonts::enable(move || {
                 let _ = proxy.send_event(crate::window::AppEvent::Wake);
