@@ -4,16 +4,17 @@
 //! The public [`HostError`] variants predate this split and are kept as they
 //! are, so the distinctions are carried in the message:
 //!
-//! | cause                                        | variant        |
-//! |----------------------------------------------|----------------|
-//! | bytes are not a component / wrong world      | `Instantiate`  |
-//! | import the manifest does not grant           | `Instantiate`  |
-//! | component start trapped / timed out          | `Instantiate`  |
-//! | guest trap, CPU timeout, host-call timeout, memory limit, host-call fault during an export | `Trap` (kills the instance) |
-//! | export returned `Err(string)`                | `ModuleError` (instance stays alive) |
-//! | call on a dead / destroyed / foreign id      | `DeadInstance` |
-//! | name never registered                        | `UnknownModule`|
-//! | host-side I/O (storage file)                 | `Runtime`      |
+//! | cause                                                   | variant         |
+//! |---------------------------------------------------------|-----------------|
+//! | bytes are not a component of the host's world           | `Instantiate`   |
+//! | an import the manifest does not grant                   | `Instantiate`   |
+//! | component start trapped / timed out                     | `Instantiate`   |
+//! | during an export: guest trap, CPU timeout, host-call    | `Trap`          |
+//! |   timeout, memory limit, failed host call               |   (kills it)    |
+//! | export returned `Err(string)`                           | `ModuleError`   |
+//! | call on a dead / destroyed / foreign id                 | `DeadInstance`  |
+//! | name never registered                                   | `UnknownModule` |
+//! | host-side I/O (storage file)                            | `Runtime`       |
 
 use std::fmt;
 use std::time::Duration;

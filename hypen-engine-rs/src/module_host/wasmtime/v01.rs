@@ -64,19 +64,37 @@ macro_rules! forward_bucket {
             fn open(&mut self, tier: Tier, ns: String) -> Result<Resource<Bucket>, StorageError> {
                 Ok(self.bucket_open($scope, tier.into(), &ns)?)
             }
-            fn get(&mut self, b: Resource<Bucket>, key: String) -> Result<Option<Vec<u8>>, StorageError> {
+            fn get(
+                &mut self,
+                b: Resource<Bucket>,
+                key: String,
+            ) -> Result<Option<Vec<u8>>, StorageError> {
                 Ok(self.bucket_get(&b, &key)?)
             }
-            fn set(&mut self, b: Resource<Bucket>, key: String, value: Vec<u8>) -> Result<(), StorageError> {
+            fn set(
+                &mut self,
+                b: Resource<Bucket>,
+                key: String,
+                value: Vec<u8>,
+            ) -> Result<(), StorageError> {
                 Ok(self.bucket_set(&b, &key, value)?)
             }
             fn delete(&mut self, b: Resource<Bucket>, key: String) -> Result<bool, StorageError> {
                 Ok(self.bucket_delete(&b, &key)?)
             }
-            fn keys(&mut self, b: Resource<Bucket>, prefix: String, limit: u32) -> Result<Vec<String>, StorageError> {
+            fn keys(
+                &mut self,
+                b: Resource<Bucket>,
+                prefix: String,
+                limit: u32,
+            ) -> Result<Vec<String>, StorageError> {
                 Ok(self.bucket_keys(&b, &prefix, limit)?)
             }
-            fn info(&mut self, b: Resource<Bucket>, key: String) -> Result<Option<EntryInfo>, StorageError> {
+            fn info(
+                &mut self,
+                b: Resource<Bucket>,
+                key: String,
+            ) -> Result<Option<EntryInfo>, StorageError> {
                 Ok(self.bucket_info(&b, &key)?.map(Into::into))
             }
             fn drop(&mut self, b: Resource<Bucket>) -> wasmtime::Result<()> {

@@ -76,22 +76,48 @@ impl hypen::engine::state::Host for HostState {}
 macro_rules! forward_bucket {
     ($iface:ident, $scope:expr, { $($extra:tt)* }) => {
         impl hypen::storage::$iface::HostBucketWithStore<HostState> for HostCap {
-            async fn open(a: &Access, tier: Tier, ns: String) -> Result<Resource<Bucket>, StorageError> {
+            async fn open(
+                a: &Access,
+                tier: Tier,
+                ns: String,
+            ) -> Result<Resource<Bucket>, StorageError> {
                 Ok(a.with(|mut s| s.get().bucket_open($scope, tier.into(), &ns))?)
             }
-            async fn get(a: &Access, b: Resource<Bucket>, key: String) -> Result<Option<Vec<u8>>, StorageError> {
+            async fn get(
+                a: &Access,
+                b: Resource<Bucket>,
+                key: String,
+            ) -> Result<Option<Vec<u8>>, StorageError> {
                 Ok(a.with(|mut s| s.get().bucket_get(&b, &key))?)
             }
-            async fn set(a: &Access, b: Resource<Bucket>, key: String, value: Vec<u8>) -> Result<(), StorageError> {
+            async fn set(
+                a: &Access,
+                b: Resource<Bucket>,
+                key: String,
+                value: Vec<u8>,
+            ) -> Result<(), StorageError> {
                 Ok(a.with(|mut s| s.get().bucket_set(&b, &key, value))?)
             }
-            async fn delete(a: &Access, b: Resource<Bucket>, key: String) -> Result<bool, StorageError> {
+            async fn delete(
+                a: &Access,
+                b: Resource<Bucket>,
+                key: String,
+            ) -> Result<bool, StorageError> {
                 Ok(a.with(|mut s| s.get().bucket_delete(&b, &key))?)
             }
-            async fn keys(a: &Access, b: Resource<Bucket>, prefix: String, limit: u32) -> Result<Vec<String>, StorageError> {
+            async fn keys(
+                a: &Access,
+                b: Resource<Bucket>,
+                prefix: String,
+                limit: u32,
+            ) -> Result<Vec<String>, StorageError> {
                 Ok(a.with(|mut s| s.get().bucket_keys(&b, &prefix, limit))?)
             }
-            async fn info(a: &Access, b: Resource<Bucket>, key: String) -> Result<Option<EntryInfo>, StorageError> {
+            async fn info(
+                a: &Access,
+                b: Resource<Bucket>,
+                key: String,
+            ) -> Result<Option<EntryInfo>, StorageError> {
                 Ok(a.with(|mut s| s.get().bucket_info(&b, &key))?.map(Into::into))
             }
             $($extra)*
