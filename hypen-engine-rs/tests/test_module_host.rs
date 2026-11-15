@@ -250,6 +250,7 @@ fn cloud_scope_denied_when_not_granted() {
         reads: vec![],
         dispatches: vec![],
         http: true,
+        ..ModuleManifest::default()
     };
     host.register("counter", COUNTER, manifest).unwrap();
 
@@ -283,6 +284,7 @@ fn engine_with_counter_and_mirror() -> Engine {
         reads: vec!["counter".into()],
         dispatches: vec!["counter".into()],
         http: true,
+        ..ModuleManifest::default()
     };
     engine
         .module_host_mut()
@@ -451,6 +453,7 @@ fn cross_module_read_denied_without_grant() {
         reads: vec![], // no read grant
         dispatches: vec![],
         http: true,
+        ..ModuleManifest::default()
     };
     engine
         .module_host_mut()

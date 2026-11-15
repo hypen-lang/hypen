@@ -1,0 +1,6 @@
+module net {
+    Column {
+        Text("Completions: @{state.completions}")
+        Text("Body: @{state.last.body}")
+    }
+}
