@@ -31,7 +31,7 @@ Status: **draft v0.2 — core implemented.** Sibling document to
 >   runtime in wasm.
 >
 > Packaged for end users via the **`hypen-runtime` binary**
-> (`src/bin/hypen_runtime.rs`, gated behind `runtime-bin`): a tiny CLI
+> (`src/bin/hypen_runtime/`, gated behind `runtime-bin`): a tiny CLI
 > that hosts any `hypen:module` `.wasm` via `WasmtimeHost` in two modes:
 >
 > - **REPL** (default): stdin→action / stdout→state, for quick scripting

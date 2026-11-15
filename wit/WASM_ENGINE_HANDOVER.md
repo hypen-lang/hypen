@@ -38,10 +38,31 @@ Elm-style effect descriptors (navigate/delay) — see `wit/hypen-module.wit`.
 - Cross-module `context.getModule`/`getGlobalState`/`emit`/`on` wired to
   `hypen:engine/state` (sync surfaces), componentized against world `module-x`. (`832ba7e`)
 
-**Reference runtime — `hypen-runtime`** (`hypen-engine-rs/src/bin/hypen_runtime.rs`)
+**Reference runtime — `hypen-runtime`** (`hypen-engine-rs/src/bin/hypen_runtime/`, a
+binary crate directory: `main.rs` is the table of contents — `cli`, `manifest`,
+`usage_plan`, `app` (the `Runtime`), `patches`, `effects`, `timers`, `reload`, `server`,
+`repl`, `error`)
 - Modes: `--serve` (HTTP), `--app app.json` (multi-module), `--ui` (declarative UI), REPL.
 - Manifest-driven **ACLs** (app.json `reads`/`dispatches`/`storage`), enforced by the host.
-- Navigate/Delay **effects** (outbox + timer thread).
+  app.json is parsed into a validated model: names must be engine-addressable and unique
+  per (lowercased) scope, `ui`/`wasm` paths must resolve *inside the manifest directory*,
+  `reads`/`dispatches` must name stateful modules of the same manifest.
+- **Single-module mode is least-privilege too**: `local` storage only unless granted with
+  `--grant-http` / `--grant-storage app,cloud` / `--grant-all`. An ungranted import fails
+  at instantiation with a hint naming the flag (or the app.json field).
+- Navigate/Delay **effects** (outbox + one timer thread over a min-heap; at most 1024
+  pending timers per module).
+- **`--serve` admission policy**: `Host` must be a loopback name with the server's port
+  (DNS rebinding), a present `Origin` must be the server's own or one passed with
+  `--allow-origin` (no wildcard CORS), POST bodies must be `application/json` and ≤ 1 MiB.
+  Errors are `{ "error": { "code", "message", "hint"? } }` with a real status code.
+- **Exact patch attribution**: a render is delivered to exactly one consumer — the
+  `/dispatch` response that caused it, or the SSE stream (hot reload, timers). `GET /patches`
+  is a snapshot of the current tree (bounded by the tree, not by history).
+- **Crash recovery**: a trapped / timed-out instance fails its dispatch with
+  `module_crashed`; the next action re-instantiates the module and re-runs `init` with its
+  original config (its state is lost, logged loudly). `--call-timeout-ms` sets the per-call
+  budget.
 - Config-seeded `init` (declaration-site) + **usage-site config**: `Counter(start: 5)`
   in a parent seeds that instance; **per-usage instantiation** — distinct configs →
   distinct scopes (`counter`, `counter__a`), via template rewriting to synthetic
@@ -166,7 +187,8 @@ This is the forward path. Do it **in order**, only starting the TS cutover when 
 # module-loader + the hypen-runtime binary's HTTP server / file watcher)
 cd hypen-engine-rs
 cargo build --features runtime-bin --bin hypen-runtime
-cargo test  --features runtime-bin --test test_hypen_runtime
+cargo test  --features runtime-bin --bin hypen-runtime            # runtime unit tests (fake host, no wasm)
+cargo test  --features runtime-bin --test test_hypen_runtime --test test_hypen_runtime_hardening
 cargo test  --features module-loader --test test_module_host --test test_module_host_async
 cargo clippy --features runtime-bin --all-targets
 
@@ -177,8 +199,10 @@ cd parser && cargo test
 cd hypen-cli && bun test tests/build-wasm.test.ts
 HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts   # real jco/tinygo/cargo builds
 
-# Run a wasm app end-to-end
+# Run a wasm app end-to-end (module files must sit next to app.json)
 ./target/debug/hypen-runtime --app path/to/app.json --serve 8080
+# …or a single module; capabilities are opt-in
+./target/debug/hypen-runtime counter.wasm --ui counter.hypen --grant-storage cloud --serve 8080
 ```
 
 ## 7. Environment gotchas (for CI sandboxes)
@@ -199,7 +223,7 @@ HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts   # real jco/tinygo/cargo bui
 | Area | Path |
 |------|------|
 | WASM build pipeline (TS/Go/Rust) | `hypen-cli/src/build-wasm.ts` |
-| Reference runtime (`--serve`/`--app`/`--ui`) | `hypen-engine-rs/src/bin/hypen_runtime.rs` |
+| Reference runtime (`--serve`/`--app`/`--ui`) | `hypen-engine-rs/src/bin/hypen_runtime/` (`main.rs` lists the modules) |
 | Native host (wasmtime) | `hypen-engine-rs/src/module_host/wasmtime_host.rs` |
 | Browser host (JS-delegated) | `hypen-engine-rs/src/module_host/bridged_host.rs` |
 | `ModuleHost` trait, effects, subscribe | `hypen-engine-rs/src/module_host/mod.rs`, `src/engine.rs` |

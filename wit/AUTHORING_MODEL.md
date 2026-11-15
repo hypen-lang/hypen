@@ -273,7 +273,7 @@ module's state slot.
 
 `--serve --ui` now renders a **live, clickable page** in the browser.
 `POST /dispatch` returns the patch *delta* (`{state, patches:[…]}`); the
-embedded client (`hypen_runtime_client.html`) has a vanilla DOM
+embedded client (`src/bin/hypen_runtime/client.html`) has a vanilla DOM
 patch-applier that builds the tree from `GET /patches`, wires Button
 clicks (via the `action` prop) to `/dispatch`, and applies each delta in
 place. Proven in a real headless browser by
@@ -648,7 +648,7 @@ doesn't matter. Covered by the always-on shim-codegen tests in
 **Usage-site config** — a parent's `Counter(start: 5)` reference — is wired,
 including **distinct config per usage** (`Counter(start: 5)` and
 `Counter(start: 9)` in one tree → two independent instances). It's a runtime-only
-change (`plan_per_usage` in `hypen_runtime.rs`); the engine is untouched.
+change (`usage_plan::plan` in `src/bin/hypen_runtime/usage_plan.rs`); the engine is untouched.
 
 Mechanism: before instantiating, `boot_app` scans every template for
 argument-bearing references to a stateful module. Each *distinct* effective

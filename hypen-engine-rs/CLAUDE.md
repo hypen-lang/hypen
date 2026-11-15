@@ -240,7 +240,8 @@ feature's tests targeted rather than as the whole suite:
 
 ```bash
 cargo test --features module-loader --lib --test test_module_host --test test_module_host_async
-cargo test --features runtime-bin --test test_hypen_runtime   # builds + drives the hypen-runtime binary
+cargo test --features runtime-bin --bin hypen-runtime          # the runtime's unit tests (fake ModuleHost, no wasm/sockets)
+cargo test --features runtime-bin --test test_hypen_runtime --test test_hypen_runtime_hardening   # build + drive the hypen-runtime binary
 cargo test --features uniffi,module-loader --test test_uniffi_host
 cargo test --test test_module_host_routing   # engine-side routing with a mock host, default features
 cargo test --test test_module_host_cascade   # reducer-output fold (ACLs, cascade queue, state, teardown), mock host
@@ -271,6 +272,22 @@ Module-host sandbox (one implementation for both ABIs; the model is stated in th
 
 A fix to quota logic, ACL checks, the deadline policy or dead-instance handling belongs in the
 shared files, never in `v01.rs` / `v02.rs` (those are `bindgen!` glue).
+
+The `hypen-runtime` binary is a crate directory, `src/bin/hypen_runtime/` (`main.rs` is the table
+of contents): `cli` (argv → typed `Command`), `manifest` (app.json → validated `AppManifest`:
+unique addressable names, paths confined to the manifest directory, grant targets exist),
+`usage_plan` + `template` (per-usage instances via template rewriting, pure), `app` (`Runtime`:
+the engine and hosted-module table behind one lock; boot, dispatch, crash recovery), `patches`
+(`PatchHub`: tree mirror behind `GET /patches`, capture window that gives each render to exactly
+one of the `/dispatch` response or SSE), `effects` + `timers` (one timer thread, min-heap, 1024
+pending per module), `reload` (`.wasm`/`.hypen` hot reload over the live module table), `server`
+(`request.rs` is the pure admission policy: loopback `Host`, own-or-`--allow-origin` `Origin`,
+JSON content type, 1 MiB bodies), `repl`, `error` (`RuntimeError` + `render`), `sync` (poisoned
+locks are recovered, not propagated). Single-module mode grants nothing beyond `local` storage
+unless `--grant-http` / `--grant-storage` / `--grant-all` is passed. A module instance that traps
+or times out fails that dispatch (`module_crashed`) and is re-instantiated + re-`init`ed from its
+original config on the next action. When two worktrees share a target dir, copy the built binary
+aside and point the subprocess suites at it with `HYPEN_RUNTIME_BIN`.
 
 `Engine::dispatch_action` is the renderer-facing entry: its input is client-controlled, and with or
 without a module instance wired it is resolved by `route_ui_action` first (a `__hypen_dispatch`
