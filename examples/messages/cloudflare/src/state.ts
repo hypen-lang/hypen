@@ -143,8 +143,8 @@ export const EMPTY_ROOM: RoomHeader = {
   title: "",
   subtitle: "",
   initial: "",
-  color: "#6366F1",
+  color: "#A79BFF",
   online: false,
 };
 
-export const EMPTY_TOAST: Toast = { show: false, roomId: "", title: "", text: "", initial: "", color: "#6366F1" };
+export const EMPTY_TOAST: Toast = { show: false, roomId: "", title: "", text: "", initial: "", color: "#A79BFF" };

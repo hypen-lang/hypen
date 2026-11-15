@@ -294,593 +294,811 @@ export default app
   .ui(`
     module App {
       Column {
-        Column {
-          // ---- in-app notification for a DM that arrived elsewhere ----
-          If(condition: @state.toast.show) {
+        // ---- in-app notification for a DM that arrived elsewhere ----
+        If(condition: @state.toast.show) {
+          Row {
+            Column {
+              Text("@{state.toast.initial}").fontSize(15).fontWeight(800).color("#14121A")
+            }
+              .width(38).height(38).borderRadius(19).flexShrink(0)
+              .backgroundColor("@{state.toast.color}")
+              .horizontalAlignment("center").verticalAlignment("center")
+            Column {
+              Text("@{state.toast.title}").fontSize(14).fontWeight(800).color("#14121A")
+              Text("@{state.toast.text}").fontSize(13).color("#4A4658").maxLines(1).textOverflow("ellipsis")
+            }
+              .flex(1).minWidth(0).gap(1)
+            Button { Icon(@resources.close).size(16).color("#4A4658") }
+              .label("Dismiss")
+              .width(32).height(32).borderRadius(16).padding(0).flexShrink(0)
+              .horizontalAlignment("center").verticalAlignment("center")
+              .backgroundColor({default: "transparent", hover: "#E4DFD3"})
+              .onClick(@actions.dismissToast)
+          }
+            .gap(10).paddingHorizontal(12).paddingVertical(10).margin(10).borderRadius(18)
+            .width("100%").maxWidth(440).alignSelf("center").flexShrink(0)
+            .backgroundColor("#F5F2EA")
+            .boxShadow("0 14px 40px rgba(0, 0, 0, 0.55)")
+            .verticalAlignment("center").cursor("pointer")
+            .onClick(@actions.openToast)
+            .liveRegion("polite")
+            .enter(slide, fade, from: top)
+            .exit(fade, duration: 150)
+        }
+
+        Row {
+          // ====================== CONVERSATIONS ======================
+          // Lives outside the When so it survives a visit to a thread: its
+          // scroll position stays and rows glide when the order changes.
+          Column {
             Row {
               Column {
-                Text("@{state.toast.initial}").fontSize(15).fontWeight(700).color("#FFFFFF")
-              }
-                .width(36).height(36).borderRadius(18).flexShrink(0)
-                .backgroundColor("@{state.toast.color}")
-                .horizontalAlignment("center").verticalAlignment("center")
-              Column {
-                Text("@{state.toast.title}").fontSize(14).fontWeight(700).color("#F8FAFC")
-                Text("@{state.toast.text}").fontSize(13).color("#CBD5E1").maxLines(1).textOverflow("ellipsis")
-              }
-                .flex(1).minWidth(0).gap(1)
-              Button { Text("✕").fontSize(13).color("#94A3B8") }
-                .label("Dismiss")
-                .backgroundColor("transparent").padding(6)
-                .onClick(@actions.dismissToast)
-            }
-              .gap(10).padding(10).margin(8).borderRadius(16)
-              .backgroundColor("#0F172A")
-              .boxShadow("0 10px 30px rgba(15, 23, 42, 0.35)")
-              .verticalAlignment("center").cursor("pointer")
-              .onClick(@actions.openToast)
-              .liveRegion("polite")
-              .enter(slide, fade, from: top)
-              .exit(fade, duration: 150)
-          }
-
-          When(value: @state.screen) {
-            // =========================== SETUP ===========================
-            Case(match: "setup") {
-              Column {
-                Column {
-                  Column {
-                    Column {
-                      Text("@{state.setupInitial}").fontSize(34).fontWeight(700).color("#FFFFFF")
-                    }
-                      .width(84).height(84).borderRadius(42)
-                      .backgroundColor("@{state.setupColor}")
-                      .horizontalAlignment("center").verticalAlignment("center")
-                      .boxShadow("0 12px 30px rgba(15, 23, 42, 0.18)")
-                      .transition(250, easeOut)
-                    Heading("@{state.editingProfile ? 'Your profile' : 'Welcome to Messages'}", level: 1)
-                      .fontSize(24).fontWeight(800).color("#0F172A").textAlign("center")
-                    Text("Pick a name and a colour. Everyone you chat with sees them.")
-                      .fontSize(14).color("#64748B").textAlign("center").maxWidth(280)
-                  }
-                    .gap(10).horizontalAlignment("center").width("100%")
-
-                  Column {
-                    Text("Display name").fontSize(13).fontWeight(600).color("#334155")
-                    Input(placeholder: "e.g. Ada")
-                      .bind(@state.setupName)
-                      .onInput(@actions.nameInput)
-                      .onKey(@actions.saveProfile)
-                      .label("Display name")
-                      .maxLength(24)
-                      .padding(horizontal: 14, vertical: 12).fontSize(16)
-                      .borderRadius(12).border("1px solid #CBD5E1").backgroundColor("#FFFFFF")
-                      .width("100%")
-                  }
-                    .gap(6).width("100%")
-
-                  Column {
-                    Text("Colour").fontSize(13).fontWeight(600).color("#334155")
-                    Row {
-                      ForEach(items: @state.colors, key: "color", as: "swatch") {
-                        Button {}
-                          .label("Colour @{swatch.color}")
-                          .width(32).height(32).borderRadius(16)
-                          .backgroundColor("@{swatch.color}")
-                          .border("@{swatch.selected ? '3px solid #0F172A' : '3px solid #FFFFFF'}")
-                          .boxShadow("0 1px 3px rgba(15, 23, 42, 0.25)")
-                          .onClick(@actions.pickColor, color: "@{swatch.color}")
-                      }
-                    }
-                      .gap(8).flexWrap("wrap")
-                  }
-                    .gap(8).width("100%")
-
-                  If(condition: @state.setupError) {
-                    Text("@{state.setupError}").fontSize(13).color("#DC2626")
-                  }
-
-                  Button {
-                    Text("@{state.editingProfile ? 'Save' : 'Start chatting'}")
-                      .fontSize(16).fontWeight(700).color("#FFFFFF")
-                  }
-                    .width("100%").padding(14).borderRadius(14)
-                    .backgroundColor({default: "#4F46E5", hover: "#4338CA"})
-                    .onClick(@actions.saveProfile)
-
-                  If(condition: @state.editingProfile) {
-                    Button { Text("Cancel").fontSize(15).color("#475569") }
-                      .backgroundColor("transparent").padding(8)
-                      .onClick(@actions.cancelProfile)
-                  }
-                }
-                  .gap(22).padding(28).paddingTop(48)
-                  .width("100%").maxWidth(420).alignSelf("center")
-              }
-                .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("auto").backgroundColor("#FFFFFF")
-            }
-
-            // ======================= CONVERSATIONS =======================
-            Case(match: "list") {
-              Column {
+                Heading("Messages", level: 1).fontSize(30).fontWeight(800).color("#F5F2EA").lineHeight(1.1)
                 Row {
-                  Column {
-                    Heading("Messages", level: 1).fontSize(28).fontWeight(800).color("#0F172A")
+                  Box {}.width(8).height(8).borderRadius(4).flexShrink(0)
+                    .backgroundColor("@{state.onlineCount ? '#C9F24D' : '#4A4658'}")
+                  If(condition: @state.onlineCount) {
                     Text("@{state.onlineCount} other@{state.onlineCount == 1 ? '' : 's'} online")
-                      .fontSize(13).color("#64748B")
+                      .fontSize(13).fontWeight(600).color("#B4AFC2")
+                    Else {
+                      Text("Just you here for now").fontSize(13).fontWeight(600).color("#B4AFC2")
+                    }
                   }
-                    .flex(1).gap(2)
-                  Button { Text("New room").fontSize(13).fontWeight(600).color("#4F46E5") }
-                    .padding(horizontal: 12, vertical: 8).borderRadius(999)
-                    .backgroundColor({default: "#EEF2FF", hover: "#E0E7FF"})
-                    .onClick(@actions.showNewRoom)
-                  Button {
-                    Text("@{state.me.initial}").fontSize(15).fontWeight(700).color("#FFFFFF")
-                  }
-                    .label("Edit profile")
-                    .width(38).height(38).borderRadius(19).padding(0)
-                    .horizontalAlignment("center").verticalAlignment("center")
-                    .backgroundColor("@{state.me.color}")
-                    .onClick(@actions.editProfile)
                 }
-                  .gap(10).padding(horizontal: 18, vertical: 14).verticalAlignment("center")
+                  .gap(7).verticalAlignment("center")
+              }
+                .flex(1).minWidth(0).gap(6)
+              Button { Icon(@resources.compose).size(20).color("#12140A") }
+                .label("New message")
+                .width(44).height(44).borderRadius(22).padding(0).flexShrink(0)
+                .horizontalAlignment("center").verticalAlignment("center")
+                .backgroundColor({default: "#C9F24D", hover: "#D8FA6E"})
+                .onClick(@actions.showNewDm)
+              Button {
+                Text("@{state.me.initial}").fontSize(16).fontWeight(800).color("#14121A")
+              }
+                .label("Edit profile")
+                .width(44).height(44).borderRadius(22).padding(0).flexShrink(0)
+                .horizontalAlignment("center").verticalAlignment("center")
+                .backgroundColor("@{state.me.color}")
+                .onClick(@actions.editProfile)
+            }
+              .gap(10).paddingHorizontal(20).paddingTop(22).paddingBottom(14).verticalAlignment("center").flexShrink(0)
 
-                // Who's around — tap a face to DM them.
-                If(condition: @state.hasPeople) {
+            Column {
+              // Who is around: tap a face to message them.
+              If(condition: @state.hasPeople) {
+                Column {
+                  Text("Around now").fontSize(12).fontWeight(700).color("#8F8AA0").paddingHorizontal(20)
                   Row {
                     ForEach(items: @state.people, key: "id", as: "person") {
                       Column {
                         Stack {
                           Column {
-                            Text("@{person.initial}").fontSize(18).fontWeight(700).color("#FFFFFF")
+                            Text("@{person.initial}").fontSize(20).fontWeight(800).color("#14121A")
                           }
-                            .width(52).height(52).borderRadius(26)
+                            .width(54).height(54).borderRadius(27)
                             .backgroundColor("@{person.color}")
                             .horizontalAlignment("center").verticalAlignment("center")
-                            .opacity("@{person.online ? 1 : 0.55}")
+                            .opacity("@{person.online ? 1 : 0.45}")
                           If(condition: @person.online) {
                             Box {}
-                              .width(14).height(14).borderRadius(7)
-                              .backgroundColor("#22C55E").border("2px solid #FFFFFF")
+                              .width(16).height(16).borderRadius(8)
+                              .backgroundColor("#C9F24D").border("3px solid #131218")
                           }
                         }
                           .horizontalAlignment("end").verticalAlignment("end")
                         Text("@{person.name}")
-                          .fontSize(12).color("#334155").maxWidth(64)
+                          .fontSize(12).fontWeight(600).color("#B4AFC2").maxWidth(64)
                           .maxLines(1).textOverflow("ellipsis").textAlign("center")
                       }
-                        .gap(6).horizontalAlignment("center").flexShrink(0).cursor("pointer")
+                        .gap(7).horizontalAlignment("center").flexShrink(0).cursor("pointer")
                         .onClick(@actions.startDm, id: "@{person.id}")
                     }
                   }
-                    .gap(14).padding(horizontal: 18, vertical: 4).overflowX("auto").flexShrink(0)
+                    .gap(16).paddingHorizontal(20).overflowX("auto").flexShrink(0)
                 }
-
-                Column {
-                  ForEach(items: @state.conversations, key: "id", as: "conv") {
-                    Row {
-                      Stack {
-                        Column {
-                          Text("@{conv.initial}")
-                            .fontSize("@{conv.isRoom ? 22 : 18}").fontWeight(700).color("#FFFFFF")
-                        }
-                          .width(50).height(50).borderRadius("@{conv.isRoom ? 16 : 25}")
-                          .backgroundColor("@{conv.color}")
-                          .horizontalAlignment("center").verticalAlignment("center")
-                        If(condition: @conv.online) {
-                          Box {}
-                            .width(14).height(14).borderRadius(7)
-                            .backgroundColor("#22C55E").border("2px solid #FFFFFF")
-                        }
-                      }
-                        .horizontalAlignment("end").verticalAlignment("end").flexShrink(0)
-
-                      Column {
-                        Row {
-                          Text("@{conv.title}")
-                            .fontSize(16).fontWeight("@{conv.hasUnread ? 800 : 600}").color("#0F172A")
-                            .flex(1).minWidth(0).maxLines(1).textOverflow("ellipsis")
-                          Text("@{conv.time}")
-                            .fontSize(12).color("@{conv.hasUnread ? '#4F46E5' : '#94A3B8'}")
-                        }
-                          .gap(8).verticalAlignment("center")
-                        Row {
-                          Text("@{conv.preview}")
-                            .fontSize(14).color("@{conv.hasUnread ? '#0F172A' : '#64748B'}")
-                            .flex(1).minWidth(0).maxLines(1).textOverflow("ellipsis")
-                          If(condition: @conv.hasUnread) {
-                            Text("@{conv.unreadLabel}")
-                              .fontSize(12).fontWeight(700).color("#FFFFFF")
-                              .backgroundColor("#4F46E5").borderRadius(999)
-                              .padding(horizontal: 7, vertical: 2).minWidth(22).textAlign("center")
-                              .width("auto").alignSelf("center").flexShrink(0)
-                              .enter(scale, fade)
-                          }
-                        }
-                          .gap(8).verticalAlignment("center")
-                      }
-                        .flex(1).minWidth(0).gap(3)
-                    }
-                      .gap(12).padding(horizontal: 18, vertical: 10).verticalAlignment("center")
-                      .backgroundColor({default: "#FFFFFF", hover: "#F8FAFC"})
-                      .cursor("pointer")
-                      .onClick(@actions.openRoom, id: "@{conv.id}")
-                      .layout(spring)
-                  }
-                }
-                  .flex(1).minHeight(0).overflowY("auto").paddingTop(8)
-
-                Row {
-                  Button {
-                    Text("✎  New message").fontSize(15).fontWeight(700).color("#FFFFFF")
-                  }
-                    .flex(1).padding(13).borderRadius(14)
-                    .backgroundColor({default: "#4F46E5", hover: "#4338CA"})
-                    .onClick(@actions.showNewDm)
-                }
-                  .padding(14).borderTop("1px solid #EEF2F7").backgroundColor("#FFFFFF")
+                  .gap(10).paddingBottom(18).flexShrink(0)
               }
-                .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("hidden").backgroundColor("#FFFFFF")
-            }
 
-            // =========================== THREAD ==========================
-            Case(match: "thread") {
-              Column {
-                // header
+              Text("Chats").fontSize(12).fontWeight(700).color("#8F8AA0").paddingHorizontal(20).paddingBottom(6)
+
+              ForEach(items: @state.conversations, key: "id", as: "conv") {
                 Row {
-                  Button { Text("‹").fontSize(30).color("#4F46E5").lineHeight(1) }
-                    .label("Back to conversations")
-                    .backgroundColor("transparent").padding(horizontal: 6, vertical: 0)
-                    .onClick(@actions.back)
                   Stack {
                     Column {
-                      Text("@{state.room.initial}")
-                        .fontSize(16).fontWeight(700).color("#FFFFFF")
+                      Text("@{conv.initial}")
+                        .fontSize("@{conv.isRoom ? 22 : 19}").fontWeight(800)
+                        .color("@{conv.isRoom ? '#C9F24D' : '#14121A'}")
                     }
-                      .width(38).height(38).borderRadius("@{state.room.isRoom ? 12 : 19}")
-                      .backgroundColor("@{state.room.color}")
+                      .width(50).height(50).borderRadius("@{conv.isRoom ? 17 : 25}")
+                      .backgroundColor("@{conv.color}")
                       .horizontalAlignment("center").verticalAlignment("center")
-                    If(condition: @state.room.online) {
+                    If(condition: @conv.online) {
                       Box {}
-                        .width(11).height(11).borderRadius(6)
-                        .backgroundColor("#22C55E").border("2px solid #FFFFFF")
+                        .width(16).height(16).borderRadius(8)
+                        .backgroundColor("#C9F24D").border("3px solid #131218")
                     }
                   }
                     .horizontalAlignment("end").verticalAlignment("end").flexShrink(0)
+
                   Column {
-                    Text("@{state.room.title}")
-                      .fontSize(16).fontWeight(700).color("#0F172A")
-                      .maxLines(1).textOverflow("ellipsis")
-                    If(condition: @state.isTyping) {
-                      Text("@{state.typingText}").fontSize(12).color("#4F46E5")
-                        .maxLines(1).textOverflow("ellipsis")
-                        .animate(pulse, duration: 1400)
-                      Else {
-                        Text("@{state.room.subtitle}").fontSize(12).color("#64748B")
-                          .maxLines(1).textOverflow("ellipsis")
+                    Row {
+                      Text("@{conv.title}")
+                        .fontSize(16).fontWeight("@{conv.hasUnread ? 800 : 600}").color("#F5F2EA")
+                        .flex(1).minWidth(0).maxLines(1).textOverflow("ellipsis")
+                      Text("@{conv.time}")
+                        .fontSize(12).fontWeight(600).color("@{conv.hasUnread ? '#C9F24D' : '#8F8AA0'}")
+                        .flexShrink(0)
+                    }
+                      .gap(8).verticalAlignment("center")
+                    Row {
+                      Text("@{conv.preview}")
+                        .fontSize(14).color("@{conv.hasUnread ? '#F5F2EA' : '#A29DB3'}")
+                        .flex(1).minWidth(0).maxLines(1).textOverflow("ellipsis")
+                      If(condition: @conv.hasUnread) {
+                        Text("@{conv.unreadLabel}")
+                          .fontSize(12).fontWeight(800).color("#12140A")
+                          .backgroundColor("#C9F24D").borderRadius(999)
+                          .paddingHorizontal(7).paddingVertical(2).minWidth(22).textAlign("center")
+                          .width("auto").alignSelf("center").flexShrink(0)
+                          .enter(scale, fade)
                       }
                     }
+                      .gap(8).verticalAlignment("center")
                   }
-                    .flex(1).minWidth(0).gap(1)
+                    .flex(1).minWidth(0).gap(4)
                 }
-                  .gap(8).padding(horizontal: 8, vertical: 8).verticalAlignment("center")
-                  .backgroundColor("rgba(255, 255, 255, 0.96)")
-                  .borderBottom("1px solid #E2E8F0").flexShrink(0)
+                  .gap(13).paddingHorizontal(12).paddingVertical(10).marginHorizontal(8).borderRadius(18)
+                  .verticalAlignment("center")
+                  .backgroundColor({default: "@{conv.id == state.room.id ? '#211F2A' : '#131218'}", hover: "#1D1B25"})
+                  .cursor("pointer").flexShrink(0)
+                  .onClick(@actions.openRoom, id: "@{conv.id}")
+                  .layout(spring)
+              }
 
-                // messages — column-reverse keeps the view pinned to the newest
-                // message and holds position when older pages load above.
+              Button {
+                Column { Icon(@resources.plus).size(20).color("#C9F24D") }
+                  .width(50).height(50).borderRadius(17).flexShrink(0)
+                  .border("1.5px dashed #4A4658")
+                  .horizontalAlignment("center").verticalAlignment("center")
+                Column {
+                  Text("Start a room").fontSize(16).fontWeight(600).color("#F5F2EA")
+                  Text("Public, open to everyone here").fontSize(14).color("#A29DB3")
+                }
+                  .flex(1).minWidth(0).gap(3).horizontalAlignment("start")
+              }
+                .flexDirection("row").gap(13).paddingHorizontal(12).paddingVertical(10)
+                .marginHorizontal(8).marginBottom(16).borderRadius(18)
+                .verticalAlignment("center").textAlign("left").flexShrink(0)
+                .backgroundColor({default: "#131218", hover: "#1D1B25"})
+                .cursor("pointer")
+                .onClick(@actions.showNewRoom)
+
+              // first run: nobody else has turned up yet
+              If(condition: @state.hasPeople) {
+                Else {
+                  Column {
+                    Text("Quiet in here").fontSize(15).fontWeight(800).color("#F5F2EA")
+                    Text("Open this app in a second browser or a private window to watch presence, typing and receipts go live.")
+                      .fontSize(14).lineHeight(1.45).color("#A29DB3")
+                  }
+                    .gap(6).padding(18).marginHorizontal(20).marginBottom(20).borderRadius(20)
+                    .backgroundColor("#1B1922").border("1px solid #262331").flexShrink(0)
+                }
+              }
+            }
+              .flex(1).minHeight(0).overflowY("auto")
+          }
+            // display hides the pane where it is supported (DOM); the width
+            // does the same job for renderers that have no display: none.
+            // No breakpoints here on purpose: embedded in the launcher the
+            // app is phone-sized inside a desktop viewport.
+            .display("@{state.screen == 'list' ? 'flex' : 'none'}")
+            .width("@{state.screen == 'list' ? '100%' : '0px'}")
+            .flexShrink(0).minHeight(0).alignSelf("stretch").overflow("hidden")
+            .backgroundColor("#131218")
+
+          // ========================= MAIN PANE =========================
+          Column {
+            When(value: @state.screen) {
+              // The DOM renderer keeps styles of props a reused node no longer
+              // sets, and a case switch reuses nodes of the same type at the
+              // same position. Every case therefore sits in its own pair of
+              // plain wrappers (Column/Column, Column/Row, Row/Column, Row/Row),
+              // so its content is always built fresh.
+              // =========================== SETUP ===========================
+              Case(match: "setup") {
                 Column {
                   Column {
-                    If(condition: @state.hasMore) {
-                      Button { Text("Load earlier messages").fontSize(13).color("#4F46E5") }
-                        .alignSelf("center").padding(horizontal: 14, vertical: 6).marginBottom(6)
-                        .borderRadius(999).backgroundColor("#EEF2FF")
-                        .onClick(@actions.loadOlder)
-                    }
-                    If(condition: @state.isEmpty) {
+                    Column {
                       Column {
-                        Text("👋").fontSize(40)
-                        Text("No messages yet").fontSize(15).fontWeight(700).color("#334155")
-                        Text("Say something to get the conversation going.").fontSize(13).color("#64748B")
-                      }
-                        .gap(6).padding(32).horizontalAlignment("center")
-                    }
+                        Column {
+                          Row {
+                            Box {}.width(8).height(8).borderRadius(4).backgroundColor("#C9F24D").flexShrink(0)
+                            Text("@{state.editingProfile ? 'Signed in on this device' : 'Live chat, no sign-up'}")
+                              .fontSize(13).fontWeight(700).color("#C9F24D")
+                          }
+                            .gap(8).verticalAlignment("center")
+                          Heading("@{state.editingProfile ? 'Your profile' : 'Who is joining the chat?'}", level: 1)
+                            .fontSize(34).fontWeight(800).color("#F5F2EA").lineHeight(1.08)
+                          Text("Pick a name and a colour. This is how everyone in the room sees you.")
+                            .fontSize(15).lineHeight(1.45).color("#B4AFC2")
+                        }
+                          .gap(12).width("100%")
 
-                    ForEach(items: @state.messages, key: "id", as: "m") {
-                      If(condition: @m.isDay) {
-                        Text("@{m.dayLabel}")
-                          .fontSize(12).fontWeight(600).color("#64748B")
-                          .alignSelf("center").marginTop(14).marginBottom(4)
-                          .padding(horizontal: 10, vertical: 3).borderRadius(999)
-                          .backgroundColor("#E8EBF2")
-                        Else {
+                        // live preview: your bubble as others will see it
+                        Row {
                           Column {
-                            If(condition: @m.showName) {
-                              Text("@{m.author}")
-                                .fontSize(12).fontWeight(600).color("@{m.color}")
-                                .marginLeft(46).marginBottom(2)
+                            Text("@{state.setupInitial ? state.setupInitial : '?'}").fontSize(15).fontWeight(800).color("#14121A")
+                          }
+                            .width(36).height(36).borderRadius(18).flexShrink(0)
+                            .backgroundColor("@{state.setupColor}")
+                            .horizontalAlignment("center").verticalAlignment("center")
+                            .transition(250, easeOut)
+                          Column {
+                            Text("@{state.setupName ? state.setupName : 'Your name'}")
+                              .fontSize(12).fontWeight(700).color("@{state.setupColor}")
+                              .marginLeft(4).maxLines(1).textOverflow("ellipsis")
+                              .transition(250, easeOut)
+                            Column {
+                              Text("Hey! Anyone around?").fontSize(15).lineHeight(1.4).color("#F5F2EA")
                             }
-                            Row {
-                              If(condition: @m.mine) {
-                                Spacer()
-                                Else {
-                                  Column {
-                                    If(condition: @m.showAvatar) {
-                                      Column {
-                                        Text("@{m.initial}").fontSize(12).fontWeight(700).color("#FFFFFF")
-                                      }
-                                        .width(30).height(30).borderRadius(15)
-                                        .backgroundColor("@{m.color}")
-                                        .horizontalAlignment("center").verticalAlignment("center")
-                                    }
-                                  }
-                                    .width(30).flexShrink(0).verticalAlignment("end")
-                                }
-                              }
+                              .paddingHorizontal(14).paddingVertical(9).cornerRadius(20).borderRadius("20px 20px 20px 6px")
+                              .backgroundColor("#262331")
+                          }
+                            .gap(4).minWidth(0).horizontalAlignment("start")
+                        }
+                          .gap(8).verticalAlignment("end").width("100%")
+                          .padding(16).borderRadius(22).backgroundColor("#1B1922")
+                          .border("1px solid #262331")
 
-                              Column {
-                                Column {
-                                  If(condition: @m.hasImage) {
-                                    Image(src: "@{m.image}", alt: "Photo from @{m.author}")
-                                      .maxWidth(240).maxHeight(320).borderRadius(14)
-                                      .objectFit("cover").display("block")
-                                  }
-                                  If(condition: @m.hasText) {
-                                    Text("@{m.text}")
-                                      .fontSize(15).lineHeight(1.4)
-                                      .color("@{m.mine ? '#FFFFFF' : '#0F172A'}")
-                                      .whiteSpace("pre-wrap").wordBreak("break-word")
-                                  }
-                                  If(condition: @m.hasPreview) {
-                                    Link(href: "@{m.previewUrl}", target: "_blank", rel: "noopener noreferrer nofollow") {
-                                      Column {
-                                        If(condition: @m.hasPreviewImage) {
-                                          Image(src: "@{m.previewImage}", alt: "@{m.previewTitle}")
-                                            .width("100%").maxHeight(140).objectFit("cover").display("block")
-                                        }
-                                        Column {
-                                          Text("@{m.previewSite}")
-                                            .fontSize(11).textTransform("uppercase").letterSpacing(0.4)
-                                            .color("#64748B")
-                                          Text("@{m.previewTitle}")
-                                            .fontSize(14).fontWeight(700).color("#0F172A")
-                                            .maxLines(2).textOverflow("ellipsis")
-                                          Text("@{m.previewDesc}")
-                                            .fontSize(12).color("#475569")
-                                            .maxLines(2).textOverflow("ellipsis")
-                                        }
-                                          .padding(10).gap(2)
-                                      }
-                                        .backgroundColor("#FFFFFF").borderRadius(12).overflow("hidden")
-                                        .border("1px solid #E2E8F0")
-                                    }
-                                      .label("Open link preview")
-                                      .marginTop(6).display("block").textDecoration("none")
-                                  }
-                                }
-                                  .padding("@{m.hasText ? '9px 13px' : '4px'}")
-                                  .borderRadius("@{m.radius}")
-                                  .backgroundColor("@{m.mine ? '#4F46E5' : '#FFFFFF'}")
-                                  .boxShadow("@{m.mine ? 'none' : '0 1px 2px rgba(15, 23, 42, 0.08)'}")
-                                  .outline("@{m.selected ? '2px solid #A5B4FC' : 'none'}")
-                                  .cursor("pointer")
-                                  .onClick(@actions.selectMessage, id: "@{m.id}")
+                        Column {
+                          Text("Display name").fontSize(13).fontWeight(700).color("#B4AFC2")
+                          Input(placeholder: "e.g. Ada")
+                            .bind(@state.setupName)
+                            .onInput(@actions.nameInput)
+                            .onKey(@actions.saveProfile)
+                            .label("Display name")
+                            .maxLength(24)
+                            .paddingHorizontal(16).paddingVertical(14).fontSize(17).fontWeight(600)
+                            .color("#F5F2EA").caretColor("#C9F24D")
+                            .borderRadius(16).backgroundColor("#0A090D")
+                            .border({default: "1.5px solid #3A3648", focus: "1.5px solid #C9F24D"})
+                            .outline("none")
+                            .width("100%")
+                        }
+                          .gap(8).width("100%")
 
-                                If(condition: @m.hasReactions) {
-                                  Row {
-                                    ForEach(items: @m.reactions, key: "key", as: "rx") {
-                                      Button {
-                                        Text("@{rx.label}").fontSize(12).color("#0F172A")
-                                      }
-                                        .padding(horizontal: 7, vertical: 2).borderRadius(999)
-                                        .backgroundColor("@{rx.mine ? '#E0E7FF' : '#FFFFFF'}")
-                                        .border("@{rx.mine ? '1px solid #A5B4FC' : '1px solid #E2E8F0'}")
-                                        .onClick(@actions.reactTo, id: "@{m.id}", emoji: "@{rx.emoji}")
-                                        .enter(scale, fade)
-                                    }
-                                  }
-                                    .gap(4).marginTop(-6).paddingHorizontal(6).flexWrap("wrap")
-                                    .horizontalAlignment("@{m.mine ? 'end' : 'start'}")
-                                }
+                        Column {
+                          Text("Colour").fontSize(13).fontWeight(700).color("#B4AFC2")
+                          Row {
+                            ForEach(items: @state.colors, key: "color", as: "swatch") {
+                              Button {
+                                Box {}.width(28).height(28).borderRadius(14).backgroundColor("@{swatch.color}")
                               }
-                                .maxWidth("78%").minWidth(0)
-                                .horizontalAlignment("@{m.mine ? 'end' : 'start'}")
-                            }
-                              .gap(8).verticalAlignment("end").width("100%")
-
-                            If(condition: @m.showTime) {
-                              Row {
-                                Text("@{m.time}").fontSize(11).color("#94A3B8")
-                                If(condition: @m.showStatus) {
-                                  Text("· @{m.status}").fontSize(11).fontWeight(600).color("#64748B")
-                                }
-                              }
-                                .gap(4).marginTop(3)
-                                .marginLeft("@{m.mine ? 0 : 38}")
-                                .horizontalAlignment("@{m.mine ? 'end' : 'start'}")
+                                .label("Colour @{swatch.color}")
+                                .width(40).height(40).borderRadius(20).padding(0).flexShrink(0)
+                                .horizontalAlignment("center").verticalAlignment("center")
+                                .backgroundColor("#131218")
+                                .border("@{swatch.selected ? '2px solid #F5F2EA' : '2px solid #131218'}")
+                                .cursor("pointer")
+                                .onClick(@actions.pickColor, color: "@{swatch.color}")
                             }
                           }
-                            .marginTop("@{m.gapTop}")
-                            .enter(slide, fade, from: bottom, duration: 180)
+                            .gap(2).flexWrap("wrap").marginLeft(-6)
                         }
+                          .gap(6).width("100%")
+
+                        If(condition: @state.setupError) {
+                          Text("@{state.setupError}").fontSize(14).fontWeight(600).color("#FF9C8F")
+                            .liveRegion("polite")
+                        }
+
+                        Column {
+                          Button {
+                            Text("@{state.editingProfile ? 'Save changes' : 'Start chatting'}")
+                              .fontSize(16).fontWeight(800).color("#12140A")
+                          }
+                            .width("100%").padding(16).borderRadius(18).horizontalAlignment("center")
+                            .backgroundColor({default: "#C9F24D", hover: "#D8FA6E"})
+                            .cursor("pointer")
+                            .onClick(@actions.saveProfile)
+
+                          If(condition: @state.editingProfile) {
+                            Button { Text("Cancel").fontSize(15).fontWeight(600).color("#B4AFC2") }
+                              .width("100%").padding(12).borderRadius(18).horizontalAlignment("center")
+                              .backgroundColor({default: "transparent", hover: "#1B1922"})
+                              .cursor("pointer")
+                              .onClick(@actions.cancelProfile)
+                          }
+                        }
+                          .gap(6).width("100%")
                       }
+                        .gap(24).paddingHorizontal(24).paddingTop(44).paddingBottom(28)
+                        .width("100%").maxWidth(460).alignSelf("center")
                     }
+                      .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("auto").backgroundColor("#131218")
                   }
-                    .padding(horizontal: 12, vertical: 10)
+                    .flex(1).minHeight(0).width("100%").flexDirection("column")
                 }
-                  .flex(1).minHeight(0).overflowY("auto")
-                  .flexDirection("column-reverse")
-                  .backgroundColor("#F1F5F9")
-                  .onScroll(@actions.scrolled)
-
-                // reaction picker for the selected bubble
-                If(condition: @state.pickerOpen) {
-                  Row {
-                    ForEach(items: @state.reactionChoices, key: "emoji", as: "choice") {
-                      Button { Text("@{choice.emoji}").fontSize(22) }
-                        .label("React @{choice.emoji}")
-                        .padding(6).borderRadius(12)
-                        .backgroundColor({default: "transparent", hover: "#F1F5F9"})
-                        .onClick(@actions.react, emoji: "@{choice.emoji}")
-                    }
-                    Spacer()
-                    Button { Text("✕").fontSize(14).color("#64748B") }
-                      .label("Close reactions")
-                      .backgroundColor("transparent").padding(8)
-                      .onClick(@actions.closePicker)
-                  }
-                    .gap(2).padding(horizontal: 10, vertical: 6).verticalAlignment("center")
-                    .backgroundColor("#FFFFFF").borderTop("1px solid #E2E8F0")
-                    .enter(slide, fade, from: bottom, duration: 160)
-                }
-
-                If(condition: @state.hasNotice) {
-                  Row {
-                    Text("@{state.notice}").fontSize(13).color("#B91C1C").flex(1)
-                    Button { Text("OK").fontSize(13).fontWeight(700).color("#B91C1C") }
-                      .backgroundColor("transparent").padding(4)
-                      .onClick(@actions.dismissNotice)
-                  }
-                    .padding(horizontal: 14, vertical: 8).backgroundColor("#FEF2F2")
-                    .verticalAlignment("center").liveRegion("polite")
-                }
-
-                // composer
-                Row {
-                  If(condition: @state.canAttach) {
-                    Button { Text("@{state.uploading ? '…' : '+'}").fontSize(22).color("#4F46E5").lineHeight(1) }
-                      .label("Send a photo")
-                      .width(40).height(40).borderRadius(20).padding(0).flexShrink(0)
-                      .horizontalAlignment("center").verticalAlignment("center")
-                      .backgroundColor({default: "#EEF2FF", hover: "#E0E7FF"})
-                      .onClick(@actions.attachImage)
-                  }
-                  Input(placeholder: "Message @{state.room.title}")
-                    .bind(@state.draft)
-                    .onInput(@actions.typing)
-                    .onKey(@actions.send)
-                    .label("Message")
-                    .maxLength(1000)
-                    .flex(1).minWidth(0)
-                    .padding(horizontal: 16, vertical: 11).fontSize(15)
-                    .borderRadius(22).border("1px solid #CBD5E1")
-                    .backgroundColor("#FFFFFF")
-                  Button { Text("Send").fontSize(14).fontWeight(700).color("#FFFFFF") }
-                    .padding(horizontal: 16, vertical: 11).borderRadius(22).flexShrink(0)
-                    .backgroundColor({default: "#4F46E5", hover: "#4338CA"})
-                    .onClick(@actions.send)
-                }
-                  .gap(8).padding(10).verticalAlignment("center")
-                  .backgroundColor("#FFFFFF").borderTop("1px solid #E2E8F0").flexShrink(0)
+                  .flex(1).minHeight(0).width("100%").flexDirection("column")
               }
-                .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("hidden").backgroundColor("#FFFFFF")
-            }
 
-            // ========================== NEW ROOM =========================
-            Case(match: "newRoom") {
-              Column {
-                Row {
-                  Button { Text("‹").fontSize(30).color("#4F46E5").lineHeight(1) }
-                    .label("Back")
-                    .backgroundColor("transparent").padding(horizontal: 6, vertical: 0)
-                    .onClick(@actions.back)
-                  Heading("New room", level: 2).fontSize(18).fontWeight(700).color("#0F172A")
-                }
-                  .gap(8).padding(8).verticalAlignment("center").borderBottom("1px solid #E2E8F0")
+              // =========================== THREAD ==========================
+              Case(match: "thread") {
                 Column {
-                  Text("Rooms are public — everyone can read and post.")
-                    .fontSize(14).color("#64748B")
                   Row {
-                    Text("#").fontSize(18).fontWeight(700).color("#94A3B8")
-                    Input(placeholder: "room-name")
-                      .bind(@state.newRoomName)
-                      .onKey(@actions.createRoom)
-                      .label("Room name")
-                      .maxLength(24)
-                      .flex(1).minWidth(0).fontSize(16)
-                      .padding(horizontal: 4, vertical: 12)
-                      .border("none").backgroundColor("transparent")
-                  }
-                    .gap(4).padding(horizontal: 12).verticalAlignment("center")
-                    .borderRadius(12).border("1px solid #CBD5E1").backgroundColor("#FFFFFF")
-                  If(condition: @state.newRoomError) {
-                    Text("@{state.newRoomError}").fontSize(13).color("#DC2626")
-                  }
-                  Button { Text("Create room").fontSize(15).fontWeight(700).color("#FFFFFF") }
-                    .padding(13).borderRadius(14)
-                    .backgroundColor({default: "#4F46E5", hover: "#4338CA"})
-                    .onClick(@actions.createRoom)
-                }
-                  .gap(14).padding(20).width("100%").maxWidth(480)
-              }
-                .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("hidden").backgroundColor("#FFFFFF")
-            }
-
-            // ========================= NEW MESSAGE =======================
-            Case(match: "newDm") {
-              Column {
-                Row {
-                  Button { Text("‹").fontSize(30).color("#4F46E5").lineHeight(1) }
-                    .label("Back")
-                    .backgroundColor("transparent").padding(horizontal: 6, vertical: 0)
-                    .onClick(@actions.back)
-                  Heading("New message", level: 2).fontSize(18).fontWeight(700).color("#0F172A")
-                }
-                  .gap(8).padding(8).verticalAlignment("center").borderBottom("1px solid #E2E8F0")
-                If(condition: @state.hasPeople) {
-                  Column {
-                    ForEach(items: @state.people, key: "id", as: "who") {
+                    Column {
+                      // header
                       Row {
+                        Button { Icon(@resources.back).size(22).color("#F5F2EA") }
+                          .label("Back to conversations")
+                          .width(40).height(40).borderRadius(20).padding(0).flexShrink(0)
+                          .horizontalAlignment("center").verticalAlignment("center")
+                          .backgroundColor({default: "transparent", hover: "#211F2A"})
+                          .onClick(@actions.back)
                         Stack {
                           Column {
-                            Text("@{who.initial}").fontSize(16).fontWeight(700).color("#FFFFFF")
+                            Text("@{state.room.initial}")
+                              .fontSize(17).fontWeight(800)
+                              .color("@{state.room.isRoom ? '#C9F24D' : '#14121A'}")
                           }
-                            .width(44).height(44).borderRadius(22)
-                            .backgroundColor("@{who.color}")
+                            .width(40).height(40).borderRadius("@{state.room.isRoom ? 14 : 20}")
+                            .backgroundColor("@{state.room.color}")
                             .horizontalAlignment("center").verticalAlignment("center")
-                          If(condition: @who.online) {
+                          If(condition: @state.room.online) {
                             Box {}
-                              .width(12).height(12).borderRadius(6)
-                              .backgroundColor("#22C55E").border("2px solid #FFFFFF")
+                              .width(14).height(14).borderRadius(7)
+                              .backgroundColor("#C9F24D").border("3px solid #131218")
                           }
                         }
                           .horizontalAlignment("end").verticalAlignment("end").flexShrink(0)
                         Column {
-                          Text("@{who.name}").fontSize(16).fontWeight(600).color("#0F172A")
-                          Text("@{who.status}").fontSize(13)
-                            .color("@{who.online ? '#16A34A' : '#94A3B8'}")
+                          Heading("@{state.room.title}", level: 2)
+                            .fontSize(17).fontWeight(800).color("#F5F2EA").lineHeight(1.2)
+                            .maxLines(1).textOverflow("ellipsis")
+                          If(condition: @state.isTyping) {
+                            Text("@{state.typingText}").fontSize(13).fontWeight(600).color("#C9F24D")
+                              .maxLines(1).textOverflow("ellipsis")
+                            Else {
+                              Text("@{state.room.subtitle}").fontSize(13).fontWeight(400).color("#A29DB3")
+                                .maxLines(1).textOverflow("ellipsis")
+                            }
+                          }
                         }
-                          .flex(1).gap(1)
+                          .flex(1).minWidth(0).gap(1).marginLeft(4)
                       }
-                        .gap(12).padding(horizontal: 18, vertical: 10).verticalAlignment("center")
-                        .backgroundColor({default: "#FFFFFF", hover: "#F8FAFC"})
-                        .cursor("pointer")
-                        .onClick(@actions.startDm, id: "@{who.id}")
+                        .gap(6).paddingHorizontal(10).paddingVertical(10).verticalAlignment("center")
+                        .backgroundColor("#131218")
+                        .borderBottom("1px solid #262331").flexShrink(0)
+
+                      // messages: column-reverse keeps the view pinned to the newest
+                      // message and holds position when older pages load above.
+                      Column {
+                        Column {
+                          If(condition: @state.hasMore) {
+                            Button { Text("Load earlier messages").fontSize(13).fontWeight(700).color("#C9F24D") }
+                              .alignSelf("center").paddingHorizontal(16).paddingVertical(8).marginBottom(6)
+                              .borderRadius(999).backgroundColor({default: "#1B1922", hover: "#262331"})
+                              .border("1px solid #2E2B39")
+                              .cursor("pointer")
+                              .onClick(@actions.loadOlder)
+                          }
+                          If(condition: @state.isEmpty) {
+                            Column {
+                              Column {
+                                Text("@{state.room.initial}")
+                                  .fontSize(30).fontWeight(800)
+                                  .color("@{state.room.isRoom ? '#C9F24D' : '#14121A'}")
+                              }
+                                .width(72).height(72).borderRadius("@{state.room.isRoom ? 24 : 36}")
+                                .backgroundColor("@{state.room.color}")
+                                .horizontalAlignment("center").verticalAlignment("center")
+                              Text("This is the very start of @{state.room.title}")
+                                .fontSize(17).fontWeight(800).color("#F5F2EA").textAlign("center")
+                              Text("Nothing here yet. Say something to get it going.")
+                                .fontSize(14).lineHeight(1.45).color("#A29DB3").textAlign("center")
+                            }
+                              .gap(8).paddingHorizontal(32).paddingVertical(40).horizontalAlignment("center")
+                          }
+
+                          ForEach(items: @state.messages, key: "id", as: "m") {
+                            If(condition: @m.isDay) {
+                              Row {
+                                Box {}.flex(1).height(1).backgroundColor("#262331")
+                                Text("@{m.dayLabel}").fontSize(12).fontWeight(700).color("#8F8AA0")
+                                Box {}.flex(1).height(1).backgroundColor("#262331")
+                              }
+                                .gap(12).verticalAlignment("center").marginTop(18).marginBottom(6)
+                              Else {
+                                Column {
+                                  If(condition: @m.showName) {
+                                    Text("@{m.author}")
+                                      .fontSize(12).fontWeight(700).color("@{m.color}")
+                                      .marginLeft(44).marginBottom(3)
+                                  }
+                                  Row {
+                                    If(condition: @m.mine) {
+                                      Spacer()
+                                      Else {
+                                        Column {
+                                          If(condition: @m.showAvatar) {
+                                            Column {
+                                              Text("@{m.initial}").fontSize(12).fontWeight(800).color("#14121A")
+                                            }
+                                              .width(30).height(30).borderRadius(15)
+                                              .backgroundColor("@{m.color}")
+                                              .horizontalAlignment("center").verticalAlignment("center")
+                                          }
+                                        }
+                                          .width(30).flexShrink(0).verticalAlignment("end")
+                                      }
+                                    }
+
+                                    Column {
+                                      Column {
+                                        If(condition: @m.hasImage) {
+                                          Image(src: "@{m.image}", alt: "Photo from @{m.author}")
+                                            .maxWidth(240).maxHeight(320).borderRadius(16)
+                                            .objectFit("cover").display("block")
+                                        }
+                                        If(condition: @m.hasText) {
+                                          Text("@{m.text}")
+                                            .fontSize(15).lineHeight(1.4)
+                                            .fontWeight("@{m.mine ? 500 : 400}")
+                                            .color("@{m.mine ? '#12140A' : '#F5F2EA'}")
+                                            .whiteSpace("pre-wrap").wordBreak("break-word")
+                                        }
+                                        If(condition: @m.hasPreview) {
+                                          Link(href: "@{m.previewUrl}", target: "_blank", rel: "noopener noreferrer nofollow") {
+                                            Column {
+                                              If(condition: @m.hasPreviewImage) {
+                                                Image(src: "@{m.previewImage}", alt: "@{m.previewTitle}")
+                                                  .width("100%").maxHeight(140).objectFit("cover").display("block")
+                                              }
+                                              Column {
+                                                Text("@{m.previewSite}")
+                                                  .fontSize(11).fontWeight(700).color("#C9F24D")
+                                                Text("@{m.previewTitle}")
+                                                  .fontSize(14).fontWeight(700).color("#F5F2EA")
+                                                  .maxLines(2).textOverflow("ellipsis")
+                                                Text("@{m.previewDesc}")
+                                                  .fontSize(12).lineHeight(1.35).color("#B4AFC2")
+                                                  .maxLines(2).textOverflow("ellipsis")
+                                              }
+                                                .paddingHorizontal(12).paddingVertical(10).gap(3)
+                                            }
+                                              .backgroundColor("#0F0E14").borderRadius(14).overflow("hidden")
+                                          }
+                                            .label("Open link preview")
+                                            .marginTop(8).marginBottom(3).display("block").textDecoration("none")
+                                        }
+                                      }
+                                        .paddingHorizontal("@{m.hasText ? 12 : 2}").paddingVertical("@{m.hasText ? 7 : 2}")
+                                        .cornerRadius(20).borderRadius("@{m.radius}")
+                                        .backgroundColor("@{m.mine ? '#C9F24D' : '#262331'}")
+                                        .border("@{m.selected ? '2px solid #F5F2EA' : '2px solid transparent'}")
+                                        .cursor("pointer")
+                                        .onClick(@actions.selectMessage, id: "@{m.id}")
+
+                                      If(condition: @m.hasReactions) {
+                                        Row {
+                                          ForEach(items: @m.reactions, key: "key", as: "rx") {
+                                            Button {
+                                              Text("@{rx.label}").fontSize(12).fontWeight(700)
+                                                .color("@{rx.mine ? '#C9F24D' : '#F5F2EA'}")
+                                            }
+                                              .paddingHorizontal(8).paddingVertical(3).borderRadius(999)
+                                              .backgroundColor("@{rx.mine ? '#2A3012' : '#1B1922'}")
+                                              .border("@{rx.mine ? '1.5px solid #C9F24D' : '1.5px solid #3A3648'}")
+                                              .cursor("pointer")
+                                              .onClick(@actions.reactTo, id: "@{m.id}", emoji: "@{rx.emoji}")
+                                              .enter(scale, fade)
+                                          }
+                                        }
+                                          .gap(4).marginTop(-7).paddingHorizontal(8).flexWrap("wrap")
+                                          .horizontalAlignment("@{m.mine ? 'end' : 'start'}")
+                                      }
+                                    }
+                                      .maxWidth("78%").minWidth(0)
+                                      .horizontalAlignment("@{m.mine ? 'end' : 'start'}")
+                                  }
+                                    .gap(8).verticalAlignment("end").width("100%")
+
+                                  If(condition: @m.showTime) {
+                                    Row {
+                                      Text("@{m.time}").fontSize(11).fontWeight(600).color("#8F8AA0")
+                                      If(condition: @m.showStatus) {
+                                        Text("· @{m.status}").fontSize(11).fontWeight(700).color("#B4AFC2")
+                                      }
+                                    }
+                                      .gap(4).marginTop(4)
+                                      .marginLeft("@{m.mine ? 0 : 42}").marginRight("@{m.mine ? 4 : 0}")
+                                      .horizontalAlignment("@{m.mine ? 'end' : 'start'}")
+                                  }
+                                }
+                                  .marginTop("@{m.gapTop}")
+                                  .enter(slide, fade, from: bottom, duration: 180)
+                              }
+                            }
+                          }
+
+                          // someone is typing: three dots in a ghost bubble
+                          If(condition: @state.isTyping) {
+                            Row {
+                              Box {}.width(7).height(7).borderRadius(4).backgroundColor("#C9F24D")
+                                .animate(pulse, duration: 900)
+                              Box {}.width(7).height(7).borderRadius(4).backgroundColor("#C9F24D")
+                                .animate(pulse, duration: 900, delay: 150)
+                              Box {}.width(7).height(7).borderRadius(4).backgroundColor("#C9F24D")
+                                .animate(pulse, duration: 900, delay: 300)
+                            }
+                              .gap(5).paddingHorizontal(14).paddingVertical(13).marginTop(10).marginLeft(38)
+                              .cornerRadius(20).borderRadius("20px 20px 20px 6px").backgroundColor("#262331")
+                              .alignSelf("start").verticalAlignment("center")
+                              .enter(scale, fade, duration: 160)
+                              .exit(fade, duration: 120)
+                          }
+                        }
+                          .paddingHorizontal(14).paddingVertical(12)
+                      }
+                        .flex(1).minHeight(0).overflowY("auto")
+                        .flexDirection("column-reverse")
+                        .backgroundColor("#0F0E14")
+                        .onScroll(@actions.scrolled)
+
+                      // reaction picker for the selected bubble
+                      If(condition: @state.pickerOpen) {
+                        Row {
+                          Row {
+                            ForEach(items: @state.reactionChoices, key: "emoji", as: "choice") {
+                              Button { Text("@{choice.emoji}").fontSize(24).lineHeight(1.2) }
+                                .label("React @{choice.emoji}")
+                                .width(44).height(44).padding(0).borderRadius(22)
+                                .horizontalAlignment("center").verticalAlignment("center")
+                                .backgroundColor({default: "transparent", hover: "#3A3648"})
+                                .cursor("pointer")
+                                .onClick(@actions.react, emoji: "@{choice.emoji}")
+                            }
+                            Box {}.width(1).height(22).backgroundColor("#3A3648").marginHorizontal(4)
+                            Button { Icon(@resources.close).size(18).color("#B4AFC2") }
+                              .label("Close reactions")
+                              .width(40).height(40).padding(0).borderRadius(20)
+                              .horizontalAlignment("center").verticalAlignment("center")
+                              .backgroundColor({default: "transparent", hover: "#3A3648"})
+                              .cursor("pointer")
+                              .onClick(@actions.closePicker)
+                          }
+                            .padding(4).verticalAlignment("center")
+                            .borderRadius(999).backgroundColor("#262331")
+                            .border("1px solid #3A3648")
+                            .boxShadow("0 10px 30px rgba(0, 0, 0, 0.5)")
+                        }
+                          .horizontalAlignment("center").paddingHorizontal(8).paddingVertical(8)
+                          .backgroundColor("#0F0E14").flexShrink(0)
+                          .enter(slide, fade, from: bottom, duration: 160)
+                      }
+
+                      If(condition: @state.hasNotice) {
+                        Row {
+                          Text("@{state.notice}").fontSize(13).fontWeight(600).color("#FFB1A6").flex(1).minWidth(0)
+                          Button { Text("OK").fontSize(13).fontWeight(800).color("#FFB1A6") }
+                            .backgroundColor({default: "transparent", hover: "#4A211C"})
+                            .paddingHorizontal(10).paddingVertical(6).borderRadius(999)
+                            .cursor("pointer")
+                            .onClick(@actions.dismissNotice)
+                        }
+                          .gap(8).paddingHorizontal(16).paddingVertical(8).backgroundColor("#34170F")
+                          .verticalAlignment("center").liveRegion("polite").flexShrink(0)
+                      }
+
+                      // composer
+                      Row {
+                        Row {
+                          If(condition: @state.canAttach) {
+                            Button {
+                              If(condition: @state.uploading) {
+                                Spinner {}.width(18).height(18).color("#C9F24D")
+                                Else { Icon(@resources.photo).size(21).color("#B4AFC2") }
+                              }
+                            }
+                              .label("Send a photo")
+                              .width(46).height(46).borderRadius(23).padding(0).flexShrink(0)
+                              .horizontalAlignment("center").verticalAlignment("center")
+                              .backgroundColor({default: "#1B1922", hover: "#262331"})
+                              .cursor("pointer")
+                              .onClick(@actions.attachImage)
+                          }
+                          Input(placeholder: "Message @{state.room.title}")
+                            .bind(@state.draft)
+                            .onInput(@actions.typing)
+                            .onKey(@actions.send)
+                            .label("Message")
+                            .maxLength(1000)
+                            .flex(1).minWidth(0)
+                            .paddingHorizontal(18).paddingVertical(12).fontSize(15)
+                            .color("#F5F2EA").caretColor("#C9F24D")
+                            .borderRadius(23).backgroundColor("#0A090D")
+                            .border({default: "1.5px solid #3A3648", focus: "1.5px solid #C9F24D"})
+                            .outline("none")
+                          Button { Icon(@resources.send).size(22).color("@{state.draft ? '#12140A' : '#8F8AA0'}") }
+                            .label("Send")
+                            .width(46).height(46).borderRadius(23).padding(0).flexShrink(0)
+                            .horizontalAlignment("center").verticalAlignment("center")
+                            .backgroundColor("@{state.draft ? '#C9F24D' : '#211F2A'}")
+                            .transition(160, easeOut)
+                            .cursor("pointer")
+                            .onClick(@actions.send)
+                        }
+                          .gap(8).verticalAlignment("center").width("100%")
+                      }
+                        .horizontalAlignment("center").paddingHorizontal(12).paddingVertical(10)
+                        .backgroundColor("#131218").borderTop("1px solid #262331").flexShrink(0)
                     }
+                      .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("hidden").backgroundColor("#131218")
                   }
-                    .flex(1).minHeight(0).overflowY("auto")
-                  Else {
-                    Column {
-                      Text("🫥").fontSize(40)
-                      Text("Nobody else is here yet").fontSize(15).fontWeight(700).color("#334155")
-                      Text("Open this app in another browser and say hi in #general.")
-                        .fontSize(13).color("#64748B").textAlign("center")
-                    }
-                      .gap(6).padding(40).horizontalAlignment("center")
-                  }
+                    .flex(1).minHeight(0).width("100%").flexDirection("column")
                 }
+                  .flex(1).minHeight(0).width("100%").flexDirection("column")
               }
-                .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("hidden").backgroundColor("#FFFFFF")
+
+              // ========================== NEW ROOM =========================
+              Case(match: "newRoom") {
+                Row {
+                  Column {
+                    Column {
+                      Row {
+                        Button { Icon(@resources.back).size(22).color("#F5F2EA") }
+                          .label("Back")
+                          .width(40).height(40).borderRadius(20).padding(0).flexShrink(0)
+                          .horizontalAlignment("center").verticalAlignment("center")
+                          .backgroundColor({default: "transparent", hover: "#211F2A"})
+                          .onClick(@actions.back)
+                        Text("New room").fontSize(15).fontWeight(700).color("#B4AFC2")
+                      }
+                        .gap(6).paddingHorizontal(10).paddingVertical(10).verticalAlignment("center").flexShrink(0)
+                      Column {
+                        Column {
+                          Heading("Name your room", level: 2)
+                            .fontSize(30).fontWeight(800).color("#F5F2EA").lineHeight(1.1)
+                          Text("Rooms are public. Everyone who has the app open can read and post.")
+                            .fontSize(15).lineHeight(1.45).color("#B4AFC2")
+                        }
+                          .gap(10)
+                        Column {
+                          Row {
+                            Text("#").fontSize(22).fontWeight(800).color("#C9F24D")
+                            Input(placeholder: "room-name")
+                              .bind(@state.newRoomName)
+                              .onKey(@actions.createRoom)
+                              .label("Room name")
+                              .maxLength(24)
+                              .flex(1).minWidth(0).fontSize(18).fontWeight(600)
+                              .color("#F5F2EA").caretColor("#C9F24D")
+                              .paddingHorizontal(4).paddingVertical(15)
+                              .border("0px solid #0A090D").backgroundColor("#0A090D").outline("none")
+                          }
+                            .gap(6).paddingHorizontal(16).verticalAlignment("center")
+                            .borderRadius(16).backgroundColor("#0A090D")
+                            .border("1.5px solid #3A3648")
+                          Text("2 to 24 letters, digits or dashes").fontSize(13).color("#8F8AA0").marginLeft(4)
+                        }
+                          .gap(8)
+                        If(condition: @state.newRoomError) {
+                          Text("@{state.newRoomError}").fontSize(14).fontWeight(600).color("#FF9C8F")
+                            .liveRegion("polite")
+                        }
+                        Button { Text("Create room").fontSize(16).fontWeight(800).color("#12140A") }
+                          .width("100%").padding(16).borderRadius(18).horizontalAlignment("center")
+                          .backgroundColor({default: "#C9F24D", hover: "#D8FA6E"})
+                          .cursor("pointer")
+                          .onClick(@actions.createRoom)
+                      }
+                        .gap(22).paddingHorizontal(24).paddingTop(16).paddingBottom(28)
+                        .width("100%").maxWidth(460).alignSelf("center")
+                    }
+                      .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("auto").backgroundColor("#131218")
+                  }
+                    .flex(1).minHeight(0).width("100%").flexDirection("column")
+                }
+                  .flex(1).minHeight(0).width("100%").flexDirection("column")
+              }
+
+              // ========================= NEW MESSAGE =======================
+              Case(match: "newDm") {
+                Row {
+                  Row {
+                    Column {
+                      Row {
+                        Button { Icon(@resources.back).size(22).color("#F5F2EA") }
+                          .label("Back")
+                          .width(40).height(40).borderRadius(20).padding(0).flexShrink(0)
+                          .horizontalAlignment("center").verticalAlignment("center")
+                          .backgroundColor({default: "transparent", hover: "#211F2A"})
+                          .onClick(@actions.back)
+                        Text("New message").fontSize(15).fontWeight(700).color("#B4AFC2")
+                      }
+                        .gap(6).paddingHorizontal(10).paddingVertical(10).verticalAlignment("center").flexShrink(0)
+                      Column {
+                        Heading("Who to?", level: 2)
+                          .fontSize(30).fontWeight(800).color("#F5F2EA").lineHeight(1.1)
+                          .paddingHorizontal(12).paddingBottom(12)
+                        If(condition: @state.hasPeople) {
+                          Column {
+                            ForEach(items: @state.people, key: "id", as: "who") {
+                              Row {
+                                Stack {
+                                  Column {
+                                    Text("@{who.initial}").fontSize(18).fontWeight(800).color("#14121A")
+                                  }
+                                    .width(48).height(48).borderRadius(24)
+                                    .backgroundColor("@{who.color}")
+                                    .horizontalAlignment("center").verticalAlignment("center")
+                                    .opacity("@{who.online ? 1 : 0.45}")
+                                  If(condition: @who.online) {
+                                    Box {}
+                                      .width(15).height(15).borderRadius(8)
+                                      .backgroundColor("#C9F24D").border("3px solid #131218")
+                                  }
+                                }
+                                  .horizontalAlignment("end").verticalAlignment("end").flexShrink(0)
+                                Column {
+                                  Text("@{who.name}").fontSize(16).fontWeight(700).color("#F5F2EA")
+                                    .maxLines(1).textOverflow("ellipsis")
+                                  Text("@{who.status}").fontSize(13).fontWeight(600)
+                                    .color("@{who.online ? '#C9F24D' : '#A29DB3'}")
+                                }
+                                  .flex(1).minWidth(0).gap(2)
+                              }
+                                .gap(13).paddingHorizontal(12).paddingVertical(10).borderRadius(18)
+                                .verticalAlignment("center").flexShrink(0)
+                                .backgroundColor({default: "#131218", hover: "#1D1B25"})
+                                .cursor("pointer")
+                                .onClick(@actions.startDm, id: "@{who.id}")
+                            }
+                          }
+                          Else {
+                            // a Row, so it never reuses the list Column above
+                            Row {
+                            Column {
+                              Column { Icon(@resources.chat).size(30).color("#C9F24D") }
+                                .width(68).height(68).borderRadius(24).backgroundColor("#1B1922")
+                                .border("1px solid #262331")
+                                .horizontalAlignment("center").verticalAlignment("center")
+                              Text("Nobody else is here yet").fontSize(17).fontWeight(800).color("#F5F2EA")
+                              Text("Open this app in another browser, or say hi in #general and wait for company.")
+                                .fontSize(14).lineHeight(1.45).color("#A29DB3").maxWidth(300)
+                            }
+                              .gap(10).paddingHorizontal(12).paddingVertical(20)
+                            }
+                          }
+                        }
+                      }
+                        .paddingHorizontal(8).paddingTop(16).paddingBottom(20)
+                        .width("100%").maxWidth(520).alignSelf("center")
+                    }
+                      .flex(1).minHeight(0).width("100%").maxWidth("100%").overflowY("auto").backgroundColor("#131218")
+                  }
+                    .flex(1).minHeight(0).width("100%").flexDirection("column")
+                }
+                  .flex(1).minHeight(0).width("100%").flexDirection("column")
+              }
             }
           }
+            .display("@{state.screen == 'list' ? 'none' : 'flex'}")
+            .flex(1).minWidth(0).minHeight(0).alignSelf("stretch").overflow("hidden")
+            .backgroundColor("#131218")
         }
-          .flex(1).minHeight(0).width("100%").maxWidth(760)
-          .backgroundColor("#FFFFFF")
-          .boxShadow({default: "none", md: "0 0 0 1px #E2E8F0, 0 20px 60px rgba(15, 23, 42, 0.08)"})
+          // a centred column on wide windows, edge to edge on a phone
+          .flex(1).minHeight(0).width("100%").maxWidth(720)
+          .backgroundColor("#131218")
+          .overflow("hidden")
+          .borderLeft("1px solid #211F2A").borderRight("1px solid #211F2A")
       }
         .flex(1).minHeight(0).height("100%").width("100%")
         .horizontalAlignment("center")
-        .backgroundColor("#E2E8F0")
+        .backgroundColor("#09080C")
         .fontFamily("-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Inter, sans-serif")
         .overflow("hidden")
     }

@@ -27,6 +27,7 @@ import * as wasm from "hypen-engine";
 // @ts-ignore - Wrangler's Text rule imports the prebuilt generic client as a string.
 import genericClientJs from "../node_modules/@hypen-space/cf/dist/client/generic.js";
 import messages from "./messages";
+import { resources } from "./icons";
 import { ChatHub, type HubStorage } from "./hub";
 import { connScope } from "./scope";
 
@@ -72,6 +73,7 @@ const worker = defineHypenWorker({
       renderer: "dom",
     },
   },
+  resources,
   title: "Hypen Messages",
 });
 
