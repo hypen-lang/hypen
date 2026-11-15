@@ -1,3 +1,7 @@
+//go:build !tinygo
+
+// The component resolver fetches remote templates over net/http, which pulls
+// the heavy net stack. Excluded from TinyGo builds (see wasm_engine.go).
 package core
 
 import (

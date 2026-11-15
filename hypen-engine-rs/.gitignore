@@ -1,5 +1,6 @@
 /target
 /pkg
+/pkg-bridged
 Cargo.lock
 *.wasm
 *.js

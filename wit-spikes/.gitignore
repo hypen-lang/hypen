@@ -1,0 +1,15 @@
+stub-module/target/
+stub-module/Cargo.lock
+xmod-module/target/
+xmod-module/Cargo.lock
+fetcher-module/target/
+fetcher-module/Cargo.lock
+web-host/node_modules/
+web-host/transpiled/
+web-host/bun.lock
+ts-module/node_modules/
+ts-module/dist/
+ts-module/bun.lock
+go-module/app.wasm
+go-module/go.sum
+go-module/internal/bindings/

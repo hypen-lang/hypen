@@ -193,6 +193,15 @@ func (m *ManagedRouter) Stop() {
 	}
 }
 
+// moduleUnregisterer is implemented by engines that can drop a destroyed
+// module's externally reachable surface. Asserted for rather than added to
+// IEngine so alternative implementations (MockEngine, remote engines) stay
+// valid without it. Declared here (its only user) rather than in agent.go,
+// which is excluded from TinyGo builds.
+type moduleUnregisterer interface {
+	UnregisterModule(name string)
+}
+
 // unregisterFromEngine drops a destroyed module's state and declared
 // actions from the engine, so they stop being externally reachable
 // (see agent.go).

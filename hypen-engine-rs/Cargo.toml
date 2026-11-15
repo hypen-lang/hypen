@@ -41,6 +41,28 @@ serde_path_to_error = "0.1"
 uniffi = { version = "0.31", optional = true }
 thiserror = { version = "1.0", optional = true }
 
+# WASM Component module hosting (native only — see `module-loader` feature).
+# wasmtime cannot run inside a wasm32 guest, so these are gated to native
+# targets and only pulled in when the feature is on.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+wasmtime = { version = "46", features = ["runtime", "component-model", "cranelift", "pulley"], optional = true }
+wasmtime-wasi = { version = "46", optional = true }
+# Provides `wasi:http/outgoing-handler` to modules so they can do HTTP
+# using idiomatic per-language clients (Rust waki/reqwest, Go net/http, etc.)
+# instead of going through a Hypen-shaped descriptor.
+wasmtime-wasi-http = { version = "46", optional = true }
+# Minimal executor driving the CM-async host's `Store::run_concurrent` from
+# the synchronous ModuleHost surface (no tokio needed while the capability
+# impls resolve without real I/O).
+futures-executor = { version = "0.3", optional = true }
+# Tiny synchronous HTTP server used by the `hypen-runtime --serve` mode.
+# Pulled in under module-loader because that's where the binary lives;
+# adds ~no dependencies of its own.
+tiny_http = { version = "0.12", optional = true }
+# Debounced filesystem watcher used by `hypen-runtime --serve` to hot-reload
+# the module .wasm when it changes on disk.
+notify-debouncer-mini = { version = "0.7", default-features = false, optional = true }
+
 # WASM JS dependencies (only needed for js feature)
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = { version = "0.2", optional = true }
@@ -82,6 +104,13 @@ uniffi = ["dep:uniffi", "dep:thiserror", "device-broker"]
 # Only enable when running the `uniffi-bindgen` binary to regenerate
 # Swift/Kotlin bindings. Adds ~30 MB of codegen deps to the static lib.
 uniffi-cli = ["uniffi", "uniffi/cli"]
+# Native WASM Component module loader (wasmtime). Lets the engine host
+# `hypen:module` guests on desktop/server/mobile. Native targets only.
+module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:futures-executor", "dep:thiserror", "dep:tiny_http", "dep:notify-debouncer-mini"]
+# Browser-side module loader: the engine itself runs in wasm and delegates
+# module hosting to a JS shim (jco-based) via wasm-bindgen. Pairs with the
+# `js` feature; requires wasm32 target.
+module-loader-bridged = ["js", "dep:thiserror"]
 
 [dev-dependencies]
 lazy_static = "1.4"
@@ -91,6 +120,9 @@ criterion = { version = "0.5", features = ["html_reports"] }
 # and hash transferred bytes against declared items.
 jsonschema = { version = "0.57", default-features = false }
 sha2 = "0.10"
+# Used by the test_hypen_runtime hot-reload test to copy the .wasm fixture
+# into a tempdir that we can rewrite without disturbing the committed copy.
+tempfile = "3"
 
 [[bench]]
 name = "state_clone"
@@ -103,6 +135,24 @@ harness = false
 [[bin]]
 name = "uniffi-bindgen"
 required-features = ["uniffi-cli"]
+
+# A tiny runtime that hosts a `hypen:module` .wasm via WasmtimeHost. Lets
+# you ship "your whole app as a .wasm" and run it on the desktop/server.
+[[bin]]
+name = "hypen-runtime"
+path = "src/bin/hypen_runtime.rs"
+required-features = ["module-loader"]
+
+# Integration test for the WASM module loader — only built when the
+# native loader feature is enabled.
+[[test]]
+name = "test_module_host"
+required-features = ["module-loader"]
+
+# Drives the `hypen-runtime` CLI binary as a subprocess.
+[[test]]
+name = "test_hypen_runtime"
+required-features = ["module-loader"]
 
 # wasm-pack metadata: disable wasm-opt since we don't have binaryen
 # available in this sandbox. Local builds can still optimise by hand

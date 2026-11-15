@@ -254,6 +254,23 @@ impl EngineCore {
         self.modules.get(name).map(|m| m.get_state())
     }
 
+    /// Resolve the module scope that owns a rendered node, given its
+    /// patch-wire id string (as produced by [`node_id_str`]).
+    ///
+    /// Renderers carry the node id of the element that dispatched an action;
+    /// the engine maps it back to the node's `module_scope` so a UI action can
+    /// be routed to the right module instance — even when several modules
+    /// export the same action name. Returns `None` when the id doesn't parse,
+    /// the node no longer exists, or the node is not module-scoped.
+    ///
+    /// [`node_id_str`]: crate::reconcile::node_id_str
+    pub(crate) fn scope_of_node(&self, node_id: &str) -> Option<String> {
+        use slotmap::KeyData;
+        let ffi: u64 = node_id.parse().ok()?;
+        let id = crate::ir::NodeId::from(KeyData::from_ffi(ffi));
+        self.tree.get(id).and_then(|n| n.module_scope.clone())
+    }
+
     // ── State Updates ──────────────────────────────────────────────────
 
     /// Canonicalize a scope: returns `None` for the primary slot, otherwise

@@ -1,3 +1,8 @@
+//go:build !tinygo
+
+// The agent surface binds to the wazero-backed WasmEngine, which does not
+// compile under TinyGo. Excluded from TinyGo builds (see wasm_engine.go).
+
 package core
 
 import (
@@ -87,14 +92,6 @@ type BoundInput struct {
 	// yields "" here, never its rendered value — the engine does not read
 	// state into the manifest.
 	Label string `json:"label,omitempty"`
-}
-
-// moduleUnregisterer is implemented by engines that can drop a destroyed
-// module's externally reachable surface. Asserted for rather than added to
-// IEngine so alternative implementations (MockEngine, remote engines) stay
-// valid without it.
-type moduleUnregisterer interface {
-	UnregisterModule(name string)
 }
 
 // ListActions returns every action an external caller may dispatch right

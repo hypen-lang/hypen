@@ -137,6 +137,31 @@ go test ./remote -run TestDeviceE2ETypeScriptClient -count=1 -v
 - `gorilla/websocket` — WebSocket implementation
 - `tetratelabs/wazero` — WASM runtime (pure Go, no CGo)
 
+## TinyGo build path (`hypen build --target wasm`)
+
+The authoring API (`AppBuilder` / `TypedAppBuilder` / `ObservableState` /
+`ModuleDefinition`) compiles under TinyGo so a `core.NewApp().OnAction()`
+module can be built to a `hypen:module` wasm component. To make this work:
+
+- `wasm_engine.go`, `portable.go`, `resolver.go`, `agent.go` (methods on the
+  wazero-backed `WasmEngine`) and `remote/device/broker.go` (the wazero device
+  broker; the root package only needs that package's wire types via `device/`)
+  carry `//go:build !tinygo` — they embed wazero / `net/http`, which don't
+  compile under TinyGo. This is **additive**: normal (non-TinyGo) builds
+  include them exactly as before.
+- `portable_tinygo.go` (`//go:build tinygo`) provides pure-Go implementations
+  of the canonical portable path/diff helpers (faithful ports of the engine's
+  `portable/{path,diff}.rs`) plus loud stubs for router/url/session helpers a
+  pure reducer never reaches, and a `NewDefaultEngine` stub.
+
+When editing the authoring path, keep it free of wazero/`net/http` symbol
+references (the `...ViaEngine` helpers are the seam) so the TinyGo build keeps
+compiling. `go test ./...` runs under standard Go and is unaffected.
+
+Without TinyGo installed, `go build -tags tinygo .` (standard Go, `tinygo`
+build tag) type-checks the same file set, and
+`go list -tags tinygo -deps . | grep wazero` must print nothing.
+
 ## Testing
 
 Tests use Go's standard testing package. The compatibility test runner in `../engine-compatibility-tests/runners/golang/` runs shared fixtures to ensure cross-SDK consistency.

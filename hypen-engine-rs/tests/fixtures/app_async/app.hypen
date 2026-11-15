@@ -1,0 +1,6 @@
+module App {
+    Column {
+        Text("App scope count: @{state.count}")
+        AsyncCounter()
+    }
+}

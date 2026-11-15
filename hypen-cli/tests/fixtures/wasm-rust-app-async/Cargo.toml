@@ -1,0 +1,24 @@
+[package]
+name = "hypen-wasm-rust-async-counter"
+version = "0.1.0"
+edition = "2021"
+
+# Opt this crate into the CM-async hypen:module@0.2.0 world: the CLI
+# provisions wit/ from its vendored wit-v0_2 instead of the v0.1 package,
+# and wit-bindgen generates async bindings from the WIT itself.
+[package.metadata.hypen]
+abi = "0.2"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.57"
+
+[profile.release]
+opt-level = "s"
+lto = true
+strip = true
+
+# Standalone: not part of the engine workspace.
+[workspace]

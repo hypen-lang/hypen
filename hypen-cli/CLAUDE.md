@@ -18,6 +18,7 @@ hypen-cli/
 │   ├── dev-bun.ts            # Bun.serve() dev server implementation
 │   ├── dev-node.ts           # Node.js dev server (RemoteServer on node:http)
 │   ├── node-ws.ts            # Minimal RFC 6455 server for dev-node
+│   ├── build-wasm.ts         # `hypen build --target wasm` (TS/jco, Go/tinygo, Rust/cargo → .wasm components)
 │   ├── run.ts                # Android/iOS native runner
 │   ├── skills.ts             # AI agent skill installation
 │   ├── skill-content.ts      # Hypen DSL skill documentation
@@ -51,7 +52,8 @@ bun bin/hypen.ts studio           # Test Studio IDE
 |---------|---------|
 | `hypen init <name>` | Scaffold new project from template |
 | `hypen dev` | Dev server with hot reload |
-| `hypen build` | Production build |
+| `hypen build` | Production build (browser SPA) |
+| `hypen build --target wasm` | Portable build: per-module `.wasm` components + `.hypen` UI + `app.json`, runnable offline via `hypen-runtime --app` |
 | `hypen generate` | Generate `.hypen/components.generated.ts` |
 | `hypen studio` | Launch Studio IDE |
 | `hypen test` | Launch Studio directly into Test Mode; boots a RemoteServer for the entry module when run inside a project, opens in connect-only mode otherwise |

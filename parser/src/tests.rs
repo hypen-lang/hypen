@@ -2452,3 +2452,26 @@ fn test_error_pos_names_unclosed_paren_on_earlier_line() {
         "expected ',' or ')', found '.' (the '(' at 2:7 is never closed)",
     );
 }
+
+#[test]
+fn test_identifiers_may_contain_digits() {
+    // Component names, arg keys, and bare identifier values may all contain
+    // digits after the first character (a leading digit is still a number).
+    let component = parse_component("Button2(\"Save\")").unwrap();
+    assert_eq!(component.name, "Button2");
+
+    let component = parse_component("H1(\"Title\")").unwrap();
+    assert_eq!(component.name, "H1");
+
+    // Digit-bearing named-arg key.
+    let component = parse_component("Grid(cols2: 3)").unwrap();
+    assert_eq!(component.arguments.get_named("cols2"), Some(&Value::Number(3.0)));
+
+    // Digit-bearing reference inside a nested composition.
+    let doc = parse_document("module App {\n Column {\n  Counter(start: 5)\n  Counter2(start: 9)\n }\n}\n").unwrap();
+    assert_eq!(doc.components.len(), 1);
+
+    // A leading digit is a number literal, not an identifier — still rejected
+    // as a component name.
+    assert!(parse_component("1Counter()").is_err());
+}

@@ -1,0 +1,120 @@
+// Hypen Storage capability — v0.2.0 (component-model async)
+//
+// Same three sister interfaces and link-time capability model as v0.1
+// (see /wit/deps/hypen-storage/storage.wit for the full scope/tier docs —
+// they apply unchanged). What changed for v0.2:
+//
+//   - Every operation is `async func`: the host may hit disk, Keychain, or
+//     the network (cloud scope) without blocking the guest's task.
+//   - The v0.1 blob triple (blob-handle / blob-writer / blob-bucket) is
+//     collapsed into a single `blob-bucket` whose get/put move payloads as
+//     `stream<u8>` — the natural WASI 0.3 shape for large values. (Hosts
+//     may stub blobs while the wasmtime stream APIs mature; the KV bucket
+//     surface is the load-bearing part.)
+
+package hypen:storage@0.2.0;
+
+interface types {
+    /// Durability tier. Same semantics as v0.1.
+    enum tier {
+        persistent,
+        cache,
+        temp,
+        secure,
+    }
+
+    /// Host-side errors. Same semantics as v0.1.
+    variant error {
+        not-found,
+        quota-exceeded(u64),
+        unavailable(string),
+        corrupted(string),
+        backend(string),
+    }
+
+    /// Metadata returned alongside a value. Same semantics as v0.1.
+    record entry-info {
+        size: u64,
+        modified-ms: u64,
+        version: option<u64>,
+    }
+}
+
+/// Module-private key-value + blob storage, scoped to this device.
+/// Always granted.
+interface local {
+    use types.{tier, error, entry-info};
+
+    resource bucket {
+        open: static async func(tier: tier, namespace: string) -> result<bucket, error>;
+        get: async func(key: string) -> result<option<list<u8>>, error>;
+        set: async func(key: string, value: list<u8>) -> result<_, error>;
+        delete: async func(key: string) -> result<bool, error>;
+        keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+        info: async func(key: string) -> result<option<entry-info>, error>;
+        clear: async func() -> result<_, error>;
+    }
+
+    resource blob-bucket {
+        open: static async func(tier: tier, namespace: string) -> result<blob-bucket, error>;
+        /// Stream the blob's contents. `none` if missing.
+        get: async func(key: string) -> result<option<stream<u8>>, error>;
+        /// Consume `contents` to completion, then commit atomically.
+        put: async func(key: string, contents: stream<u8>) -> result<entry-info, error>;
+        delete: async func(key: string) -> result<bool, error>;
+        keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+    }
+}
+
+/// Storage shared by every module in the same Hypen app. Manifest-gated.
+interface app {
+    use types.{tier, error, entry-info};
+
+    resource bucket {
+        open: static async func(tier: tier, namespace: string) -> result<bucket, error>;
+        get: async func(key: string) -> result<option<list<u8>>, error>;
+        set: async func(key: string, value: list<u8>) -> result<_, error>;
+        delete: async func(key: string) -> result<bool, error>;
+        keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+        info: async func(key: string) -> result<option<entry-info>, error>;
+        clear: async func() -> result<_, error>;
+    }
+
+    resource blob-bucket {
+        open: static async func(tier: tier, namespace: string) -> result<blob-bucket, error>;
+        get: async func(key: string) -> result<option<stream<u8>>, error>;
+        put: async func(key: string, contents: stream<u8>) -> result<entry-info, error>;
+        delete: async func(key: string) -> result<bool, error>;
+        keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+    }
+}
+
+/// User-scoped storage synced across devices. Manifest-gated. `async` is
+/// most meaningful here: cloud round-trips are genuinely slow, and awaiting
+/// them no longer needs the Elm-style effect detour.
+interface cloud {
+    use types.{tier, error, entry-info};
+
+    resource bucket {
+        open: static async func(tier: tier, namespace: string) -> result<bucket, error>;
+        get: async func(key: string) -> result<option<list<u8>>, error>;
+        set: async func(key: string, value: list<u8>) -> result<_, error>;
+        delete: async func(key: string) -> result<bool, error>;
+        keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+        info: async func(key: string) -> result<option<entry-info>, error>;
+        /// Atomic compare-and-set. Same version contract as v0.1.
+        compare-and-set: async func(
+            key: string,
+            expected-version: option<u64>,
+            value: list<u8>,
+        ) -> result<u64, error>;
+    }
+
+    resource blob-bucket {
+        open: static async func(tier: tier, namespace: string) -> result<blob-bucket, error>;
+        get: async func(key: string) -> result<option<stream<u8>>, error>;
+        put: async func(key: string, contents: stream<u8>) -> result<entry-info, error>;
+        delete: async func(key: string) -> result<bool, error>;
+        keys: async func(prefix: string, limit: u32) -> result<list<string>, error>;
+    }
+}

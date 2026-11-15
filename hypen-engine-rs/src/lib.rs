@@ -42,6 +42,7 @@ pub(crate) mod engine_core;
 pub mod error;
 pub mod ir;
 pub mod lifecycle;
+pub mod module_host;
 pub mod portable;
 pub mod reactive;
 pub mod reconcile;

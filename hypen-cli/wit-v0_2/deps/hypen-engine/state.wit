@@ -1,0 +1,39 @@
+// Hypen cross-module state capability — v0.2.0 (component-model async)
+//
+// Same contract and ACL model as v0.1 (see /wit/deps/hypen-engine/state.wit
+// for the full design rationale — it applies unchanged). All three
+// operations become `async func` in v0.2: a sibling's reducer is itself
+// async now, so a directed `dispatch` must be awaitable, and `read` may
+// have to wait for a sibling's in-flight reducer to settle before
+// snapshotting.
+//
+// `action` stays declared locally so this package remains a leaf dependency
+// (no circular reference to `hypen:module`).
+
+package hypen:engine@0.2.0;
+
+interface state {
+    /// An action to deliver to a sibling module's reducer.
+    record action {
+        name: string,
+        payload: list<u8>,
+    }
+
+    variant error {
+        not-found,
+        permission-denied(string),
+        module-error(string),
+    }
+
+    /// Snapshot of a sibling's current state. Requires a `reads` grant.
+    read: async func(module: string) -> result<list<u8>, error>;
+
+    /// Send an action to a sibling's reducer. Requires a `dispatches` grant.
+    /// Still applied after the calling reducer returns (no reentrancy).
+    dispatch: async func(module: string, action: action) -> result<_, error>;
+
+    /// Observe a sibling's state at `path`; the host dispatches `on-change`
+    /// back to the caller on subsequent changes. Requires a `reads` grant.
+    /// Registration still happens when the calling reducer returns.
+    subscribe: async func(module: string, path: string, on-change: string) -> result<_, error>;
+}

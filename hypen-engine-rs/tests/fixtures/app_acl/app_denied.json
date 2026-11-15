@@ -1,0 +1,8 @@
+{
+  "entry": "App",
+  "modules": [
+    { "name": "App", "wasm": "../counter_module.wasm", "ui": "app.hypen" },
+    { "name": "Counter", "wasm": "../counter_module.wasm", "ui": "counter.hypen" },
+    { "name": "Mirror", "wasm": "../mirror_module.wasm", "ui": "mirror.hypen" }
+  ]
+}

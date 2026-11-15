@@ -1,0 +1,3 @@
+module Mirror {
+    Text("Mirror seen: @{state.seen}")
+}

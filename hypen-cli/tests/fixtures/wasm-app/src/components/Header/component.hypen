@@ -1,0 +1,4 @@
+Column {
+    Text("My Counter App")
+    Text("— powered by Hypen wasm —")
+}

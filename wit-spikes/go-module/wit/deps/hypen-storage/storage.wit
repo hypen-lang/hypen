@@ -1,0 +1,261 @@
+// Hypen Storage capability — v0.1.0 (strawman)
+//
+// Three sister interfaces, one per visibility scope. Capability granting
+// happens at the *interface* level: a module that imports `hypen:storage/app`
+// without a matching manifest grant fails to instantiate. There is no
+// "permission-denied at runtime" path for scope — denial is a link-time fact.
+//
+// Module sandboxing for `local` is enforced by the host: every key is
+// transparently prefixed with the module name before reaching the platform
+// store. The WASM module cannot escape its scope because the scope is bound
+// at instantiation, not a parameter the module controls.
+
+package hypen:storage@0.1.0;
+
+interface types {
+    /// Durability tier. Orthogonal to scope.
+    ///
+    /// - `persistent`: survives reboots, included in OS backups. The default
+    ///   for real user data.
+    /// - `cache`:      evictable by the OS under storage pressure. For
+    ///   computed / refetchable data.
+    /// - `temp`:       cleared on app termination. For session state. Maps
+    ///   to `tmp/` on iOS, `cacheDir/.session/` on Android, `sessionStorage`
+    ///   on web.
+    /// - `secure`:     hardware-encrypted; may require biometric unlock. For
+    ///   tokens, keys, anything that shouldn't show up in a backup. Maps to
+    ///   Keychain (iOS), EncryptedSharedPreferences (Android), or
+    ///   WebCrypto-wrapped IDB entries (web — no native secure store).
+    enum tier {
+        persistent,
+        cache,
+        temp,
+        secure,
+    }
+
+    /// All operations return `result<T, error>`. Errors are *always* host-side
+    /// — module code can't construct these; it only handles them.
+    variant error {
+        /// Key isn't present. Distinct from `option<value>::none` because
+        /// some operations (e.g. `compare-and-set` with a wrong version) want
+        /// to be told the key doesn't exist as their primary outcome.
+        not-found,
+        /// Write would exceed the host's per-scope quota. Payload is the
+        /// number of bytes over budget. Modules can shrink + retry.
+        quota-exceeded(u64),
+        /// Backend is reachable but can't serve the request right now.
+        /// `cloud` offline, `secure` tier locked behind biometrics, etc.
+        /// Payload is a human-readable hint for logs.
+        unavailable(string),
+        /// Stored bytes don't match what was written (host detected
+        /// checksum mismatch, partial write, etc.).
+        corrupted(string),
+        /// Platform-specific failure the host couldn't classify. Payload is
+        /// opaque; modules should generally surface it to the user as-is.
+        backend(string),
+    }
+
+    /// Metadata returned alongside a value. Useful for cache freshness
+    /// decisions and sync conflict resolution.
+    record entry-info {
+        /// Size of the stored value in bytes.
+        size: u64,
+        /// Wall-clock time of the last write, ms since the unix epoch, as
+        /// reported by the host's clock. Untrusted across devices.
+        modified-ms: u64,
+        /// Monotonic version counter. Populated on `cloud` (each
+        /// successful `set` / `compare-and-set` increments). `none` on
+        /// `local` and `app` since those don't have a concurrent writer.
+        version: option<u64>,
+    }
+}
+
+// -----------------------------------------------------------------------------
+// local — module-private, device-only. Always available.
+// -----------------------------------------------------------------------------
+
+/// Module-private key-value + blob storage, scoped to this device.
+/// Always granted; every module gets this without manifest opt-in.
+///
+/// Sandboxed: the host transparently prefixes every key with the module
+/// name. A module cannot read or overwrite another module's `local` storage
+/// because the scope is bound at instantiation, not in the call signature.
+interface local {
+    use types.{tier, error, entry-info};
+
+    /// Key-value bucket. Values are arbitrary bytes; keep them small
+    /// (<1 MB). Use the blob interface below for larger payloads.
+    resource bucket {
+        /// Open (or create) a bucket. `namespace` is a sub-scope inside the
+        /// module — modules typically use it to separate concerns
+        /// ("prefs", "drafts", "feed-cache").
+        open: static func(tier: tier, namespace: string) -> result<bucket, error>;
+
+        /// Read a value. Returns `none` if the key doesn't exist (distinct
+        /// from `error::not-found`, which signals a different condition).
+        get: func(key: string) -> result<option<list<u8>>, error>;
+        /// Write a value. Overwrites any existing entry.
+        set: func(key: string, value: list<u8>) -> result<_, error>;
+        /// Remove a key. Returns `true` if the key existed before the call.
+        delete: func(key: string) -> result<bool, error>;
+        /// List keys with the given prefix. Order is implementation-defined.
+        /// Capped at `limit` results; callers should paginate if more are
+        /// expected.
+        keys: func(prefix: string, limit: u32) -> result<list<string>, error>;
+        /// Metadata for a key without reading the value. Returns `none` for
+        /// missing keys.
+        info: func(key: string) -> result<option<entry-info>, error>;
+        /// Remove every key in this bucket. Module-scoped — does not touch
+        /// other buckets in the same tier/namespace.
+        clear: func() -> result<_, error>;
+    }
+
+    /// Read-only handle to a stored blob. Cheaper than materializing the
+    /// full value into a `list<u8>` when only a subrange is needed.
+    resource blob-handle {
+        /// Total size of the blob in bytes.
+        size: func() -> u64;
+        /// Read a range. Clamped to `size` if `offset + len` overflows.
+        read: func(offset: u64, len: u32) -> result<list<u8>, error>;
+    }
+
+    /// Write-side handle. Streams chunks instead of buffering the whole
+    /// payload. The host doesn't commit until `finish` is called; `abort`
+    /// (or dropping the handle) discards everything written.
+    resource blob-writer {
+        /// Append a chunk to the in-progress blob.
+        write: func(chunk: list<u8>) -> result<_, error>;
+        /// Commit the blob and return its metadata.
+        finish: func() -> result<entry-info, error>;
+        /// Discard everything written so far. Same effect as dropping the
+        /// resource without calling `finish`.
+        abort: func();
+    }
+
+    /// Blob bucket. Same scoping rules as `bucket`, separate keyspace.
+    resource blob-bucket {
+        open: static func(tier: tier, namespace: string) -> result<blob-bucket, error>;
+
+        /// Open a blob for streaming reads. Returns `none` if missing.
+        get: func(key: string) -> result<option<blob-handle>, error>;
+        /// Begin a streaming write. Replaces any existing blob at `key`
+        /// only when the writer's `finish` is called.
+        put: func(key: string) -> result<blob-writer, error>;
+        delete: func(key: string) -> result<bool, error>;
+        keys: func(prefix: string, limit: u32) -> result<list<string>, error>;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// app — shared across modules in this app, device-only. Opt-in.
+// -----------------------------------------------------------------------------
+
+/// Storage shared by every module in the same Hypen app. Requires the
+/// `hypen:storage/app` capability grant in the module manifest; instantiation
+/// fails otherwise.
+///
+/// Use sparingly. The shared keyspace is a coordination surface — two
+/// modules writing the same key with different shapes will collide. Prefer
+/// `cloud` (cross-device, versioned) or per-module `local` when possible.
+interface app {
+    use types.{tier, error, entry-info};
+
+    resource bucket {
+        open: static func(tier: tier, namespace: string) -> result<bucket, error>;
+
+        get: func(key: string) -> result<option<list<u8>>, error>;
+        set: func(key: string, value: list<u8>) -> result<_, error>;
+        delete: func(key: string) -> result<bool, error>;
+        keys: func(prefix: string, limit: u32) -> result<list<string>, error>;
+        info: func(key: string) -> result<option<entry-info>, error>;
+        clear: func() -> result<_, error>;
+    }
+
+    resource blob-handle {
+        size: func() -> u64;
+        read: func(offset: u64, len: u32) -> result<list<u8>, error>;
+    }
+
+    resource blob-writer {
+        write: func(chunk: list<u8>) -> result<_, error>;
+        finish: func() -> result<entry-info, error>;
+        abort: func();
+    }
+
+    resource blob-bucket {
+        open: static func(tier: tier, namespace: string) -> result<blob-bucket, error>;
+
+        get: func(key: string) -> result<option<blob-handle>, error>;
+        put: func(key: string) -> result<blob-writer, error>;
+        delete: func(key: string) -> result<bool, error>;
+        keys: func(prefix: string, limit: u32) -> result<list<string>, error>;
+    }
+}
+
+// -----------------------------------------------------------------------------
+// cloud — synced across the user's devices. Opt-in.
+// -----------------------------------------------------------------------------
+
+/// User-scoped storage that replicates across the user's devices via the
+/// platform's sync mechanism (iCloud on iOS, Auto Backup / Drive on Android,
+/// Hypen sync service on web). Requires the `hypen:storage/cloud` capability
+/// grant in the module manifest.
+///
+/// Differences from `local` / `app`:
+///   - `compare-and-set` is mandatory; concurrent writes from sibling
+///     devices need optimistic concurrency control.
+///   - No `clear` — synced data is precious, removal is deliberate per-key.
+///   - `error::unavailable` is a normal outcome when offline; modules must
+///     handle it gracefully (typically by retrying with `local` as a buffer).
+interface cloud {
+    use types.{tier, error, entry-info};
+
+    resource bucket {
+        open: static func(tier: tier, namespace: string) -> result<bucket, error>;
+
+        get: func(key: string) -> result<option<list<u8>>, error>;
+        /// Unconditional write. First-write-wins on conflicts — use
+        /// `compare-and-set` if conflict-detection matters.
+        set: func(key: string, value: list<u8>) -> result<_, error>;
+        delete: func(key: string) -> result<bool, error>;
+        keys: func(prefix: string, limit: u32) -> result<list<string>, error>;
+        info: func(key: string) -> result<option<entry-info>, error>;
+
+        /// Atomic compare-and-set for cross-device concurrency.
+        ///
+        /// Pass `expected-version: none` to mean "the key must not currently
+        /// exist" — first-write-wins on missing keys.
+        /// Pass `expected-version: some(N)` to mean "only write if the
+        /// current version is exactly N."
+        ///
+        /// On success, returns the new version (`previous + 1`, or `1` if
+        /// the key was missing). On mismatch, errors with
+        /// `error::unavailable("version mismatch")`. The module should
+        /// re-read and retry.
+        compare-and-set: func(
+            key: string,
+            expected-version: option<u64>,
+            value: list<u8>,
+        ) -> result<u64, error>;
+    }
+
+    resource blob-handle {
+        size: func() -> u64;
+        read: func(offset: u64, len: u32) -> result<list<u8>, error>;
+    }
+
+    resource blob-writer {
+        write: func(chunk: list<u8>) -> result<_, error>;
+        finish: func() -> result<entry-info, error>;
+        abort: func();
+    }
+
+    resource blob-bucket {
+        open: static func(tier: tier, namespace: string) -> result<blob-bucket, error>;
+
+        get: func(key: string) -> result<option<blob-handle>, error>;
+        put: func(key: string) -> result<blob-writer, error>;
+        delete: func(key: string) -> result<bool, error>;
+        keys: func(prefix: string, limit: u32) -> result<list<string>, error>;
+    }
+}

@@ -1,3 +1,9 @@
+//go:build !tinygo
+
+// This file embeds the wazero WASM runtime, which does not compile under
+// TinyGo. It is excluded from TinyGo builds so the authoring API
+// (AppBuilder / ObservableState / ModuleDefinition) in this package can be
+// compiled to a wasm component by `hypen build --target wasm`.
 package core
 
 import (

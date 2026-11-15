@@ -211,6 +211,10 @@ update_version "$ROOT_DIR/hypen-web/packages/agent/package.json" "$OLD" "$NEW"
 update_dep "$ROOT_DIR/hypen-web/packages/agent/package.json" "@hypen-space\/core" "$OLD" "$NEW"
 echo "  ✓ hypen-web/packages/agent/package.json"
 
+# @hypen-space/module-host (no @hypen-space deps)
+update_version "$ROOT_DIR/hypen-web/packages/module-host/package.json" "$OLD" "$NEW"
+echo "  ✓ hypen-web/packages/module-host/package.json"
+
 # @hypen-space/cf (depends on core, web, device-web)
 update_version "$ROOT_DIR/hypen-web/packages/cf/package.json" "$OLD" "$NEW"
 update_dep "$ROOT_DIR/hypen-web/packages/cf/package.json" "@hypen-space\/core" "$OLD" "$NEW"

@@ -22,7 +22,10 @@
   "files": [
     "dist",
     "src",
-    "studio-ui"
+    "studio-ui",
+    "wit",
+    "wit-tinygo",
+    "wit-v0_2"
   ],
   "scripts": {
     "build": "bun run build.ts",

@@ -1,0 +1,133 @@
+// Hypen Module world — v0.2.0 (component-model async)
+//
+// The async successor to `hypen:module@0.1.0` (see `/wit`). Same reducer
+// contract, but the state-producing exports are `async func`: a handler can
+// `await` capability imports (storage, cross-module state) inline and then
+// return its delta — exactly the in-process `onAction(async ({state}) =>
+// await …)` body, no effect descriptors for anything the module can do
+// itself. Enabled by Component Model async (WASI 0.3.0, released 2026-06;
+// wasmtime 46+ hosts it under the default `component-model-async` feature).
+//
+// Design notes (see also wit/V0_2_NOTES.md §5):
+//
+// 1. `reducer-output` survives from v0.1 UNCHANGED, so the engine's
+//    path-diff/reactivity pipeline (`portable/diff.rs`) is untouched — it
+//    just receives the delta after the reducer's suspension points.
+//
+// 2. `effect` remains for what a sandboxed module must NOT do directly and
+//    what must apply transactionally *after* the reducer returns: router
+//    control (`navigate`), the post-reducer action bus (`emit` on
+//    reducer-output), plus `delay`/`log` kept for determinism and
+//    zero-import portability.
+//
+// 3. HTTP is still *not* declared in this WIT — same stance as v0.1: the
+//    standard WASI surface is between the module and the runtime, not part
+//    of the Hypen contract. Async modules import `wasi:http/client@0.3.0`
+//    (`client.send` is the p3 outgoing path) via their per-language
+//    toolchain; hosts link `wasmtime-wasi-http`'s p3 support when it
+//    stabilizes (experimental/semver-exempt in wasmtime 46).
+//
+// 4. `@0.1.0` remains the DEFAULT world. This package ships so Rust (the
+//    happy path) can prove the ABI; the TS cutover stays gated on
+//    componentize-js shipping custom async host imports (the
+//    `wasi03-async-spike` verdict in wit/AUTHORING_MODEL.md).
+
+package hypen:module@0.2.0;
+
+interface types {
+    /// UTF-8 JSON bytes; engine parses on receipt and path-tracks for
+    /// reactivity. Same contract as v0.1.
+    type json = list<u8>;
+
+    /// An action raised by the UI (`@actions.<name>`) or emitted by another
+    /// action's `reducer-output.emit`.
+    record action {
+        name: string,
+        payload: json,
+    }
+
+    /// What `dispatch`, `on-activated`, and `on-deactivated` resolve to.
+    /// Identical shape to v0.1 — see design note 1.
+    record reducer-output {
+        state: option<json>,
+        effects: list<effect>,
+        emit: list<action>,
+    }
+
+    /// Host-performed side effects. Slimmed in spirit (async modules await
+    /// storage/HTTP themselves) but kept shape-compatible with v0.1:
+    /// `navigate` is host-only by design; `delay`/`log` remain for
+    /// determinism and zero-import portability.
+    variant effect {
+        delay(delay-effect),
+        navigate(string),
+        log(log-effect),
+    }
+
+    record delay-effect {
+        ms: u32,
+        then: string,
+    }
+
+    record log-effect {
+        level: log-level,
+        message: string,
+    }
+
+    enum log-level {
+        trace,
+        debug,
+        info,
+        warn,
+        error,
+    }
+}
+
+/// The async module contract. Exports are the same reducer + lifecycle ABI
+/// as v0.1; everything state-producing is now `async func` so the module can
+/// suspend on awaited capability calls mid-reducer. `actions` stays sync —
+/// it's pure metadata.
+world module {
+    use types.{action, reducer-output, json};
+
+    /// Construct the initial state snapshot. May await capability imports
+    /// (e.g. rehydrate from storage) before returning it.
+    export init: async func(config: json) -> result<json, string>;
+
+    /// The reducer. Awaits capabilities inline; returns the delta when done.
+    export dispatch: async func(state: json, action: action) -> result<reducer-output, string>;
+
+    /// Module became visible (route entered or cache hit).
+    export on-activated: async func(state: json) -> result<reducer-output, string>;
+
+    /// Module is leaving the screen.
+    export on-deactivated: async func(state: json) -> result<reducer-output, string>;
+
+    /// Final teardown, just before the instance is dropped.
+    export on-destroyed: async func(state: json) -> result<_, string>;
+
+    /// Names of actions `dispatch` accepts. Sync: pure metadata, called once
+    /// after instantiation to wire routing (same semantics as v0.1,
+    /// including the `"*"` wildcard).
+    export actions: func() -> list<string>;
+
+    // Capability imports — async in v0.2. `local` is always available;
+    // `app`/`cloud` require manifest grants (link-time denial, as in v0.1).
+    import hypen:storage/local@0.2.0;
+    import hypen:storage/app@0.2.0;
+    import hypen:storage/cloud@0.2.0;
+
+    // Time — implicitly granted like `local`, but virtualizable: the host
+    // may substitute a deterministic clock (see hypen:time design notes).
+    import hypen:time/clock@0.2.0;
+}
+
+/// Superset adding cross-module state (async `read`/`dispatch`/`subscribe` —
+/// a sibling's reducer is itself async now, so directed dispatch must be
+/// awaitable). Kept separate from `module` for the same reason as v0.1: a
+/// host linker built for `module-x` still instantiates plain `module`
+/// components.
+world module-x {
+    include module;
+    import hypen:engine/state@0.2.0;
+}

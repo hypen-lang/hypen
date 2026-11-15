@@ -1,0 +1,42 @@
+// hypen:time — clocks and timers as a granted capability, not ambient WASI.
+//
+// Design notes:
+//
+// 1. This is the first "stdlib" package added after the storage/state
+//    pioneers, and it exists for two reasons beyond convenience:
+//    - Least privilege: modules never link wasi:clocks directly, so the
+//      host controls the entire time surface.
+//    - Determinism: the host can substitute a VIRTUAL clock — `now-ms` /
+//      `monotonic-ms` read a counter and `sleep-ms` advances it without
+//      real waiting — which makes reducer runs deterministically
+//      replayable (record the action log, replay the bug exactly).
+//
+// 2. `sleep-ms` is `async func`: the guest task suspends through the
+//    component event loop, keeping the "await capabilities inline"
+//    authoring model. Long timers that outlive a reducer call are NOT this
+//    — that remains `Effect::Delay`, which schedules a future dispatch.
+//    Hosts may clamp `sleep-ms` to the per-call budget.
+//
+// 3. Reads are sync funcs: they never block, and keeping them sync spares
+//    guests an await on every timestamp.
+//
+// 4. Like `hypen:storage/local`, this capability is implicitly granted —
+//    every v0.2 host links it. It is virtualizable rather than deniable.
+
+package hypen:time@0.2.0;
+
+interface clock {
+    /// Milliseconds since the Unix epoch, per the host's wall clock (or the
+    /// virtual clock during deterministic replay). Not monotonic — the wall
+    /// clock can jump.
+    now-ms: func() -> u64;
+
+    /// Milliseconds since an arbitrary fixed origin; never decreases.
+    /// Use for measuring durations.
+    monotonic-ms: func() -> u64;
+
+    /// Suspend the calling task for at least `ms` milliseconds (virtual
+    /// clock: advances the clock and resumes immediately). The per-call
+    /// wall-clock budget still applies — a sleep cannot extend it.
+    sleep-ms: async func(ms: u64);
+}

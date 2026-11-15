@@ -1,0 +1,7 @@
+module Counter {
+    Column {
+        Header()
+        Text("Count: @{state.count}")
+        Button("@actions.increment") { Text("+1") }
+    }
+}

@@ -21,6 +21,7 @@ const ENTRYPOINTS = [
   "./src/dev.ts",
   "./src/dev-bun.ts",
   "./src/dev-node.ts",
+  "./src/build-wasm.ts",
 ];
 
 // One Bun.build per entrypoint: with all five in a single call, some Bun

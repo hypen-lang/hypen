@@ -1,0 +1,3 @@
+module Fetcher {
+    Text("last fetch: @{state.received}")
+}

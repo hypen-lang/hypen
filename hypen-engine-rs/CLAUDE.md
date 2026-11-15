@@ -58,6 +58,15 @@ hypen-engine-rs/src/
 ├── serialize/                # Remote UI Protocol
 │   └── remote.rs             # Initial tree & incremental patch serialization
 │
+├── module_host/              # WASM Component module hosting (`hypen:module`, see /wit/ENGINE_INTEGRATION.md)
+│   ├── mod.rs                # ModuleHost trait + value types (always compiled; Engine holds Option<Box<dyn ModuleHost>>)
+│   ├── registry.rs           # ModuleRegistry / BundledRegistry
+│   ├── kv.rs                 # Storage backend shared by the wasmtime hosts (module-loader)
+│   ├── wasmtime_host.rs      # WasmtimeHost: v0.1 sync world (module-loader, native only)
+│   ├── wasmtime_host_async.rs # WasmtimeHostAsync: v0.2 CM-async world (module-loader, native only)
+│   ├── dual.rs               # DualHost: sniffs a component's ABI and routes to the matching host
+│   └── bridged_host.rs       # BridgedHost: delegates to a JS host (module-loader-bridged, wasm32 only)
+│
 ├── device/                   # Device Capability Protocol (RFC 001) server broker, sans-IO
 │   ├── broker.rs             # DeviceBroker: ids, owners, leases, credit, uploads/downloads, violations
 │   └── scheduler.rs          # Bulk transport scheduler (64 KiB turns, 256 KiB pending, 8 MiB queue)
@@ -68,11 +77,13 @@ hypen-engine-rs/src/
 │   ├── device_binding.rs     # Device broker JSON shapes + WASI framing shared by JS/WASI/UniFFI
 │   ├── js.rs                 # wasm-bindgen JS bindings (js feature)
 │   ├── js_device.rs          # WasmDeviceBroker / WasmRetainedBytesPool / device* helpers (js feature)
+│   ├── js_hosted.rs          # WasmHostedEngine: `Engine` + BridgedHost for JS (module-loader-bridged feature)
 │   ├── wasi.rs               # WASI C FFI (wasi feature)
 │   └── wasi_device.rs        # hypen_device_* C ABI (wasi feature; also compiled for native tests)
 │
 └── uniffi/                   # Mobile Bindings
     ├── mod.rs                # UniFFI scaffolding (uniffi feature)
+    ├── module_host.rs        # HypenModuleHost object over DualHost (uniffi + module-loader)
     └── device.rs             # DeviceBroker / DeviceRetainedBytesPool objects + device* helpers
 ```
 
@@ -196,6 +207,23 @@ Crate always builds as both `cdylib` and `rlib`. Feature flags control which bin
 | `wasi` | C FFI | Go, Python, native |
 | `component-model` | WIT | Type-safe cross-language |
 | `uniffi` | Kotlin/Swift | Android, iOS |
+| `module-loader` | none (adds `WasmtimeHost`/`WasmtimeHostAsync`/`DualHost` + the `hypen-runtime` bin) | Hosting `hypen:module` WASM Components natively (wasmtime 46; native targets only) |
+| `module-loader-bridged` | wasm-bindgen `WasmHostedEngine` (implies `js`) | Engine in wasm32 delegating module hosting to a JS host |
+
+`module-loader` links wasmtime into every test binary (~0.5 GB each with debuginfo), so run the
+feature's tests targeted rather than as the whole suite:
+
+```bash
+cargo test --features module-loader --lib --bins --test test_module_host --test test_module_host_async --test test_hypen_runtime
+cargo test --features uniffi,module-loader --test test_uniffi_host
+cargo test --test test_module_host_routing   # engine-side routing with a mock host, default features
+```
+
+With a module instance wired (`Engine::register_module_instance`), `Engine::dispatch_action` still
+resolves `__hypen_dispatch` envelopes through `route_ui_action` first (node ownership is the only
+routing authority) and then hands a resolved `__hypen_scoped:<scope>:<name>` to the owning module
+instance; `scope:action`, sender-node and unambiguous bare names are the non-renderer forms. With
+no instance wired, dispatch is exactly `route_ui_action` + the closure dispatcher.
 
 ## Key Dependencies
 

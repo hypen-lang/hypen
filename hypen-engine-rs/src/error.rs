@@ -31,6 +31,9 @@
 //!         EngineError::ExpressionError(msg) => {
 //!             eprintln!("Expression error: {}", msg);
 //!         }
+//!         EngineError::ModuleError(msg) => {
+//!             eprintln!("Module error: {}", msg);
+//!         }
 //!     }
 //! }
 //! ```
@@ -80,6 +83,13 @@ pub enum EngineError {
 
     /// Error evaluating an expression or template string.
     ExpressionError(String),
+
+    /// A WASM module reducer/host returned an error or trapped.
+    ///
+    /// Contains a human-readable description from the [`ModuleHost`].
+    ///
+    /// [`ModuleHost`]: crate::module_host::ModuleHost
+    ModuleError(String),
 }
 
 impl fmt::Display for EngineError {
@@ -105,6 +115,9 @@ impl fmt::Display for EngineError {
             }
             EngineError::ExpressionError(msg) => {
                 write!(f, "Expression error: {}", msg)
+            }
+            EngineError::ModuleError(msg) => {
+                write!(f, "Module error: {}", msg)
             }
         }
     }

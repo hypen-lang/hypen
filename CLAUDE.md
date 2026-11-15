@@ -15,15 +15,19 @@ hypen-engine-rs/
 │   ├── packages/core/           # @hypen-space/core - Platform-agnostic runtime (types, app, state, router - NO WASM)
 │   ├── packages/web/            # @hypen-space/web - DOM & Canvas renderers (pure patch consumers)
 │   ├── packages/server/         # @hypen-space/server - Node.js WASM engine, loader, discovery, RemoteServer
-│   └── packages/web-engine/     # @hypen-space/web-engine - Browser WASM engine, Hypen orchestrator
+│   ├── packages/web-engine/     # @hypen-space/web-engine - Browser WASM engine, Hypen orchestrator
+│   └── packages/module-host/    # @hypen-space/module-host - Browser/Node host for WASM-component modules (jco transpile, capability gating)
 ├── hypen-cli/                   # @hypen-space/cli - CLI tools (init, dev, build)
 ├── hypen-docs/                  # Fumadocs/Next.js documentation site
 ├── hypen-renderer-android/      # Android/Kotlin native renderer
 ├── hypen-renderer-swift/        # iOS/SwiftUI native renderer
 ├── hypen-server-swift/          # Swift server SDK
 ├── hypen-kotlin/                # Kotlin/JVM SDK (module system with Kotlin DSL)
+├── hypen-host-kotlin/           # Kotlin/JVM host library for WASM-component modules (UniFFI -> engine module host)
 ├── hypen-golang/                # Go implementation (module system)
 ├── hypen-lsp/                   # Language Server Protocol implementation
+├── wit/, wit-v0_2/              # `hypen:module` WIT contract (v0.1 sync, v0.2 CM-async) + WASM module hosting docs
+├── wit-spikes/                  # Reference modules / host harnesses for the WIT contract (source of the engine's .wasm test fixtures)
 ├── tailwind-parse/              # Tailwind CSS class parser (Rust)
 ├── component-gallery-server/    # Component gallery & screenshot testing
 ├── engine-compatibility-tests/  # Cross-SDK compatibility test suite

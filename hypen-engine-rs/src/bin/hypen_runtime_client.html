@@ -1,0 +1,208 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>hypen-runtime</title>
+<link rel="icon" href="data:,">
+<style>
+  body {
+    font: 14px/1.45 system-ui, -apple-system, sans-serif;
+    background: #0b0c10; color: #d6d8db;
+    max-width: 760px; margin: 32px auto; padding: 0 20px;
+  }
+  h1 { font-size: 16px; color: #fff; margin: 0 0 2px; }
+  .sub { color: #7a8290; margin: 0 0 20px; font-size: 12px; }
+  #app {
+    background: #0f1117; border: 1px solid #1c2230; border-radius: 8px;
+    padding: 18px; min-height: 60px;
+  }
+  /* Hypen element-type → sensible defaults so a counter looks like a counter */
+  #app .hy-Column { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+  #app .hy-Row    { display: flex; flex-direction: row;    gap: 8px; align-items: center; }
+  #app .hy-Button {
+    background: #2563eb; color: #fff; border: 0; border-radius: 6px;
+    padding: 6px 14px; cursor: pointer; font: inherit;
+  }
+  #app .hy-Button:hover { background: #1d4ed8; }
+  details { margin-top: 18px; color: #7a8290; }
+  pre { background: #050608; border: 1px solid #1a1f29; border-radius: 6px; padding: 10px; overflow-x: auto; }
+  .err { color: #ff7779; min-height: 18px; }
+</style>
+</head>
+<body>
+  <h1 id="title">hypen-runtime</h1>
+  <p class="sub" id="subtitle">connecting…</p>
+
+  <div id="app"></div>
+  <p class="err" id="err"></p>
+
+  <details id="debug">
+    <summary>debug</summary>
+    <div id="actions" style="margin:8px 0;"></div>
+    <pre id="state">…</pre>
+  </details>
+
+<script type="module">
+  const $ = (id) => document.getElementById(id);
+  const setErr = (s) => { $("err").textContent = s || ""; };
+  const appRoot = $("app");
+
+  // id → DOM element. "root" is the #app container.
+  const nodes = new Map();
+
+  function elementForType(t) {
+    switch (t) {
+      case "Text": return document.createElement("span");
+      case "Button": return document.createElement("button");
+      case "Image": return document.createElement("img");
+      case "Input": return document.createElement("input");
+      default: return document.createElement("div"); // Column/Row/etc.
+    }
+  }
+
+  function applyProp(el, type, name, value) {
+    if (name === "0" || name === "text") {        // positional/text content
+      el.textContent = value;
+    } else if (name === "action") {
+      el.dataset.action = String(value).replace(/^@/, "");
+    } else if (name === "tw" || name === "class" || name === "className") {
+      // keep the hy-<Type> marker class, append the author's classes
+      el.className = `hy-${type} ${value}`;
+    } else if (name === "src" || name === "placeholder" || name === "value") {
+      el.setAttribute(name, value);
+    } else {
+      try { el.setAttribute(name, value); } catch {}
+    }
+  }
+
+  function applyPatch(p) {
+    switch (p.type) {
+      case "create": {
+        const el = elementForType(p.elementType);
+        el.classList.add(`hy-${p.elementType}`);
+        el.dataset.hyType = p.elementType;
+        el.dataset.nodeId = p.id;        // lets dispatch report its scope
+        for (const [k, v] of Object.entries(p.props || {})) applyProp(el, p.elementType, k, v);
+        nodes.set(p.id, el);
+        break;
+      }
+      case "insert":
+      case "attach": {
+        const el = nodes.get(p.id);
+        if (!el) break;
+        const parent = p.parentId === "root" ? appRoot : nodes.get(p.parentId);
+        if (!parent) break;
+        const before = p.beforeId ? nodes.get(p.beforeId) : null;
+        parent.insertBefore(el, before || null);
+        break;
+      }
+      case "move": {
+        const el = nodes.get(p.id);
+        const parent = p.parentId === "root" ? appRoot : nodes.get(p.parentId);
+        if (!el || !parent) break;
+        const before = p.beforeId ? nodes.get(p.beforeId) : null;
+        parent.insertBefore(el, before || null);
+        break;
+      }
+      case "setProp": {
+        const el = nodes.get(p.id);
+        if (el) applyProp(el, el.dataset.hyType, p.name, p.value);
+        break;
+      }
+      case "removeProp": {
+        const el = nodes.get(p.id);
+        if (el && p.name !== "0" && p.name !== "text") el.removeAttribute(p.name);
+        else if (el) el.textContent = "";
+        break;
+      }
+      case "remove": {
+        const el = nodes.get(p.id);
+        if (el) el.remove();
+        nodes.delete(p.id);
+        break;
+      }
+      case "detach": {
+        const el = nodes.get(p.id);
+        if (el) el.remove();           // keep in `nodes` for a later attach
+        break;
+      }
+    }
+  }
+
+  function applyPatches(patches) {
+    for (const p of patches || []) applyPatch(p);
+  }
+
+  // Event delegation: any rendered element carrying data-action dispatches it.
+  // The node id rides along as `sender` so the engine can resolve which
+  // module scope owns the action (several modules may share an action name).
+  appRoot.addEventListener("click", (e) => {
+    const target = e.target.closest("[data-action]");
+    if (target) dispatch(target.dataset.action, target.dataset.nodeId);
+  });
+
+  async function dispatch(name, sender) {
+    setErr("");
+    const r = await fetch("/dispatch", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ action: name, payload: {}, sender: sender || null }),
+    });
+    const body = await r.json();
+    if (body.error) setErr(body.error);
+    applyPatches(body.patches);        // incremental DOM update
+    refreshDebug(body.state);
+  }
+
+  function refreshDebug(state) {
+    if (state !== undefined) $("state").textContent = JSON.stringify(state, null, 2);
+  }
+
+  async function init() {
+    const meta = await (await fetch("/state")).json();
+    $("subtitle").textContent =
+      `module "${meta.scope}" — ${meta.actions.length} action(s)`;
+    refreshDebug(meta.state);
+
+    // Debug action buttons (work even without a UI template).
+    const actionsEl = $("actions");
+    actionsEl.innerHTML = "";
+    for (const a of meta.actions) {
+      const b = document.createElement("button");
+      b.textContent = a; b.style.marginRight = "6px";
+      b.onclick = () => dispatch(a);
+      actionsEl.appendChild(b);
+    }
+
+    // Declarative UI, if a --ui template was loaded: apply the full patch log.
+    const patches = await (await fetch("/patches")).json();
+    if (Array.isArray(patches) && patches.length) {
+      applyPatches(patches);
+      $("debug").open = false;
+    } else {
+      appRoot.innerHTML =
+        '<em style="color:#7a8290">No --ui template. Use the debug action buttons below.</em>';
+      $("debug").open = true;
+    }
+
+    // Live server push (SSE): the server re-renders the entry template on a
+    // `.hypen` hot reload (and on delayed effects) and streams the reconcile
+    // delta here, so an edit shows up without a manual refresh. Dispatch deltas
+    // are NOT streamed (they ride back in the /dispatch response), so applying
+    // every frame here can't double-apply.
+    try {
+      const es = new EventSource("/events");
+      es.onmessage = (e) => {
+        try { applyPatches(JSON.parse(e.data)); }
+        catch (err) { setErr("live update: " + err); }
+      };
+      es.onerror = () => { /* browser auto-reconnects; nothing to do */ };
+    } catch (err) {
+      // EventSource unavailable — polling via a refresh still works.
+    }
+  }
+
+  init().catch((e) => setErr(String(e)));
+</script>
+</body>
+</html>

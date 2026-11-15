@@ -1,0 +1,2 @@
+[workspace]
+members = ["src/components/Counter", "src/components/Timer"]

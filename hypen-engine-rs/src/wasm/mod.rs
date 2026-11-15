@@ -79,6 +79,12 @@ pub use js::*;
 // Server JS builds only (`js,device-broker`): the browser bundle omits them.
 #[cfg(all(target_arch = "wasm32", feature = "js", feature = "device-broker"))]
 pub mod js_device;
+// JS wrapper around the native `Engine` for the bridged-host workflow
+// (engine in wasm calls back into JS for module loading via jco).
+#[cfg(all(target_arch = "wasm32", feature = "module-loader-bridged"))]
+pub mod js_hosted;
+#[cfg(all(target_arch = "wasm32", feature = "module-loader-bridged"))]
+pub use js_hosted::*;
 
 // WASI bindings (C FFI)
 #[cfg(all(target_arch = "wasm32", feature = "wasi", not(feature = "js")))]

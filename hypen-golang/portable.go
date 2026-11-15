@@ -1,3 +1,7 @@
+//go:build !tinygo
+
+// Embeds the portable engine via the wazero WASM runtime, which does not
+// compile under TinyGo. Excluded from TinyGo builds (see wasm_engine.go).
 package core
 
 import (

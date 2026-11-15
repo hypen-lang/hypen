@@ -1,0 +1,4 @@
+# Bun test configuration for running `bun test` from this package directory.
+# (The repo-level run uses hypen-web/bunfig.toml, which lists the same preload.)
+[test]
+preload = ["./tests/_preload.ts"]

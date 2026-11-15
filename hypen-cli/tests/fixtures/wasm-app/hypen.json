@@ -1,0 +1,1 @@
+{ "components": "./src/components", "entry": "Counter", "outDir": "dist" }

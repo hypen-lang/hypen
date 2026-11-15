@@ -29,6 +29,12 @@ use crate::{
 
 // UniFFI scaffolding is set up in lib.rs
 
+// Native module host surface (wasmtime does not run inside wasm32 guests).
+#[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
+mod module_host;
+#[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
+pub use module_host::HypenModuleHost;
+
 /// Version information
 #[uniffi::export]
 pub fn version() -> String {
@@ -588,6 +594,8 @@ pub enum HypenError {
     ComponentError(String),
     #[error("Initialization error: {0}")]
     InitializationError(String),
+    #[error("Module host error: {0}")]
+    ModuleHostError(String),
 }
 
 impl From<crate::error::EngineError> for HypenError {
@@ -611,6 +619,7 @@ impl From<crate::error::EngineError> for HypenError {
             crate::error::EngineError::ExpressionError(msg) => {
                 HypenError::RenderError(format!("Expression error: {}", msg))
             }
+            crate::error::EngineError::ModuleError(msg) => HypenError::ModuleHostError(msg),
         }
     }
 }

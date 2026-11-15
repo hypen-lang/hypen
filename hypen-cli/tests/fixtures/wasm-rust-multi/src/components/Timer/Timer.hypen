@@ -1,0 +1,3 @@
+module Timer {
+ Text("Elapsed: @{state.elapsed}")
+}

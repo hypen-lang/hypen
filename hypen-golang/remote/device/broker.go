@@ -1,3 +1,10 @@
+//go:build !tinygo
+
+// The broker runtime embeds wazero, which does not compile under TinyGo.
+// The root package reaches this package only for the wire types (types.go)
+// via ../../device, so excluding this file keeps the authoring API
+// TinyGo-buildable for `hypen build --target wasm` (see ../../wasm_engine.go).
+
 package device
 
 // Go binding of the Rust device broker (RFC 001) over the WASI C ABI.

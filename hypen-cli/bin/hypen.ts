@@ -95,6 +95,8 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     --a11y          dev: print accessibility findings on every rebuild
     -o, --outDir    build: output directory (default: dist)
     --format        theme export: css, android, ios or all (default: all)
+    -t, --target    build: spa (default) or wasm (module components)
+    --keep-temp     build --target wasm: keep the intermediate build directory
     -m, --minify    build: minify (default on; ${dim("--no-minify")} to disable)
     -s, --sourcemap build: emit external source maps
     --no-open       studio/test: don't open a browser tab
@@ -111,6 +113,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${dim("$")} hypen dev --port 3000
     ${dim("$")} hypen dev --a11y
     ${dim("$")} hypen build --minify
+    ${dim("$")} hypen build --target wasm
     ${dim("$")} hypen check
     ${dim("$")} hypen check src/components/App/component.hypen
     ${dim("$")} hypen studio --port 5173
@@ -172,9 +175,12 @@ const COMMAND_HELP: Record<string, string> = {
     hypen build [options]
 
   ${boldYellow("Options:")}
+    -t, --target <t>    Build target: spa (default) or wasm
     -o, --outDir <dir>  Output directory (default: hypen.json "outDir", else dist)
     -m, --minify        Minify output (default: on; ${dim("--no-minify")} to disable)
     -s, --sourcemap     Emit external source maps
+    --keep-temp         With --target wasm: keep the intermediate build
+                        directory (<outDir>/.wasm-temp) for debugging
 
   ${boldYellow("Output:")} ${dim("(component projects)")}
     A static site: index.html, main.js, the engine WASM (no CDN at runtime)
@@ -184,9 +190,18 @@ const COMMAND_HELP: Record<string, string> = {
     Script-entry projects (hypen.json "entry": "./src/app.ts") get the entry
     bundled to dist/main.js instead (run with bun dist/main.js).
 
+  ${boldYellow("Output:")} ${dim("(--target wasm, component projects only)")}
+    <outDir>/wasm/: one <Module>.wasm component per stateful module, the
+    <Module>.hypen templates and an app.json manifest, runnable with
+    ${dim("hypen-runtime --app <outDir>/wasm/app.json")}. The language is detected
+    from the project: Cargo.toml (Rust, needs cargo + the wasm32-wasip2
+    target), go.mod (Go, needs tinygo + wit-bindgen-go), else TypeScript
+    (needs jco). --minify / --sourcemap do not apply.
+
   ${boldYellow("Examples:")}
     ${dim("$")} hypen build
     ${dim("$")} hypen build --outDir out --no-minify --sourcemap
+    ${dim("$")} hypen build --target wasm
 `,
   generate: `
   ${boldPink("hypen generate")} ${dim("-")} Generate component imports
@@ -794,14 +809,56 @@ async function devServer(options: { port?: number; debug?: boolean; a11y?: boole
 }
 
 /**
- * Build for production
+ * Build for production.
+ *
+ * The default target is the in-process browser SPA bundle. `--target wasm`
+ * builds the *portable* target instead: one `.wasm` Component per stateful
+ * module + the declarative `.hypen` UI assets + an `app.json` manifest,
+ * runnable offline via `hypen-runtime --app`. Same authoring API, different
+ * artifact shape — selected by the target, not a new noun (see
+ * `wit/AUTHORING_MODEL.md`).
  */
 async function buildProject(options: {
+  target?: string;
   outDir?: string;
   minify?: boolean;
   sourcemap?: boolean;
+  keepTemp?: boolean;
 }) {
   const config = await loadConfig();
+
+  const target = (options.target || "spa").toLowerCase();
+  if (target === "wasm") {
+    // The wasm build discovers modules from the components directory; a
+    // server-based project registers them programmatically in its entry
+    // script, so there is nothing for it to componentize.
+    if (isScriptEntry(config.entry)) {
+      console.error(
+        `\n  \`hypen build --target wasm\` needs a component project ` +
+          `(hypen.json "entry" naming a component); "${config.entry}" is a script entry.\n`
+      );
+      process.exit(1);
+    }
+    const { buildWasm } = await import("../src/build-wasm.js");
+    try {
+      await buildWasm({
+        components: config.components,
+        entry: config.entry,
+        outDir: options.outDir || config.outDir || "dist",
+        keepTemp: options.keepTemp ?? false,
+      });
+    } catch (err: any) {
+      // Toolchain failures (missing tinygo/cargo/jco, a failed compile) are
+      // expected errors: report the message, not a stack trace.
+      console.error(`\n  Error: ${err?.message ?? err}\n`);
+      process.exit(1);
+    }
+    return;
+  }
+  if (target !== "spa") {
+    console.error(`\n  Unknown build target: "${target}" (expected "spa" or "wasm")\n`);
+    process.exit(1);
+  }
 
   // Server-based projects: bundle the entry script (deps stay external so
   // the output runs against the project's node_modules) instead of the
@@ -1660,6 +1717,8 @@ try {
       a11y: { type: "boolean" },
       "studio-port": { type: "string" },
       format: { type: "string" },
+      target: { type: "string", short: "t" },
+      "keep-temp": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -1759,9 +1818,11 @@ switch (command) {
 
   case "build":
     await buildProject({
+      target: values.target,
       outDir: values.outDir,
       minify: values.minify,
       sourcemap: values.sourcemap,
+      keepTemp: values["keep-temp"],
     });
     break;
 

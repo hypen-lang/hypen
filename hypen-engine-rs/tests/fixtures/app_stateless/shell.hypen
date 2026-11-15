@@ -1,0 +1,9 @@
+module Shell {
+    Column {
+        Banner()
+        Text("Count: @{state.count}")
+        Button("@actions.increment") {
+            Text("+1")
+        }
+    }
+}

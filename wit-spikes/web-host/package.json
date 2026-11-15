@@ -1,0 +1,22 @@
+{
+  "name": "hypen-wit-spike-web-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "transpile": "jco transpile ../stub-module/target/wasm32-wasip2/release/hypen_stub_module.wasm -o transpiled --name stub-module --no-typescript --instantiation",
+    "test:node": "node src/run.mjs",
+    "test:browser": "bun scripts/test-browser.mjs",
+    "test:bridged": "node src/bridged-test.mjs",
+    "test:serve-ui": "bun scripts/test-serve-ui.mjs",
+    "test:transpile": "node scripts/test-transpile.mjs",
+    "test:http-gate": "node scripts/test-http-gate.mjs",
+    "test": "bun run test:node && bun run test:localstore && bun run test:transpile && bun run test:http-gate && bun run test:browser && bun run test:bridged",
+    "serve": "bun scripts/serve.mjs",
+    "test:localstore": "node scripts/test-localstore.mjs"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "^1.13.0",
+    "playwright": "^1.56.0"
+  }
+}
