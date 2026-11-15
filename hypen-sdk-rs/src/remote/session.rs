@@ -2038,6 +2038,52 @@ impl RemoteSession {
         }
     }
 
+    /// Suspend this session in `manager` when its last connection drops:
+    /// one call that keeps everything a returning client should get back —
+    /// the primary module's state and, when the session has a theme, its
+    /// scheme preference. Pair it with [`resume_from`](Self::resume_from).
+    ///
+    /// Fires the `on_disconnect` handler first when `manager` still has the
+    /// session active. Returns `false` (and keeps nothing) when it does not.
+    ///
+    /// ```rust,ignore
+    /// // On disconnect:
+    /// session.suspend_in(&manager, &id, || { /* expired */ });
+    ///
+    /// // On reconnect:
+    /// if let Some(pending) = manager.resume_session(&id) {
+    ///     let session = RemoteSession::connect(def, components, transport).with_theme(&app_theme);
+    ///     session.resume_from(&pending);
+    /// }
+    /// ```
+    pub fn suspend_in<F>(&self, manager: &super::SessionManager, id: &str, on_expire: F) -> bool
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        if let Some(info) = manager.get_active_session(id) {
+            self.fire_disconnect(&info);
+        }
+        manager.suspend_session_with_theme(id, self.get_state(), self.theme_preference(), on_expire)
+    }
+
+    /// Bring a rebuilt session back to where its client left it: restore
+    /// the theme's scheme preference, then run the reconnect step
+    /// ([`fire_reconnect`](Self::fire_reconnect)) with the saved state. Call
+    /// it right after construction (and `with_theme`), before the hello, so
+    /// the first frame is already in the user's scheme.
+    ///
+    /// A saved preference the theme no longer knows is ignored, leaving the
+    /// session on the app theme's own preference.
+    pub fn resume_from(&self, pending: &super::PendingSession) {
+        if let (Some(theme), Some(preference)) = (self.theme(), pending.theme_preference.as_deref())
+        {
+            if let Err(err) = theme.set_scheme(preference) {
+                log::warn!("resume: saved theme preference ignored: {err}");
+            }
+        }
+        self.fire_reconnect(&pending.info, &pending.saved_state);
+    }
+
     /// Fire the `on_expire` handler. Call this from the
     /// [`SessionManager`] suspension's `on_expire` callback when the TTL
     /// elapses without a reconnect.

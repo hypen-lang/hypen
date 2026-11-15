@@ -175,7 +175,7 @@ engine.setColorScheme("light"); // when the platform's appearance changes
 
 The Android, iOS and desktop preview clients report the device's scheme the same way, and the Go client takes it as an option.
 
-On the wire that is `hello.colorScheme` and a `{ "type": "colorScheme", "scheme": "light" | "dark" }` message; servers without a theme ignore both. The TypeScript, Go, Kotlin and Rust servers all read them. A session resumed within its TTL keeps its scheme preference; in the Rust SDK, where the host constructs sessions, pass it back with `suspend_session_with_theme` and `with_theme_preference`. An explicit `setScheme` in a handler still wins until the session goes back to `"system"`.
+On the wire that is `hello.colorScheme` and a `{ "type": "colorScheme", "scheme": "light" | "dark" }` message; servers without a theme ignore both. The TypeScript, Go, Kotlin and Rust servers all read them. A session resumed within its TTL keeps its scheme preference. An explicit `setScheme` in a handler still wins until the session goes back to `"system"`.
 
 ## Aliases
 
@@ -220,4 +220,4 @@ The scheme preference is not stored for you in the browser; save `theme.preferen
 
 - On Linux under X11 the desktop preview client cannot read the system scheme, so it reports nothing there; a `"system"` preference then resolves to the theme's `systemScheme` (default `light`) until a handler calls `setSystemScheme`.
 - `hypen check` does not validate scheme names used as value-map keys against the theme file, so a misspelt scheme (or breakpoint) silently falls back to `default`.
-- In the Rust SDK the host constructs sessions, so it passes a resumed session's scheme preference back itself (`suspend_session_with_theme`, `with_theme_preference`).
+- In the Rust SDK the host suspends and resumes sessions itself; the scheme preference is kept when it does so with `session.suspend_in(…)` and `session.resume_from(…)`.

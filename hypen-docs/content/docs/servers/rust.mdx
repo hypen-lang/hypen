@@ -722,7 +722,20 @@ if let Some(theme) = ctx.and_then(|c| c.theme()) {
 }
 ```
 
-A handler runs while the engine is locked, so a scheme switch made in one is applied when the dispatch finishes, together with its state changes. The session reads the client's reported system scheme itself. Because the host constructs sessions, it carries the preference across a resume: `suspend_session_with_theme(…, session.theme_preference(), …)` on disconnect and `with_theme_preference(&theme, pending.theme_preference.as_deref())` on resume.
+A handler runs while the engine is locked, so a scheme switch made in one is applied when the dispatch finishes, together with its state changes. The session reads the client's reported system scheme itself. The host constructs sessions in this SDK, so it also suspends and resumes them. Do both through the session and the scheme preference travels with the saved state:
+
+```rust
+// Last connection dropped
+session.suspend_in(&manager, &id, || { /* expired */ });
+
+// Client came back
+if let Some(pending) = manager.resume_session(&id) {
+    let session = RemoteSession::connect(def, components, transport).with_theme(&theme);
+    session.resume_from(&pending); // preference + saved state, before the hello
+}
+```
+
+A host that calls `SessionManager::suspend_session` and `fire_reconnect` directly keeps the state but not the preference; `suspend_session_with_theme` and `with_theme_preference` are the lower-level pieces.
 
 See the [Theming guide](/docs/guide/theming) for tokens, schemes, aliases and the theme file.
 

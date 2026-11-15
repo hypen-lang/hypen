@@ -772,6 +772,42 @@ fn a_resumed_session_keeps_its_scheme_preference() {
 }
 
 #[test]
+fn suspend_in_and_resume_from_carry_state_and_preference_without_theme_code() {
+    use hypen_server::remote::SessionManagerConfig;
+
+    let theme = make_theme();
+    let manager = SessionManager::new(SessionManagerConfig::default());
+    let info = manager.create_session(Default::default());
+
+    let first = themed_session(&theme);
+    first.handle_message(&hello(json!("light")));
+    first.theme().unwrap().set_scheme("dark").unwrap();
+    let saved_state = first.get_state();
+    assert!(first.suspend_in(&manager, &info.id, || {}));
+    // Nothing to suspend twice.
+    assert!(!first.suspend_in(&manager, &info.id, || {}));
+    drop(first);
+
+    let pending = manager.resume_session(&info.id).expect("still pending");
+    let resumed = themed_session(&theme);
+    resumed.resume_from(&pending);
+    assert_eq!(resumed.theme_preference().as_deref(), Some("dark"));
+    assert_eq!(resumed.get_state(), saved_state);
+    // The first frame is already dark although the client reports light.
+    let replies = resumed.handle_message(&hello(json!("light")));
+    let tree = patches_of(&replies, "initialTree");
+    assert!(has_prop(&tree, "0", json!("dark")), "{tree:#?}");
+    assert_eq!(theme.preference(), "system");
+
+    // A session without a theme resumes its state and nothing else.
+    assert!(resumed.suspend_in(&manager, &info.id, || {}));
+    let pending = manager.resume_session(&info.id).expect("still pending");
+    let plain = RemoteSession::from_definition(session_def(), ComponentRegistry::new());
+    plain.resume_from(&pending);
+    assert_eq!(plain.theme_preference(), None);
+}
+
+#[test]
 fn an_expired_suspension_drops_the_preference() {
     use hypen_server::remote::SessionManagerConfig;
     use std::time::Duration;
