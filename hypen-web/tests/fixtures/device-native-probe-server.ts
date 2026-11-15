@@ -11,6 +11,8 @@ const module = app.defineState({ result: "waiting" })
   }).build();
 const server = new RemoteServer().module("App", module)
   .ui('Text("@{state.result}")')
+  // The native client calls `probe` programmatically; no control renders it.
+  .clientActions("probe")
   .config({ hostname: "127.0.0.1", webClient: false,
     authenticate: (request: Request) => request.headers.get("authorization") === "Bearer native-probe" })
   .enableDevice();

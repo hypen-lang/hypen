@@ -474,8 +474,15 @@ Examples: ${COMPONENTS.length} components, ${APPLICATORS.length} applicators
 
         const msg = JSON.parse(message.toString());
 
-        if (msg.type === "dispatchAction") {
-          clientData.engine.dispatchAction(msg.action, msg.payload);
+        if (msg.type === "dispatchAction" && typeof msg.action === "string") {
+          // The client is untrusted: resolve what it sent as a UI envelope
+          // (a bare name becomes a node-less one) so only an action bound on
+          // a rendered node runs, then dispatch the engine-validated handler.
+          const envelope = msg.action === "__hypen_dispatch"
+            ? msg.payload
+            : { action: msg.action, ...(msg.payload === undefined ? {} : { payload: msg.payload }) };
+          const resolved = clientData.engine.resolveUIAction("__hypen_dispatch", envelope);
+          clientData.engine.dispatchAction(resolved.name, resolved.payload);
         }
       } catch (error) {
         console.error("Error handling WebSocket message:", error);

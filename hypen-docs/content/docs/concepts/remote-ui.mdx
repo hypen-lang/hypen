@@ -121,6 +121,20 @@ The [Web](/docs/adapters/web), [Android](/docs/adapters/android), and
 client changes between local and remote mode — layout, hit-testing,
 accessibility, and IME all work unchanged.
 
+## Which Actions a Client Can Run
+
+The client is untrusted, so the server does not take its word for which action to run. A client can dispatch an action only while a control bound to it (`@actions.save`) is rendered for its session; an action behind an `If` that is currently false, or on a route that is not on screen, is refused. Two-way binds and drag-and-drop writes are accepted only from the node that declares them, and `router.*` navigation is always allowed.
+
+If client code calls an action that has no control on screen — a keyboard shortcut, a timer, a custom back action — name it on the server:
+
+```typescript
+new RemoteServer()
+  .module("App", app)
+  .clientActions("refresh", "navigateBack");
+```
+
+List only actions that are safe for any connected client to call at any time. The other server SDKs have the same option: `AllowClientActions(...)` (Go), `allowClientActions(...)` (Kotlin, Swift) and `RemoteSession::allow_client_actions(...)` (Rust). Payloads are still supplied by the client, so validate them in the handler.
+
 ## Sessions
 
 Sessions are identified by a `sessionId` issued in `SessionAck`. Clients replay

@@ -210,6 +210,11 @@ class DeviceWebSocketE2ETest {
             allowedOrigins("http://app.e2e")
             authenticate { it.header("Authorization") == "Bearer e2e" }
             // No device call: the device plane is on by default.
+            // The client calls these programmatically; no control renders them.
+            allowClientActions(
+                "e2eSupports", "e2eQuery", "e2eQueryMic", "e2ePick", "e2eSave", "e2eScan",
+                "e2eRecord", "e2eSlowPick", "e2eCancelPick", "e2eSlowRequest",
+            )
         }
         NettyHypenWebSocketServer(server).use { ws ->
             val proc = ProcessBuilder(bun, "run", script.path, ws.url)

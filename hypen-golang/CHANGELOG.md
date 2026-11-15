@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- **Client actions need a rendered binding.** `RemoteSession` resolves every action a client sends through the engine's client check: it runs only if bound on a node rendered for that session; bare names of unrendered actions, `__hypen_scoped:*` names and `__hypen_bind`/`__hypen_reorder`/`__hypen_pin` by name are refused. The map-style `OnAction` shim runs only actions the engine reports as bound (`ErrUIActionUnhandled`). New `RemoteServer.AllowClientActions(names...)` names actions a client may call without a rendered control. Requires the bundled `hypen_engine.wasm` from this release.
+
 ### Changed (quick-start fixes)
 - **`RemoteServer.Listen` now blocks** until `Stop()` (like
   `http.ListenAndServe`), so a `main` that ends with `.Listen(3000)` keeps

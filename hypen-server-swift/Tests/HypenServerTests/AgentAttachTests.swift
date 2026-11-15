@@ -175,6 +175,32 @@ final class AgentAttachTests: XCTestCase {
         XCTAssertEqual(count(allowed, "wiped"), 0)
     }
 
+    /// The untyped `onAction` shim keeps its own handler table, so the
+    /// engine only authorises: the shim runs an action the tree binds and
+    /// nothing else.
+    func testLegacyShimNeedsARenderedBindingToo() throws {
+        let seen = TestCounter<[String]>([])
+        let server = RemoteServer()
+            .withState("Cart", ["total": 0])
+            .onAction { name, _, state in
+                seen.set(seen.current + [name])
+                return state
+            }
+            .ui(Self.cartTemplate)
+        try server.prepare()
+        defer { server.stop() }
+        let transport = RecordingTransport()
+        let session = try server.createSession(transport: transport, helloGraceMs: nil)
+        session.receive("{\"type\":\"hello\"}")
+        XCTAssertTrue(session.isReady)
+
+        for name in ["addToCart", "wipe", "__hypen_scoped::wipe", "__hypen_scoped::addToCart", "__hypen_bind"] {
+            session.receive("{\"type\":\"dispatchAction\",\"action\":\"\(name)\",\"payload\":{\"path\":\"total\",\"value\":9}}")
+        }
+        XCTAssertEqual(seen.current, ["addToCart"])
+        XCTAssertEqual(session.currentState()["total"] as? Int, 0)
+    }
+
     // MARK: - Attach lookup
 
     func testAttachReturnsHandleForReadySession() throws {
