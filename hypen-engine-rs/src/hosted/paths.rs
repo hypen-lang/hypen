@@ -181,6 +181,9 @@ pub(crate) fn collect_sparse_changes(
 ) {
     use serde_json::Value;
     let mut current = state;
+    // Byte offset just past the segments walked so far, counting the `.`
+    // after each: `end - 1` is always a segment boundary inside `path` (so a
+    // valid slice point), whatever the host put in the path.
     let mut end: usize = 0;
     for segment in path.split('.') {
         let index = match current {

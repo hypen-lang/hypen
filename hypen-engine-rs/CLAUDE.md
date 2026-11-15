@@ -11,7 +11,7 @@ This file provides guidance to Claude Code when working with the Hypen engine cr
 ```
 hypen-engine-rs/src/
 ├── lib.rs                    # Public API exports
-├── engine.rs                 # Engine struct — main orchestrator
+├── engine.rs                 # Engine struct — main orchestrator (EngineCore + HostedModules; module-instance methods delegate to hosted/)
 ├── error.rs                  # EngineError type
 ├── state.rs                  # StateChange notifications
 ├── render.rs                 # Dirty node rendering logic
@@ -58,8 +58,20 @@ hypen-engine-rs/src/
 ├── serialize/                # Remote UI Protocol
 │   └── remote.rs             # Initial tree & incremental patch serialization
 │
+├── hosted/                   # Engine-side half of module hosting: everything `Engine` keeps for hosted (WASM-backed) scopes
+│   ├── mod.rs                # HostedModules (owned by Engine) + EngineCtx (the engine parts it works on); contract docs; register/rewire/destroy, UI + trusted dispatch, host-write notification
+│   ├── names.rs              # ScopeName (lowercased, validated once), ActionSet (Named | Wildcard, `accepts`)
+│   ├── registry.rs           # Instance table, ModuleGrants (public) -> Grants (normalized), wire/unwire of the core's routing records
+│   ├── cascade.rs            # Work queue, depth cap + budget, drain loop, the host call (`invoke`)
+│   ├── fold.rs               # Applying one ReducerOutput: state -> subscriptions -> effects -> follow-ups
+│   ├── subscriptions.rs      # Cross-module subscriptions, who a change notifies
+│   ├── snapshots.rs          # Encoded-state cache lent to host calls (Weak-identity invalidation)
+│   ├── paths.rs              # Changed-path collection (replace / merge / sparse) + paths_overlap
+│   ├── report.rs             # CascadeReport / CascadeFailure / FailureCause / Origin and their rendering
+│   └── tests.rs              # Subsystem tests: HostedModules + bare EngineCore + scripted host, no Engine
+│
 ├── module_host/              # WASM Component module hosting (`hypen:module`, see /wit/ENGINE_INTEGRATION.md)
-│   ├── mod.rs                # ModuleHost trait + value types (always compiled; Engine holds Option<Box<dyn ModuleHost>>)
+│   ├── mod.rs                # ModuleHost trait + value types (always compiled; `hosted::HostedModules` holds Option<Box<dyn ModuleHost>>)
 │   ├── registry.rs           # ModuleRegistry / BundledRegistry
 │   ├── kv.rs                 # Storage backend shared by the wasmtime hosts: per-module `local` partitions, quotas, per-call flush (module-loader)
 │   ├── wasmtime_host.rs      # WasmtimeHost: v0.1 sync world; also ModuleLimits, HostCore (engine + epoch ticker + tokio runtime), TotalMemoryLimiter (module-loader, native only)
@@ -220,6 +232,7 @@ cargo test --features runtime-bin --test test_hypen_runtime   # builds + drives 
 cargo test --features uniffi,module-loader --test test_uniffi_host
 cargo test --test test_module_host_routing   # engine-side routing with a mock host, default features
 cargo test --test test_module_host_cascade   # reducer-output fold (ACLs, cascade queue, state, teardown), mock host
+cargo test --lib hosted::                    # the subsystem without an Engine: bad paths, failure report, names, snapshots, paths
 ```
 
 Module-host sandbox (both wasmtime hosts; details in the `wasmtime_host.rs` / `kv.rs` module docs):
@@ -238,12 +251,31 @@ one scope handles). A resolved scoped name owned by a hosted instance drives tha
 else the closure dispatcher. There is no `scope:action` qualifier and no sender-node shortcut;
 trusted embedder code (REPL, timers, tests) uses `Engine::dispatch_module_action(scope, name, payload)`.
 
+The hosted-module subsystem is `src/hosted/` (`HostedModules`, one field of `Engine`; the `Engine`
+module-instance methods are delegations). It never takes `&mut Engine`: each call gets an `EngineCtx`
+(`&mut EngineCore`, the closure `ActionDispatcher`, a `PatchSink`), so it is driven in unit tests
+(`src/hosted/tests.rs`) with a scripted `ModuleHost` and no `Engine`.
+
 Folding a reducer output (`dispatch`, `on_activated`, `on_deactivated`) never routes by string:
 `emit` stays in the emitting scope, cross-dispatch and `subscribe` are re-checked against the
 `ModuleGrants` given at `register_module_instance`, and follow-ups drain from a FIFO queue bounded
 by `MAX_CASCADE_DEPTH` and `Engine::module_dispatch_budget` (a failed follow-up is collected and
 reported after the queue is empty). The scope's state is replaced wholesale with what the reducer
-returned; the old/new comparison only yields the changed paths to invalidate.
+returned; the old/new comparison only yields the changed paths to invalidate. Fold order: state
+(unusable state rejects the whole output) -> requested subscriptions -> effects -> follow-ups
+(`emit`, cross-dispatch, subscriber notifications).
+
+Types carry the invariants: a `ScopeName` (lowercase, non-empty, no `:`, not `__hypen_*`) and an
+`ActionSet` are built once in `register`/`rewire` and nothing downstream re-validates or
+re-lowercases; every queued item has an `Origin` (`Root`, `Lifecycle`, `Emit`, `CrossDispatch { from }`,
+`SubscriptionChange { target, path }`); every refusal/failure is a `CascadeFailure { scope, action,
+origin, cause: FailureCause }` in a `CascadeReport`. The public error type is unchanged — the report
+is rendered into `EngineError::ModuleError` (one line per failure; an ACL refusal names the grant to
+add), a failing root keeps its variant (`ModuleError` / `StateError`) — and the structured report of
+the most recent cascade is `Engine::last_module_cascade_report()` (also the only place the failures
+of a host write's subscriber notifications surface, since `update_state*` return nothing).
+A follow-up payload must be JSON: empty means `null`, anything else malformed is refused and
+reported (`FailureCause::PayloadNotJson`), not delivered.
 
 ## Key Dependencies
 
