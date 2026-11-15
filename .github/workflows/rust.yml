@@ -12,6 +12,11 @@ on:
       # `bindgen!` over ../wit (v0.1) and ../wit-v0_2 (v0.2, CM-async).
       - "wit/**"
       - "wit-v0_2/**"
+      # Vendored copies of that contract (scripts/sync-wit.sh --check below).
+      - "hypen-cli/wit/**"
+      - "hypen-cli/wit-v0_2/**"
+      - "hypen-cli/wit-tinygo/**"
+      - "scripts/sync-wit.sh"
       - "engine-compatibility-tests/schema/device/**"
       - "engine-compatibility-tests/fixtures/device/**"
       - ".github/workflows/rust.yml"
@@ -26,6 +31,11 @@ on:
       # `bindgen!` over ../wit (v0.1) and ../wit-v0_2 (v0.2, CM-async).
       - "wit/**"
       - "wit-v0_2/**"
+      # Vendored copies of that contract (scripts/sync-wit.sh --check below).
+      - "hypen-cli/wit/**"
+      - "hypen-cli/wit-v0_2/**"
+      - "hypen-cli/wit-tinygo/**"
+      - "scripts/sync-wit.sh"
       - "engine-compatibility-tests/schema/device/**"
       - "engine-compatibility-tests/fixtures/device/**"
       - ".github/workflows/rust.yml"
@@ -127,6 +137,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # hypen-cli vendors the `hypen:module` WIT for its published package;
+      # /wit and /wit-v0_2 are the source of truth. Fails on drift.
+      - name: Check vendored WIT copies are in sync
+        run: bash scripts/sync-wit.sh --check
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt

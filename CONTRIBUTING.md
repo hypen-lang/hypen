@@ -112,6 +112,18 @@ For docs work:
 > `git restore -- '*bun.lock'`, or use `bun install --frozen-lockfile` to see
 > whether a lockfile is out of date. Lockfile refreshes belong in their own PR.
 
+#### WIT contract (`hypen:module`)
+
+```bash
+# Edit only wit/ (v0.1) or wit-v0_2/ (v0.2). hypen-cli vendors copies for its
+# published package (hypen-cli/wit, wit-v0_2, wit-tinygo); regenerate them:
+scripts/sync-wit.sh
+scripts/sync-wit.sh --check   # CI (Rust › Format) and hypen-cli's bun test run this
+```
+
+If the contract itself changed, also rebuild the engine's `.wasm` test
+fixtures (`hypen-engine-rs/tests/fixtures/README.md`).
+
 #### Go SDK
 
 ```bash

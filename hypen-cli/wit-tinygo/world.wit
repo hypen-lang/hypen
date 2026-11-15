@@ -192,6 +192,11 @@ world module-x {
     import hypen:engine/state@0.1.0;
 }
 
+// ==== TINYGO-ONLY BELOW (hypen-cli-owned) ====
+// Everything above this marker is generated from /wit/hypen-module.wit by
+// scripts/sync-wit.sh — edit /wit, then re-run the script. Everything from
+// the marker down is owned here and preserved verbatim by the script.
+
 /// Go-specific world: `module` exports + every wasi:cli/* / wasi:io/* /
 /// wasi:clocks/* / wasi:filesystem/* / wasi:random/* import that TinyGo's
 /// preview2 adapter brings in for the Go runtime. Not part of the

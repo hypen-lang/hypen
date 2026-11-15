@@ -31,7 +31,10 @@ hypen-cli/
 │   ├── dev.test.ts           # Dev server tests
 │   ├── device.test.ts        # Android/iOS runner tests
 │   ├── skills.test.ts        # Skill installation tests
-│   └── studio.test.ts        # Studio command tests
+│   ├── studio.test.ts        # Studio command tests
+│   └── wit-sync.test.ts      # vendored WIT == canonical (scripts/sync-wit.sh --check)
+├── wit/, wit-v0_2/           # GENERATED from /wit, /wit-v0_2 by scripts/sync-wit.sh — do not edit
+├── wit-tinygo/               # /wit + TinyGo-owned `tinygo-module` world & WASI deps (see its README.md)
 ├── build.ts                  # Bun.build() script
 └── package.json
 ```

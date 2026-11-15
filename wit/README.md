@@ -20,6 +20,21 @@ wit/
         └── storage.wit           package hypen:storage@0.1.0
 ```
 
+### One source of truth
+
+`wit/` (v0.1) and [`wit-v0_2/`](../wit-v0_2/) (v0.2) are canonical — the
+engine's `bindgen!` and the fixture modules read them directly. The CLI
+package vendors copies (`hypen-cli/wit/`, `hypen-cli/wit-v0_2/`, and
+`hypen-cli/wit-tinygo/`, which adds TinyGo's `tinygo-module` world and the
+WASI 0.2.0 deps it needs) because the published package has no repo root.
+Never edit those copies: edit `wit/` or `wit-v0_2/`, run
+`scripts/sync-wit.sh` to regenerate them, and if the contract changed,
+rebuild the engine's `.wasm` fixtures
+(`hypen-engine-rs/tests/fixtures/README.md`). `scripts/sync-wit.sh --check`
+fails on drift; CI (Rust › Format) and `hypen-cli/tests/wit-sync.test.ts`
+run it. The TinyGo-only parts of `wit-tinygo/` are listed in the script's
+`TINYGO_OWNED` table and `hypen-cli/wit-tinygo/README.md`.
+
 `hypen-module.wit` is the root package: what every Hypen module *exports*
 (reducer ABI + lifecycle) and which capabilities it *imports*.
 

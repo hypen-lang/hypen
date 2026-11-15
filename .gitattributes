@@ -1,3 +1,11 @@
 # Compiled WebAssembly (engine builds, test fixtures such as
 # hypen-engine-rs/tests/fixtures/*.wasm): never text-convert, diff or merge.
 *.wasm binary
+
+# Vendored copies of the `hypen:module` WIT contract, generated from /wit and
+# /wit-v0_2 by scripts/sync-wit.sh (CI fails on drift). Edit the canonical
+# dirs, not these. wit-tinygo/ also holds TinyGo-owned files (its README.md).
+hypen-cli/wit/** linguist-generated=true
+hypen-cli/wit-v0_2/** linguist-generated=true
+hypen-cli/wit-tinygo/** linguist-generated=true
+hypen-cli/wit-tinygo/README.md linguist-generated=false
