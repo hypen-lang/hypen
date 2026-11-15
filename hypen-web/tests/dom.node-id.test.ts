@@ -71,6 +71,22 @@ describe("DOM renderer: node ids", () => {
     expect(render({ stampNodeIds: false }).el("r1").dataset.hypenId).toBeUndefined();
   });
 
+  test("Route elements keep the attribute: web-engine <= 0.6.7 reads it for lazy routes", () => {
+    const container = document.createElement("div");
+    const renderer = new DOMRenderer(container, { dispatchAction() {} } as unknown as Engine);
+    renderer.applyPatches([
+      p({ type: "create", id: "route-1", elementType: "Route", props: { path: "/a" } }),
+      p({ type: "insert", parentId: "root", id: "route-1" }),
+      p({ type: "create", id: "plain", elementType: "Column", props: {} }),
+      p({ type: "insert", parentId: "route-1", id: "plain" }),
+    ]);
+    const route = renderer.getNode("route-1") as unknown as FakeElement;
+    expect(route.dataset.hypenId).toBe("route-1");
+    expect(getNodeId(route)).toBe("route-1");
+    // …and only routes.
+    expect((renderer.getNode("plain") as unknown as FakeElement).dataset.hypenId).toBeUndefined();
+  });
+
   test("elements the renderer did not create have no id", () => {
     expect(getNodeId(document.createElement("div"))).toBeUndefined();
     expect(getNodeId(null)).toBeUndefined();

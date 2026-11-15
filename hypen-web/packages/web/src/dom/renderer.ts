@@ -112,6 +112,17 @@ function setElementText(element: HTMLElement, text: string): void {
 }
 
 const ACTIONABLE_TYPES = new Set(["button", "link", "card"]);
+
+/**
+ * `Route` elements always carry `data-hypen-id`, whatever `stampNodeIds`
+ * says. `@hypen-space/web-engine` up to 0.6.7 read a lazy route's node id
+ * from that attribute and threw without it, and its dependency range
+ * accepts this package's later versions — so an app that updates
+ * `@hypen-space/web` alone must keep rendering its lazy routes. Routes are
+ * a handful per app, so this costs nothing where the attribute mattered
+ * (one write per element of every list row).
+ */
+const ROUTE_TYPE = "route";
 const HORIZONTAL_DEMAND_PROP = /^(?:width|size|fillMaxWidth|fillMaxSize|horizontalAlignment|horizontalAlign|justifyContent|alignSelf|weight|flex|flexGrow|orientation)(?:\.|$)/;
 
 /**
@@ -1304,7 +1315,7 @@ export class DOMRenderer {
     for (let i = 0; i < elements.length; i++) {
       const element = elements[i];
       setNodeId(element, ids[i]);
-      if (stamp) element.dataset.hypenId = ids[i];
+      if (stamp || types[i] === ROUTE_TYPE) element.dataset.hypenId = ids[i];
       // No `setEngine` per node: `getEngine` resolves through the mounted
       // ancestors, and the per-element WeakMap write was ~17k per create.
       this.nodes.set(ids[i], element);
@@ -1453,7 +1464,9 @@ export class DOMRenderer {
 
     element.dataset.hypenType = elementType.toLowerCase();
     setNodeId(element, id);
-    if (this.stampNodeIds) element.dataset.hypenId = id;
+    if (this.stampNodeIds || element.dataset.hypenType === ROUTE_TYPE) {
+      element.dataset.hypenId = id;
+    }
     setEngine(element, this.engine);
 
     // Slot marker: `.slot("name")` lowers to the `slot.0` prop. The engine
