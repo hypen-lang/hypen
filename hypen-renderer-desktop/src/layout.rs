@@ -1555,6 +1555,31 @@ impl TaffyState {
             .any(|(src, had)| crate::paint::image::loaded_natural_size(src).is_some() != *had)
     }
 
+    /// Whether an image fetch landed since the last compute that changes
+    /// a style this state built — one resolved on the ABSENCE of that
+    /// image's natural size (a `w-full` hero in a content-sized Stack, an
+    /// Image with only one axis set). The window's layout cache key only
+    /// covers tree / viewport / interaction inputs, so without this check
+    /// the `AppEvent::Wake` an image load sends only repainted the cached
+    /// layout: the Food restaurant hero stayed as wide as its button bar
+    /// (112px) until some unrelated patch forced a relayout.
+    pub fn media_intrinsics_stale(&mut self) -> bool {
+        let generation = crate::paint::image::image_load_generation();
+        if generation == self.image_load_generation {
+            return false;
+        }
+        self.drain_media_size_probes();
+        if self.media_sizes_changed() {
+            // Left for `compute_inner_state`, which rebuilds on it.
+            return true;
+        }
+        // Nothing this state styled depends on the landed fetches: absorb
+        // the generation (as `compute_inner_state` would) so later frames
+        // skip the probe scan.
+        self.image_load_generation = generation;
+        false
+    }
+
     /// Number of bulk Taffy rebuilds this state has performed.
     #[cfg(test)]
     pub(crate) fn bulk_rebuilds(&self) -> u64 {
@@ -4278,14 +4303,26 @@ where
 /// Taffy 0.10's `TaffyTree` has no calc resolver (`resolve_calc_value`
 /// returns 0), so the style carries the percentage part as a provisional
 /// width (see `apply_size_props`). After a layout the parent's content-box
-/// width is known; write the exact `P% × width ± L` as a definite length
-/// and let the caller relayout. The node's own min / max still clamp on
-/// top and `alignSelf` places the resolved box, exactly as in CSS — the
-/// MovieDB search field (`calc(100% - 40px)`, `alignSelf(center)`) and the
-/// News tab bar (`calc(100% - 32px)`) were content-width pills without it.
+/// width is known, and the exact `P% × width ± L` is written back — as an
+/// equivalent PERCENTAGE of that width, never as a definite length. The
+/// node's own min / max still clamp on top and `alignSelf` places the
+/// resolved box, exactly as in CSS — the MovieDB search field
+/// (`calc(100% - 40px)`, `alignSelf(center)`) and the News tab bar
+/// (`calc(100% - 32px)`) were content-width pills without it.
 ///
-/// Idempotent: a node whose width already equals the resolved length is
-/// left alone, so a steady frame costs no extra relayout.
+/// Why a percentage: CSS resolves a percentage width against an
+/// indefinite containing block as `auto` for intrinsic sizing, so a
+/// content-sized parent (Button, Stack grid, a Row child) sizes from the
+/// child's CONTENT and the calc then applies inside that box. Taffy does
+/// the same for percentages, but a definite length would be the child's
+/// intrinsic contribution: the parent would shrink to the resolved width,
+/// the next pass would subtract `L` again, and the box would lose `L` on
+/// every relayout until it reached zero. A percentage of the parent's
+/// width cannot feed back into that width, so repeated passes are stable
+/// and a resize simply re-derives the fraction.
+///
+/// Idempotent: a node whose fraction already matches is left alone, so a
+/// steady frame costs no extra relayout.
 fn apply_calc_widths(
     taffy: &mut TaffyTree<NodeContext>,
     calc_widths: &HashMap<NodeId, crate::style::CalcLength>,
@@ -4306,11 +4343,16 @@ fn apply_calc_widths(
             - parent_layout.border.right
             - parent_layout.scrollbar_size.width)
             .max(0.0);
-        let target = Dimension::length((calc.percent * inner + calc.px * scale).max(0.0));
+        let target = if inner > 0.0 {
+            Dimension::percent((calc.percent * inner + calc.px * scale).max(0.0) / inner)
+        } else {
+            // No containing width yet: keep the provisional form.
+            provisional_calc_width(calc, scale)
+        };
         let Ok(style) = taffy.style(node) else {
             continue;
         };
-        if style.size.width == target {
+        if calc_dimension_matches(style.size.width, target) {
             continue;
         }
         let mut style = style.clone();
@@ -4320,6 +4362,30 @@ fn apply_calc_widths(
         }
     }
     changed
+}
+
+/// The width a `calc(P% ± L)` node lays out with before its containing
+/// block is known: the percentage part, or the bare length when there is
+/// no percentage.
+fn provisional_calc_width(calc: crate::style::CalcLength, scale: f32) -> Dimension {
+    if calc.percent != 0.0 {
+        Dimension::percent(calc.percent)
+    } else {
+        Dimension::length(calc.px.max(0.0) * scale)
+    }
+}
+
+/// Equal within float noise, so a steady frame does not relayout.
+fn calc_dimension_matches(current: Dimension, target: Dimension) -> bool {
+    if current.tag() != target.tag() {
+        return false;
+    }
+    let tolerance = if target.tag() == taffy::style::CompactLength::PERCENT_TAG {
+        1e-5
+    } else {
+        1e-3
+    };
+    (current.value() - target.value()).abs() < tolerance
 }
 
 /// See the cache note in [`apply_fit_content_widths`].
@@ -7243,11 +7309,7 @@ fn apply_size_props(style: &mut Style, node: &crate::tree::Node, vs: &VariantSta
         // value to 0, so lay out against the percentage part first;
         // `apply_calc_widths` then writes the exact length once the
         // containing block's width is known (see there).
-        style.size.width = if calc.percent != 0.0 {
-            Dimension::percent(calc.percent)
-        } else {
-            Dimension::length(calc.px.max(0.0) * scale)
-        };
+        style.size.width = provisional_calc_width(calc, scale);
     }
     if let Some(d) = prop_dim_with(node, "height", vs) {
         style.size.height = match d {

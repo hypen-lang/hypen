@@ -10380,6 +10380,123 @@ fn calc_width_honours_max_width() {
     assert!((bar.rect.x - 250.0).abs() < 0.5, "{:?}", bar.rect);
 }
 
+/// Lay out `Column(100%) > <carrier> > Row(calc(100% - 40px)) > Column(200)`
+/// once per viewport width on one `TaffyState` and return each pass's
+/// (carrier width, carrier content width, bar width).
+fn calc_in_content_sized_carrier(carrier: &str, viewports: &[u32]) -> Vec<(f32, f32, f32)> {
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("carrier", carrier, &[]),
+        insert_patch("col", "carrier"),
+        create_patch(
+            "bar",
+            "Row",
+            &[("width", json!("calc(100% - 40px)")), ("height", json!(20))],
+        ),
+        insert_patch("carrier", "bar"),
+        create_patch(
+            "inner",
+            "Column",
+            &[("width", json!(200)), ("height", json!(10))],
+        ),
+        insert_patch("bar", "inner"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(viewports[0] as f32));
+    let mut text = TextEngine::new();
+    viewports
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let pass = LayoutPass::compute_with_state(
+                &mut state,
+                &tree,
+                &mut text,
+                (w, 600),
+                1.0,
+                0.0,
+                &HashMap::new(),
+                i as u64 + 1,
+            );
+            let c = find_item(&pass, "carrier");
+            // None of these carriers has default padding (DOM parity).
+            (c.rect.w, c.rect.w, find_item(&pass, "bar").rect.w)
+        })
+        .collect()
+}
+
+/// CSS: inside a content-sized containing block the percentage behaves as
+/// `auto` for intrinsic sizing, so the carrier sizes from the bar's
+/// content (200) and the calc applies inside it — and stays put on every
+/// relayout. Writing the resolved definite length fed it back into the
+/// carrier's content size and the bar lost 40px per pass.
+#[test]
+fn calc_width_in_content_sized_carrier_is_stable_across_relayouts() {
+    for carrier in ["Button", "Stack"] {
+        let passes = calc_in_content_sized_carrier(carrier, &[400, 400, 400, 400]);
+        let (carrier_w, inner_w, bar_w) = passes[0];
+        assert!(
+            (inner_w - 200.0).abs() < 0.5,
+            "{carrier}: carrier sizes from the bar's content: {passes:?}"
+        );
+        assert!(
+            (bar_w - (inner_w - 40.0)).abs() < 0.5,
+            "{carrier}: calc applies inside the carrier: {passes:?}"
+        );
+        for p in &passes[1..] {
+            assert!(
+                (p.0 - carrier_w).abs() < 0.5 && (p.2 - bar_w).abs() < 0.5,
+                "{carrier}: relayout must not shrink the box: {passes:?}"
+            );
+        }
+    }
+}
+
+/// A resize re-derives the fraction against the new containing width,
+/// and repeated passes at each size stay put.
+#[test]
+fn calc_width_tracks_resize_without_drift() {
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch(
+            "bar",
+            "Row",
+            &[("width", json!("calc(100% - 40px)")), ("height", json!(20))],
+        ),
+        insert_patch("col", "bar"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(400.0));
+    let mut text = TextEngine::new();
+    let widths: Vec<f32> = [400, 400, 600, 600, 300, 300]
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let pass = LayoutPass::compute_with_state(
+                &mut state,
+                &tree,
+                &mut text,
+                (w, 600),
+                1.0,
+                0.0,
+                &HashMap::new(),
+                i as u64 + 1,
+            );
+            find_item(&pass, "bar").rect.w
+        })
+        .collect();
+    let expected = [360.0, 360.0, 560.0, 560.0, 260.0, 260.0];
+    for (got, want) in widths.iter().zip(expected) {
+        assert!((got - want).abs() < 0.5, "{widths:?}");
+    }
+}
+
 #[test]
 fn parse_calc_forms() {
     use crate::style::{parse_calc, CalcLength};
@@ -10653,6 +10770,97 @@ fn stack_end_alignment_pins_badge_to_bottom_right() {
 
 /// The real Food hero: a decoded 800×600 photo, `h-56` (14rem) and
 /// `w-full`, plus a SafeArea overlay holding the back / favourite Row.
+/// The Food hero's box depends on its natural size. When that image
+/// lands AFTER the first layout, the state must report itself stale so
+/// the window recomputes instead of repainting the cached layout (the
+/// hero stayed as wide as its button bar, 112px, in the capture).
+#[test]
+fn late_image_load_marks_layout_stale_and_resizes_the_stack() {
+    let src = "/layout-tests/food-hero-late-800x600.png";
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("stack", "Stack", &[]),
+        insert_patch("col", "stack"),
+        create_patch(
+            "hero",
+            "Image",
+            &[
+                ("src", json!(src)),
+                ("width.0", json!("100%")),
+                ("height.0", json!("14rem")),
+            ],
+        ),
+        insert_patch("stack", "hero"),
+        create_patch(
+            "bar",
+            "Row",
+            &[
+                ("width.0", json!("100%")),
+                ("paddingLeft.0", json!("16px")),
+                ("paddingRight.0", json!("16px")),
+            ],
+        ),
+        insert_patch("stack", "bar"),
+        create_patch(
+            "b1",
+            "Button",
+            &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+        ),
+        insert_patch("bar", "b1"),
+        create_patch(
+            "b2",
+            "Button",
+            &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+        ),
+        insert_patch("bar", "b2"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(430.0));
+    let mut text = TextEngine::new();
+    let mut compute = |state: &mut TaffyState| {
+        LayoutPass::compute_with_state(
+            state,
+            &tree,
+            &mut text,
+            (430, 900),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            1,
+        )
+    };
+    let before = compute(&mut state);
+    assert!(
+        (find_item(&before, "stack").rect.w - 112.0).abs() < 1.0,
+        "before load the bar sizes the Stack: {:?}",
+        find_item(&before, "stack").rect
+    );
+    assert!(!state.media_intrinsics_stale(), "nothing landed yet");
+
+    crate::paint::image::test_seed_decoded(
+        src,
+        std::sync::Arc::new(tiny_skia::Pixmap::new(800, 600).unwrap()),
+    );
+    crate::paint::image::bump_image_load_generation_for_test();
+    assert!(
+        state.media_intrinsics_stale(),
+        "a landed natural size the hero's style waited on must invalidate the cached layout"
+    );
+    let after = compute(&mut state);
+    assert!(
+        (find_item(&after, "stack").rect.w - 298.67).abs() < 1.5,
+        "{:?}",
+        find_item(&after, "stack").rect
+    );
+    assert!(!state.media_intrinsics_stale(), "absorbed by the recompute");
+    // A fetch landing that no style here waited on does not invalidate.
+    crate::paint::image::bump_image_load_generation_for_test();
+    assert!(!state.media_intrinsics_stale(), "unrelated load");
+}
+
 #[test]
 fn decoded_hero_image_sizes_its_stack_like_chrome() {
     let src = "/layout-tests/food-hero-800x600.png";
