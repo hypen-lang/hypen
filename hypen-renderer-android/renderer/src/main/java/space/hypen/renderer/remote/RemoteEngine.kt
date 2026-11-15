@@ -184,6 +184,39 @@ class RemoteEngine(
     @Volatile
     private var currentDevice: DeviceConnection? = null
 
+    // The system color scheme last reported (or to report in the next hello),
+    // and the socket whose hello has gone out. Both guarded by colorSchemeLock
+    // so a change is carried by exactly one of: that hello, or a `colorScheme`
+    // message after it.
+    private val colorSchemeLock = Any()
+    private var reportedColorScheme: HypenColorScheme? = config.colorScheme.fixedScheme
+    private var helloSentOn: WebSocket? = null
+
+    /** The system color scheme this engine reports to the server, or null when it reports none. */
+    val colorScheme: HypenColorScheme?
+        get() = synchronized(colorSchemeLock) { reportedColorScheme }
+
+    /**
+     * Report the system color scheme to the server (and remember it for the
+     * hello of every later connection). A server-side theme whose preference
+     * is "system" follows it. Reporting the value already held sends nothing.
+     *
+     * `HypenApp` calls this for you per [RemoteEngineConfig.colorScheme]; call
+     * it yourself when you own the engine, e.g. from
+     * `onConfigurationChanged` with [HypenColorScheme.fromUiMode].
+     */
+    fun setColorScheme(scheme: HypenColorScheme) {
+        synchronized(colorSchemeLock) {
+            if (scheme == reportedColorScheme) return
+            reportedColorScheme = scheme
+            // Before this socket's hello: the hello carries it.
+            val socket = helloSentOn ?: return
+            if (socket !== webSocket || _connectionState.value != ConnectionState.CONNECTED) return
+            log.debug("Color scheme ${scheme.wireName}")
+            socket.send(messageParser.serializeMessage(ColorSchemeMessage(scheme = scheme.wireName)))
+        }
+    }
+
     /**
      * Connect to the remote server.
      */
@@ -349,16 +382,22 @@ class RemoteEngine(
      */
     private fun sendHello(socket: WebSocket, advertisement: Map<String, Any?>?) {
         val sessionId = currentSessionId ?: sessionOptions?.id
-        val hello = HelloMessage(
-            sessionId = sessionId,
-            props = sessionOptions?.props,
-            device = advertisement,
-            // Only when resuming the session the token was issued for.
-            resumeToken = if (sessionId != null) resumeToken else null,
-        )
-        val json = messageParser.serializeMessage(hello)
-        log.debug("Sending hello message")
-        socket.send(json)
+        // Under the lock: a setColorScheme racing this hello either lands in
+        // it or follows it as a `colorScheme` message, never before it.
+        synchronized(colorSchemeLock) {
+            val hello = HelloMessage(
+                sessionId = sessionId,
+                props = sessionOptions?.props,
+                device = advertisement,
+                // Only when resuming the session the token was issued for.
+                resumeToken = if (sessionId != null) resumeToken else null,
+                colorScheme = reportedColorScheme?.wireName,
+            )
+            val json = messageParser.serializeMessage(hello)
+            log.debug("Sending hello message")
+            socket.send(json)
+            helloSentOn = socket
+        }
     }
 
     /**
@@ -567,6 +606,9 @@ class RemoteEngine(
                     }
                     is ViewportMessage -> {
                         log.warn("Unexpected viewport message from server")
+                    }
+                    is ColorSchemeMessage -> {
+                        log.warn("Unexpected colorScheme message from server")
                     }
                 }
             } catch (e: CancellationException) {
