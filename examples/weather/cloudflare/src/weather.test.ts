@@ -3,7 +3,7 @@
  * Run: bun test
  */
 
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, describe, expect, setSystemTime, test } from "bun:test";
 import ensembleFixture from "../fixtures/ensemble-sf.json";
 import geocodingFixture from "../fixtures/geocoding-reykjav.json";
 import airFixture from "../fixtures/air-quality-sf.json";
@@ -31,6 +31,12 @@ const json = (body: unknown, status = 200, headers: Record<string, string> = {})
   new Response(JSON.stringify(body), { status, headers: { "content-type": "application/json", ...headers } });
 
 afterEach(() => setFetcher(null));
+
+// Pin the wall clock to the fixture's recording time. Paths that read
+// Date.now() internally (getForecast -> ensembleToForecast, load -> present)
+// would otherwise drop the fixture's "past" days as real time moves on.
+beforeAll(() => setSystemTime(RECORDED_AT));
+afterAll(() => setSystemTime());
 
 function ensembleForecast(): Forecast {
   return ensembleToForecast(ensembleFixture as never, SF.lat, SF.lon, RECORDED_AT);
