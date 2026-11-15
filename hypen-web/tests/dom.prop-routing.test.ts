@@ -114,7 +114,7 @@ describe("Heading level", () => {
     // h4's user-agent size, bold — and zero specificity (`:where`), so any
     // author styling (.fontSize(), a Tailwind text-* class) still wins.
     expect(css).toContain(
-      ':where([data-hypen-type="heading"][data-hypen-level="4"]) { font-size: 1em; font-weight: bold; }'
+      ':where([data-hypen-type="heading"][data-hypen-level="4"]) { font-size: 1em; font-weight: bold; margin-block: 1.33em; }'
     );
     expect(css).toContain('[data-hypen-level="1"]) { font-size: 2em;');
     expect(css).toContain('[data-hypen-level="6"]) { font-size: 0.67em;');
