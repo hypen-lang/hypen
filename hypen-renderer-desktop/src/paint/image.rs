@@ -29,8 +29,10 @@ pub(crate) enum CacheEntry {
     /// Worker has been told about this src; result not yet back.
     /// Painter renders the placeholder for now.
     Loading,
-    /// Source's *encoded* bytes (JPEG / PNG / WebP). Decoded on
-    /// demand by `loaded_source`. Holding encoded keeps the global
+    /// Source's *encoded* bytes (JPEG / PNG / WebP / AVIF / SVG). The
+    /// worker also leaves its decoded bitmap in the short-term decoded
+    /// tier (see `resolve_source`); once that is evicted or cleared,
+    /// `loaded_source` decodes these bytes again on demand. Holding encoded keeps the global
     /// cache 10-15× smaller than holding decoded `Pixmap`s — a
     /// 1080×1080 JPEG is ~300 KB encoded vs ~4.6 MB premultiplied
     /// RGBA. The painter-side tile cache (`VelloPainter::image_cache`
@@ -84,6 +86,13 @@ const GLOBAL_IMAGE_CACHE_CAP: usize = 256;
 /// smoothness; the decoded entries get cleared on `Occluded(true)`
 /// (see `clear_decoded_cache`) so background memory still drops.
 const DECODED_CACHE_CAP: usize = 32;
+
+/// Byte ceiling on the decoded tier, alongside [`DECODED_CACHE_CAP`]:
+/// one decode may allocate up to 512 MiB (`image`'s default limit, and
+/// the AVIF budget), so 32 large images alone could pin gigabytes. The
+/// least recently used bitmaps go first; the newest entry always stays
+/// (the paint that asked for it is about to draw it).
+const DECODED_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
 
 /// Bump `src` to the back of the LRU queue. No-op on an empty cache
 /// or when the entry is already last. Caller must already hold the
@@ -164,8 +173,9 @@ fn cache() -> &'static ImageCache {
 /// the multi-hundred-ms hitch users see post the #5 compression
 /// optimisation. Hit returns `Arc<Pixmap>` directly; miss falls
 /// through to encoded-bytes-and-decode and populates this tier for
-/// next time. LRU eviction; populated lazily so an image that was
-/// loaded but never painted doesn't claim a slot.
+/// next time. LRU eviction. The image worker seeds it with each bitmap
+/// it decodes (sources are only queued by a paint / layout that wants
+/// them), so the first paint after a load doesn't decode again.
 struct DecodedCache {
     entries: Mutex<IndexMap<String, DecodedEntry>>,
 }
@@ -181,11 +191,27 @@ struct DecodedEntry {
     natural: (f32, f32),
 }
 
+#[cfg(not(test))]
 fn decoded_cache() -> &'static DecodedCache {
     static CACHE: OnceLock<DecodedCache> = OnceLock::new();
     CACHE.get_or_init(|| DecodedCache {
         entries: Mutex::new(IndexMap::new()),
     })
+}
+
+/// Tests get one decoded tier per thread: the suite runs tests in
+/// parallel, and tests that clear the tier, fill it to its cap or count
+/// decodes would otherwise race each other's entries out of the one
+/// shared tier. Every test seeds and reads it on its own thread (each
+/// tier is leaked: a test thread's tier lives as long as the process).
+#[cfg(test)]
+fn decoded_cache() -> &'static DecodedCache {
+    thread_local! {
+        static CACHE: &'static DecodedCache = Box::leak(Box::new(DecodedCache {
+            entries: Mutex::new(IndexMap::new()),
+        }));
+    }
+    CACHE.with(|c| *c)
 }
 
 /// Drop every entry in the decoded-pixmap cache. Called by the
@@ -216,9 +242,23 @@ fn store_decoded(key: &str, entry: DecodedEntry) {
         .entries
         .lock()
         .expect("decoded cache poisoned");
+    // Re-storing a key moves it to the back (`insert` alone would keep
+    // its old, possibly least-recent, slot and evict it first).
+    entries.shift_remove(key);
     entries.insert(key.to_string(), entry);
-    while entries.len() > DECODED_CACHE_CAP {
-        entries.shift_remove_index(0);
+    evict_decoded(&mut entries, DECODED_CACHE_CAP, DECODED_CACHE_MAX_BYTES);
+}
+
+/// Drop least-recently-used decoded bitmaps (from the front) until at
+/// most `cap` remain and they total at most `max_bytes`, keeping the
+/// newest one whatever its size.
+fn evict_decoded(entries: &mut IndexMap<String, DecodedEntry>, cap: usize, max_bytes: usize) {
+    let mut bytes: usize = entries.values().map(|e| e.pixmap.data().len()).sum();
+    while entries.len() > cap || (bytes > max_bytes && entries.len() > 1) {
+        match entries.shift_remove_index(0) {
+            Some((_, gone)) => bytes -= gone.pixmap.data().len(),
+            None => break,
+        }
     }
 }
 
@@ -1003,12 +1043,11 @@ fn base64_decode(input: &str) -> Option<Vec<u8>> {
 
 /// Worker loop. Receives src strings on the channel, fetches the
 /// encoded source bytes (HTTP body for URLs, file read for local
-/// paths), validates them by attempting a decode (discarding the
-/// result), stores the **encoded** bytes in the cache, then nudges
-/// the event loop. Either branch off the main thread keeps the
-/// paint loop responsive — the network and IO are obvious wins; the
-/// validation decode is here so we don't cache un-decodable bytes
-/// that fail on every paint until evicted.
+/// paths), decodes them (the bitmap goes to the decoded tier), stores
+/// the **encoded** bytes in the cache, then nudges the event loop.
+/// Either branch off the main thread keeps the paint loop responsive —
+/// the network, IO and decode all stay off it, and un-decodable bytes
+/// are never cached to fail on every paint until evicted.
 /// Monotonic counter bumped every time the image worker resolves an
 /// `src` (success OR failure). The painter reads this on each
 /// `build_scene` call: if it moved since the last paint, any subtree
@@ -1063,33 +1102,47 @@ pub(crate) fn bump_image_load_generation_for_test() {
     TEST_IMAGE_LOAD_GEN.with(|g| g.set(g.get() + 1));
 }
 
+/// Fetch / read and decode one queued source (a cache key) on the
+/// worker thread. A source that decodes is handed to the paint thread
+/// twice over: its encoded bytes for the long-lived tier, and the bitmap
+/// itself in the decoded tier, so the first paint is a lookup rather
+/// than a second decode of the same bytes on the paint thread (an AVIF
+/// wallpaper took 0.1-0.3 s per 1080p image there; a big JPEG ~50-200 ms).
+/// A source that doesn't decode is `Failed` (logged once, here) and
+/// stays failed: nothing re-fetches or re-decodes it.
+fn resolve_source(src: &str) -> CacheEntry {
+    // The cache (and the failure registry) stay keyed by the src as
+    // authored; only the fetch uses the resolved URL.
+    // `src` is a cache key (see `cache_key`): remote owners only
+    // ever queue `data:` / absolute `http(s)` keys, so planning it
+    // with no origin can only yield `Local` for a local owner's key.
+    let bytes = match plan_source(src, None) {
+        SourcePlan::Data => decode_data_uri(src),
+        SourcePlan::Http(url) => fetch_http_bytes(&url, src),
+        SourcePlan::Local(_) => read_local_bytes(src),
+        SourcePlan::Refused => None,
+    };
+    let Some(bytes) = bytes else {
+        return CacheEntry::Failed;
+    };
+    match decode_bytes(&bytes, src) {
+        Some(decoded) => {
+            store_decoded(
+                src,
+                DecodedEntry {
+                    pixmap: Arc::new(decoded.pixmap),
+                    natural: decoded.natural,
+                },
+            );
+            CacheEntry::Loaded(Arc::new(bytes))
+        }
+        None => CacheEntry::Failed,
+    }
+}
+
 fn run_image_worker(rx: mpsc::Receiver<String>) {
     while let Ok(src) = rx.recv() {
-        // The cache (and the failure registry) stay keyed by the src as
-        // authored; only the fetch uses the resolved URL.
-        // `src` is a cache key (see `cache_key`): remote owners only
-        // ever queue `data:` / absolute `http(s)` keys, so planning it
-        // with no origin can only yield `Local` for a local owner's key.
-        let bytes = match plan_source(&src, None) {
-            SourcePlan::Data => decode_data_uri(&src),
-            SourcePlan::Http(url) => fetch_http_bytes(&url, &src),
-            SourcePlan::Local(_) => read_local_bytes(&src),
-            SourcePlan::Refused => None,
-        };
-        let entry = match bytes {
-            Some(bytes) => {
-                // Decode + discard for validation. The paint thread
-                // re-decodes on demand via `loaded_source`; the
-                // painter-side tile cache then keeps the warm path
-                // off the encoded source.
-                if decode_bytes(&bytes, &src).is_some() {
-                    CacheEntry::Loaded(Arc::new(bytes))
-                } else {
-                    CacheEntry::Failed
-                }
-            }
-            None => CacheEntry::Failed,
-        };
+        let entry = resolve_source(&src);
         {
             let mut entries = cache().entries.lock().expect("image cache poisoned");
             // `IndexMap::insert` keeps an existing key in place; the
@@ -1213,13 +1266,17 @@ pub(crate) struct Decoded {
     pub(crate) natural: (f32, f32),
 }
 
-/// Render an SVG document with resvg into a premultiplied pixmap. No
-/// font database and no external resources are loaded: an image source
-/// can't make the renderer read local files through `<image href>` /
-/// `@font-face`, which matters in remote mode (see the policy above).
+/// Render an SVG document with resvg into a premultiplied pixmap.
+/// `<text>` is shaped with the renderer's own system font index
+/// ([`crate::text::svg_font_db`], shared, not rescanned). No external
+/// resources are loaded: an image source can't make the renderer read
+/// local files through `<image href>` / `@font-face` — usvg only ever
+/// picks from the faces it is handed — which matters in remote mode
+/// (see the policy above).
 fn rasterize_svg(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
     let opts = resvg::usvg::Options {
         resources_dir: None,
+        fontdb: crate::text::svg_font_db(),
         // Refuse every nested `<image>` reference rather than resolving
         // it against the filesystem.
         image_href_resolver: resvg::usvg::ImageHrefResolver {
@@ -1269,11 +1326,30 @@ fn truncate_label(label: &str) -> String {
     }
 }
 
+#[cfg(test)]
+thread_local! {
+    /// Decodes run on the calling thread (tests drive `resolve_source`
+    /// and `loaded_source` on the test thread, so this counts theirs).
+    static TEST_DECODES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 /// Shared codec path: bytes → RGBA8 → premultiplied → tiny-skia
 /// pixmap. Used by both local decode and worker fetch.
 fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
+    #[cfg(test)]
+    TEST_DECODES.with(|n| n.set(n.get() + 1));
     if looks_like_svg(bytes) {
         return rasterize_svg(bytes, debug_label);
+    }
+    #[cfg(feature = "avif")]
+    if super::avif::looks_like_avif(bytes) {
+        return match super::avif::decode_rgba8(bytes) {
+            Ok((w, h, data)) => premultiplied_pixmap(w, h, data),
+            Err(e) => {
+                log::warn!("image: failed decoding {}: {e}", truncate_label(debug_label));
+                None
+            }
+        };
     }
     let img = match image::load_from_memory(bytes) {
         Ok(d) => d,
@@ -1284,8 +1360,12 @@ fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
     };
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
+    premultiplied_pixmap(w, h, rgba.into_raw())
+}
+
+/// Straight-alpha RGBA8 → the premultiplied pixmap the painters draw.
+fn premultiplied_pixmap(w: u32, h: u32, mut data: Vec<u8>) -> Option<Decoded> {
     let size = IntSize::from_wh(w, h)?;
-    let mut data = rgba.into_raw();
     // image gives us straight alpha; tiny-skia wants premultiplied.
     for px in data.chunks_exact_mut(4) {
         let a = px[3] as u32;
@@ -1706,6 +1786,72 @@ fn rounded_rect_path(x: f32, y: f32, w: f32, h: f32, r: f32) -> Option<tiny_skia
 mod tests {
     use super::*;
 
+    /// `data:<mime>,` + every byte percent-encoded.
+    fn percent_data_uri(mime: &str, bytes: &[u8]) -> String {
+        let mut out = format!("data:{mime},");
+        for b in bytes {
+            out.push_str(&format!("%{b:02X}"));
+        }
+        out
+    }
+
+    fn png_bytes(w: u32, h: u32) -> Vec<u8> {
+        let img = image::RgbaImage::from_pixel(w, h, image::Rgba([10, 20, 30, 255]));
+        let mut out = std::io::Cursor::new(Vec::new());
+        img.write_to(&mut out, image::ImageFormat::Png).unwrap();
+        out.into_inner()
+    }
+
+    /// The worker's decode is the only one: it leaves the bitmap in the
+    /// decoded tier, so the first paint (`loaded_source`) and layout
+    /// (`loaded_natural_size`) look it up instead of decoding the same
+    /// bytes again on the paint thread.
+    #[test]
+    fn worker_decode_is_reused_by_the_first_paint() {
+        let mut sources = vec![("png", percent_data_uri("image/png", &png_bytes(7, 5)), (7, 5))];
+        #[cfg(feature = "avif")]
+        sources.push((
+            "avif",
+            percent_data_uri(
+                "image/avif",
+                include_bytes!("../../tests/fixtures/images/blue-currents-swatch.avif"),
+            ),
+            (0, 0), // size checked against the pixmap below
+        ));
+        for (label, src, size) in sources {
+            let key = cache_key(&src).unwrap().into_owned();
+            let before = TEST_DECODES.with(|n| n.get());
+            assert!(matches!(resolve_source(&key), CacheEntry::Loaded(_)), "{label}");
+            assert_eq!(TEST_DECODES.with(|n| n.get()) - before, 1, "{label}: the worker decodes once");
+            let pm = loaded_source(&src).expect("decoded tier holds the worker's bitmap");
+            if size != (0, 0) {
+                assert_eq!((pm.width(), pm.height()), size, "{label}");
+            }
+            assert_eq!(
+                loaded_natural_size(&src),
+                Some((pm.width() as f32, pm.height() as f32)),
+                "{label}"
+            );
+            assert_eq!(
+                TEST_DECODES.with(|n| n.get()) - before,
+                1,
+                "{label}: first paint and layout don't decode again"
+            );
+        }
+    }
+
+    /// An undecodable source is `Failed` after one decode attempt, and
+    /// nothing is left in the decoded tier for paint to retry.
+    #[test]
+    fn undecodable_source_fails_once_without_a_decoded_entry() {
+        let src = percent_data_uri("image/png", b"\x89PNG\r\n\x1a\nnot really");
+        let key = cache_key(&src).unwrap().into_owned();
+        let before = TEST_DECODES.with(|n| n.get());
+        assert!(matches!(resolve_source(&key), CacheEntry::Failed));
+        assert_eq!(TEST_DECODES.with(|n| n.get()) - before, 1);
+        assert!(lookup_decoded(&key).is_none());
+    }
+
     /// Weather's glyphs: `data:image/svg+xml;utf8,` + encodeURIComponent(svg).
     fn svg_data_uri(body: &str) -> String {
         let svg = format!(
@@ -1743,6 +1889,34 @@ mod tests {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><image href="/etc/hostname" width="8" height="8"/></svg>"#;
         let pm = decode_bytes(svg, "test://nested-image.svg").expect("still renders").pixmap;
         assert!(pm.pixels().iter().all(|p| p.alpha() == 0), "nested href must not load");
+    }
+
+    /// Ink coverage of an SVG `<text>` glyph, rendered through the same
+    /// path as an `Image` source.
+    fn svg_text_ink(family: &str, weight: u16, glyph: &str) -> usize {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128"><rect width="128" height="128" fill="#000"/><text x="64" y="100" text-anchor="middle" font-family="{family}" font-size="96" font-weight="{weight}" fill="#fff">{glyph}</text></svg>"##
+        );
+        let pm = decode_bytes(svg.as_bytes(), "test://text.svg").expect("renders").pixmap;
+        pm.pixels().iter().filter(|p| p.red() > 128).count()
+    }
+
+    /// movie-discovery's poster monogram and radio's station tiles are
+    /// SVG `<text>`; resvg was built without text support, so only the
+    /// shapes around the letters were drawn.
+    #[test]
+    fn svg_text_is_drawn_with_the_renderer_fonts() {
+        let ink = svg_text_ink("Georgia, 'Times New Roman', serif", 700, "I");
+        assert!(ink > 200, "the monogram letter must be inked, got {ink} px");
+        let ink = svg_text_ink("system-ui,-apple-system,Segoe UI,sans-serif", 700, "R");
+        assert!(ink > 200, "the station tile letter must be inked, got {ink} px");
+    }
+
+    #[test]
+    fn svg_text_honours_font_weight() {
+        let regular = svg_text_ink("serif", 400, "W");
+        let bold = svg_text_ink("serif", 700, "W");
+        assert!(bold > regular, "bold must pick the bold face: {bold} vs {regular}");
     }
 
     #[test]
@@ -2356,6 +2530,36 @@ mod tests {
         // Cleanup so other tests aren't sensitive to leftovers.
         let mut decoded = decoded_cache().entries.lock().unwrap();
         decoded.clear();
+    }
+
+    /// The decoded tier is bounded in bytes as well as entries: big
+    /// bitmaps push the least recently used out, and the newest stays
+    /// even when it alone is over the ceiling.
+    #[test]
+    fn decoded_tier_evicts_by_bytes_and_count() {
+        let entry = |side: u32| DecodedEntry {
+            pixmap: Arc::new(Pixmap::new(side, side).unwrap()),
+            natural: (side as f32, side as f32),
+        };
+        let mut entries = IndexMap::new();
+        for (k, side) in [("a", 16), ("b", 16), ("c", 16)] {
+            entries.insert(k.to_string(), entry(side));
+        }
+        // 3 × 1 KiB under a 2.5 KiB ceiling: the oldest goes.
+        evict_decoded(&mut entries, 32, 2560);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["b", "c"]);
+        // An entry over the ceiling on its own evicts everything else
+        // but is kept.
+        entries.insert("big".into(), entry(64));
+        evict_decoded(&mut entries, 32, 2560);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["big"]);
+        // The count cap still applies under the byte ceiling.
+        for k in ["x", "y", "z"] {
+            entries.insert(k.into(), entry(1));
+        }
+        evict_decoded(&mut entries, 2, usize::MAX);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["y", "z"]);
+        const { assert!(DECODED_CACHE_MAX_BYTES >= 4 * 3840 * 2160 * 4, "a few 4K bitmaps fit") };
     }
 
     #[test]

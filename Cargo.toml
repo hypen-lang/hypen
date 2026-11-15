@@ -10,6 +10,8 @@ members = [
     "engine-compatibility-tests/runners/rust",
 ]
 exclude = [
+    # Vendored dependency (see third_party/rav1d/PATCHES.md), not a member.
+    "third_party/rav1d",
     "examples/social/rust",
     "examples/food-ordering/rust",
 ]
@@ -26,6 +28,21 @@ authors = ["Hypen Contributors"]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# rav1d (the desktop renderer's AVIF decoder) unoptimised takes seconds
+# per wallpaper-sized image; dev builds decode with it optimised.
+[profile.dev.package.rav1d]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
+# rav1d with `extern "C-unwind"` entry points, so a panic on a malformed
+# AV1 bitstream unwinds to the desktop renderer's `catch_unwind` instead of
+# aborting the process. See third_party/rav1d/PATCHES.md.
+[patch.crates-io]
+rav1d = { path = "third_party/rav1d" }
+
+# No `panic = "abort"` in any profile: the AVIF decoder's panic isolation
+# (hypen-renderer-desktop/src/paint/avif.rs) relies on unwinding.
 [profile.release]
 opt-level = "z"
 lto = true

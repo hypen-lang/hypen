@@ -5393,7 +5393,8 @@ fn hidden_slots_are_not_hit_testable_but_visible_ones_are() {
     tree.apply(&create_patch(
         "btn",
         "Button",
-        &[("action", json!("@actions.togglePlay"))],
+        // Explicit box: an empty Button has no implicit padding (DOM).
+        &[("action", json!("@actions.togglePlay")), ("size", json!(40))],
     ));
     tree.apply(&insert_patch("ctl", "btn"));
 
@@ -5788,7 +5789,9 @@ fn intent_button_tree(intent: Option<&str>, action: Option<&str>) -> Tree {
         &[("slot.0", json!("controls"))],
     ));
     tree.apply(&insert_patch("vid", "ctl"));
-    let mut props: Vec<(&str, Value)> = Vec::new();
+    // An explicit box: like a DOM `<button>`, an empty Button has no
+    // implicit padding, so without one there is nothing to hit.
+    let mut props: Vec<(&str, Value)> = vec![("size", json!(40))];
     if let Some(i) = intent {
         props.push(("videoIntent.0", json!(i)));
     }
@@ -9793,4 +9796,261 @@ fn ancestor_font_size_change_remeasures_descendant_text_incrementally() {
     );
     let fresh = LayoutPass::compute(&tree, &mut TextEngine::new(), (430, 934), 1.0);
     assert_eq!(find_item(&after, "child").rect, find_item(&fresh, "child").rect);
+}
+
+// -----------------------------------------------------------------
+// DOM parity: aspect-ratio transfer, actionable defaults, named
+// padding, font-family
+// -----------------------------------------------------------------
+
+/// News' picture of the day (`Today.ts`), trimmed: a `w-full` Image with
+/// `.aspectRatio(r)` + `.maxHeight(300)` + `objectFit("cover")` inside a
+/// Link-wrapped card. Chrome keeps the authored width and caps the
+/// ratio-derived height (the photo is cover-cropped); Taffy used to
+/// transfer `max-height` through the ratio into a `max-width`, so a
+/// portrait photo drew 225px wide in a 396px card, and the Link's
+/// implicit Button padding inset the whole card.
+#[test]
+fn picture_of_the_day_fills_its_card_and_crops_to_max_height() {
+    let src = "test://potd-portrait-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Column {{
+                Link(href: "https://example.org", target: "_blank") {{
+                    Column {{
+                        Image(src: "{src}", alt: "potd")
+                            .objectFit("cover")
+                            .aspectRatio("@{{state.aspect}}")
+                            .maxHeight(300)
+                            .tw("w-full")
+                        Column {{ Text("PICTURE OF THE DAY") }}.tw("p-4")
+                    }}
+                    .tw("rounded-3xl overflow-hidden border")
+                }}
+                .tw("block no-underline w-full")
+            }}
+            .tw("px-4 mt-4")
+            .maxWidth(760).width("100%").alignSelf("center")
+        }}
+        .tw("w-full")"#
+        ),
+        json!({ "aspect": 0.75 }),
+    );
+    let mut text = TextEngine::new();
+    for scale in [1.0f32, 2.0] {
+        let pass = LayoutPass::compute(&tree, &mut text, ((430.0 * scale) as u32, (934.0 * scale) as u32), scale);
+        let rect = |ty: &str| pass.item_by_id(&first_of_type(&tree, ty)).expect("laid out").rect;
+        let (link, image) = (rect("Link"), rect("Image"));
+        let card = pass
+            .item_by_id(&tree.children_of(&first_of_type(&tree, "Link"))[0])
+            .expect("card laid out")
+            .rect;
+        assert!(
+            (link.x - 16.0 * scale).abs() < 0.5 && (link.w - 398.0 * scale).abs() < 0.5,
+            "scale={scale}: the Link spans the padded column, no implicit inset: {link:?}"
+        );
+        assert!(
+            (card.x - link.x).abs() < 0.5 && (card.w - link.w).abs() < 0.5,
+            "scale={scale}: a Link has no default padding (DOM <a>): card {card:?} in {link:?}"
+        );
+        assert!(
+            (image.w - (card.w - 2.0 * scale)).abs() < 0.5,
+            "scale={scale}: the authored w-full survives max-height: image {image:?} in card {card:?}"
+        );
+        assert!(
+            (image.h - 300.0 * scale).abs() < 0.5,
+            "scale={scale}: the ratio-derived height is capped at 300: {image:?}"
+        );
+        assert!(
+            card.h < image.h + 80.0 * scale,
+            "scale={scale}: the card hugs the capped photo + caption: card {card:?}, image {image:?}"
+        );
+    }
+}
+
+/// A natural-size image (no authored width) still shrinks both axes
+/// under a max-height, like an `<img>` with only `max-height`.
+#[test]
+fn natural_size_image_still_scales_down_under_max_height() {
+    let src = "test://natural-max-h-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(r#"Column {{ Image(src: "{src}").maxHeight(400) }}.tw("w-full")"#),
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1200, 2400), 1.0);
+    let image = pass.item_by_id(&first_of_type(&tree, "Image")).unwrap().rect;
+    assert!((image.h - 400.0).abs() < 0.5, "{image:?}");
+    assert!((image.w - 225.0).abs() < 0.5, "keeps 1080:1920 → 225×400, got {image:?}");
+}
+
+/// `keep_authored_size_out_of_ratio_transfer` pins the authored axis's
+/// max to `f32::MAX` (Taffy has no "none" distinct from `auto`, and
+/// `auto` is exactly what invites the transfer). That sentinel can never
+/// be scaled through the ratio: Taffy's `maybe_apply_aspect_ratio` only
+/// fills an axis whose max is unset, and once pinned both are set. So
+/// even ratios whose product with `f32::MAX` overflows to ±inf / NaN
+/// leave every rect finite and the authored axis as authored.
+#[test]
+fn ratio_transfer_sentinel_stays_finite_under_extreme_ratios() {
+    let src = "test://extreme-ratio-1080x1920";
+    seed_tall_story_photo(src);
+    let mut text = TextEngine::new();
+    for ratio in [1e-30f64, 1e-6, 1e-3, 0.75, 1e3, 1e6, 1e30] {
+        for (sizing, authored_w) in [(".width(200).maxHeight(300)", true), (".height(200).maxWidth(300)", false)] {
+            let tree = tree_from_dsl(
+                &format!(
+                    r#"Column {{ Image(src: "{src}").objectFit("cover").aspectRatio("@{{state.r}}"){sizing} }}"#
+                ),
+                json!({ "r": ratio }),
+            );
+            for scale in [1.0f32, 2.0] {
+                let pass = LayoutPass::compute(
+                    &tree,
+                    &mut text,
+                    ((430.0 * scale) as u32, (934.0 * scale) as u32),
+                    scale,
+                );
+                let image = pass.item_by_id(&first_of_type(&tree, "Image")).unwrap().rect;
+                let column = pass.item_by_id(&first_of_type(&tree, "Column")).unwrap().rect;
+                for r in [image, column] {
+                    assert!(
+                        [r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite()),
+                        "ratio {ratio} {sizing} scale {scale}: non-finite rect {r:?}"
+                    );
+                }
+                let (authored, capped) = if authored_w { (image.w, image.h) } else { (image.h, image.w) };
+                assert!(
+                    (authored - 200.0 * scale).abs() < 0.5,
+                    "ratio {ratio} {sizing} scale {scale}: authored axis kept: {image:?}"
+                );
+                assert!(
+                    capped <= 300.0 * scale + 0.5,
+                    "ratio {ratio} {sizing} scale {scale}: the other axis is capped: {image:?}"
+                );
+            }
+        }
+    }
+}
+
+/// DOM Button resets `padding: 0`; Card sets `16px`. Todo's "Add" button
+/// (`Button { Text("Add").padding(10) }`) is the text box plus nothing.
+#[test]
+fn actionable_default_padding_matches_the_dom_components() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Button { Text("Add").padding(10) }
+            Card { Text("Card") }
+            Button { Text("Padded") }.padding(8)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let column = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&column);
+    let rect = |id: &str| pass.item_by_id(id).expect("laid out").rect;
+    for (i, pad) in [(0usize, 0.0f32), (1, 16.0), (2, 8.0)] {
+        let outer = rect(&kids[i]);
+        let inner = rect(&tree.children_of(&kids[i])[0]);
+        assert!(
+            (inner.x - outer.x - pad).abs() < 0.5
+                && (outer.w - inner.w - 2.0 * pad).abs() < 0.5
+                && (outer.h - inner.h - 2.0 * pad).abs() < 0.5,
+            "child #{i}: expected {pad}px padding, outer {outer:?} inner {inner:?}"
+        );
+    }
+}
+
+/// `.padding(horizontal: 14, vertical: 12)` (the Messages inputs) — the
+/// named axis form the DOM, Swift and Android renderers all resolve.
+#[test]
+fn named_axis_padding_reaches_an_input() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Input(placeholder: "e.g. Ada")
+                .padding(horizontal: 14, vertical: 12).fontSize(16)
+                .borderRadius(12).border("1px solid #CBD5E1")
+                .width("100%")
+            Row { Text("x") }.padding(vertical: 4, top: 9, start: 3)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let input = pass.item_by_id(&first_of_type(&tree, "Input")).unwrap();
+    match &input.kind {
+        ItemKind::Input { padding, .. } => assert_eq!(*padding, (14.0, 12.0, 14.0, 12.0)),
+        other => panic!("expected an Input item, got {other:?}"),
+    }
+    assert!(input.rect.h >= 16.0 + 24.0 + 2.0, "padding feeds the box: {:?}", input.rect);
+    let row = first_of_type(&tree, "Row");
+    let pad = crate::style::padding_at(tree.get(&row).unwrap(), vp(430.0));
+    // An explicit edge beats its axis; `start` lands on the left (LTR).
+    assert_eq!((pad.left, pad.top, pad.right, pad.bottom), (3.0, 9.0, 0.0, 4.0));
+}
+
+/// `fontFamily` inherits to Text like CSS `font-family`, and is a layout
+/// input (a serif face measures differently).
+#[test]
+fn font_family_inherits_to_text_items() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("Headline")
+            Text("Mono").fontFamily("ui-monospace, monospace")
+        }.fontFamily("Georgia, 'Times New Roman', serif")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let column = first_of_type(&tree, "Column");
+    let family = |id: &str| match &pass.item_by_id(id).unwrap().kind {
+        ItemKind::Text { font_family, .. } => font_family.clone(),
+        other => panic!("expected Text, got {other:?}"),
+    };
+    let kids = tree.children_of(&column);
+    assert_eq!(family(&kids[0]), crate::text::FontFamily::from_css("Georgia, 'Times New Roman', serif"));
+    assert_eq!(family(&kids[1]), crate::text::FontFamily::from_css("ui-monospace, monospace"));
+    assert!(is_layout_prop("fontFamily") && is_inherited_text_measure_key("fontFamily.0"));
+}
+
+/// Tailwind `font-sans` / `font-serif` / `font-mono` (expanded by the
+/// engine to `fontFamily.0`, or `fontFamily@md.0` under a breakpoint)
+/// set the family on the Text itself and on its descendants, and every
+/// spelling the invalidation predicates accept is one the readers see.
+#[test]
+fn tailwind_font_family_classes_reach_text() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("Serif").tw("font-serif")
+            Text("Mono").tw("font-mono")
+            Text("Sans").tw("font-sans")
+            Column { Text("Inherited") }.tw("font-mono")
+            Text("Responsive").tw("font-sans md:font-serif")
+        }"#,
+        json!({}),
+    );
+    let serif = crate::text::FontFamily::from_css("ui-serif, Georgia, serif");
+    let mono = crate::text::FontFamily::from_css("ui-monospace, monospace");
+    let sans = crate::text::FontFamily::from_css("ui-sans-serif, system-ui, sans-serif");
+    let mut text = TextEngine::new();
+    for (width, responsive) in [(430u32, &sans), (1000, &serif)] {
+        let pass = LayoutPass::compute(&tree, &mut text, (width, 934), 1.0);
+        let family = |id: &str| match &pass.item_by_id(id).unwrap().kind {
+            ItemKind::Text { font_family, .. } => font_family.clone(),
+            other => panic!("expected Text, got {other:?}"),
+        };
+        let kids = tree.children_of(&first_of_type(&tree, "Column"));
+        assert_eq!(&family(&kids[0]), &serif);
+        assert_eq!(&family(&kids[1]), &mono);
+        assert_eq!(&family(&kids[2]), &sans);
+        assert_eq!(&family(&tree.children_of(&kids[3])[0]), &mono, "inherited from the Column");
+        assert_eq!(&family(&kids[4]), responsive, "md: variant at {width}px");
+    }
+    for key in ["fontFamily", "font-family", "fontFamily.0", "fontFamily@md.0"] {
+        assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
+    }
 }

@@ -9,6 +9,7 @@ use cosmic_text::{
     Attrs, Buffer, Color, Family, FontSystem, Metrics, Shaping, SwashCache, Weight, Wrap,
 };
 use indexmap::IndexMap;
+use std::sync::{Arc, OnceLock};
 use tiny_skia::Pixmap;
 
 /// Cap on cached `(text, font_size, wrap_width) -> (w, h)` entries.
@@ -66,6 +67,14 @@ pub struct TextEngine {
     /// of a decorated Text built and shaped a fresh cosmic-text `Buffer`,
     /// on top of the (cached) glyph tile it decorates.
     line_runs_cache: IndexMap<u64, std::sync::Arc<[LineRun]>>,
+    /// The `font-family` every shape / measure / draw uses: the renderer
+    /// default (sans-serif) except inside [`Self::with_family`]. Part of
+    /// every cache key above.
+    family: FontFamily,
+    /// Authored family list → the face family it resolves to on this
+    /// host (see [`resolve_family_list`]). A screen uses a handful of
+    /// distinct lists, so this stays tiny.
+    family_resolution: rustc_hash::FxHashMap<Arc<str>, ResolvedFamily>,
     /// How many times [`Self::line_runs`] actually shaped (cache misses).
     #[cfg(test)]
     pub(crate) line_runs_shapes: usize,
@@ -80,6 +89,8 @@ impl TextEngine {
             raster_cache: IndexMap::new(),
             scene_tile_cache: IndexMap::new(),
             line_runs_cache: IndexMap::new(),
+            family: FontFamily::default(),
+            family_resolution: Default::default(),
             #[cfg(test)]
             line_runs_shapes: 0,
         }
@@ -94,6 +105,45 @@ impl TextEngine {
         self.raster_cache.clear();
         self.scene_tile_cache.clear();
         self.line_runs_cache.clear();
+    }
+
+    /// Run `f` with `family` as the font family of every measure / draw /
+    /// line-layout call it makes, then restore the previous one. Outside
+    /// a scope text uses the renderer default (sans-serif), so a caller
+    /// that never sets a family can't inherit a stale one.
+    pub fn with_family<R>(&mut self, family: &FontFamily, f: impl FnOnce(&mut Self) -> R) -> R {
+        if *family == self.family {
+            return f(self);
+        }
+        let previous = self.replace_family(family.clone());
+        let result = f(self);
+        self.replace_family(previous);
+        result
+    }
+
+    /// Set the current family and return the previous one — the
+    /// non-closure form of [`Self::with_family`] for callers that need
+    /// to borrow their own state around the text calls. Pair every call
+    /// with a restoring one.
+    pub fn replace_family(&mut self, family: FontFamily) -> FontFamily {
+        std::mem::replace(&mut self.family, family)
+    }
+
+    /// The face family the current [`FontFamily`] resolves to here.
+    fn resolved_family(&mut self) -> ResolvedFamily {
+        let Some(list) = self.family.0.as_ref() else {
+            return ResolvedFamily::Generic(GenericFamily::SansSerif);
+        };
+        if let Some(hit) = self.family_resolution.get(list) {
+            return hit.clone();
+        }
+        let resolved = resolve_family_list(list, self.fonts.db());
+        if self.family_resolution.len() >= 64 {
+            self.family_resolution.clear();
+        }
+        self.family_resolution
+            .insert(Arc::clone(list), resolved.clone());
+        resolved
     }
 
     /// Measure `text` at `font_size` (physical px). When `wrap_width` is
@@ -133,6 +183,7 @@ impl TextEngine {
         font_size.to_bits().hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        self.family.hash(&mut hasher);
         line_height.to_bits().hash(&mut hasher);
         let key = hasher.finish();
         if let Some(&hit) = self.measure_cache.get(&key) {
@@ -140,9 +191,10 @@ impl TextEngine {
         }
 
         let metrics = Metrics::new(font_size, line_height.max(font_size));
+        let family = self.resolved_family();
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
-            .family(Family::SansSerif)
+            .family(family.as_family())
             .weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
@@ -286,9 +338,10 @@ impl TextEngine {
             return;
         }
         let metrics = Metrics::new(font_size, line_height.max(font_size));
+        let family = self.resolved_family();
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
-            .family(Family::SansSerif)
+            .family(family.as_family())
             .weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
@@ -412,6 +465,7 @@ impl TextEngine {
         color_u32.hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        self.family.hash(&mut hasher);
         line_height.to_bits().hash(&mut hasher);
         cw.hash(&mut hasher);
         ch.hash(&mut hasher);
@@ -535,6 +589,7 @@ impl TextEngine {
         color_u32.hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        self.family.hash(&mut hasher);
         cw.hash(&mut hasher);
         ch.hash(&mut hasher);
         let key = hasher.finish();
@@ -613,6 +668,7 @@ impl TextEngine {
         font_size.to_bits().hash(&mut hasher);
         wrap_width.map(f32::to_bits).hash(&mut hasher);
         weight.hash(&mut hasher);
+        self.family.hash(&mut hasher);
         line_height.to_bits().hash(&mut hasher);
         let key = hasher.finish();
         if let Some(hit) = self.line_runs_cache.get(&key) {
@@ -643,9 +699,10 @@ impl TextEngine {
             self.line_runs_shapes += 1;
         }
         let metrics = Metrics::new(font_size, line_height.max(font_size));
+        let family = self.resolved_family();
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
-            .family(Family::SansSerif)
+            .family(family.as_family())
             .weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
@@ -691,9 +748,10 @@ impl TextEngine {
     ) -> Vec<crate::textarea::VisualLine> {
         use crate::textarea::{GlyphBox, VisualLine};
         let metrics = Metrics::new(font_size, line_height.max(font_size));
+        let family = self.resolved_family();
         let mut buffer = Buffer::new(&mut self.fonts, metrics);
         let attrs = Attrs::new()
-            .family(Family::SansSerif)
+            .family(family.as_family())
             .weight(Weight(weight));
         buffer.set_text(text, &attrs, Shaping::Advanced, None);
         buffer.set_size(wrap_width, None);
@@ -767,9 +825,213 @@ impl Default for TextEngine {
     }
 }
 
-/// Build a `FontSystem` whose `fontdb::Database` is restricted to
-/// platform-provided system font directories — explicitly *not*
-/// walking user-installed font dirs.
+/// A CSS `font-family` list as authored (`"Georgia, 'Times New Roman',
+/// serif"`). The default is the renderer's sans-serif. Cheap to clone
+/// (one `Arc`), and hashed into every text cache key, so two Texts that
+/// differ only in family never share a measure or a glyph tile.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct FontFamily(Option<Arc<str>>);
+
+impl FontFamily {
+    /// The family list a `fontFamily` prop carries; blank means default.
+    pub fn from_css(list: &str) -> Self {
+        let list = list.trim();
+        if list.is_empty() {
+            Self::default()
+        } else {
+            Self(Some(Arc::from(list)))
+        }
+    }
+
+    pub fn is_default(&self) -> bool {
+        self.0.is_none()
+    }
+}
+
+/// CSS generic families (plus the `system-ui` / `ui-*` keywords), each
+/// mapped to the generic family the font database is configured with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GenericFamily {
+    Serif,
+    SansSerif,
+    Monospace,
+    Cursive,
+    Fantasy,
+}
+
+impl GenericFamily {
+    fn from_css(name: &str) -> Option<Self> {
+        Some(match name.to_ascii_lowercase().as_str() {
+            "serif" | "ui-serif" => Self::Serif,
+            "sans-serif" | "system-ui" | "ui-sans-serif" | "ui-rounded" | "-apple-system"
+            | "blinkmacsystemfont" => Self::SansSerif,
+            "monospace" | "ui-monospace" => Self::Monospace,
+            "cursive" => Self::Cursive,
+            "fantasy" => Self::Fantasy,
+            _ => return None,
+        })
+    }
+}
+
+/// What a [`FontFamily`] list resolved to on this host: the first entry
+/// that names an installed family, or a generic keyword.
+#[derive(Clone, Debug, PartialEq, Eq)]
+enum ResolvedFamily {
+    Generic(GenericFamily),
+    Named(Arc<str>),
+}
+
+impl ResolvedFamily {
+    fn as_family(&self) -> Family<'_> {
+        match self {
+            Self::Named(name) => Family::Name(name),
+            Self::Generic(GenericFamily::Serif) => Family::Serif,
+            Self::Generic(GenericFamily::SansSerif) => Family::SansSerif,
+            Self::Generic(GenericFamily::Monospace) => Family::Monospace,
+            Self::Generic(GenericFamily::Cursive) => Family::Cursive,
+            Self::Generic(GenericFamily::Fantasy) => Family::Fantasy,
+        }
+    }
+}
+
+/// Resolve a CSS family list the way a browser walks it: entries in
+/// order, the first installed family (or generic keyword) wins, and a
+/// list where nothing matches falls back to the default sans-serif.
+/// cosmic-text itself takes one family and substitutes its own default
+/// for a missing name, which would turn `"Georgia, serif"` into sans on
+/// any host without Georgia.
+fn resolve_family_list(list: &str, db: &fontdb::Database) -> ResolvedFamily {
+    for entry in list.split(',') {
+        let name = entry.trim().trim_matches(|c| c == '"' || c == '\'').trim();
+        if name.is_empty() {
+            continue;
+        }
+        if let Some(generic) = GenericFamily::from_css(name) {
+            return ResolvedFamily::Generic(generic);
+        }
+        let candidates =
+            std::iter::once(name).chain(metric_compatible_aliases(name).iter().copied());
+        for candidate in candidates {
+            if let Some(found) = installed_family(db, candidate) {
+                return ResolvedFamily::Named(found);
+            }
+        }
+    }
+    ResolvedFamily::Generic(GenericFamily::SansSerif)
+}
+
+/// The installed spelling of family `name` (case-insensitive), if any.
+fn installed_family(db: &fontdb::Database, name: &str) -> Option<Arc<str>> {
+    db.faces()
+        .flat_map(|face| face.families.iter())
+        .find(|(family, _)| family.eq_ignore_ascii_case(name))
+        .map(|(family, _)| Arc::from(family.as_str()))
+}
+
+/// Metric-compatible open substitutes for the web's core fonts, the
+/// same ones fontconfig aliases them to on Linux (which is what Chrome
+/// draws there): `Arial` lays out like `Liberation Sans` / `Arimo`.
+fn metric_compatible_aliases(name: &str) -> &'static [&'static str] {
+    match name.to_ascii_lowercase().as_str() {
+        "arial" | "helvetica" | "helvetica neue" => &["Liberation Sans", "Arimo"],
+        "times new roman" | "times" => &["Liberation Serif", "Tinos"],
+        "courier new" | "courier" => &["Liberation Mono", "Cousine"],
+        "georgia" => &["Gelasio"],
+        _ => &[],
+    }
+}
+
+/// The OS-vendor font index (see [`scan_system_fonts`]), built once per
+/// process. Every window's `FontSystem` starts from a clone of it, and
+/// SVG text rendering shares its faces ([`svg_font_db`]) — the font
+/// directories are walked and the face tables parsed exactly once.
+fn system_font_db() -> &'static fontdb::Database {
+    static DB: OnceLock<fontdb::Database> = OnceLock::new();
+    DB.get_or_init(scan_system_fonts)
+}
+
+/// The system faces as a database for resvg's text layer. resvg links
+/// fontdb 0.24 while cosmic-text links 0.23, so the database can't be
+/// passed as-is, but the face records can: they are copied over (file
+/// paths and already-mapped font bytes are shared, nothing is read or
+/// parsed again), together with the generic-family choices, so an SVG's
+/// `font-family="Georgia, serif"` / `font-weight="700"` picks the same
+/// faces the renderer's own text does.
+///
+/// Only these faces are visible to an SVG: usvg never loads system or
+/// `@font-face` fonts on its own, so an image source still can't make
+/// the renderer read anything beyond the fonts it already indexed.
+pub(crate) fn svg_font_db() -> Arc<resvg::usvg::fontdb::Database> {
+    static DB: OnceLock<Arc<resvg::usvg::fontdb::Database>> = OnceLock::new();
+    Arc::clone(DB.get_or_init(|| Arc::new(convert_for_svg(system_font_db()))))
+}
+
+fn convert_for_svg(src: &fontdb::Database) -> resvg::usvg::fontdb::Database {
+    use resvg::usvg::fontdb as svg;
+    let mut db = svg::Database::new();
+    for face in src.faces() {
+        let source = match &face.source {
+            fontdb::Source::Binary(data) => svg::Source::Binary(Arc::clone(data)),
+            fontdb::Source::File(path) => svg::Source::File(path.clone()),
+            fontdb::Source::SharedFile(_, data) => svg::Source::Binary(Arc::clone(data)),
+        };
+        db.push_face_info(svg::FaceInfo {
+            id: svg::ID::dummy(),
+            source,
+            index: face.index,
+            // fontdb 0.24 vendors its own copy of the `Language` /
+            // `Width` enums. Names are matched language-agnostically;
+            // only the English (US) tag, which fontdb lists first, has a
+            // role (it marks the canonical name), so it is the one kept.
+            families: face
+                .families
+                .iter()
+                .map(|(name, lang)| {
+                    let lang = if *lang == fontdb::Language::English_UnitedStates {
+                        svg::Language::English_UnitedStates
+                    } else {
+                        svg::Language::Unknown
+                    };
+                    (name.clone(), lang)
+                })
+                .collect(),
+            post_script_name: face.post_script_name.clone(),
+            style: match face.style {
+                fontdb::Style::Normal => svg::Style::Normal,
+                fontdb::Style::Italic => svg::Style::Italic,
+                fontdb::Style::Oblique => svg::Style::Oblique,
+            },
+            weight: svg::Weight(face.weight.0),
+            stretch: match face.stretch {
+                fontdb::Stretch::UltraCondensed => svg::Stretch::UltraCondensed,
+                fontdb::Stretch::ExtraCondensed => svg::Stretch::ExtraCondensed,
+                fontdb::Stretch::Condensed => svg::Stretch::Condensed,
+                fontdb::Stretch::SemiCondensed => svg::Stretch::SemiCondensed,
+                fontdb::Stretch::Normal => svg::Stretch::Normal,
+                fontdb::Stretch::SemiExpanded => svg::Stretch::SemiExpanded,
+                fontdb::Stretch::Expanded => svg::Stretch::Expanded,
+                fontdb::Stretch::ExtraExpanded => svg::Stretch::ExtraExpanded,
+                fontdb::Stretch::UltraExpanded => svg::Stretch::UltraExpanded,
+            },
+            monospaced: face.monospaced,
+        });
+    }
+    db.set_serif_family(src.family_name(&fontdb::Family::Serif));
+    db.set_sans_serif_family(src.family_name(&fontdb::Family::SansSerif));
+    db.set_monospace_family(src.family_name(&fontdb::Family::Monospace));
+    db.set_cursive_family(src.family_name(&fontdb::Family::Cursive));
+    db.set_fantasy_family(src.family_name(&fontdb::Family::Fantasy));
+    db
+}
+
+fn build_slim_font_system() -> FontSystem {
+    let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
+    FontSystem::new_with_locale_and_db(locale, system_font_db().clone())
+}
+
+/// Index the fonts in the platform-provided system font directories —
+/// explicitly *not* walking user-installed font dirs. This is the
+/// database every `FontSystem` (and SVG text) is built on.
 ///
 /// `cosmic_text::FontSystem::new()` calls `fontdb::Database::load_system_fonts()`,
 /// which on macOS recurses into `/Library/Fonts`, `/System/Library/Fonts`,
@@ -782,12 +1044,10 @@ impl Default for TextEngine {
 ///
 /// We load only the OS-vendor directories and skip user / network /
 /// third-party (`/Library/Fonts/` on macOS — App Store font installers
-/// drop here) sources. `sys_locale` matches what cosmic-text would
-/// have set internally. The family aliases mirror cosmic-text's own
+/// drop here) sources. The family aliases mirror cosmic-text's own
 /// defaults logic so `Family::SansSerif` etc. resolve to a real font
 /// on every supported platform.
-fn build_slim_font_system() -> FontSystem {
-    let locale = sys_locale::get_locale().unwrap_or_else(|| "en-US".to_string());
+fn scan_system_fonts() -> fontdb::Database {
     let mut db = fontdb::Database::new();
 
     #[cfg(target_os = "macos")]
@@ -841,7 +1101,7 @@ fn build_slim_font_system() -> FontSystem {
 
     log::debug!("slim font db: indexed {} font faces", db.len());
 
-    FontSystem::new_with_locale_and_db(locale, db)
+    db
 }
 
 #[cfg(test)]
@@ -1112,5 +1372,111 @@ mod tests {
                 "offset {off} for x={px} is not a char boundary in {s:?}",
             );
         }
+    }
+
+    // ---- font-family ---------------------------------------------
+
+    use super::{
+        resolve_family_list, svg_font_db, system_font_db, FontFamily, GenericFamily, ResolvedFamily,
+    };
+
+    #[test]
+    fn family_list_falls_through_missing_names_to_its_generic() {
+        // No faces at all: every named family is missing, so the list's
+        // generic keyword decides — never the renderer default.
+        let empty = fontdb::Database::new();
+        let serif = ResolvedFamily::Generic(GenericFamily::Serif);
+        assert_eq!(
+            resolve_family_list(
+                "Georgia, 'Iowan Old Style', 'Times New Roman', serif",
+                &empty
+            ),
+            serif
+        );
+        assert_eq!(
+            resolve_family_list("\"Nope\" , ui-monospace", &empty),
+            ResolvedFamily::Generic(GenericFamily::Monospace)
+        );
+        assert_eq!(
+            resolve_family_list("system-ui,-apple-system,Segoe UI,sans-serif", &empty),
+            ResolvedFamily::Generic(GenericFamily::SansSerif)
+        );
+        // Nothing matches and no generic: CSS falls back to the default.
+        assert_eq!(
+            resolve_family_list("Nope", &empty),
+            ResolvedFamily::Generic(GenericFamily::SansSerif)
+        );
+        assert!(FontFamily::from_css("  ").is_default());
+    }
+
+    #[test]
+    fn tailwind_family_lists_resolve_to_their_generic() {
+        // `font-sans` / `font-serif` / `font-mono` as tailwind-parse
+        // expands them: the leading `ui-*` keyword decides on every host,
+        // installed fonts or not.
+        let empty = fontdb::Database::new();
+        for db in [&empty, system_font_db()] {
+            assert_eq!(
+                resolve_family_list("ui-serif, Georgia, serif", db),
+                ResolvedFamily::Generic(GenericFamily::Serif)
+            );
+            assert_eq!(
+                resolve_family_list("ui-monospace, monospace", db),
+                ResolvedFamily::Generic(GenericFamily::Monospace)
+            );
+            assert_eq!(
+                resolve_family_list("ui-sans-serif, system-ui, sans-serif", db),
+                ResolvedFamily::Generic(GenericFamily::SansSerif)
+            );
+        }
+    }
+
+    #[test]
+    fn family_list_picks_the_first_installed_family() {
+        let db = system_font_db();
+        let Some(installed) = db.faces().next().map(|f| f.families[0].0.clone()) else {
+            return; // fontless host: nothing to resolve to
+        };
+        let list = format!("NoSuchFamily, '{}', serif", installed.to_ascii_uppercase());
+        assert_eq!(
+            resolve_family_list(&list, db),
+            ResolvedFamily::Named(installed.as_str().into())
+        );
+    }
+
+    #[test]
+    fn serif_family_measures_and_caches_apart_from_the_default() {
+        let mut t = TextEngine::new();
+        let text = "The Daily Hypen — Wikipedia's front page";
+        let sans = t.measure_weighted(text, 32.0, None, 700);
+        let serif_family = FontFamily::from_css("Georgia, 'Times New Roman', serif");
+        let serif = t.with_family(&serif_family, |t| t.measure_weighted(text, 32.0, None, 700));
+        assert_ne!(
+            sans, serif,
+            "a serif face must not reuse the sans measure / shaping"
+        );
+        // The scope ends with the default restored, and the cache keeps
+        // both answers apart.
+        assert_eq!(t.measure_weighted(text, 32.0, None, 700), sans);
+        assert_eq!(
+            t.with_family(&serif_family, |t| t.measure_weighted(text, 32.0, None, 700)),
+            serif
+        );
+    }
+
+    #[test]
+    fn svg_font_db_is_the_renderer_font_index() {
+        let ours = system_font_db();
+        let svg = svg_font_db();
+        assert_eq!(
+            svg.len(),
+            ours.len(),
+            "every system face is visible to SVG text, nothing more"
+        );
+        assert_eq!(
+            svg.family_name(&resvg::usvg::fontdb::Family::Serif),
+            ours.family_name(&fontdb::Family::Serif)
+        );
+        assert!(std::sync::Arc::ptr_eq(&svg, &svg_font_db()), "built once");
     }
 }

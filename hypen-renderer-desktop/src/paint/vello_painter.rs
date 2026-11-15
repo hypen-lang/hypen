@@ -1138,6 +1138,7 @@ impl VelloPainter {
                 max_lines,
                 padding,
                 decoration,
+                font_family,
             } => {
                 // `truncate` (max_lines = Some(1)) wants overflow to
                 // disappear cleanly instead of bleeding into siblings.
@@ -1162,6 +1163,7 @@ impl VelloPainter {
                         &clip,
                     );
                 }
+                let outer_family = self.text.replace_family(font_family.clone());
                 self.draw_text(
                     item,
                     content,
@@ -1174,6 +1176,7 @@ impl VelloPainter {
                     *padding,
                     *decoration,
                 );
+                self.text.replace_family(outer_family);
                 if needs_clip {
                     self.scene.pop_layer();
                 }

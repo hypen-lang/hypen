@@ -29,9 +29,27 @@ the `video` feature, Video `src`) resolve by mode:
   with nested `<image>` references disabled for the same reason.
 
 SVG sources (`data:image/svg+xml;utf8,…`, base64, or `.svg` URLs) are
-rasterised with resvg. AVIF needs the opt-in `avif` feature (system dav1d:
-`apt install libdav1d-dev` / `brew install dav1d`); without it an AVIF source
-keeps its placeholder or background colour.
+rasterised with resvg; their `<text>` uses the renderer's own system font
+index (generic `serif` / `sans-serif` / `monospace` and `font-weight` resolve
+as in the app's text). AVIF decodes through the default `avif` feature —
+pure Rust (`avif-parse` + `rav1d`), no system library; `avif-asm` enables
+rav1d's assembly (needs `nasm`). Still images decode (major brand `avif`,
+or e.g. `mif1` listing `avif`), with alpha; an animated AVIF that also lists
+`avif` shows its still primary image, unanimated. Grid (tiled) primary
+images and `avis`-only sequences are not supported: the source fails once
+(logged) and keeps its placeholder, like any undecodable image. rav1d panics on
+some malformed bitstreams; the workspace patches it to a vendored copy with
+`extern "C-unwind"` entry points (`third_party/rav1d/PATCHES.md`), so each
+AVIF decodes in-process on its own thread under `catch_unwind` and a panic
+only fails that image (keep `panic = "unwind"`, the default: with
+`panic = "abort"` such a panic ends the app). A decode still running after
+30 s is abandoned (its thread finishes in the background). With
+`default-features = false` and no `avif`, an AVIF source keeps its
+placeholder or background colour.
+
+Text honours `fontFamily` lists the CSS way (`"Georgia, 'Times New Roman',
+serif"`: the first installed family wins; `serif`, `sans-serif`,
+`monospace`, `system-ui` map to the platform's generic faces).
 
 ## Screenshots
 

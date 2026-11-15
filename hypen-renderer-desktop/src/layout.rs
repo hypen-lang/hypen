@@ -103,8 +103,20 @@ const _: () = assert!(CULL_BUFFER_VH >= SCROLL_REEMIT_THRESHOLD_VH);
 /// tw `gap-N`.
 const DEFAULT_GAP_PX: f32 = 0.0;
 const DEFAULT_PADDING_PX: f32 = 24.0;
-const DEFAULT_BUTTON_PAD_X: f32 = 16.0;
-const DEFAULT_BUTTON_PAD_Y: f32 = 10.0;
+/// Implicit padding of an actionable surface that declares none, as
+/// `(horizontal, vertical)` logical px — the DOM components' own resets:
+/// `Button` sets `padding: 0` on its `<button>` and `Link` is a plain
+/// `<a>`, so neither has any; `Card` sets `padding: 16px`. Desktop used
+/// to give all three 16×10, which made every unpadded Button (Todo's
+/// "Add", Messages' colour swatches) and every Link-wrapped card (News'
+/// picture of the day) bigger / inset compared with the web.
+fn default_actionable_padding(element_type: &str) -> (f32, f32) {
+    if element_type.eq_ignore_ascii_case("Card") {
+        (16.0, 16.0)
+    } else {
+        (0.0, 0.0)
+    }
+}
 /// DOM Text inherits the browser's 16px root size when `.fontSize(...)` is
 /// absent. Keep Desktop's implicit typography on the same contract.
 const DEFAULT_FONT_SIZE_PX: f32 = 16.0;
@@ -687,6 +699,9 @@ pub enum ItemKind {
         /// Tailwind `underline` / `line-through`, `.underline()` /
         /// `.strikethrough()`), propagated from ancestors like CSS.
         decoration: TextDecoration,
+        /// CSS `font-family` list, inherited like CSS (`.fontFamily` on
+        /// a container reaches its Text). Default = renderer sans-serif.
+        font_family: crate::text::FontFamily,
     },
     Button,
     /// Card keeps Button's action/accessibility behaviour while allowing the
@@ -1101,6 +1116,9 @@ pub(crate) struct NodeContext {
     /// makes a bold line that Taffy sized for one line wrap onto two,
     /// and the box stays a line short of the glyphs drawn into it.
     font_weight: u16,
+    /// Inherited CSS `font-family` list; a serif face measures
+    /// differently from the default sans.
+    font_family: crate::text::FontFamily,
 }
 
 /// The live interaction state fed into the layout pass so that
@@ -3197,13 +3215,15 @@ impl LayoutPass {
                     AvailableSpace::MaxContent => None,
                 })
             };
-            let (w, measured_h) = text.measure_weighted_line_height(
-                text_content,
-                ctx.font_size,
-                wrap_width,
-                ctx.font_weight,
-                ctx.line_height,
-            );
+            let (w, measured_h) = text.with_family(&ctx.font_family, |text| {
+                text.measure_weighted_line_height(
+                    text_content,
+                    ctx.font_size,
+                    wrap_width,
+                    ctx.font_weight,
+                    ctx.line_height,
+                )
+            });
             let h = ctx
                 .max_lines
                 .map(|lines| measured_h.min(ctx.line_height * lines as f32))
@@ -4659,6 +4679,7 @@ fn build_subtree(
                             * scale,
                         max_lines: resolve_max_lines(node, viewport),
                         font_weight: inherited_text_font_weight(tree, node_id, viewport),
+                        font_family: inherited_text_font_family(tree, node_id, viewport),
                     },
                 )
                 .ok()?;
@@ -4758,15 +4779,10 @@ fn build_subtree(
             // — the launcher's dock icons grew 56pt -> 88pt and four of them
             // overflowed their `max-w-[260px]` container.
             let declares_padding = crate::style::declares_padding(node, &vs);
-            let pad_x = if declares_padding {
-                (pad.left + pad.right) * 0.5
+            let (pad_x, pad_y) = if declares_padding {
+                ((pad.left + pad.right) * 0.5, (pad.top + pad.bottom) * 0.5)
             } else {
-                DEFAULT_BUTTON_PAD_X
-            };
-            let pad_y = if declares_padding {
-                (pad.top + pad.bottom) * 0.5
-            } else {
-                DEFAULT_BUTTON_PAD_Y
+                default_actionable_padding(et)
             };
             // Column-direction Button + no implicit centring — see
             // the matching comment in `node_style`'s actionable
@@ -5105,7 +5121,8 @@ pub(crate) fn is_inherited_text_measure_key(name: &str) -> bool {
     let base = hypen_engine::portable::parse_prop_key(name).base;
     matches!(
         base.to_ascii_lowercase().as_str(),
-        "fontsize" | "font-size" | "fontweight" | "font-weight"
+        "fontsize" | "font-size" | "fontweight" | "font-weight" | "fontfamily"
+            | "font-family"
     )
 }
 
@@ -5189,6 +5206,8 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "font-size"
             | "fontweight"
             | "font-weight"
+            | "fontfamily"
+            | "font-family"
             // NOT `level`: it is layout-affecting only on a Heading —
             // see `is_heading_level_write`.
             // Textarea intrinsic height is `rows` lines of its line height.
@@ -5375,15 +5394,10 @@ pub(crate) fn node_style_with(
         // See the matching branch in `node_style_with`: default only when the
         // node declares NO padding, so an explicit `p-0` is honoured.
         let declares_padding = crate::style::declares_padding(node, &vs);
-        let pad_x = if declares_padding {
-            (pad.left + pad.right) * 0.5
+        let (pad_x, pad_y) = if declares_padding {
+            ((pad.left + pad.right) * 0.5, (pad.top + pad.bottom) * 0.5)
         } else {
-            DEFAULT_BUTTON_PAD_X
-        };
-        let pad_y = if declares_padding {
-            (pad.top + pad.bottom) * 0.5
-        } else {
-            DEFAULT_BUTTON_PAD_Y
+            default_actionable_padding(et)
         };
         Style {
             display: Display::Flex,
@@ -6355,6 +6369,9 @@ pub(crate) fn node_context(
             line_height: resolved_line_height(node, font_size / scale, viewport) * scale,
             max_lines: resolve_max_lines(node, viewport),
             font_weight,
+            font_family: crate::style::prop_str_at(node, "fontFamily", viewport)
+                .map(crate::text::FontFamily::from_css)
+                .unwrap_or_default(),
         }
     } else {
         NodeContext::default()
@@ -6493,6 +6510,7 @@ fn node_context_in_tree(
         line_height: resolved_line_height(node, font_size / scale, viewport) * scale,
         max_lines: resolve_max_lines(node, viewport),
         font_weight: inherited_text_font_weight(tree, id, viewport),
+        font_family: inherited_text_font_family(tree, id, viewport),
     }
 }
 
@@ -6881,6 +6899,55 @@ fn apply_size_props(style: &mut Style, node: &crate::tree::Node, vs: &VariantSta
             Dim::Length(v) => Dimension::length(v * scale),
             Dim::Percent(p) => Dimension::percent(p),
         };
+    }
+    if style.aspect_ratio.is_some() {
+        let authored = |keys: &[&str]| keys.iter().any(|k| prop_dim_with(node, k, vs).is_some());
+        let authored_w = authored(&["width", "size"])
+            || prop_fill_fraction_with(node, "fillMaxWidth", vs).is_some();
+        let authored_h = authored(&["height", "size"])
+            || prop_fill_fraction_with(node, "fillMaxHeight", vs).is_some();
+        let shrink_authored = prop_f32_with(node, "flexShrink", vs).is_some()
+            || crate::style::prop_str_with(node, "flex", vs).is_some()
+            || prop_f32_with(node, "flex", vs).is_some();
+        keep_authored_size_out_of_ratio_transfer(style, authored_w, authored_h, shrink_authored);
+    }
+}
+
+/// CSS carries a min / max constraint through `aspect-ratio` onto the
+/// other axis only when that axis's size is automatic; an authored
+/// `width` stays the width, and `max-height` just caps the
+/// ratio-derived height (the image then crops via `object-fit`). Taffy
+/// transfers unconditionally, so News' picture of the day — `w-full`,
+/// `.aspectRatio(r)`, `.maxHeight(300)` — got `max-width = 300 × r` and
+/// rendered narrower than its card instead of full-width and cropped.
+/// Pin the authored axis's open max to "none" so there is nothing to
+/// transfer onto. Natural-size images keep the transfer: their
+/// width is not authored, and a capped height should shrink it.
+///
+/// Such a capped item also gets CSS's initial `flex-shrink: 1` back
+/// (unless the author set one). Images default to 0 here (see
+/// `image_style`), and Taffy's intrinsic flex-container sizing floors a
+/// non-shrinkable item's contribution at its flex basis — the
+/// *unclamped* ratio-derived size (the 2016 spec change Chrome never
+/// shipped) — so the card around the 300px photo still sized itself for
+/// the full 528px one.
+fn keep_authored_size_out_of_ratio_transfer(
+    style: &mut Style,
+    authored_w: bool,
+    authored_h: bool,
+    shrink_authored: bool,
+) {
+    let mut capped = false;
+    if authored_w && !authored_h && style.max_size.width.is_auto() && !style.max_size.height.is_auto() {
+        style.max_size.width = Dimension::length(f32::MAX);
+        capped = true;
+    }
+    if authored_h && !authored_w && style.max_size.height.is_auto() && !style.max_size.width.is_auto() {
+        style.max_size.height = Dimension::length(f32::MAX);
+        capped = true;
+    }
+    if capped && !shrink_authored {
+        style.flex_shrink = 1.0;
     }
 }
 
@@ -7559,6 +7626,7 @@ fn emit_items(
                             max_lines,
                             padding: padding_phys,
                             decoration: inherited_text_decoration(tree, rid, viewport),
+                            font_family: inherited_text_font_family(tree, rid, viewport),
                         },
                         rect,
                         action,
@@ -9173,6 +9241,25 @@ pub(crate) fn inherited_text_decoration(tree: &Tree, id: &str, viewport: Viewpor
         cursor = tree.parent_of(current);
     }
     out
+}
+
+/// `font-family` inherits in CSS: the nearest Text-or-ancestor that
+/// declares one decides (the news example sets it on Text and on
+/// containers alike).
+pub(crate) fn inherited_text_font_family(
+    tree: &Tree,
+    id: &str,
+    viewport: Viewport,
+) -> crate::text::FontFamily {
+    let mut cursor = Some(id);
+    while let Some(current) = cursor {
+        let Some(node) = tree.get(current) else { break };
+        if let Some(list) = crate::style::prop_str_at(node, "fontFamily", viewport) {
+            return crate::text::FontFamily::from_css(list);
+        }
+        cursor = tree.parent_of(current);
+    }
+    crate::text::FontFamily::default()
 }
 
 fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign {

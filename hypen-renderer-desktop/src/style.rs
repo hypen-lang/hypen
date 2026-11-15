@@ -898,6 +898,15 @@ struct BoxPropKeys {
     dot_right: &'static str,
     dot_bottom: &'static str,
     dot_left: &'static str,
+    /// Named-argument axes / logical edges: `.padding(horizontal: 14,
+    /// vertical: 12)` arrives as `padding.horizontal` / `padding.vertical`,
+    /// `.padding(start: 8)` as `padding.start` (see [`apply_named_box_args`]).
+    dot_horizontal: &'static str,
+    dot_vertical: &'static str,
+    dot_start: &'static str,
+    dot_end: &'static str,
+    dot_leading: &'static str,
+    dot_trailing: &'static str,
 }
 
 static PADDING_KEYS: BoxPropKeys = BoxPropKeys {
@@ -912,6 +921,12 @@ static PADDING_KEYS: BoxPropKeys = BoxPropKeys {
     dot_right: "padding.right",
     dot_bottom: "padding.bottom",
     dot_left: "padding.left",
+    dot_horizontal: "padding.horizontal",
+    dot_vertical: "padding.vertical",
+    dot_start: "padding.start",
+    dot_end: "padding.end",
+    dot_leading: "padding.leading",
+    dot_trailing: "padding.trailing",
 };
 
 static MARGIN_KEYS: BoxPropKeys = BoxPropKeys {
@@ -926,7 +941,51 @@ static MARGIN_KEYS: BoxPropKeys = BoxPropKeys {
     dot_right: "margin.right",
     dot_bottom: "margin.bottom",
     dot_left: "margin.left",
+    dot_horizontal: "margin.horizontal",
+    dot_vertical: "margin.vertical",
+    dot_start: "margin.start",
+    dot_end: "margin.end",
+    dot_leading: "margin.leading",
+    dot_trailing: "margin.trailing",
 };
+
+/// The named-argument form of `.padding(...)` / `.margin(...)`, resolved
+/// like the DOM renderer's `resolveSpacingKeys` (and Swift's): an axis
+/// (`horizontal` / `vertical`) is the fallback for its two edges, an
+/// explicit edge (`top` / `right` / `bottom` / `left`) beats it, and the
+/// logical `leading ?? start` / `trailing ?? end` win over both (LTR, so
+/// they land on left / right). Desktop used to read only the four
+/// physical edges, so `.padding(horizontal: 14, vertical: 12)` — the
+/// Messages inputs — was silently dropped.
+fn apply_named_box_args(node: &Node, keys: &BoxPropKeys, viewport: Option<Viewport>, p: &mut Padding) {
+    let named = |key: &str| node.props.get(key).and_then(|v| value_to_f32(v, viewport));
+    if let Some(v) = named(keys.dot_horizontal) {
+        p.left = v;
+        p.right = v;
+    }
+    if let Some(v) = named(keys.dot_vertical) {
+        p.top = v;
+        p.bottom = v;
+    }
+    if let Some(v) = named(keys.dot_top) {
+        p.top = v;
+    }
+    if let Some(v) = named(keys.dot_right) {
+        p.right = v;
+    }
+    if let Some(v) = named(keys.dot_bottom) {
+        p.bottom = v;
+    }
+    if let Some(v) = named(keys.dot_left) {
+        p.left = v;
+    }
+    if let Some(v) = named(keys.dot_leading).or_else(|| named(keys.dot_start)) {
+        p.left = v;
+    }
+    if let Some(v) = named(keys.dot_trailing).or_else(|| named(keys.dot_end)) {
+        p.right = v;
+    }
+}
 
 /// Shared box-model reader for `padding` / `margin`. The Hypen DSL gives
 /// both shorthand and per-side applicators that all collapse to the same
@@ -962,7 +1021,18 @@ pub fn declares_padding(node: &Node, vs: &VariantState) -> bool {
     {
         return true;
     }
-    [k.dot_top, k.dot_right, k.dot_bottom, k.dot_left]
+    [
+        k.dot_top,
+        k.dot_right,
+        k.dot_bottom,
+        k.dot_left,
+        k.dot_horizontal,
+        k.dot_vertical,
+        k.dot_start,
+        k.dot_end,
+        k.dot_leading,
+        k.dot_trailing,
+    ]
         .iter()
         .any(|key| {
             node.props
@@ -986,34 +1056,7 @@ fn read_box_props_at(node: &Node, keys: &BoxPropKeys, vs: &VariantState) -> Padd
         p.top = v;
         p.bottom = v;
     }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_top)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.top = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_right)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.right = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_bottom)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.bottom = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_left)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.left = v;
-    }
+    apply_named_box_args(node, keys, viewport, &mut p);
     if let Some(v) = prop_f32_with(node, keys.top, vs) {
         p.top = v;
     }
@@ -1044,34 +1087,7 @@ fn read_box_props(node: &Node, keys: &BoxPropKeys) -> Padding {
         p.top = v;
         p.bottom = v;
     }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_top)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.top = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_right)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.right = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_bottom)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.bottom = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_left)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.left = v;
-    }
+    apply_named_box_args(node, keys, viewport, &mut p);
     if let Some(v) = prop_f32(node, keys.top) {
         p.top = v;
     }
@@ -3787,6 +3803,22 @@ mod tests {
             prop_color(&node, "backgroundColor"),
             Some(Rgba(0xff, 0, 0, 0xff))
         );
+    }
+
+    #[test]
+    fn font_family_readers_accept_every_spelling() {
+        // The invalidation predicates (`is_layout_prop`,
+        // `is_inherited_text_measure_key`) accept `font-family`; the
+        // readers ask for `fontFamily` and reach the kebab and `.0`
+        // spellings through the lookup chain.
+        for key in ["fontFamily", "fontFamily.0", "font-family"] {
+            let node = node_with(&[(key, serde_json::json!("ui-monospace, monospace"))]);
+            assert_eq!(
+                prop_str_at(&node, "fontFamily", vp(1000.0)),
+                Some("ui-monospace, monospace"),
+                "{key}"
+            );
+        }
     }
 
     #[test]

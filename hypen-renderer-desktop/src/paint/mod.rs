@@ -6,6 +6,8 @@
 //!
 //! [`Painter`]: crate::Painter
 
+#[cfg(feature = "avif")]
+mod avif;
 pub mod cpu;
 pub mod icon;
 pub mod image;
