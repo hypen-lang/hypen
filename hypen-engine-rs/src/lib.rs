@@ -40,6 +40,7 @@ pub mod dispatch;
 pub mod engine;
 pub(crate) mod engine_core;
 pub mod error;
+pub mod hosted;
 pub mod ir;
 pub mod lifecycle;
 pub mod module_host;

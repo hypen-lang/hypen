@@ -1,0 +1,512 @@
+//! What went wrong in a cascade, as data.
+//!
+//! Every refusal and failure met while draining a cascade is recorded as a
+//! [`CascadeFailure`] — which module, which action, *why it was going to run*
+//! ([`Origin`]) and *why it did not* ([`FailureCause`]) — and collected in a
+//! [`CascadeReport`]. The public `Engine` API still returns the stable
+//! `EngineError` variants; the report is rendered into the message there
+//! ([`CascadeReport::to_engine_error`]) and stays available, structured,
+//! through `Engine::last_module_cascade_report`.
+
+use super::names::ScopeName;
+use crate::error::EngineError;
+use crate::module_host::HostError;
+use std::fmt;
+use std::sync::Arc;
+
+/// Failures kept in full per cascade; [`CascadeReport::failure_count`] is
+/// always exact.
+pub const MAX_REPORTED_FAILURES: usize = 8;
+
+/// A lifecycle export the engine drives and folds like a dispatch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LifecycleHook {
+    Activated,
+    Deactivated,
+}
+
+impl LifecycleHook {
+    /// The pseudo action name the hook is reported under.
+    pub fn label(self) -> &'static str {
+        match self {
+            LifecycleHook::Activated => "<on_activated>",
+            LifecycleHook::Deactivated => "<on_deactivated>",
+        }
+    }
+}
+
+/// Why an action was going to run in a module.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Origin {
+    /// The top-level action the embedder or renderer dispatched.
+    Root,
+    /// The top-level lifecycle call (`activate_module` / `deactivate_module`).
+    Lifecycle(LifecycleHook),
+    /// The module emitted it to itself.
+    Emit,
+    /// Module `from` dispatched it across modules.
+    CrossDispatch { from: ScopeName },
+    /// The module subscribed to `target` at `path`, and that state changed
+    /// (written by a reducer, or by the host — see [`CascadeRoot::HostWrite`]).
+    SubscriptionChange { target: Arc<str>, path: Arc<str> },
+    /// Not a run at all: the module asked to subscribe to `target` at `path`
+    /// with this action as `on_change`, and the request itself was refused.
+    SubscribeRequest { target: String, path: String },
+}
+
+/// What started a cascade.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CascadeRoot {
+    Dispatch {
+        scope: ScopeName,
+        action: String,
+    },
+    Lifecycle {
+        scope: ScopeName,
+        hook: LifecycleHook,
+    },
+    /// The host wrote `scope`'s state (`update_state*`) and its subscribers
+    /// were notified.
+    HostWrite {
+        scope: String,
+    },
+}
+
+impl CascadeRoot {
+    /// The action the root is reported under: the dispatched name, a
+    /// lifecycle hook's [`label`](LifecycleHook::label), or
+    /// `<host state update>`.
+    pub fn action_label(&self) -> &str {
+        match self {
+            CascadeRoot::Dispatch { action, .. } => action,
+            CascadeRoot::Lifecycle { hook, .. } => hook.label(),
+            CascadeRoot::HostWrite { .. } => "<host state update>",
+        }
+    }
+
+    /// The scope the root call addressed (or the host wrote).
+    pub fn scope(&self) -> &str {
+        match self {
+            CascadeRoot::Dispatch { scope, .. } | CascadeRoot::Lifecycle { scope, .. } => {
+                scope.as_str()
+            }
+            CascadeRoot::HostWrite { scope } => scope,
+        }
+    }
+}
+
+impl fmt::Display for CascadeRoot {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{}] {}", self.scope(), self.action_label())
+    }
+}
+
+/// Why a reducer's returned state cannot become the scope's state.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidState {
+    /// The bytes are not JSON (carries the decoder's message).
+    NotJson(String),
+    /// Valid JSON, but module state must be an object.
+    NotAnObject,
+}
+
+impl fmt::Display for InvalidState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InvalidState::NotJson(e) => write!(f, "invalid state: {e}"),
+            InvalidState::NotAnObject => f.write_str("module state must be a JSON object"),
+        }
+    }
+}
+
+/// Why an action did not run, or a subscription was not registered.
+#[derive(Debug)]
+pub enum FailureCause {
+    /// No hosted module is wired under the addressed scope.
+    UnknownModule,
+    /// The addressed module does not accept that action name.
+    NotAccepted,
+    /// A cross-module dispatch without the sender's `dispatches` grant.
+    /// `missing_grant` is the scope to add to the sender's `dispatches` list.
+    DispatchDenied { missing_grant: String },
+    /// A subscription without the subscriber's `reads` grant. `missing_grant`
+    /// is the scope to add to the subscriber's `reads` list.
+    ReadDenied { missing_grant: String },
+    /// The subscriber already holds the per-module maximum.
+    SubscriptionLimit { limit: usize },
+    /// The follow-up's payload is neither empty nor JSON; it was not delivered.
+    PayloadNotJson(String),
+    /// The follow-up would exceed the cascade depth cap.
+    DepthExceeded { limit: u32 },
+    /// The cascade's reducer-invocation budget ran out; `dropped` pending
+    /// actions (this one first) never ran.
+    BudgetExhausted { budget: usize, dropped: usize },
+    /// The module host failed the call (trap, dead instance, module error, …).
+    Host(HostError),
+    /// No module host is installed on the engine.
+    NoHost,
+    /// The scope has no state slot in the engine.
+    NoStateSlot,
+    /// The scope's state could not be encoded for the call.
+    StateEncoding(String),
+    /// The reducer returned unusable state; nothing of its output was applied.
+    InvalidState(InvalidState),
+}
+
+impl FailureCause {
+    /// `refused` (a policy said no), `dropped` (a cap was hit) or `failed`
+    /// (it ran, or tried to, and broke).
+    fn verb(&self) -> &'static str {
+        match self {
+            FailureCause::UnknownModule
+            | FailureCause::NotAccepted
+            | FailureCause::DispatchDenied { .. }
+            | FailureCause::ReadDenied { .. }
+            | FailureCause::SubscriptionLimit { .. }
+            | FailureCause::PayloadNotJson(_) => "refused",
+            FailureCause::DepthExceeded { .. } | FailureCause::BudgetExhausted { .. } => "dropped",
+            FailureCause::Host(_)
+            | FailureCause::NoHost
+            | FailureCause::NoStateSlot
+            | FailureCause::StateEncoding(_)
+            | FailureCause::InvalidState(_) => "failed",
+        }
+    }
+}
+
+/// One refusal or failure met during a cascade.
+#[derive(Debug)]
+pub struct CascadeFailure {
+    /// The module the action was addressed to (for a refused subscription:
+    /// the subscriber). Canonical spelling; may name no hosted module.
+    pub scope: String,
+    /// The action name (for a refused subscription: its `on_change`; for a
+    /// lifecycle call: [`LifecycleHook::label`]).
+    pub action: String,
+    pub origin: Origin,
+    pub cause: FailureCause,
+}
+
+impl CascadeFailure {
+    /// Whether this is the failure of the cascade's root call (in which case
+    /// nothing was applied and it is the report's only failure).
+    pub fn is_root(&self) -> bool {
+        matches!(self.origin, Origin::Root | Origin::Lifecycle(_))
+    }
+
+    fn write_cause(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            scope,
+            action,
+            origin,
+            cause,
+        } = self;
+        match cause {
+            FailureCause::UnknownModule => write!(f, "no hosted module under scope '{scope}'"),
+            FailureCause::NotAccepted => match origin {
+                Origin::SubscribeRequest { .. } => {
+                    write!(f, "on_change '{action}' is not an action of '{scope}'")
+                }
+                _ => write!(f, "module '{scope}' does not accept that action"),
+            },
+            FailureCause::DispatchDenied { missing_grant } => {
+                let sender = match origin {
+                    Origin::CrossDispatch { from } => from.as_str(),
+                    _ => "the sender",
+                };
+                write!(
+                    f,
+                    "'{sender}' has no `dispatches` grant on '{missing_grant}' — add \
+                     \"{missing_grant}\" to `dispatches` in the manifest of '{sender}'"
+                )
+            }
+            FailureCause::ReadDenied { missing_grant } => write!(
+                f,
+                "no `reads` grant on '{missing_grant}' — add \"{missing_grant}\" to `reads` in \
+                 the manifest of '{scope}'"
+            ),
+            FailureCause::SubscriptionLimit { limit } => {
+                write!(f, "subscription limit ({limit}) reached")
+            }
+            FailureCause::PayloadNotJson(e) => write!(f, "payload is not JSON ({e})"),
+            FailureCause::DepthExceeded { limit } => {
+                write!(f, "cascade depth cap ({limit}) reached")
+            }
+            FailureCause::BudgetExhausted { budget, dropped } => write!(
+                f,
+                "reducer-invocation budget ({budget}) exhausted; dropped {dropped} pending \
+                 action(s), this one first"
+            ),
+            FailureCause::Host(e) => write!(f, "{e}"),
+            FailureCause::NoHost => f.write_str("no module host installed"),
+            FailureCause::NoStateSlot => f.write_str("module has no state slot"),
+            FailureCause::StateEncoding(e) => write!(f, "module state could not be encoded: {e}"),
+            FailureCause::InvalidState(reason) => write!(f, "{reason}"),
+        }
+    }
+}
+
+/// `[module] 'action' refused|dropped|failed: why (why it was going to run)`.
+impl fmt::Display for CascadeFailure {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self {
+            scope,
+            action,
+            origin,
+            cause,
+        } = self;
+        let verb = cause.verb();
+        if let Origin::SubscribeRequest { target, path } = origin {
+            write!(f, "[{scope}] subscribe to '{target}'")?;
+            if !path.is_empty() {
+                write!(f, " at '{path}'")?;
+            }
+            write!(f, " {verb}: ")?;
+            return self.write_cause(f);
+        }
+        write!(f, "[{scope}] '{action}' {verb}: ")?;
+        self.write_cause(f)?;
+        match origin {
+            // The root is named by the report's header.
+            Origin::Root | Origin::Lifecycle(_) | Origin::SubscribeRequest { .. } => Ok(()),
+            Origin::Emit => write!(f, " (emitted by '{scope}')"),
+            Origin::CrossDispatch { from } => write!(f, " (dispatched by '{from}')"),
+            Origin::SubscriptionChange { target, path } if path.is_empty() => {
+                write!(f, " (notification: '{target}' changed)")
+            }
+            Origin::SubscriptionChange { target, path } => {
+                write!(f, " (notification: '{target}' changed at '{path}')")
+            }
+        }
+    }
+}
+
+/// The failures of one cascade. Only produced when there is at least one.
+#[derive(Debug)]
+pub struct CascadeReport {
+    root: CascadeRoot,
+    failures: Vec<CascadeFailure>,
+    failure_count: usize,
+}
+
+impl CascadeReport {
+    pub(crate) fn new(root: CascadeRoot) -> Self {
+        Self {
+            root,
+            failures: Vec::new(),
+            failure_count: 0,
+        }
+    }
+
+    pub(crate) fn record(&mut self, failure: CascadeFailure) {
+        self.failure_count += 1;
+        if self.failures.len() < MAX_REPORTED_FAILURES {
+            self.failures.push(failure);
+        }
+    }
+
+    /// What started the cascade.
+    pub fn root(&self) -> &CascadeRoot {
+        &self.root
+    }
+
+    /// The first [`MAX_REPORTED_FAILURES`] failures, in the order they
+    /// happened.
+    pub fn failures(&self) -> &[CascadeFailure] {
+        &self.failures
+    }
+
+    /// How many failures there were in total (may exceed
+    /// `failures().len()`).
+    pub fn failure_count(&self) -> usize {
+        self.failure_count
+    }
+
+    pub fn is_clean(&self) -> bool {
+        self.failure_count == 0
+    }
+
+    /// The root call's own failure, if that is what this report records.
+    pub fn root_failure(&self) -> Option<&CascadeFailure> {
+        self.failures.first().filter(|failure| failure.is_root())
+    }
+
+    /// Render for the public API, keeping the `EngineError` variant each
+    /// situation always had: a root failure is the caller's error
+    /// (`StateError` for unusable state, `ModuleError` otherwise); follow-up
+    /// failures are summarized as one `ModuleError`.
+    pub fn to_engine_error(&self) -> EngineError {
+        match self.root_failure() {
+            Some(failure) => match failure.cause {
+                FailureCause::NoStateSlot
+                | FailureCause::StateEncoding(_)
+                | FailureCause::InvalidState(_) => EngineError::StateError(failure.to_string()),
+                _ => EngineError::ModuleError(failure.to_string()),
+            },
+            None => EngineError::ModuleError(self.to_string()),
+        }
+    }
+}
+
+/// A header naming the root, then one line per failure.
+impl fmt::Display for CascadeReport {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "module cascade from {} finished with {} failure(s):",
+            self.root, self.failure_count
+        )?;
+        for failure in &self.failures {
+            write!(f, "\n  - {failure}")?;
+        }
+        let unlisted = self.failure_count - self.failures.len();
+        if unlisted > 0 {
+            write!(f, "\n  - ... and {unlisted} more")?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scope(name: &str) -> ScopeName {
+        ScopeName::parse(name).unwrap()
+    }
+
+    fn failure(scope: &str, action: &str, origin: Origin, cause: FailureCause) -> CascadeFailure {
+        CascadeFailure {
+            scope: scope.into(),
+            action: action.into(),
+            origin,
+            cause,
+        }
+    }
+
+    fn dispatch_root() -> CascadeRoot {
+        CascadeRoot::Dispatch {
+            scope: scope("cart"),
+            action: "checkout".into(),
+        }
+    }
+
+    #[test]
+    fn an_acl_refusal_names_the_grant_to_add() {
+        let denied = failure(
+            "payments",
+            "charge",
+            Origin::CrossDispatch {
+                from: scope("cart"),
+            },
+            FailureCause::DispatchDenied {
+                missing_grant: "payments".into(),
+            },
+        );
+        assert_eq!(
+            denied.to_string(),
+            "[payments] 'charge' refused: 'cart' has no `dispatches` grant on 'payments' — add \
+             \"payments\" to `dispatches` in the manifest of 'cart' (dispatched by 'cart')"
+        );
+        let unread = failure(
+            "cart",
+            "priceChanged",
+            Origin::SubscribeRequest {
+                target: "catalog".into(),
+                path: "prices".into(),
+            },
+            FailureCause::ReadDenied {
+                missing_grant: "catalog".into(),
+            },
+        );
+        assert_eq!(
+            unread.to_string(),
+            "[cart] subscribe to 'catalog' at 'prices' refused: no `reads` grant on 'catalog' — \
+             add \"catalog\" to `reads` in the manifest of 'cart'"
+        );
+    }
+
+    #[test]
+    fn a_report_lists_each_failure_on_its_own_line_and_counts_the_unlisted() {
+        let mut report = CascadeReport::new(dispatch_root());
+        assert!(report.is_clean());
+        report.record(failure(
+            "cart",
+            "recount",
+            Origin::Emit,
+            FailureCause::BudgetExhausted {
+                budget: 1024,
+                dropped: 3,
+            },
+        ));
+        report.record(failure(
+            "audit",
+            "cartChanged",
+            Origin::SubscriptionChange {
+                target: "cart".into(),
+                path: "items".into(),
+            },
+            FailureCause::Host(HostError::Trap("unreachable".into())),
+        ));
+        for _ in 0..MAX_REPORTED_FAILURES {
+            report.record(failure(
+                "cart",
+                "x",
+                Origin::Emit,
+                FailureCause::NotAccepted,
+            ));
+        }
+        assert_eq!(report.failure_count(), MAX_REPORTED_FAILURES + 2);
+        assert_eq!(report.failures().len(), MAX_REPORTED_FAILURES);
+        assert!(report.root_failure().is_none());
+
+        let EngineError::ModuleError(message) = report.to_engine_error() else {
+            panic!("follow-up failures are a ModuleError");
+        };
+        let lines: Vec<&str> = message.lines().collect();
+        assert_eq!(
+            &lines[..3],
+            [
+                "module cascade from [cart] checkout finished with 10 failure(s):",
+                "  - [cart] 'recount' dropped: reducer-invocation budget (1024) exhausted; \
+                 dropped 3 pending action(s), this one first (emitted by 'cart')",
+                "  - [audit] 'cartChanged' failed: module trapped: unreachable (notification: \
+                 'cart' changed at 'items')",
+            ]
+        );
+        assert_eq!(lines.len(), 1 + MAX_REPORTED_FAILURES + 1);
+        assert_eq!(lines[lines.len() - 1], "  - ... and 2 more");
+    }
+
+    #[test]
+    fn a_root_failure_keeps_its_engine_error_variant() {
+        let mut trapped = CascadeReport::new(dispatch_root());
+        trapped.record(failure(
+            "cart",
+            "checkout",
+            Origin::Root,
+            FailureCause::Host(HostError::DeadInstance),
+        ));
+        assert_eq!(
+            trapped.to_engine_error(),
+            EngineError::ModuleError("[cart] 'checkout' failed: module instance is dead".into())
+        );
+
+        let mut bad_state = CascadeReport::new(CascadeRoot::Lifecycle {
+            scope: scope("cart"),
+            hook: LifecycleHook::Activated,
+        });
+        bad_state.record(failure(
+            "cart",
+            LifecycleHook::Activated.label(),
+            Origin::Lifecycle(LifecycleHook::Activated),
+            FailureCause::InvalidState(InvalidState::NotAnObject),
+        ));
+        assert_eq!(
+            bad_state.to_engine_error(),
+            EngineError::StateError(
+                "[cart] '<on_activated>' failed: module state must be a JSON object".into()
+            )
+        );
+    }
+}

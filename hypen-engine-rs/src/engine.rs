@@ -1,27 +1,57 @@
 use crate::{
-    action_routing::{scoped_action_name, split_scoped_action, wildcard_covers, UI_ACTION},
     dispatch::{Action, ActionDispatcher},
     engine_core::EngineCore,
     error::EngineError,
+    hosted::{
+        paths::{collect_merge_changes, collect_sparse_changes},
+        CascadeReport, EngineCtx, HostedModules, LifecycleHook,
+    },
     ir::{ComponentRegistry, IRNode, NodeId, ResourceRegistry},
     lifecycle::{ModuleInstance, ResourceCache},
-    module_host::{
-        Effect, HostAction, LogLevel, ModuleHost, ModuleInstanceId, ModuleManifest, ReducerOutput,
-        SiblingState, SubscribeRequest,
-    },
+    module_host::{Effect, ModuleHost, ModuleInstanceId},
     reconcile::Patch,
     state::StateChange,
 };
-use indexmap::{IndexMap, IndexSet};
-use std::collections::{HashMap, VecDeque};
+use indexmap::IndexMap;
 use std::sync::{Arc, Weak};
+
+// The hosted-module subsystem lives in `crate::hosted`; these are its items
+// that have always been reachable through this module.
+pub use crate::hosted::{
+    EffectHandler, ModuleGrants, DEFAULT_MODULE_DISPATCH_BUDGET, MAX_CASCADE_DEPTH,
+    MAX_SUBSCRIPTIONS_PER_MODULE,
+};
 
 /// Callback type for rendering patches to the platform
 pub type RenderCallback = Box<dyn Fn(&[Patch]) + Send + Sync>;
 
-/// Handler for engine-native effects (`Navigate` / `Delay`) the host performs.
-/// Receives the originating module scope and the effect.
-pub type EffectHandler = Box<dyn Fn(&str, &Effect) + Send + Sync>;
+/// Where a batch of patches goes: the installed render callback, if any.
+///
+/// A borrowed view of the engine's callback, so a subsystem that re-renders
+/// (see [`crate::hosted`]) can emit patches without holding the `Engine`.
+#[derive(Clone, Copy)]
+pub(crate) struct PatchSink<'a> {
+    callback: Option<&'a (dyn Fn(&[Patch]) + Send + Sync)>,
+}
+
+impl<'a> PatchSink<'a> {
+    pub(crate) fn new(callback: Option<&'a RenderCallback>) -> Self {
+        Self {
+            callback: callback.map(|callback| &**callback),
+        }
+    }
+
+    /// Send patches to the renderer.
+    /// Filters out Remove patches for elements that were Created in the same
+    /// batch -- this happens when a conditional re-reconciles module-scoped
+    /// children whose stored template doesn't carry module_scope.
+    pub(crate) fn emit(&self, mut patches: Vec<Patch>) {
+        EngineCore::filter_spurious_removes(&mut patches);
+        if let Some(callback) = self.callback {
+            callback(&patches);
+        }
+    }
+}
 
 /// The main Hypen engine that orchestrates reactive UI rendering.
 ///
@@ -92,195 +122,12 @@ pub struct Engine {
     /// a true result means literally the same allocation.
     last_state_weak: Weak<serde_json::Value>,
 
-    /// Optional WASM module host. When installed, actions registered via
-    /// [`register_module_instance`](Self::register_module_instance) are
-    /// routed to a module's `dispatch` export instead of a closure handler.
-    module_host: Option<Box<dyn ModuleHost>>,
-
-    /// Hosted module instances by (lowercased) scope — the source of truth
-    /// for which scopes are WASM-backed: instance id, accepted actions,
-    /// wildcard flag and cross-module grants. A module that exports no
-    /// actions still has an entry, so its lifecycle hooks run and a reload
-    /// can find the old instance.
-    module_instances: IndexMap<String, HostedModule>,
-
-    /// Optional host hook for engine-native effects the engine can't perform
-    /// on its own — `Navigate` (needs the host's router) and `Delay` (needs a
-    /// timer). Called from [`perform_effect`](Self::perform_effect) with the
-    /// originating module scope. `Log` stays engine-native and does not go
-    /// through this hook. When unset, `Navigate`/`Delay` are logged only.
-    on_effect: Option<EffectHandler>,
-
-    /// Active cross-module subscriptions (via `hypen:engine/state.subscribe`).
-    /// Fired when a target's state changes at the watched path. A scope's own
-    /// subscriptions are dropped when it is re-registered or re-wired; both
-    /// directions are dropped by [`Engine::destroy_module`].
-    subscriptions: Vec<Subscription>,
-
-    /// Per-scope cache of JSON-encoded module state, so a dispatch does not
-    /// re-serialize state that has not changed. See
-    /// [`Engine::checkout_encoded`] for the (hook-free) invalidation rule.
-    encoded_states: HashMap<String, EncodedState>,
-
-    /// Reducer-invocation budget per top-level dispatch / lifecycle call.
-    module_dispatch_budget: usize,
-
-    /// True while a module cascade is draining (re-entrancy guard).
-    cascade_active: bool,
+    /// Everything held for hosted (WASM-backed) modules: the module host, the
+    /// instance table, grants, subscriptions, the encoded-state cache and the
+    /// cascade machinery. See [`crate::hosted`]; the methods below that deal
+    /// with module instances delegate to it.
+    hosted: HostedModules,
 }
-
-/// The cross-module capabilities the engine enforces for one hosted scope.
-///
-/// Mirrors the `reads` / `dispatches` lists of a [`ModuleManifest`]. The
-/// engine checks them itself when it folds a reducer's output (cross-module
-/// dispatch, `subscribe`) and uses `reads` to decide which sibling snapshots a
-/// module is handed at all — it does not rely on the [`ModuleHost`] having
-/// enforced them. Names are module scopes and compare case-insensitively;
-/// there is no wildcard.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct ModuleGrants {
-    /// Scopes whose state this module may read and subscribe to.
-    pub reads: Vec<String>,
-    /// Scopes this module may dispatch actions to.
-    pub dispatches: Vec<String>,
-}
-
-impl ModuleGrants {
-    /// No cross-module access at all.
-    pub fn none() -> Self {
-        Self::default()
-    }
-
-    pub fn new<R, D>(reads: R, dispatches: D) -> Self
-    where
-        R: IntoIterator,
-        R::Item: Into<String>,
-        D: IntoIterator,
-        D::Item: Into<String>,
-    {
-        Self {
-            reads: reads.into_iter().map(Into::into).collect(),
-            dispatches: dispatches.into_iter().map(Into::into).collect(),
-        }
-    }
-
-    /// Lowercased (module scopes are lowercase engine-side) and de-duplicated.
-    fn normalized(self) -> Self {
-        fn norm(names: Vec<String>) -> Vec<String> {
-            let mut out: Vec<String> = Vec::with_capacity(names.len());
-            for name in names {
-                let name = name.to_lowercase();
-                if !out.contains(&name) {
-                    out.push(name);
-                }
-            }
-            out
-        }
-        Self {
-            reads: norm(self.reads),
-            dispatches: norm(self.dispatches),
-        }
-    }
-}
-
-impl From<&ModuleManifest> for ModuleGrants {
-    fn from(manifest: &ModuleManifest) -> Self {
-        Self {
-            reads: manifest.reads.clone(),
-            dispatches: manifest.dispatches.clone(),
-        }
-    }
-}
-
-/// One hosted module scope.
-struct HostedModule {
-    id: ModuleInstanceId,
-    /// Explicitly exported action names (never contains `"*"`).
-    actions: IndexSet<String>,
-    /// The module's `actions()` contained `"*"`: accept any action name.
-    wildcard: bool,
-    grants: ModuleGrants,
-}
-
-impl HostedModule {
-    fn accepts(&self, name: &str) -> bool {
-        self.actions.contains(name) || (self.wildcard && wildcard_covers(name))
-    }
-}
-
-/// A registered cross-module subscription: `subscriber` gets `on_change`
-/// dispatched to it whenever `target`'s state changes at (or under, or at an
-/// ancestor of) `path`.
-struct Subscription {
-    subscriber: String,
-    target: String,
-    path: String,
-    on_change: String,
-}
-
-/// Cached JSON encoding of a scope's state, valid while `source` still is the
-/// allocation the scope's state lives in.
-struct EncodedState {
-    source: Weak<serde_json::Value>,
-    bytes: Vec<u8>,
-}
-
-/// Which export of a hosted module a cascade step calls.
-enum ModuleCall {
-    Dispatch(HostAction),
-    Activate,
-    Deactivate,
-}
-
-impl ModuleCall {
-    fn label(&self) -> &str {
-        match self {
-            ModuleCall::Dispatch(action) => &action.name,
-            ModuleCall::Activate => "<on_activated>",
-            ModuleCall::Deactivate => "<on_deactivated>",
-        }
-    }
-}
-
-/// A queued follow-up: run `action` in `scope`'s reducer.
-struct WorkItem {
-    scope: String,
-    action: HostAction,
-    depth: u32,
-}
-
-/// The work queue and failure log of one top-level module dispatch.
-#[derive(Default)]
-struct Cascade {
-    queue: VecDeque<WorkItem>,
-    /// The first [`MAX_REPORTED_FAILURES`] failure messages.
-    failures: Vec<String>,
-    failure_count: usize,
-}
-
-impl Cascade {
-    fn fail(&mut self, message: String) {
-        self.failure_count += 1;
-        if self.failures.len() < MAX_REPORTED_FAILURES {
-            self.failures.push(message);
-        }
-    }
-}
-
-/// How deep one top-level dispatch may chain follow-ups (root = depth 1).
-/// Bounds ping-pong cycles (two modules that subscribe to each other and each
-/// flip a value); fan-out is bounded separately by
-/// [`Engine::module_dispatch_budget`].
-pub const MAX_CASCADE_DEPTH: u32 = 32;
-
-/// Default reducer-invocation budget of one top-level dispatch.
-pub const DEFAULT_MODULE_DISPATCH_BUDGET: usize = 1024;
-
-/// Most subscriptions a single module may hold.
-pub const MAX_SUBSCRIPTIONS_PER_MODULE: usize = 256;
-
-/// Failure messages kept verbatim per cascade (the count is always exact).
-const MAX_REPORTED_FAILURES: usize = 8;
 
 impl Engine {
     pub fn new() -> Self {
@@ -290,14 +137,19 @@ impl Engine {
             resources: ResourceCache::new(),
             render_callback: None,
             last_state_weak: Weak::new(),
-            module_host: None,
-            module_instances: IndexMap::new(),
-            on_effect: None,
-            subscriptions: Vec::new(),
-            encoded_states: HashMap::new(),
-            module_dispatch_budget: DEFAULT_MODULE_DISPATCH_BUDGET,
-            cascade_active: false,
+            hosted: HostedModules::new(),
         }
+    }
+
+    /// Split the engine into the hosted-module subsystem and the parts of the
+    /// engine it works on.
+    fn hosted_parts(&mut self) -> (&mut HostedModules, EngineCtx<'_>) {
+        let ctx = EngineCtx {
+            core: &mut self.core,
+            closures: &self.actions,
+            patches: PatchSink::new(self.render_callback.as_ref()),
+        };
+        (&mut self.hosted, ctx)
     }
 
     /// Install a handler for engine-native effects (`Navigate`, `Delay`) that
@@ -308,7 +160,7 @@ impl Engine {
     where
         F: Fn(&str, &Effect) + Send + Sync + 'static,
     {
-        self.on_effect = Some(Box::new(handler));
+        self.hosted.set_effect_handler(Box::new(handler));
     }
 
     /// Clear the component registry's resolved-component caches so referenced
@@ -509,13 +361,16 @@ impl Engine {
     ) {
         // Matched against the pre-write state (the patch is moved into the
         // merge below, and no state snapshot may be held across it).
-        let notify = self.host_write_subscribers(scope, |state, changed| {
-            collect_merge_changes(state, &state_patch, &mut String::new(), changed)
-        });
+        let notice = self
+            .hosted
+            .host_write_notice(&self.core, scope, |state, changed| {
+                collect_merge_changes(state, &state_patch, &mut String::new(), changed)
+            });
         if self.core.update_state(scope, state_patch, animation) {
             self.render_dirty();
-            if let Some((scope, notify)) = notify {
-                self.notify_host_write(&scope, notify);
+            if let Some(notice) = notice {
+                let (hosted, mut ctx) = self.hosted_parts();
+                hosted.notify_host_write(&mut ctx, notice);
             }
         }
     }
@@ -543,95 +398,40 @@ impl Engine {
         values: &serde_json::Value,
         animation: Option<serde_json::Value>,
     ) {
-        let notify = self.host_write_subscribers(scope, |state, changed| {
-            if let serde_json::Value::Object(map) = values {
-                for path in paths {
-                    if let Some(value) = map.get(path) {
-                        collect_sparse_changes(state, path, value, changed);
+        let notice = self
+            .hosted
+            .host_write_notice(&self.core, scope, |state, changed| {
+                if let serde_json::Value::Object(map) = values {
+                    for path in paths {
+                        if let Some(value) = map.get(path) {
+                            collect_sparse_changes(state, path, value, changed);
+                        }
                     }
                 }
-            }
-        });
+            });
         if self
             .core
             .update_state_sparse(scope, paths, values, animation)
         {
             self.render_dirty();
-            if let Some((scope, notify)) = notify {
-                self.notify_host_write(&scope, notify);
+            if let Some(notice) = notice {
+                let (hosted, mut ctx) = self.hosted_parts();
+                hosted.notify_host_write(&mut ctx, notice);
             }
         }
-    }
-
-    /// The `(subscriber, on_change)` pairs a host write to `scope` would
-    /// notify, given `collect` — which pushes the paths at which the write
-    /// changes the scope's current state. Paths are matched exactly as
-    /// [`fold_output`](Self::fold_output) matches a reducer's changes.
-    ///
-    /// `None` (and no path work at all) when there are no subscriptions, the
-    /// write targets the primary slot (never a subscription target), nothing
-    /// watches `scope`, or a cascade is draining: a write applied while a
-    /// reducer output is being folded is notified by that fold.
-    fn host_write_subscribers(
-        &self,
-        scope: Option<&str>,
-        collect: impl FnOnce(&serde_json::Value, &mut Vec<String>),
-    ) -> Option<(String, Vec<(String, String)>)> {
-        if self.subscriptions.is_empty() || self.cascade_active {
-            return None;
-        }
-        let scope = scope.filter(|s| !s.is_empty())?.to_lowercase();
-        if !self.subscriptions.iter().any(|s| s.target == scope) {
-            return None;
-        }
-        let state = self.core.get_module_state(&scope)?;
-        let mut changed = Vec::new();
-        collect(state, &mut changed);
-        if changed.is_empty() {
-            return None;
-        }
-        let notify: Vec<(String, String)> = self
-            .subscriptions
-            .iter()
-            .filter(|s| s.target == scope)
-            .filter(|s| changed.iter().any(|p| paths_overlap(p, &s.path)))
-            .map(|s| (s.subscriber.clone(), s.on_change.clone()))
-            .collect();
-        (!notify.is_empty()).then_some((scope, notify))
-    }
-
-    /// Run the `on_change` notifications of a host write to `scope` as one
-    /// cascade (the host write is its depth-1 root). Failures are logged by
-    /// the drain; the host-facing update APIs return nothing, so they are not
-    /// surfaced further.
-    fn notify_host_write(&mut self, scope: &str, notify: Vec<(String, String)>) {
-        if self.cascade_active {
-            return;
-        }
-        self.cascade_active = true;
-        let mut cascade = Cascade::default();
-        for (subscriber, on_change) in notify {
-            let action = HostAction::new(on_change, b"null".to_vec());
-            self.enqueue_follow_up(scope, "notify", &subscriber, action, 1, &mut cascade);
-        }
-        let budget = self.module_dispatch_budget.max(1);
-        let root_label = format!("[{scope}] <host state update>");
-        // Already logged failure by failure inside the drain.
-        let _ = self.drain_queue(&root_label, cascade, budget);
-        self.cascade_active = false;
     }
 
     /// Install a WASM module host. Once installed, modules registered via
     /// [`register_module_instance`](Self::register_module_instance) handle
     /// their actions in WASM rather than via host closures.
     pub fn set_module_host(&mut self, host: Box<dyn ModuleHost>) {
-        self.module_host = Some(host);
+        self.hosted.set_host(host);
     }
 
     /// Mutable access to the installed module host (for registering and
     /// instantiating module components before wiring their instances).
     pub fn module_host_mut(&mut self) -> Option<&mut (dyn ModuleHost + 'static)> {
-        self.module_host.as_deref_mut()
+        self.hosted.host_mut()
     }
 
     /// Maximum number of reducer invocations (the root action included) one
@@ -639,14 +439,26 @@ impl Engine {
     /// cross-module dispatch and subscription notifications. Default
     /// [`DEFAULT_MODULE_DISPATCH_BUDGET`].
     pub fn module_dispatch_budget(&self) -> usize {
-        self.module_dispatch_budget
+        self.hosted.dispatch_budget()
     }
 
     /// Set the per-top-level-dispatch reducer-invocation budget (see
     /// [`module_dispatch_budget`](Self::module_dispatch_budget)). Clamped to
     /// at least 1 so the root action itself can always run.
     pub fn set_module_dispatch_budget(&mut self, budget: usize) {
-        self.module_dispatch_budget = budget.max(1);
+        self.hosted.set_dispatch_budget(budget);
+    }
+
+    /// The structured failures of the most recent module cascade — a
+    /// dispatch, a lifecycle call, or the subscriber notifications of a host
+    /// state write — or `None` when it had none (or none ran yet).
+    ///
+    /// This is the data behind the `EngineError` message such a call returns:
+    /// per failure the module, the action, why it was going to run and why it
+    /// did not. It is also the only place the failures of a host write's
+    /// notifications surface, since `update_state*` return nothing.
+    pub fn last_module_cascade_report(&self) -> Option<&CascadeReport> {
+        self.hosted.last_report()
     }
 
     /// Wire an already-instantiated WASM module instance into the engine.
@@ -666,7 +478,8 @@ impl Engine {
     /// scope name, and only ever dispatch into the subscriber.
     ///
     /// Errors (nothing is changed) when the scope or an action name is
-    /// malformed, or `initial_state` is not a JSON object.
+    /// malformed (a scope must be non-empty, contain no `:` and not start with
+    /// the reserved `__hypen_`), or `initial_state` is not a JSON object.
     pub fn register_module_instance(
         &mut self,
         scope: &str,
@@ -675,22 +488,8 @@ impl Engine {
         grants: ModuleGrants,
         initial_state: serde_json::Value,
     ) -> Result<(), EngineError> {
-        self.reject_during_cascade("register_module_instance")?;
-        let scope = scope.to_lowercase();
-        validate_hosted_names(&scope, &actions)?;
-        if !initial_state.is_object() {
-            return Err(EngineError::StateError(format!(
-                "[{scope}] module state must be a JSON object"
-            )));
-        }
-        self.unwire_module(&scope);
-        self.subscriptions.retain(|sub| sub.subscriber != scope);
-        let declared: Vec<String> = actions.iter().filter(|a| *a != "*").cloned().collect();
-        let module = crate::lifecycle::Module::new(&scope).with_actions(declared);
-        let instance = ModuleInstance::new(module, initial_state);
-        self.core.register_module(&scope, instance);
-        self.wire_module(scope, id, actions, grants);
-        Ok(())
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.register(&mut ctx, scope, id, actions, grants, initial_state)
     }
 
     /// Re-wire an existing module scope to a new instance, **preserving the
@@ -711,80 +510,15 @@ impl Engine {
         actions: Vec<String>,
         grants: ModuleGrants,
     ) -> Result<(), EngineError> {
-        self.reject_during_cascade("rewire_module_instance")?;
-        let scope = scope.to_lowercase();
-        validate_hosted_names(&scope, &actions)?;
-        if !self.core.modules.contains_key(&scope) {
-            return Err(EngineError::ModuleError(format!(
-                "[{scope}] cannot rewire: no module state registered under this scope"
-            )));
-        }
-        self.unwire_module(&scope);
-        self.subscriptions.retain(|sub| sub.subscriber != scope);
-        self.wire_module(scope, new_id, actions, grants);
-        Ok(())
-    }
-
-    /// Record `scope` as hosted by instance `id`. Each explicit action name is
-    /// also noted as a scoped handler in the core, and a wildcard scope is
-    /// flagged there, so [`EngineCore::route_ui_action`] resolves renderer
-    /// envelopes for nodes this module owns instead of failing closed.
-    fn wire_module(
-        &mut self,
-        scope: String,
-        id: ModuleInstanceId,
-        actions: Vec<String>,
-        grants: ModuleGrants,
-    ) {
-        let mut wildcard = false;
-        let mut names = IndexSet::with_capacity(actions.len());
-        for action in actions {
-            if action == "*" {
-                wildcard = true;
-            } else {
-                self.core.note_handler(&scoped_action_name(&scope, &action));
-                names.insert(action);
-            }
-        }
-        if wildcard && !self.core.wildcard_action_scopes.contains(&scope) {
-            self.core.wildcard_action_scopes.push(scope.clone());
-        }
-        self.module_instances.insert(
-            scope,
-            HostedModule {
-                id,
-                actions: names,
-                wildcard,
-                grants: grants.normalized(),
-            },
-        );
-    }
-
-    /// Forget the instance wired under `scope`: its instance entry, action
-    /// routing, grants, wildcard flag, encoded-state cache and the
-    /// scoped-handler records [`wire_module`](Self::wire_module) added (unless
-    /// a closure handler is registered under the same scoped name).
-    fn unwire_module(&mut self, scope: &str) {
-        self.encoded_states.remove(scope);
-        self.core.wildcard_action_scopes.retain(|s| s != scope);
-        let Some(hosted) = self.module_instances.shift_remove(scope) else {
-            return;
-        };
-        for action in &hosted.actions {
-            let scoped = scoped_action_name(scope, action);
-            if !self.actions.has_handler(&scoped) {
-                self.core.registered_actions.retain(|a| a != &scoped);
-            }
-        }
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.rewire(&mut ctx, scope, new_id, actions, grants)
     }
 
     /// Return the instance id wired to a scope, if any. The result reflects
     /// the most recent `register_module_instance` / `rewire_module_instance`
     /// call, and is present even for a module that exports no actions.
     pub fn module_instance_id(&self, scope: &str) -> Option<ModuleInstanceId> {
-        self.module_instances
-            .get(scope.to_lowercase().as_str())
-            .map(|m| m.id)
+        self.hosted.instance_id(scope)
     }
 
     /// Drive a module's `on_activated` lifecycle export for `scope` and fold
@@ -799,22 +533,16 @@ impl Engine {
     /// the error and budget semantics of
     /// [`dispatch_module_action`](Self::dispatch_module_action) apply.
     pub fn activate_module(&mut self, scope: &str) -> Result<(), EngineError> {
-        let scope = scope.to_lowercase();
-        if !self.module_instances.contains_key(&scope) {
-            return Ok(());
-        }
-        self.run_cascade(scope, ModuleCall::Activate)
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.run_lifecycle(&mut ctx, scope, LifecycleHook::Activated)
     }
 
     /// Drive a module's `on_deactivated` lifecycle export for `scope` and fold
     /// its output like [`activate_module`](Self::activate_module). No-ops when
     /// `scope` has no wired instance.
     pub fn deactivate_module(&mut self, scope: &str) -> Result<(), EngineError> {
-        let scope = scope.to_lowercase();
-        if !self.module_instances.contains_key(&scope) {
-            return Ok(());
-        }
-        self.run_cascade(scope, ModuleCall::Deactivate)
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.run_lifecycle(&mut ctx, scope, LifecycleHook::Deactivated)
     }
 
     /// Tear a hosted module scope down.
@@ -833,27 +561,8 @@ impl Engine {
     /// pass it to [`ModuleHost::destroy`] afterwards. No-ops when `scope` has
     /// no wired instance.
     pub fn destroy_module(&mut self, scope: &str) -> Result<(), EngineError> {
-        self.reject_during_cascade("destroy_module")?;
-        let scope = scope.to_lowercase();
-        let Some(id) = self.module_instances.get(&scope).map(|m| m.id) else {
-            return Ok(());
-        };
-        let hook = match (self.checkout_encoded(&scope), self.module_host.as_mut()) {
-            (Some((_, bytes)), Some(host)) => host
-                .on_destroyed(id, &bytes)
-                .map_err(|e| EngineError::ModuleError(e.to_string())),
-            (None, Some(host)) => host
-                .on_destroyed(id, b"{}")
-                .map_err(|e| EngineError::ModuleError(e.to_string())),
-            (_, None) => Err(EngineError::ModuleError(
-                "no module host installed".into(),
-            )),
-        };
-        self.unwire_module(&scope);
-        self.subscriptions
-            .retain(|sub| sub.subscriber != scope && sub.target != scope);
-        crate::agent_core::unregister_module(&mut self.core, &scope);
-        hook
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.destroy(&mut ctx, scope)
     }
 
     /// Dispatch an action to its registered handler.
@@ -881,45 +590,13 @@ impl Engine {
     /// With no module instance wired, this is exactly `route_ui_action` +
     /// closure dispatch.
     pub fn dispatch_action(&mut self, action: Action) -> Result<(), EngineError> {
-        // A bare name several hosted modules export would be refused by
-        // `route_ui_action` as ambiguous anyway; refuse it here with a message
-        // that names the owners.
-        if !self.module_instances.is_empty()
-            && action.name != UI_ACTION
-            && split_scoped_action(&action.name).is_none()
-        {
-            let owners: Vec<&str> = self
-                .module_instances
-                .iter()
-                .filter(|(_, module)| module.actions.contains(&action.name))
-                .map(|(scope, _)| scope.as_str())
-                .collect();
-            if owners.len() > 1 {
-                return Err(EngineError::ModuleError(format!(
-                    "action '{}' is exported by multiple modules ({}); dispatch it from a \
-                     node of the owning module (a `{UI_ACTION}` envelope) or address the \
-                     scope with `dispatch_module_action`",
-                    action.name,
-                    owners.join(", "),
-                )));
-            }
+        // No hosted module: exactly `route_ui_action` + closure dispatch.
+        if self.hosted.is_empty() {
+            let action = self.core.route_ui_action(action)?;
+            return self.actions.dispatch(&action);
         }
-        let action = self.core.route_ui_action(action)?;
-        if !self.module_instances.is_empty() {
-            let hit = split_scoped_action(&action.name).filter(|(scope, name)| {
-                self.module_instances
-                    .get(*scope)
-                    .is_some_and(|m| m.accepts(name))
-            });
-            if let Some((scope, name)) = hit {
-                let (scope, name) = (scope.to_string(), name.to_string());
-                return self.run_cascade(
-                    scope,
-                    ModuleCall::Dispatch(HostAction::new(name, encode_payload(action.payload))),
-                );
-            }
-        }
-        self.actions.dispatch(&action)
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.dispatch_ui_action(&mut ctx, action)
     }
 
     /// Dispatch `name` straight to the hosted module wired under `scope`.
@@ -942,435 +619,18 @@ impl Engine {
     ///   invalid returned state) the error is returned and nothing is applied.
     /// - If a **follow-up** fails, is refused by an ACL, or a cap is hit, the
     ///   rest of the queue is still drained; the failures are logged and
-    ///   returned together as one `EngineError::ModuleError` afterwards. State
-    ///   applied by the steps that succeeded stays applied.
+    ///   returned together as one `EngineError::ModuleError` afterwards (one
+    ///   line per failure: module, action, why). State applied by the steps
+    ///   that succeeded stays applied. The same failures are available as
+    ///   data from [`last_module_cascade_report`](Self::last_module_cascade_report).
     pub fn dispatch_module_action(
         &mut self,
         scope: &str,
         name: &str,
         payload: serde_json::Value,
     ) -> Result<(), EngineError> {
-        let scope = scope.to_lowercase();
-        let accepts = self
-            .module_instances
-            .get(&scope)
-            .ok_or_else(|| {
-                EngineError::ActionNotFound(format!("no hosted module under scope '{scope}'"))
-            })?
-            .accepts(name);
-        if !accepts {
-            return Err(EngineError::ActionNotFound(format!(
-                "module '{scope}' does not accept action '{name}'"
-            )));
-        }
-        self.run_cascade(
-            scope,
-            ModuleCall::Dispatch(HostAction::new(name, encode_payload(Some(payload)))),
-        )
-    }
-
-    /// Structural mutations of the hosted-module table are refused while a
-    /// cascade is draining. `&mut self` already makes that statically
-    /// unreachable from safe Rust (no callback is handed the engine); the flag
-    /// turns a future regression into a clear error instead of a corrupted
-    /// queue.
-    fn reject_during_cascade(&self, what: &str) -> Result<(), EngineError> {
-        if self.cascade_active {
-            return Err(EngineError::ModuleError(format!(
-                "{what} called while a module dispatch cascade is running"
-            )));
-        }
-        Ok(())
-    }
-
-    /// Run one top-level module call and drain everything it causes.
-    ///
-    /// Re-entrancy: a second cascade cannot start while one is draining (it is
-    /// rejected with an error). No engine callback receives `&mut Engine`, so
-    /// this is unreachable from safe code today; follow-ups a reducer wants
-    /// are expressed in its [`ReducerOutput`] and join the running queue.
-    fn run_cascade(&mut self, scope: String, call: ModuleCall) -> Result<(), EngineError> {
-        self.reject_during_cascade("module dispatch")?;
-        self.cascade_active = true;
-        let result = self.drain_cascade(scope, call);
-        self.cascade_active = false;
-        result
-    }
-
-    fn drain_cascade(&mut self, scope: String, call: ModuleCall) -> Result<(), EngineError> {
-        let root_label = format!("[{scope}] {}", call.label());
-        let mut cascade = Cascade::default();
-        let budget = self.module_dispatch_budget.max(1);
-
-        // Root: any failure is the caller's error and nothing is applied.
-        let output = self.invoke(&scope, call)?;
-        let budget = budget - 1;
-        self.fold_output(&scope, output, 1, &mut cascade)?;
-        self.drain_queue(&root_label, cascade, budget)
-    }
-
-    /// Drain `cascade`'s follow-ups — FIFO, each failure recorded, the queue
-    /// always emptied — within `budget` reducer invocations, then log and
-    /// summarize the failures as one `ModuleError` labelled `root_label`.
-    fn drain_queue(
-        &mut self,
-        root_label: &str,
-        mut cascade: Cascade,
-        mut budget: usize,
-    ) -> Result<(), EngineError> {
-        while let Some(item) = cascade.queue.pop_front() {
-            if budget == 0 {
-                let dropped = cascade.queue.len() + 1;
-                cascade.queue.clear();
-                cascade.fail(format!(
-                    "reducer-invocation budget ({}) exhausted; dropped {dropped} pending \
-                     action(s), first '[{}] {}'",
-                    self.module_dispatch_budget, item.scope, item.action.name
-                ));
-                break;
-            }
-            budget -= 1;
-            let label = format!("[{}] {}", item.scope, item.action.name);
-            let step = self
-                .invoke(&item.scope, ModuleCall::Dispatch(item.action))
-                .and_then(|output| self.fold_output(&item.scope, output, item.depth, &mut cascade));
-            if let Err(e) = step {
-                cascade.fail(format!("{label}: {e}"));
-            }
-        }
-
-        if cascade.failure_count == 0 {
-            return Ok(());
-        }
-        for failure in &cascade.failures {
-            crate::logger::log(
-                crate::logger::LogLevel::Warn,
-                crate::logger::LogScope::Engine,
-                &format!("module cascade from {root_label}: {failure}"),
-            );
-        }
-        let mut summary = format!(
-            "module cascade from {root_label} finished with {} failure(s): {}",
-            cascade.failure_count,
-            cascade.failures.join("; ")
-        );
-        if cascade.failure_count > cascade.failures.len() {
-            summary.push_str("; ...");
-        }
-        Err(EngineError::ModuleError(summary))
-    }
-
-    /// Call one export of the instance wired under `scope`, handing it the
-    /// scope's state and the sibling snapshots its `reads` grant names — and
-    /// nothing else. All bytes come from the encoded-state cache.
-    fn invoke(&mut self, scope: &str, call: ModuleCall) -> Result<ReducerOutput, EngineError> {
-        let hosted = self.module_instances.get(scope).ok_or_else(|| {
-            EngineError::ModuleError(format!("no hosted module under scope '{scope}'"))
-        })?;
-        let id = hosted.id;
-        let read_names: Vec<String> = if matches!(call, ModuleCall::Deactivate) {
-            Vec::new()
-        } else {
-            hosted
-                .grants
-                .reads
-                .iter()
-                .filter(|name| name.as_str() != scope)
-                .cloned()
-                .collect()
-        };
-        if self.module_host.is_none() {
-            return Err(EngineError::ModuleError("no module host installed".into()));
-        }
-        let (own_source, own_bytes) = self.checkout_encoded(scope).ok_or_else(|| {
-            EngineError::StateError(format!("[{scope}] module has no state slot"))
-        })?;
-        let mut sources = Vec::with_capacity(read_names.len());
-        let mut siblings: Vec<SiblingState> = Vec::with_capacity(read_names.len());
-        for name in read_names {
-            if let Some((source, bytes)) = self.checkout_encoded(&name) {
-                sources.push(source);
-                siblings.push((name, bytes));
-            }
-        }
-
-        let host = self.module_host.as_mut().expect("checked above");
-        let result = match call {
-            ModuleCall::Dispatch(action) => host.dispatch(id, &own_bytes, action, &siblings),
-            ModuleCall::Activate => host.on_activated(id, &own_bytes, &siblings),
-            ModuleCall::Deactivate => host.on_deactivated(id, &own_bytes),
-        };
-
-        self.checkin_encoded(scope, own_source, own_bytes);
-        for ((name, bytes), source) in siblings.into_iter().zip(sources) {
-            self.checkin_encoded(&name, source, bytes);
-        }
-        result.map_err(|e| EngineError::ModuleError(e.to_string()))
-    }
-
-    /// Borrow `scope`'s JSON-encoded state out of the cache, encoding it only
-    /// when the cached bytes are stale. Pair with
-    /// [`checkin_encoded`](Self::checkin_encoded).
-    ///
-    /// Staleness needs no invalidation hook: the entry holds a `Weak` to the
-    /// state `Arc` it was encoded from, and every state write goes through
-    /// `Arc::make_mut` (which must move to a fresh allocation while a `Weak`
-    /// exists) or installs a new `Arc`. So "same allocation" is exactly
-    /// "unchanged since encoding", whichever engine API did the write — and a
-    /// live `Weak` pins the old allocation, so its address is never reused.
-    fn checkout_encoded(&mut self, scope: &str) -> Option<(Weak<serde_json::Value>, Vec<u8>)> {
-        let Some(instance) = self.core.modules.get(scope) else {
-            self.encoded_states.remove(scope);
-            return None;
-        };
-        let mut buffer = Vec::new();
-        if let Some(entry) = self.encoded_states.get_mut(scope) {
-            buffer = std::mem::take(&mut entry.bytes);
-            if std::ptr::eq(entry.source.as_ptr(), instance.get_state()) {
-                return Some((entry.source.clone(), buffer));
-            }
-            buffer.clear();
-        }
-        serde_json::to_writer(&mut buffer, instance.get_state()).ok()?;
-        Some((Arc::downgrade(&instance.get_state_shared()), buffer))
-    }
-
-    fn checkin_encoded(&mut self, scope: &str, source: Weak<serde_json::Value>, bytes: Vec<u8>) {
-        match self.encoded_states.get_mut(scope) {
-            Some(entry) => {
-                entry.source = source;
-                entry.bytes = bytes;
-            }
-            None => {
-                self.encoded_states
-                    .insert(scope.to_string(), EncodedState { source, bytes });
-            }
-        }
-    }
-
-    /// Fold one [`ReducerOutput`] of `scope` into the engine and enqueue its
-    /// follow-ups at `depth + 1`.
-    ///
-    /// Returns `Err` — with nothing applied — only when the returned state is
-    /// unusable (not JSON, or not an object). Refused follow-ups (ACL, unknown
-    /// target, depth cap) and refused subscriptions are recorded on `cascade`
-    /// and never stop the rest of the output from being applied.
-    fn fold_output(
-        &mut self,
-        scope: &str,
-        output: ReducerOutput,
-        depth: u32,
-        cascade: &mut Cascade,
-    ) -> Result<(), EngineError> {
-        // 1. State. The reducer returned its whole new state, so the scope's
-        //    subtree is replaced wholesale — the engine's copy is then exactly
-        //    what the module returned. The old→new comparison only produces
-        //    the changed-path set for binding invalidation and subscribers.
-        let mut notify: Vec<(String, String)> = Vec::new();
-        if let Some(new_bytes) = output.state {
-            let new_state: serde_json::Value = serde_json::from_slice(&new_bytes)
-                .map_err(|e| EngineError::StateError(format!("[{scope}] invalid state: {e}")))?;
-            if !new_state.is_object() {
-                return Err(EngineError::StateError(format!(
-                    "[{scope}] module state must be a JSON object"
-                )));
-            }
-            let old_state = self.core.get_module_state(scope).ok_or_else(|| {
-                EngineError::StateError(format!("[{scope}] module has no state slot"))
-            })?;
-            let mut changed = Vec::new();
-            collect_changed_paths(old_state, &new_state, &mut String::new(), &mut changed);
-            if !changed.is_empty() {
-                self.core.replace_module_state(scope, new_state, &changed);
-                self.render_dirty();
-                // Snapshot who to notify *before* step 2, so a subscription
-                // created by this very output does not fire on the change
-                // that created it.
-                notify = self
-                    .subscriptions
-                    .iter()
-                    .filter(|s| s.target == scope)
-                    .filter(|s| changed.iter().any(|p| paths_overlap(p, &s.path)))
-                    .map(|s| (s.subscriber.clone(), s.on_change.clone()))
-                    .collect();
-            }
-        }
-
-        // 2. Subscriptions this reducer requested (subscriber = this scope).
-        for request in output.subscribe_requests {
-            if let Err(reason) = self.add_subscription(scope, request) {
-                cascade.fail(format!("[{scope}] subscribe refused: {reason}"));
-            }
-        }
-
-        // 3. Side effects the host performs directly.
-        for effect in output.effects {
-            self.perform_effect(scope, effect);
-        }
-
-        // 4. Follow-ups. Guest-supplied names are opaque action names: they
-        //    are matched against the destination scope's action set and never
-        //    parsed, qualified or re-routed.
-        //    a. `emit` always targets the emitting module's own scope.
-        for action in output.emit {
-            self.enqueue_follow_up(scope, "emit", scope, action, depth, cascade);
-        }
-        //    b. Cross-dispatch needs the sender's `dispatches` grant on the
-        //       target, re-checked here whatever the host enforced.
-        for (target, action) in output.cross_dispatch {
-            let target = target.to_lowercase();
-            let granted = self
-                .module_instances
-                .get(scope)
-                .is_some_and(|m| m.grants.dispatches.contains(&target));
-            if !granted {
-                cascade.fail(format!(
-                    "[{scope}] dispatch to '{target}' refused: no `dispatches` grant"
-                ));
-                continue;
-            }
-            self.enqueue_follow_up(scope, "dispatch", &target, action, depth, cascade);
-        }
-        //    c. Subscriber notifications run in the subscriber's own scope.
-        for (subscriber, on_change) in notify {
-            let action = HostAction::new(on_change, b"null".to_vec());
-            self.enqueue_follow_up(scope, "notify", &subscriber, action, depth, cascade);
-        }
-        Ok(())
-    }
-
-    /// Queue `action` for `target`, or record why it was refused.
-    fn enqueue_follow_up(
-        &self,
-        origin: &str,
-        kind: &str,
-        target: &str,
-        mut action: HostAction,
-        depth: u32,
-        cascade: &mut Cascade,
-    ) {
-        let accepted = self
-            .module_instances
-            .get(target)
-            .is_some_and(|m| m.accepts(&action.name));
-        if !accepted {
-            cascade.fail(format!(
-                "[{origin}] {kind} '{}' refused: module '{target}' does not accept that action",
-                action.name
-            ));
-            return;
-        }
-        if depth >= MAX_CASCADE_DEPTH {
-            cascade.fail(format!(
-                "[{origin}] {kind} '{}' to '{target}' dropped: cascade depth cap \
-                 ({MAX_CASCADE_DEPTH}) reached",
-                action.name
-            ));
-            return;
-        }
-        // The payload crosses a module boundary as-is; make sure it is JSON.
-        if serde_json::from_slice::<serde::de::IgnoredAny>(&action.payload).is_err() {
-            action.payload = b"null".to_vec();
-        }
-        cascade.queue.push_back(WorkItem {
-            scope: target.to_string(),
-            action,
-            depth: depth + 1,
-        });
-    }
-
-    /// Register (or replace) a cross-module subscription. Replacing an existing
-    /// `(subscriber, target, path)` keeps the set idempotent under repeated
-    /// `subscribe` calls.
-    ///
-    /// Observing state is a read, so the subscriber needs its `reads` grant on
-    /// the target (re-checked here whatever the host enforced). `on_change`
-    /// must be an action the subscriber itself accepts, and a subscriber may
-    /// hold at most [`MAX_SUBSCRIPTIONS_PER_MODULE`] subscriptions.
-    fn add_subscription(&mut self, subscriber: &str, req: SubscribeRequest) -> Result<(), String> {
-        let target = req.target.to_lowercase();
-        let hosted = self
-            .module_instances
-            .get(subscriber)
-            .ok_or_else(|| "subscriber is not a hosted module".to_string())?;
-        if !hosted.grants.reads.contains(&target) {
-            return Err(format!("no `reads` grant on '{target}'"));
-        }
-        if !hosted.accepts(&req.on_change) {
-            return Err(format!(
-                "on_change '{}' is not an action of '{subscriber}'",
-                req.on_change
-            ));
-        }
-        let existing = self
-            .subscriptions
-            .iter()
-            .position(|s| s.subscriber == subscriber && s.target == target && s.path == req.path);
-        if let Some(index) = existing {
-            self.subscriptions[index].on_change = req.on_change;
-            return Ok(());
-        }
-        let held = self
-            .subscriptions
-            .iter()
-            .filter(|s| s.subscriber == subscriber)
-            .count();
-        if held >= MAX_SUBSCRIPTIONS_PER_MODULE {
-            return Err(format!(
-                "subscription limit ({MAX_SUBSCRIPTIONS_PER_MODULE}) reached"
-            ));
-        }
-        self.subscriptions.push(Subscription {
-            subscriber: subscriber.to_string(),
-            target,
-            path: req.path,
-            on_change: req.on_change,
-        });
-        Ok(())
-    }
-
-    /// Perform an engine-native effect. `Log` is handled here directly. HTTP
-    /// is *not* an effect: modules call `wasi:http` directly through their
-    /// language's idiomatic client. `Navigate` and `Delay` need host
-    /// cooperation (a router / a timer), so they are handed to the installed
-    /// [`EffectHandler`](Self::set_effect_handler); with none installed they
-    /// are logged only.
-    fn perform_effect(&mut self, scope: &str, effect: Effect) {
-        match effect {
-            Effect::Log { level, message } => {
-                use crate::logger::{LogLevel as LL, LogScope};
-                let ll = match level {
-                    LogLevel::Trace => LL::Trace,
-                    LogLevel::Debug => LL::Debug,
-                    LogLevel::Info => LL::Info,
-                    LogLevel::Warn => LL::Warn,
-                    LogLevel::Error => LL::Error,
-                };
-                crate::logger::log(ll, LogScope::Engine, &format!("[{scope}] {message}"));
-            }
-            // Navigate + Delay need host cooperation (a router / a timer). Hand
-            // them to the installed effect handler; if none, log the intent so
-            // it isn't silently swallowed.
-            effect @ (Effect::Navigate(_) | Effect::Delay { .. }) => {
-                if let Some(handler) = &self.on_effect {
-                    handler(scope, &effect);
-                } else {
-                    match &effect {
-                        Effect::Navigate(path) => crate::logger::log(
-                            crate::logger::LogLevel::Debug,
-                            crate::logger::LogScope::Engine,
-                            &format!("[{scope}] navigate -> {path} (no effect handler)"),
-                        ),
-                        Effect::Delay { then, ms } => crate::logger::log(
-                            crate::logger::LogLevel::Warn,
-                            crate::logger::LogScope::Engine,
-                            &format!("[{scope}] Delay({ms}ms -> {then}) dropped (no effect handler)"),
-                        ),
-                        Effect::Log { .. } => unreachable!(),
-                    }
-                }
-            }
-        }
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.dispatch_trusted(&mut ctx, scope, name, payload)
     }
 
     /// Resolve a UI envelope for hosts that own their action dispatch loop.
@@ -1402,15 +662,9 @@ impl Engine {
         }
     }
 
-    /// Send patches to the renderer.
-    /// Filters out Remove patches for elements that were Created in the same
-    /// batch -- this happens when a conditional re-reconciles module-scoped
-    /// children whose stored template doesn't carry module_scope.
-    fn emit_patches(&self, mut patches: Vec<Patch>) {
-        EngineCore::filter_spurious_removes(&mut patches);
-        if let Some(ref callback) = self.render_callback {
-            callback(&patches);
-        }
+    /// Send patches to the renderer (see [`PatchSink::emit`]).
+    fn emit_patches(&self, patches: Vec<Patch>) {
+        PatchSink::new(self.render_callback.as_ref()).emit(patches);
     }
 
     /// Get the current revision number
@@ -1508,335 +762,5 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
-    }
-}
-
-/// Whether a changed state path `changed` should trigger a subscription to
-/// `watched`: true when they are the same, when one is a descendant of the
-/// other (a parent change implies the child changed, and vice-versa), or when
-/// either is empty (a whole-state watch / whole-state replacement).
-fn paths_overlap(changed: &str, watched: &str) -> bool {
-    fn is_ancestor(ancestor: &str, path: &str) -> bool {
-        path.len() > ancestor.len()
-            && path.as_bytes()[ancestor.len()] == b'.'
-            && path.starts_with(ancestor)
-    }
-    changed.is_empty()
-        || watched.is_empty()
-        || changed == watched
-        || is_ancestor(watched, changed)
-        || is_ancestor(changed, watched)
-}
-
-/// JSON-encode an action payload for a module's `dispatch` export.
-fn encode_payload(payload: Option<serde_json::Value>) -> Vec<u8> {
-    payload
-        .and_then(|value| serde_json::to_vec(&value).ok())
-        .unwrap_or_else(|| b"null".to_vec())
-}
-
-/// Scope and action names a hosted module may be wired with. `:` is the
-/// separator of the scoped wire name (`__hypen_scoped:<scope>:<action>`), so a
-/// name containing it could alias another scope's handler record.
-fn validate_hosted_names(scope: &str, actions: &[String]) -> Result<(), EngineError> {
-    if scope.is_empty() || scope.contains(':') {
-        return Err(EngineError::ModuleError(format!(
-            "invalid module scope '{scope}': must be non-empty and contain no ':'"
-        )));
-    }
-    for action in actions {
-        if action.is_empty() || action.contains(':') || action == UI_ACTION {
-            return Err(EngineError::ModuleError(format!(
-                "[{scope}] invalid action name '{action}': must be non-empty, contain no ':' \
-                 and not be the reserved '{UI_ACTION}'"
-            )));
-        }
-    }
-    Ok(())
-}
-
-/// Collect the dotted paths at which `new` differs from `old`, for binding
-/// invalidation and subscription matching (the state itself is replaced
-/// wholesale, so nothing here has to be able to *reconstruct* `new`).
-///
-/// - Changed, added and removed object keys report `prefix.key`.
-/// - Arrays compare index by index; a shrunk array reports the array itself.
-/// - A key the dotted-path system cannot address (empty, or containing `.`)
-///   reports its parent instead — over-invalidating the parent rather than
-///   naming a path that would alias a different, nested value. At the root
-///   that is the empty path: "the whole state".
-///
-/// `prefix` is scratch space and is restored before returning.
-fn collect_changed_paths(
-    old: &serde_json::Value,
-    new: &serde_json::Value,
-    prefix: &mut String,
-    out: &mut Vec<String>,
-) {
-    use serde_json::Value;
-    use std::fmt::Write;
-
-    fn with_segment<R>(prefix: &mut String, segment: &str, f: impl FnOnce(&mut String) -> R) -> R {
-        let len = prefix.len();
-        if len > 0 {
-            prefix.push('.');
-        }
-        prefix.push_str(segment);
-        let result = f(prefix);
-        prefix.truncate(len);
-        result
-    }
-    fn addressable(key: &str) -> bool {
-        !key.is_empty() && !key.contains('.')
-    }
-
-    match (old, new) {
-        (Value::Object(old_map), Value::Object(new_map)) => {
-            let mut parent_changed = false;
-            for (key, old_value) in old_map {
-                let new_value = new_map.get(key);
-                if !addressable(key) {
-                    parent_changed |= new_value != Some(old_value);
-                    continue;
-                }
-                match new_value {
-                    Some(new_value) => with_segment(prefix, key, |path| {
-                        collect_changed_paths(old_value, new_value, path, out)
-                    }),
-                    None => with_segment(prefix, key, |path| out.push(path.clone())),
-                }
-            }
-            for key in new_map.keys() {
-                if old_map.contains_key(key) {
-                    continue;
-                }
-                if addressable(key) {
-                    with_segment(prefix, key, |path| out.push(path.clone()));
-                } else {
-                    parent_changed = true;
-                }
-            }
-            if parent_changed {
-                out.push(prefix.clone());
-            }
-        }
-        (Value::Array(old_items), Value::Array(new_items)) => {
-            if new_items.len() < old_items.len() {
-                out.push(prefix.clone());
-                return;
-            }
-            let mut segment = String::new();
-            for (index, new_item) in new_items.iter().enumerate() {
-                segment.clear();
-                let _ = write!(segment, "{index}");
-                let segment = segment.as_str();
-                match old_items.get(index) {
-                    Some(old_item) => with_segment(prefix, segment, |path| {
-                        collect_changed_paths(old_item, new_item, path, out)
-                    }),
-                    None => with_segment(prefix, segment, |path| out.push(path.clone())),
-                }
-            }
-        }
-        (old, new) => {
-            if old != new {
-                out.push(prefix.clone());
-            }
-        }
-    }
-}
-
-/// The changed paths (as [`collect_changed_paths`] reports them) that
-/// deep-merging `patch` into `target` — `ModuleInstance::update_state`'s
-/// merge — would produce, without performing it: objects merge key by key,
-/// anything else replaces the target value.
-fn collect_merge_changes(
-    target: &serde_json::Value,
-    patch: &serde_json::Value,
-    prefix: &mut String,
-    out: &mut Vec<String>,
-) {
-    use serde_json::Value;
-    let (Value::Object(target_map), Value::Object(patch_map)) = (target, patch) else {
-        collect_changed_paths(target, patch, prefix, out);
-        return;
-    };
-    let mut parent_changed = false;
-    for (key, value) in patch_map {
-        let addressable = !key.is_empty() && !key.contains('.');
-        match (target_map.get(key), addressable) {
-            (Some(old), true) => {
-                let len = prefix.len();
-                if len > 0 {
-                    prefix.push('.');
-                }
-                prefix.push_str(key);
-                collect_merge_changes(old, value, prefix, out);
-                prefix.truncate(len);
-            }
-            (None, true) => {
-                let mut path = prefix.clone();
-                if !path.is_empty() {
-                    path.push('.');
-                }
-                path.push_str(key);
-                out.push(path);
-            }
-            // Not addressable by a dotted path: report the parent, as
-            // `collect_changed_paths` does.
-            (Some(old), false) => {
-                let mut scratch = Vec::new();
-                collect_merge_changes(old, value, &mut String::new(), &mut scratch);
-                parent_changed |= !scratch.is_empty();
-            }
-            (None, false) => parent_changed = true,
-        }
-    }
-    if parent_changed {
-        out.push(prefix.clone());
-    }
-}
-
-/// The changed paths writing `value` at the dotted `path` of `state` —
-/// `ModuleInstance::update_state_sparse`'s auto-vivifying write — would
-/// produce, without performing it. A missing or non-container segment
-/// reports the path down to that segment (that is what gets created or
-/// replaced); a present value is compared like [`collect_changed_paths`].
-fn collect_sparse_changes(
-    state: &serde_json::Value,
-    path: &str,
-    value: &serde_json::Value,
-    out: &mut Vec<String>,
-) {
-    use serde_json::Value;
-    let mut current = state;
-    let mut end: usize = 0;
-    for segment in path.split('.') {
-        let index = match current {
-            Value::Array(_) => segment.parse::<usize>().ok(),
-            _ => None,
-        };
-        let next = match (current, index) {
-            (Value::Object(map), _) => map.get(segment),
-            (Value::Array(items), Some(index)) => items.get(index),
-            // A scalar (or an array addressed by a non-index key) in the way
-            // is replaced by an object holding the rest.
-            _ => {
-                out.push(path[..end.saturating_sub(1)].to_string());
-                return;
-            }
-        };
-        end += segment.len() + 1;
-        match next {
-            Some(next) => current = next,
-            None => {
-                out.push(path[..end - 1].to_string());
-                return;
-            }
-        }
-    }
-    collect_changed_paths(current, value, &mut path.to_string(), out);
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{collect_changed_paths, collect_merge_changes, collect_sparse_changes, paths_overlap};
-    use serde_json::{json, Value};
-
-    fn changed(old: Value, new: Value) -> Vec<String> {
-        let mut out = Vec::new();
-        let mut prefix = String::new();
-        collect_changed_paths(&old, &new, &mut prefix, &mut out);
-        assert!(prefix.is_empty(), "scratch prefix must be restored");
-        out
-    }
-
-    #[test]
-    fn paths_overlap_matches_equal_ancestor_and_descendant_paths_only() {
-        assert!(paths_overlap("a.b", "a.b"));
-        assert!(paths_overlap("a", "a.b"));
-        assert!(paths_overlap("a.b.c", "a.b"));
-        assert!(paths_overlap("", "a.b"));
-        assert!(paths_overlap("a.b", ""));
-        // A shared string prefix is not a shared path prefix.
-        assert!(!paths_overlap("ab", "a"));
-        assert!(!paths_overlap("a", "ab"));
-        assert!(!paths_overlap("a.bc", "a.b"));
-        assert!(!paths_overlap("a.b", "a.c"));
-    }
-
-    #[test]
-    fn changed_paths_are_minimal_for_addressable_keys() {
-        assert!(changed(json!({ "a": { "b": [1, 2] } }), json!({ "a": { "b": [1, 2] } })).is_empty());
-        assert_eq!(
-            changed(
-                json!({ "a": { "b": 1, "c": 2 }, "gone": 1, "list": [1, 2] }),
-                json!({ "a": { "b": 1, "c": 3 }, "new": 1, "list": [1, 5, 9] }),
-            ),
-            ["a.c", "gone", "list.1", "list.2", "new"]
-        );
-        // Shrinking reports the array itself; a type change its own path.
-        assert_eq!(
-            changed(
-                json!({ "list": [1, 2], "t": { "x": 1 } }),
-                json!({ "list": [1], "t": [1] })
-            ),
-            ["list", "t"]
-        );
-    }
-
-    #[test]
-    fn unaddressable_keys_report_their_parent() {
-        assert_eq!(
-            changed(json!({ "cfg": { "x": 1 } }), json!({ "cfg": { "x": 1, "a.b": 2 } })),
-            ["cfg"]
-        );
-        assert_eq!(
-            changed(json!({ "cfg": { "": 1, "a.b": 2 } }), json!({ "cfg": { "": 1 } })),
-            ["cfg"]
-        );
-        // At the root the parent is the whole state.
-        assert_eq!(changed(json!({ "a.b": 1 }), json!({ "a.b": 2 })), [""]);
-        assert!(changed(json!({ "a.b": 1 }), json!({ "a.b": 1 })).is_empty());
-    }
-
-    #[test]
-    fn merge_changes_preview_the_deep_merge_without_deletions() {
-        fn merged(target: serde_json::Value, patch: serde_json::Value) -> Vec<String> {
-            let mut out = Vec::new();
-            collect_merge_changes(&target, &patch, &mut String::new(), &mut out);
-            out
-        }
-        let state = json!({ "user": { "name": "a", "age": 1 }, "items": [1, 2], "n": 0 });
-        // Keys absent from the patch are kept, not reported as removed.
-        assert_eq!(merged(state.clone(), json!({ "user": { "name": "b" } })), ["user.name"]);
-        assert!(merged(state.clone(), json!({ "user": { "name": "a" }, "n": 0 })).is_empty());
-        // New keys, replaced arrays and type changes report like the fold.
-        assert_eq!(merged(state.clone(), json!({ "user": { "x": 1 } })), ["user.x"]);
-        assert_eq!(merged(state.clone(), json!({ "items": [1, 3] })), ["items.1"]);
-        assert_eq!(merged(state.clone(), json!({ "items": [1] })), ["items"]);
-        assert_eq!(merged(state.clone(), json!({ "n": { "deep": 1 } })), ["n"]);
-        // Non-addressable keys report their parent.
-        assert_eq!(merged(state, json!({ "user": { "a.b": 1 } })), ["user"]);
-    }
-
-    #[test]
-    fn sparse_changes_preview_the_auto_vivifying_write() {
-        fn sparse(state: serde_json::Value, path: &str, value: serde_json::Value) -> Vec<String> {
-            let mut out = Vec::new();
-            collect_sparse_changes(&state, path, &value, &mut out);
-            out
-        }
-        let state = json!({ "user": { "name": "a" }, "items": [{ "t": 1 }], "n": 0 });
-        assert_eq!(sparse(state.clone(), "user.name", json!("b")), ["user.name"]);
-        assert!(sparse(state.clone(), "user.name", json!("a")).is_empty());
-        assert_eq!(sparse(state.clone(), "items.0.t", json!(2)), ["items.0.t"]);
-        assert_eq!(sparse(state.clone(), "user", json!({ "name": "b" })), ["user.name"]);
-        // Created segments report the first one created.
-        assert_eq!(sparse(state.clone(), "a.b.c", json!(1)), ["a"]);
-        assert_eq!(sparse(state.clone(), "items.3", json!(1)), ["items.3"]);
-        // A scalar or non-index array segment in the way is replaced.
-        assert_eq!(sparse(state.clone(), "n.x", json!(1)), ["n"]);
-        assert_eq!(sparse(state, "items.key", json!(1)), ["items"]);
     }
 }
