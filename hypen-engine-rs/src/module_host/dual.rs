@@ -39,12 +39,15 @@ pub enum ModuleAbi {
 /// positions of an `h` are compared against them. (This runs on every
 /// `register`, on components of tens of megabytes.)
 pub fn detect_abi(bytes: &[u8]) -> ModuleAbi {
-    const MARKERS: [&[u8]; 5] = [
+    // Every capability interface a v0.2 world can import: a module is
+    // routed by whichever of them it uses, so a new interface belongs here.
+    const MARKERS: [&[u8]; 6] = [
         b"hypen:storage/local@0.2.0",
         b"hypen:storage/app@0.2.0",
         b"hypen:storage/cloud@0.2.0",
         b"hypen:engine/state@0.2.0",
         b"hypen:time/clock@0.2.0",
+        b"hypen:http/deferred@0.2.0",
     ];
     let mut rest = bytes;
     while let Some(at) = rest.iter().position(|&b| b == b'h') {

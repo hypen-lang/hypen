@@ -17,12 +17,14 @@ use hypen_engine::module_host::{
     DeniedCapability, DualHost, Effect, HostAction, HostError, HostPattern, HttpEffect,
     HttpFailure, HttpFailureKind, HttpOutcome, HttpRequest, HttpResponse, ManifestGrant,
     ModuleHost, ModuleInstanceId, ModuleManifest, QueuedHttpRequest, ReducerOutput, WasmtimeHost,
+    WasmtimeHostAsync,
     MAX_HTTP_REQUESTS_PER_CALL,
 };
 use hypen_engine::{Engine, ModuleGrants};
 use serde_json::{json, Value};
 
 const DEFERRED: &[u8] = include_bytes!("fixtures/deferred_http_module.wasm");
+const DEFERRED_ASYNC: &[u8] = include_bytes!("fixtures/deferred_http_async_module.wasm");
 const FETCHER: &[u8] = include_bytes!("fixtures/fetcher_module.wasm");
 const COUNTER: &[u8] = include_bytes!("fixtures/counter_module.wasm");
 
@@ -231,6 +233,61 @@ fn components_that_do_not_import_the_interface_are_unaffected() {
         .unwrap();
     assert!(output.http_requests.is_empty());
     assert!(output.state.is_some());
+}
+
+// ── hypen:module@0.2.0 (CM-async) ────────────────────────────────────────────
+
+/// `send` is a plain sync func in the v0.2 world too. The async host links
+/// it under the same grant, queues through the same code, and delivers the
+/// completion to an `async` reducer.
+#[test]
+fn the_async_abi_queues_and_completes_the_same_way() {
+    fn check(host: &mut dyn ModuleHost) {
+        host.register("m", DEFERRED_ASYNC, ModuleManifest::default()).unwrap();
+        assert_eq!(
+            host.denied_capabilities("m"),
+            vec![DeniedCapability {
+                import: "hypen:http/deferred@0.2.0".into(),
+                grant: ManifestGrant::Http,
+            }]
+        );
+        assert!(matches!(host.instantiate("m"), Err(HostError::Instantiate(_))));
+
+        host.register("m", DEFERRED_ASYNC, http_only("m", &["*.example.com"])).unwrap();
+        let id = host.instantiate("m").unwrap();
+        let state = host.init(id, b"{}").unwrap();
+        let get = |url: &str| {
+            HostAction::new("get", json!({ "url": url, "tag": "t" }).to_string().into_bytes())
+        };
+
+        let output = host.dispatch(id, &state, get("https://api.example.com/x"), &[]).unwrap();
+        assert_eq!(output.http_requests.len(), 1);
+        assert_eq!(output.http_requests[0].request.url, "https://api.example.com/x");
+        assert_eq!(output.http_requests[0].then, "fetched");
+        assert_eq!(output.http_requests[0].tag.as_deref(), Some("t"));
+
+        let output = host.dispatch(id, &state, get("https://evil.test/"), &[]).unwrap();
+        assert!(output.http_requests.is_empty());
+        let told: Value = serde_json::from_slice(&output.state.unwrap()).unwrap();
+        let told = told["sendError"].as_str().unwrap();
+        assert!(told.contains("PermissionDenied") && told.contains("'evil.test:443'"), "{told}");
+
+        // The completion, as the engine would dispatch it.
+        let payload = HttpOutcome::Response(HttpResponse {
+            status: 201,
+            headers: Vec::new(),
+            body: b"made".to_vec(),
+        })
+        .into_payload(Some("t"));
+        let output = host.dispatch(id, &state, HostAction::new("fetched", payload), &[]).unwrap();
+        let state: Value = serde_json::from_slice(&output.state.unwrap()).unwrap();
+        assert_eq!(
+            state["last"],
+            json!({ "ok": true, "status": 201, "body": "made", "error": null, "tag": "t" })
+        );
+    }
+    check(&mut WasmtimeHostAsync::new().unwrap());
+    check(&mut DualHost::new().unwrap());
 }
 
 // ── blocking wasi:http under the same allowlist ─────────────────────────────
