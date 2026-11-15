@@ -6,28 +6,30 @@
 //! Run with:
 //! `cargo test --features "uniffi,module-loader" --test test_uniffi_host`
 
-#![cfg(all(feature = "uniffi", feature = "module-loader"))]
-
 use hypen_engine::uniffi::HypenModuleHost;
 
 const COUNTER: &[u8] = include_bytes!("fixtures/counter_module.wasm");
 const ASYNC_COUNTER: &[u8] = include_bytes!("fixtures/async_counter_module.wasm");
 const FETCHER: &[u8] = include_bytes!("fixtures/fetcher_module.wasm");
 
+/// The counter fixtures import `hypen:storage/cloud`; manifests are
+/// deny-by-default, so the grant is spelled out.
+const COUNTER_GRANTS: &str = r#"{"storage": ["cloud"]}"#;
+
 fn count(state_json: &str) -> i64 {
     let v: serde_json::Value = serde_json::from_str(state_json).unwrap();
     v["count"].as_i64().unwrap()
 }
 
-/// The full loop over the FFI shapes: register (bytes + empty manifest =
-/// grant-all), instantiate, init, dispatch, and the camelCase ReducerOutput
+/// The full loop over the FFI shapes: register (bytes + manifest JSON),
+/// instantiate, init, dispatch, and the camelCase ReducerOutput
 /// wire — with BOTH ABIs behind one host object (DualHost sniffing).
 #[test]
 fn ffi_surface_drives_both_abis() {
     let host = HypenModuleHost::new().unwrap();
 
-    host.register("counter".into(), COUNTER.to_vec(), String::new()).unwrap();
-    host.register("acounter".into(), ASYNC_COUNTER.to_vec(), String::new()).unwrap();
+    host.register("counter".into(), COUNTER.to_vec(), COUNTER_GRANTS.into()).unwrap();
+    host.register("acounter".into(), ASYNC_COUNTER.to_vec(), COUNTER_GRANTS.into()).unwrap();
 
     // v0.1 sync module.
     let id = host.instantiate("counter".into()).unwrap();
@@ -67,7 +69,7 @@ fn ffi_data_dir_persists_across_hosts() {
 
     {
         let host = HypenModuleHost::with_config(config.clone()).unwrap();
-        host.register("counter".into(), COUNTER.to_vec(), String::new()).unwrap();
+        host.register("counter".into(), COUNTER.to_vec(), COUNTER_GRANTS.into()).unwrap();
         let id = host.instantiate("counter".into()).unwrap();
         let mut state = host.init(id, "{}".into()).unwrap();
         for _ in 0..2 {
@@ -83,7 +85,7 @@ fn ffi_data_dir_persists_across_hosts() {
     }
 
     let host = HypenModuleHost::with_config(config).unwrap();
-    host.register("counter".into(), COUNTER.to_vec(), String::new()).unwrap();
+    host.register("counter".into(), COUNTER.to_vec(), COUNTER_GRANTS.into()).unwrap();
     let id = host.instantiate("counter".into()).unwrap();
     let restored = host.init(id, "{}".into()).unwrap();
     assert_eq!(count(&restored), 2, "state survived across host objects");
@@ -94,7 +96,7 @@ fn ffi_data_dir_persists_across_hosts() {
 #[test]
 fn ffi_interpreter_mode_runs_modules() {
     let host = HypenModuleHost::with_config(r#"{"interpreter": true}"#.into()).unwrap();
-    host.register("counter".into(), COUNTER.to_vec(), String::new()).unwrap();
+    host.register("counter".into(), COUNTER.to_vec(), COUNTER_GRANTS.into()).unwrap();
     let id = host.instantiate("counter".into()).unwrap();
     let state = host.init(id, "{}".into()).unwrap();
     let out: serde_json::Value = serde_json::from_str(
@@ -104,6 +106,24 @@ fn ffi_interpreter_mode_runs_modules() {
     )
     .unwrap();
     assert_eq!(out["state"]["count"], 1);
+}
+
+/// An empty manifest grants nothing beyond `local` storage: the counter's
+/// `cloud` import and the fetcher's `wasi:http` import both fail to link.
+#[test]
+fn ffi_empty_manifest_is_least_privilege() {
+    let host = HypenModuleHost::new().unwrap();
+    host.register("counter".into(), COUNTER.to_vec(), String::new()).unwrap();
+    let err = host.instantiate("counter".into()).unwrap_err();
+    assert!(format!("{err}").contains("cloud"), "denial names the import: {err}");
+
+    host.register("fetcher".into(), FETCHER.to_vec(), "{}".into()).unwrap();
+    let err = host.instantiate("fetcher".into()).unwrap_err();
+    assert!(format!("{err}").contains("http"), "denial names the import: {err}");
+
+    // ...and the explicit grant links it.
+    host.register("fetcher".into(), FETCHER.to_vec(), r#"{"http": true}"#.into()).unwrap();
+    host.instantiate("fetcher".into()).unwrap();
 }
 
 /// Manifest JSON gates capabilities through the FFI: `"http": false` denies

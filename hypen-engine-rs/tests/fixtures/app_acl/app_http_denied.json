@@ -1,7 +1,7 @@
 {
   "entry": "App",
   "modules": [
-    { "name": "App", "wasm": "../counter_module.wasm", "ui": "app.hypen" },
+    { "name": "App", "wasm": "../counter_module.wasm", "ui": "app.hypen", "storage": ["cloud"] },
     { "name": "Fetcher", "wasm": "../fetcher_module.wasm", "ui": "fetcher.hypen", "http": false }
   ]
 }

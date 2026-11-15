@@ -146,8 +146,8 @@ struct Args {
     scope: String,
     serve: Option<u16>,
     ui: Option<PathBuf>,
-    /// Persist module `local`/`app` storage under this directory (one JSON
-    /// snapshot per host ABI), so state survives process restarts.
+    /// Persist module `local`/`app` storage under this directory (a JSON
+    /// snapshot, `storage.json`), so state survives process restarts.
     data_dir: Option<PathBuf>,
 }
 
@@ -237,7 +237,7 @@ Options:
                    override (e.g. to force a specific subset).
   --scope NAME     Module scope name in the engine. Defaults to the file
                    stem of <module.wasm>.
-  --data-dir DIR   Persist module local/app storage as JSON snapshots under
+  --data-dir DIR   Persist module local/app storage as a JSON snapshot under
                    DIR, so module state survives runtime restarts.
   --serve PORT     Run an HTTP server on 127.0.0.1:PORT instead of the REPL.
                    GET /, /state and POST /dispatch let a browser drive the
@@ -878,33 +878,35 @@ struct ModuleEntry {
     /// manifest.
     ui: PathBuf,
     /// Storage scopes granted to this module: any of `"local"`, `"app"`,
-    /// `"cloud"` (`local` is always granted regardless). Absent → all three,
-    /// matching the pre-manifest grant-all default (`ModuleManifest::all`).
+    /// `"cloud"` (`local` is always granted regardless). Absent → `local`
+    /// only (deny by default).
     #[serde(default)]
     storage: Option<Vec<String>>,
     /// Sibling module scopes this module may `hypen:engine/state.read` /
-    /// `subscribe` to. Absent → none, matching `ModuleManifest::all`.
+    /// `subscribe` to. Absent → none.
     #[serde(default)]
     reads: Option<Vec<String>>,
     /// Sibling module scopes this module may `hypen:engine/state.dispatch` to.
-    /// Absent → none, matching `ModuleManifest::all`.
+    /// Absent → none.
     #[serde(default)]
     dispatches: Option<Vec<String>>,
-    /// Whether outbound HTTP (`wasi:http`) is granted. Absent → granted
-    /// (the historical baseline); an explicit `false` denies at link time —
-    /// a module importing `wasi:http` without the grant fails to
-    /// instantiate, making egress auditable from app.json alone.
+    /// Whether outbound HTTP (`wasi:http`) is granted. Absent → denied; only
+    /// an explicit `true` grants. Denial is at link time — a module importing
+    /// `wasi:http` without the grant fails to instantiate, making egress
+    /// auditable from app.json alone.
     #[serde(default)]
     http: Option<bool>,
 }
 
 /// Build a [`ModuleManifest`] for `scope` from a manifest entry's optional
-/// capability fields. A field left out falls back to the historical grant-all
-/// baseline (`ModuleManifest::all`: full storage, no cross-module
-/// reads/dispatches), so app.json files written before capabilities existed
-/// behave exactly as they did.
+/// capability fields. Deny by default: a field left out grants nothing
+/// (module-private `local` storage only, no cross-module reads/dispatches, no
+/// HTTP), so everything a module can reach is spelled out in app.json.
 fn manifest_from_entry(scope: &str, entry: &ModuleEntry) -> Result<ModuleManifest, String> {
-    let mut manifest = ModuleManifest::all(scope);
+    let mut manifest = ModuleManifest {
+        name: scope.to_string(),
+        ..ModuleManifest::default()
+    };
     if let Some(storage) = &entry.storage {
         manifest.storage = storage
             .iter()

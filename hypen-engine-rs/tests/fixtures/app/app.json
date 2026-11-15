@@ -1,7 +1,7 @@
 {
   "entry": "App",
   "modules": [
-    { "name": "App", "wasm": "../counter_module.wasm", "ui": "app.hypen" },
-    { "name": "Counter", "wasm": "../counter_module.wasm", "ui": "counter.hypen" }
+    { "name": "App", "wasm": "../counter_module.wasm", "ui": "app.hypen", "storage": ["cloud"] },
+    { "name": "Counter", "wasm": "../counter_module.wasm", "ui": "counter.hypen", "storage": ["cloud"] }
   ]
 }

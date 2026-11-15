@@ -1,12 +1,13 @@
 {
   "entry": "App",
   "modules": [
-    { "name": "App", "wasm": "../counter_module.wasm", "ui": "app.hypen" },
+    { "name": "App", "wasm": "../counter_module.wasm", "ui": "app.hypen", "storage": ["cloud"] },
     {
       "name": "AsyncCounter",
       "wasm": "../async_counter_module.wasm",
       "ui": "async_counter.hypen",
       "storage": ["app", "cloud"],
+      "http": true,
       "reads": ["counter"]
     }
   ]

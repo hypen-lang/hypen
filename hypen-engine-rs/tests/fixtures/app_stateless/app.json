@@ -1,7 +1,7 @@
 {
   "entry": "Shell",
   "modules": [
-    { "name": "Shell", "wasm": "../counter_module.wasm", "ui": "shell.hypen" },
+    { "name": "Shell", "wasm": "../counter_module.wasm", "ui": "shell.hypen", "storage": ["cloud"] },
     { "name": "Banner", "ui": "banner.hypen" }
   ]
 }

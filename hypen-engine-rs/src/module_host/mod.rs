@@ -145,37 +145,43 @@ pub enum StorageScope {
 
 /// Declares a module's identity and the capabilities it is granted.
 ///
+/// **Deny by default**: a capability that is not named here is not granted.
+/// `Default` and a deserialized manifest that omits a field both mean the
+/// least privilege — module-private `local` storage only, no cross-module
+/// access, no network. [`ModuleManifest::all`] is the explicit
+/// grant-everything constructor.
+///
 /// The host enforces this at instantiation: storage scopes outside
-/// `storage` are not linked, so a module importing an ungranted scope
-/// fails to instantiate (link-time capability denial). `reads`/`dispatches`
-/// gate cross-module access at call time.
+/// `storage` and (without `http`) `wasi:http` are not linked, so a module
+/// importing an ungranted capability fails to instantiate (link-time
+/// capability denial). `reads`/`dispatches` gate cross-module access at call
+/// time.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ModuleManifest {
     pub name: String,
     pub version: String,
-    /// Storage scopes granted *in addition to* `local` (always granted).
+    /// Storage scopes granted *in addition to* `local` (always granted, and
+    /// always private to the module). Omitted = `local` only.
     pub storage: Vec<StorageScope>,
-    /// Names of sibling modules whose state this module may read.
+    /// Names of sibling modules whose state this module may read or
+    /// subscribe to. Omitted = none.
     pub reads: Vec<String>,
     /// Names of sibling modules this module may dispatch actions to.
+    /// Omitted = none.
     pub dispatches: Vec<String>,
-    /// Whether `wasi:http` (outbound HTTP egress) is granted. Enforced at
-    /// link time like storage: an ungranted module that imports `wasi:http`
-    /// fails to instantiate. Serialized manifests that omit the field keep
-    /// the historical grant (`true`) so pre-gate manifests don't silently
-    /// lose egress; an explicit `"http": false` is the audit-grade denial.
-    #[serde(default = "default_http_grant")]
+    /// Whether `wasi:http` (outbound HTTP egress) is granted. Omitted =
+    /// denied; only an explicit `"http": true` links `wasi:http`. Enforced
+    /// at link time like storage: an ungranted module that imports
+    /// `wasi:http` fails to instantiate.
     pub http: bool,
 }
 
-fn default_http_grant() -> bool {
-    true
-}
-
 impl ModuleManifest {
-    /// A permissive manifest granting every capability — for tests and the
-    /// "trusted first-party module" path before manifests are authored.
+    /// A permissive manifest granting every storage scope and HTTP egress —
+    /// for tests and explicitly trusted first-party modules. (Cross-module
+    /// `reads`/`dispatches` name specific siblings, so they start empty.)
+    /// Nothing falls back to this implicitly.
     pub fn all(name: impl Into<String>) -> Self {
         Self {
             name: name.into(),

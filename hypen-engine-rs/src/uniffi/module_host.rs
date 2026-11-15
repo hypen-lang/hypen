@@ -145,9 +145,11 @@ impl HypenModuleHost {
     }
 
     /// Register a component. ABI (v0.1 sync / v0.2 async) is sniffed from
-    /// the bytes. Empty `manifest_json` = grant-all dev manifest; otherwise
-    /// the same shape as an app.json module entry
-    /// (`{"name", "storage"?, "reads"?, "dispatches"?, "http"?}`).
+    /// the bytes. `manifest_json` has the same shape as an app.json module
+    /// entry (`{"name", "storage"?, "reads"?, "dispatches"?, "http"?}`) and
+    /// is deny-by-default: an omitted field — or an empty string — grants
+    /// nothing beyond module-private `local` storage. Grant `app`/`cloud`
+    /// storage and `"http": true` explicitly.
     pub fn register(
         &self,
         name: String,
@@ -155,7 +157,7 @@ impl HypenModuleHost {
         manifest_json: String,
     ) -> Result<(), HypenError> {
         let manifest: ModuleManifest = if manifest_json.trim().is_empty() {
-            ModuleManifest::all(&name)
+            ModuleManifest { name: name.clone(), ..ModuleManifest::default() }
         } else {
             serde_json::from_str(&manifest_json).map_err(|e| bad(format!("manifest: {e}")))?
         };
