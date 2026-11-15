@@ -445,6 +445,18 @@ impl HostedModules {
             }
         }
         let action = ctx.core.route_ui_action(action)?;
+        self.dispatch_routed(ctx, action)
+    }
+
+    /// Run an action that routing already resolved (`route_ui_action` or
+    /// `EngineCore::route_client_action`): in the hosted module that owns the scoped name, or else
+    /// through the closure dispatcher. No routing happens here — see
+    /// `Engine::dispatch_client_action`.
+    pub(crate) fn dispatch_routed(
+        &mut self,
+        ctx: &mut EngineCtx<'_>,
+        action: Action,
+    ) -> Result<(), EngineError> {
         // The scope of a routed scoped name is canonical already.
         let hit = split_scoped_action(&action.name).and_then(|(scope, name)| {
             let (scope, module) = self.registry.resolve(scope)?;
@@ -459,31 +471,6 @@ impl HostedModules {
                 self.run_cascade(ctx, scope, Call::Dispatch(action))
             }
             None => ctx.closures.dispatch_ui(ctx.core, action),
-        }
-    }
-
-    /// Run an action that `EngineCore::route_client_action` already
-    /// resolved: in the hosted module that owns the scoped name, or else
-    /// through the closure dispatcher. No routing happens here — see
-    /// `Engine::dispatch_client_action`.
-    pub(crate) fn dispatch_routed(
-        &mut self,
-        ctx: &mut EngineCtx<'_>,
-        action: Action,
-    ) -> Result<(), EngineError> {
-        let hit = split_scoped_action(&action.name).and_then(|(scope, name)| {
-            let (scope, module) = self.registry.resolve(scope)?;
-            module
-                .actions
-                .accepts(name)
-                .then(|| (scope.clone(), name.to_string()))
-        });
-        match hit {
-            Some((scope, name)) => {
-                let action = HostAction::new(name, encode_payload(action.payload));
-                self.run_cascade(ctx, scope, Call::Dispatch(action))
-            }
-            None => ctx.closures.dispatch(&action),
         }
     }
 
