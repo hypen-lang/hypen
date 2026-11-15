@@ -444,7 +444,14 @@ fn seek_moves_the_reported_position() {
     })
     .expect("duration once prerolled");
     let target = duration * 0.5;
-    assert!(seek(node, target), "seek issued");
+    // The duration can be known (from the demuxer) a moment before the
+    // pipeline finishes prerolling, and GStreamer refuses a flushing seek
+    // until it has — on a loaded machine that moment is long enough to
+    // see. Issue the seek once the pipeline accepts it.
+    assert!(
+        poll_until(Duration::from_secs(10), || seek(node, target).then_some(())).is_some(),
+        "seek issued"
+    );
     // KEY_UNIT (the flag the ended-restart and loop paths already use)
     // snaps to the nearest preceding keyframe, and the tiny fixture may
     // only carry one at t=0 — frame-accurate seeking is an explicit v2
@@ -981,7 +988,9 @@ fn starved_legacy_demuxer_consumes_its_manifest_without_criticals() {
             continue;
         };
         ran = true;
-        assert!(!super::gst_pipeline::guard_remote_element(&pipeline, &demux));
+        assert!(!super::gst_pipeline::guard_remote_element(
+            &pipeline, &demux
+        ));
         let criticals = gst_criticals_during(|| {
             let sink = demux.static_pad("sink").expect("demuxer sink pad");
             let src = gst::Pad::builder(gst::PadDirection::Src).build();
@@ -993,9 +1002,9 @@ fn starved_legacy_demuxer_consumes_its_manifest_without_criticals() {
                 src.push_event(gst::event::Caps::new(&gst::Caps::new_empty_simple(caps))),
                 "{name}: caps {caps}"
             );
-            let _ = src.push_event(gst::event::Segment::new(
-                &gst::FormattedSegment::<gst::format::Bytes>::new(),
-            ));
+            let _ = src.push_event(gst::event::Segment::new(&gst::FormattedSegment::<
+                gst::format::Bytes,
+            >::new()));
             let pushed = src.push(gst::Buffer::from_slice(
                 b"#EXTM3U\n#EXTINF:1.0,\nfile:///etc/passwd\n".to_vec(),
             ));
@@ -1051,6 +1060,141 @@ fn manifest_scan_finds_non_http_uris() {
     );
 }
 
+/// Comments are not URIs anything opens (an encoder's provenance note
+/// must not refuse a playable stream); XML character references ARE
+/// decoded, as the demuxer's XML parser would, so `file&#58;//` cannot
+/// slip past; a UTF-16 MPD is scanned like a UTF-8 one.
+#[test]
+fn manifest_scan_ignores_comments_and_decodes_what_the_demuxer_decodes() {
+    use super::gst_pipeline::{manifest_refused_uri, manifest_text};
+    let mpd_comment = r#"<?xml version="1.0"?>
+        <!-- Generated from file:///home/encoder/master.mov -->
+        <MPD><BaseURL>https://cdn.test/</BaseURL></MPD>"#;
+    assert_eq!(manifest_refused_uri(mpd_comment), None);
+    let hls_comment = "#EXTM3U\n# packaged from file:///srv/in.mp4\n#EXTINF:1.0,\nseg0.ts\n";
+    assert_eq!(manifest_refused_uri(hls_comment), None);
+    // A tag line is not a comment.
+    assert_eq!(
+        manifest_refused_uri("#EXTM3U\n#EXT-X-MAP:URI=\"file:///etc/init.mp4\"\n").as_deref(),
+        Some("file:///etc/init.mp4")
+    );
+    assert_eq!(
+        manifest_refused_uri("<MPD><BaseURL>file&#58;///etc/</BaseURL></MPD>").as_deref(),
+        Some("file:///etc/")
+    );
+    assert_eq!(
+        manifest_refused_uri("<MPD><BaseURL>&#x66;ile://h/x/</BaseURL></MPD>").as_deref(),
+        Some("file://h/x/")
+    );
+    // A comment that never closes hides nothing after it… and nothing
+    // the demuxer would read either (the XML is malformed).
+    assert_eq!(
+        manifest_refused_uri("<MPD><!-- <BaseURL>smb://x/</BaseURL>"),
+        None
+    );
+
+    let mpd = "<MPD><BaseURL>smb://share/x/</BaseURL></MPD>";
+    let mut utf16 = vec![0xFF, 0xFE];
+    utf16.extend(mpd.encode_utf16().flat_map(u16::to_le_bytes));
+    assert_eq!(
+        manifest_refused_uri(&manifest_text(&utf16)).as_deref(),
+        Some("smb://share/x/")
+    );
+}
+
+/// The HTTP-only demuxer's manifest scan sees a manifest however it
+/// arrives — here as a buffer LIST — withholds its EOS, and posts the
+/// refusal on the pipeline.
+#[test]
+fn http_only_demuxer_scan_refuses_a_manifest_pushed_as_a_buffer_list() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    let Ok(demux) = gst::ElementFactory::make("hlsdemux2").build() else {
+        eprintln!("skipping: hlsdemux2 is not installed");
+        return;
+    };
+    let pipeline = gst::Pipeline::new();
+    pipeline.add(&demux).unwrap();
+    let pipeline_el: gst::Element = pipeline.clone().upcast();
+    assert!(super::gst_pipeline::guard_remote_element(
+        &pipeline_el,
+        &demux
+    ));
+    let bus = pipeline.bus().unwrap();
+    let sink = demux.static_pad("sink").expect("demuxer sink pad");
+    let src = gst::Pad::builder(gst::PadDirection::Src).build();
+    src.set_active(true).unwrap();
+    src.link(&sink).unwrap();
+    // Only the probe on the sink pad is under test: activate the pad
+    // rather than bring the whole demuxer up (it will not leave NULL
+    // without a scheduler of its own).
+    if demux.set_state(gst::State::Paused).is_err() {
+        sink.set_active(true).unwrap();
+    }
+    assert!(src.push_event(gst::event::StreamStart::new("manifest")));
+    let _ = src.push_event(gst::event::Caps::new(&gst::Caps::new_empty_simple(
+        "application/x-hls",
+    )));
+    let _ = src.push_event(gst::event::Segment::new(&gst::FormattedSegment::<
+        gst::format::Bytes,
+    >::new()));
+    let mut list = gst::BufferList::new();
+    {
+        let list = list.get_mut().unwrap();
+        list.add(gst::Buffer::from_slice(
+            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n".to_vec(),
+        ));
+        list.add(gst::Buffer::from_slice(
+            b"#EXTINF:1.0,\nfile:///etc/passwd\n#EXT-X-ENDLIST\n".to_vec(),
+        ));
+    }
+    let _ = src.push_list(list);
+    let _ = src.push_event(gst::event::Eos::new());
+    // (A standalone demuxer posts its own "requires a streams-aware
+    // context" error on the state change; look past it.)
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut refusal = None;
+    while refusal.is_none() && Instant::now() < deadline {
+        let Some(msg) = bus.timed_pop_filtered(
+            gst::ClockTime::from_mseconds(100),
+            &[gst::MessageType::Error],
+        ) else {
+            continue;
+        };
+        if let gst::MessageView::Error(err) = msg.view() {
+            if err.error().matches(gst::ResourceError::NotAuthorized) {
+                refusal = Some(err.debug().map(|d| d.to_string()).unwrap_or_default());
+            }
+        }
+    }
+    let _ = demux.set_state(gst::State::Null);
+    let debug = refusal.expect("the refused manifest must post resource/NotAuthorized");
+    assert!(debug.contains("file:///etc/passwd"), "{debug}");
+}
+
+/// The stall watchdog's clock: armed only once the manifest is accepted,
+/// any sign of life restarts the wait.
+#[test]
+fn stall_watch_counts_silence_from_the_last_sign_of_life() {
+    let w = super::gst_pipeline::StallWatch::new();
+    let short = Duration::from_millis(30);
+    std::thread::sleep(Duration::from_millis(60));
+    assert!(
+        !w.stalled(short),
+        "not armed before the manifest is accepted"
+    );
+    w.progress();
+    assert!(!w.stalled(short));
+    std::thread::sleep(Duration::from_millis(60));
+    assert!(w.stalled(short));
+    w.progress();
+    assert!(!w.stalled(short), "media arriving restarts the wait");
+}
+
 /// Encode 30 frames into an MPEG-TS segment at `path` (an HLS segment).
 fn build_ts_segment(path: &std::path::Path) -> bool {
     use gstreamer as gst;
@@ -1081,40 +1225,68 @@ fn build_ts_segment(path: &std::path::Path) -> bool {
 /// Serve `files` (`(path, content type, body)`) over HTTP/1.1 on an
 /// ephemeral localhost port until the process exits; 404 otherwise.
 fn serve(files: Vec<(String, &'static str, Vec<u8>)>) -> u16 {
+    serve_gated(files, None)
+}
+
+/// A gate a test opens to release the responses [`serve_gated`] holds.
+type Gate = Arc<(Mutex<bool>, std::sync::Condvar)>;
+
+fn open_gate(gate: &Gate) {
+    *gate.0.lock().unwrap() = true;
+    gate.1.notify_all();
+}
+
+/// [`serve`], one thread per connection (a held response never blocks
+/// another request), where a request for `gated.0` is answered only
+/// once the test opens `gated.1` (or after 30 s).
+fn serve_gated(files: Vec<(String, &'static str, Vec<u8>)>, gated: Option<(String, Gate)>) -> u16 {
     use std::io::{BufRead, BufReader, Write};
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
+    let files = Arc::new(files);
+    let gated = Arc::new(gated);
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
-            let mut request_line = String::new();
-            let mut reader = BufReader::new(stream.try_clone().unwrap());
-            let _ = reader.read_line(&mut request_line);
-            // Drain the headers.
-            loop {
-                let mut line = String::new();
-                if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
-                    break;
+            let files = Arc::clone(&files);
+            let gated = Arc::clone(&gated);
+            std::thread::spawn(move || {
+                let mut request_line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let _ = reader.read_line(&mut request_line);
+                // Drain the headers.
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
                 }
-            }
-            let path = request_line.split_whitespace().nth(1).unwrap_or("/");
-            let path = path.split('?').next().unwrap_or(path);
-            match files.iter().find(|(p, _, _)| p == path) {
-                Some((_, mime, body)) => {
-                    let _ = write!(
-                        stream,
-                        "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
-                         Connection: close\r\n\r\n",
-                        body.len()
-                    );
-                    let _ = stream.write_all(body);
+                let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or(path);
+                if let Some((gated_path, gate)) = gated.as_ref() {
+                    if gated_path == path {
+                        let (open, cvar) = &**gate;
+                        let guard = open.lock().unwrap();
+                        let _ = cvar.wait_timeout_while(guard, Duration::from_secs(30), |o| !*o);
+                    }
                 }
-                None => {
-                    let _ = stream.write_all(
-                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-                    );
+                match files.iter().find(|(p, _, _)| p == path) {
+                    Some((_, mime, body)) => {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
+                             Connection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(body);
+                    }
+                    None => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
                 }
-            }
+            });
         }
     });
     port
@@ -1234,15 +1406,19 @@ fn remote_hls_manifest_cannot_reach_a_local_segment() {
     // manifest scan / refusal backstop — `resource/NotAuthorized`.
     let code = remote_err.expect("a refused HLS segment must report onError, not stall");
     assert!(
-        matches!(code.as_str(), "core/MissingPlugin" | "resource/NotAuthorized"),
+        matches!(
+            code.as_str(),
+            "core/MissingPlugin" | "resource/NotAuthorized"
+        ),
         "{code}"
     );
 }
 
 /// `hlsdemux2` downloads VARIANT playlists itself (never through a pad
 /// the manifest scan sees), and refuses a `file://` segment one names
-/// without posting anything — the refusal log backstop must still turn
-/// that into `onError` (`resource/NotAuthorized`) instead of a stall.
+/// without posting anything — the stall watchdog must still turn that
+/// into `onError` (`resource/NotAuthorized`) instead of a stall. (Run
+/// with a short watchdog timeout; the real one only adds waiting.)
 /// Skipped without souphttpsrc / hlsdemux2 / an H.264 encoder.
 #[test]
 fn remote_hls_variant_naming_a_local_segment_reports_onerror() {
@@ -1262,8 +1438,7 @@ fn remote_hls_variant_naming_a_local_segment_reports_onerror() {
         eprintln!("skipping: souphttpsrc or hlsdemux2 is not installed");
         return;
     }
-    let segment =
-        std::env::temp_dir().join(format!("hypen_variant_seg_{}.ts", std::process::id()));
+    let segment = std::env::temp_dir().join(format!("hypen_variant_seg_{}.ts", std::process::id()));
     if !build_ts_segment(&segment) {
         eprintln!("skipping: cannot encode an MPEG-TS segment here");
         return;
@@ -1288,18 +1463,26 @@ fn remote_hls_variant_naming_a_local_segment_reports_onerror() {
     let url = format!("http://127.0.0.1:{port}/master.m3u8");
     let node = "test-hls-variant-remote";
     let _ = take_events();
+    super::gst_pipeline::ADAPTIVE_STALL_TIMEOUT_MS_OVERRIDE
+        .store(2_000, std::sync::atomic::Ordering::SeqCst);
     start(node, &url, &url, 0, &restricted_opts(), true).expect("start");
-    let err = poll_until(Duration::from_secs(10), || {
-        crate::media::status(node)
-            .filter(|s| s.errored)
-            .map(|_| ())
+    let err = poll_until(Duration::from_secs(15), || {
+        crate::media::status(node).filter(|s| s.errored).map(|_| ())
     });
+    super::gst_pipeline::ADAPTIVE_STALL_TIMEOUT_MS_OVERRIDE
+        .store(0, std::sync::atomic::Ordering::SeqCst);
     let frame = current_frame(node);
     let events = take_events();
     release(node);
     let _ = std::fs::remove_file(&segment);
-    assert!(frame.is_none(), "a remote app's variant played a file:// segment");
-    assert!(err.is_some(), "the refused variant segment stalled without onError");
+    assert!(
+        frame.is_none(),
+        "a remote app's variant played a file:// segment"
+    );
+    assert!(
+        err.is_some(),
+        "the refused variant segment stalled without onError"
+    );
     let code = events.into_iter().find_map(|e| match e.kind {
         MediaEventKind::Error { code, .. } if e.node_id == node => Some(code),
         _ => None,
@@ -1341,21 +1524,30 @@ fn restricted_pipeline_plays_http_mp4_and_hls() {
     let segment = std::env::temp_dir().join(format!("hypen_http_seg_{}.ts", std::process::id()));
     let hls = have("hlsdemux2") && build_ts_segment(&segment);
     if hls {
+        // TWO segments, the last one held back until the first frame is
+        // out. GStreamer 1.24's adaptivedemux2 errors a stream that
+        // reaches its end-of-manifest before the demuxer's output thread
+        // has exposed a pad ("Can't push EOS on non-exposed pad", posted
+        // as `resource/NotFound: Couldn't download fragments`) — which a
+        // single, instantly-served segment does whenever that thread is
+        // scheduled late (a loaded machine: ~1 run in 4 with every core
+        // busy). Holding the last segment keeps the end of the stream
+        // behind the first frame, so the test sees the restricted
+        // pipeline play, not that upstream race.
+        let body = std::fs::read(&segment).unwrap();
         files.push((
             "/live.m3u8".to_string(),
             "application/vnd.apple.mpegurl",
             b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
-              #EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
+              #EXTINF:1.0,\nseg0.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1.0,\nseg1.ts\n#EXT-X-ENDLIST\n"
                 .to_vec(),
         ));
-        files.push((
-            "/seg0.ts".to_string(),
-            "video/mp2t",
-            std::fs::read(&segment).unwrap(),
-        ));
+        files.push(("/seg0.ts".to_string(), "video/mp2t", body.clone()));
+        files.push(("/seg1.ts".to_string(), "video/mp2t", body));
         let _ = std::fs::remove_file(&segment);
     }
-    let port = serve(files);
+    let gate: Gate = Arc::default();
+    let port = serve_gated(files, Some(("/seg1.ts".to_string(), Arc::clone(&gate))));
     let mut cases = vec![(
         "test-remote-mp4",
         format!("http://127.0.0.1:{port}/clip.mp4"),
@@ -1373,6 +1565,7 @@ fn restricted_pipeline_plays_http_mp4_and_hls() {
         start(node, &url, &url, 0, &restricted_opts(), true)
             .unwrap_or_else(|e| panic!("{node}: {e}"));
         let frame = poll_until(Duration::from_secs(15), || current_frame(node));
+        open_gate(&gate);
         let errors: Vec<String> = take_events()
             .into_iter()
             .filter_map(|e| match e.kind {
