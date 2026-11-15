@@ -1,0 +1,8 @@
+module Counter {
+    Column {
+        Text("Counter scope count: @{state.count}")
+        Button("@actions.increment") {
+            Text("+1")
+        }
+    }
+}

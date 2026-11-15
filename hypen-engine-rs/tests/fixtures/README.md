@@ -30,6 +30,21 @@ git add -f hypen-engine-rs/tests/fixtures/<fixture>.wasm
 All commands below are run from the repository root. Rebuild whenever the
 module source or the WIT it targets (`/wit`, `/wit-v0_2`) changes.
 
+### Copies inside the app fixtures
+
+`hypen-runtime --app` only loads files that live inside the manifest's
+directory (a `wasm` / `ui` path that resolves outside it is rejected), so
+each `app*/` fixture carries its own copy of the modules it lists. After
+rebuilding a fixture, refresh those copies too:
+
+```bash
+cd hypen-engine-rs/tests/fixtures
+cp counter_module.wasm app/ && cp counter_module.wasm app_stateless/
+cp counter_module.wasm mirror_module.wasm fetcher_module.wasm app_acl/
+cp counter_module.wasm async_counter_module.wasm app_async/
+git add -f app*/*.wasm
+```
+
 ### Rust fixtures
 
 Each Rust crate under `src/` is a standalone leaf crate: it has its own
