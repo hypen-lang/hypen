@@ -125,7 +125,12 @@ export interface SessionInfo {
  * The server module handles navigation via its own route stack.
  */
 export interface NavigationOptions {
-  /** Action name dispatched on back navigation (default: "navigateBack") */
+  /**
+   * Action name dispatched on back navigation (default: "navigateBack").
+   * It is sent by name, with no node: unless a control bound to it is on
+   * screen, the server must list it in `clientActions` (`router.back` needs
+   * no listing).
+   */
   backAction?: string;
   /**
    * State key that represents the current view/route on the server.

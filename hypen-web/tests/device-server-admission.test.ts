@@ -187,7 +187,7 @@ describe("never refuses to start over device prerequisites", () => {
       .build();
     const server = new RemoteServer()
       .module("Asker", asker)
-      .ui('Text("hi")')
+      .ui('Button(@actions.ask) { Text("hi") }')
       .config({ allowedOrigins: ["http://localhost:1234"], webClient: false })
       .syncActions();
     await server.listen(port());

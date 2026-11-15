@@ -107,7 +107,7 @@ function makeConfig(overrides: Partial<HypenDurableObjectConfig> = {}): HypenDur
       incCalls += 1;
       state.counter += 1;
     })
-    .ui('module App { Text("counter:@{state.counter}") }');
+    .ui('module App { Column { Text("counter:@{state.counter}") Button(@actions.inc) { Text("+") } } }');
   return {
     module,
     template: module.template ?? "",
@@ -438,7 +438,7 @@ describe("CF device transport", () => {
       .onAction("pick", async ({ context }: any) => {
         results.push(await context.device.request("gallery.pick", { mediaTypes: ["photo"], maxCount: 1 }));
       })
-      .ui('module App { Text("n") }');
+      .ui('module App { Button(@actions.pick) { Text("n") } }');
     const d = new TestDO(
       createCtx(),
       makeConfig({ module, template: module.template ?? "", syncActions: true })

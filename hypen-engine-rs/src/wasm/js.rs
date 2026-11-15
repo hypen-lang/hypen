@@ -770,14 +770,22 @@ impl WasmEngine {
 
     // ── Actions ─────────────────────────────────────────────────────
 
-    /// Resolve session-local node identity before trusted server fan-out.
+    /// Resolve an action received from an untrusted renderer (a Remote UI
+    /// client) before trusted server fan-out. Any name is accepted as input,
+    /// but it only resolves through a live rendered binding — see
+    /// `EngineCore::route_client_action`.
     #[wasm_bindgen(js_name = resolveUIAction)]
     pub fn resolve_ui_action(&self, name: &str, payload: JsValue) -> Result<JsValue, JsValue> {
-        let payload: serde_json::Value =
-            from_value(payload).map_err(|e| structured_error("actionError", &e.to_string()))?;
+        let payload: Option<serde_json::Value> = if payload.is_undefined() || payload.is_null() {
+            None
+        } else {
+            Some(from_value(payload).map_err(|e| structured_error("actionError", &e.to_string()))?)
+        };
+        let mut action = Action::new(name);
+        action.payload = payload;
         let action = self
             .core
-            .route_ui_action(Action::new(name).with_payload(payload))
+            .route_client_action(action)
             .map_err(|e| structured_error("actionError", &e.to_string()))?;
         let serializer = serde_wasm_bindgen::Serializer::json_compatible();
         serde::Serialize::serialize(&action, &serializer)

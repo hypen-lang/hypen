@@ -63,6 +63,15 @@ export interface DefineHypenWorkerOptions {
    */
   syncActions?: boolean;
   /**
+   * Actions a client may dispatch **by name, without a rendered binding** —
+   * programmatic client calls such as the browser-back `backAction`
+   * (`navigateBack`). Everything else a client sends must resolve through a
+   * live node that binds it (a rendered `@actions.x`), so an action is only
+   * reachable while its control is on screen. Framework names (`__*`) can
+   * never be listed. Default: none.
+   */
+  clientActions?: string[];
+  /**
    * Device Capability Protocol (RFC 001). On by default — the broker is the
    * Rust one in the `wasm` glue passed below, wired automatically. `false`
    * opts out. See `HypenDurableObjectConfig.device`.
@@ -149,6 +158,7 @@ export function defineHypenWorker(opts: DefineHypenWorkerOptions): WorkerExports
       : {}),
     ...(opts.resources !== undefined ? { resources: opts.resources } : {}),
     ...(opts.syncActions !== undefined ? { syncActions: opts.syncActions } : {}),
+    ...(opts.clientActions !== undefined ? { clientActions: opts.clientActions } : {}),
     ...(opts.device !== undefined ? { device: opts.device } : {}),
     // The device broker is the Rust one in the same web-target wasm glue
     // (built with `js,device-broker`) — supplied automatically. A glue

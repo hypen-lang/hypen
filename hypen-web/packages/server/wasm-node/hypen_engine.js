@@ -857,7 +857,10 @@ class WasmEngine {
         wasm.wasmengine_reset(this.__wbg_ptr);
     }
     /**
-     * Resolve session-local node identity before trusted server fan-out.
+     * Resolve an action received from an untrusted renderer (a Remote UI
+     * client) before trusted server fan-out. Any name is accepted as input,
+     * but it only resolves through a live rendered binding — see
+     * `EngineCore::route_client_action`.
      * @param {string} name
      * @param {any} payload
      * @returns {any}

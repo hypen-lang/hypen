@@ -306,15 +306,30 @@ impl Engine {
         }
     }
 
-    /// Dispatch an action to its registered handler.
+    /// Dispatch an action to its registered handler. This is the **trusted
+    /// host** entry point: any registered name runs. A `__hypen_dispatch`
+    /// envelope is still authorised against the live tree, but never pass a
+    /// bare name received from a remote client — that is
+    /// [`dispatch_ui_action`](Self::dispatch_ui_action).
     pub fn dispatch_action(&mut self, action: Action) -> Result<(), EngineError> {
         let action = self.core.route_ui_action(action)?;
         self.actions.dispatch(&action)
     }
 
-    /// Resolve a UI envelope for hosts that own their action dispatch loop.
+    /// Dispatch an action that came from an **untrusted renderer** (a
+    /// Remote UI client). Unlike [`dispatch_action`](Self::dispatch_action),
+    /// a handler's name is not authority: the action must resolve through a
+    /// live rendered binding. See
+    /// [`EngineCore::route_client_action`](crate::engine_core::EngineCore::route_client_action).
+    pub fn dispatch_ui_action(&mut self, action: Action) -> Result<(), EngineError> {
+        let action = self.core.route_client_action(action)?;
+        self.actions.dispatch(&action)
+    }
+
+    /// Resolve a client-originated action for hosts that own their action
+    /// dispatch loop. Same rule as [`dispatch_ui_action`](Self::dispatch_ui_action).
     pub fn resolve_ui_action(&self, action: Action) -> Result<Action, EngineError> {
-        self.core.route_ui_action(action)
+        self.core.route_client_action(action)
     }
 
     /// Look up which named module (by lowercased name) owns a given action.

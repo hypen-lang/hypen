@@ -13,6 +13,8 @@ import { AsyncQueueTransport } from "../packages/core/src/remote/remote-session"
 import { app } from "../packages/core/src/app";
 
 const APP_TEMPLATE = `module RegApp {
+  Column {
+  Button(@actions.navigate) { Text("go") }
   Router {
     Route(path: "/") {
       RegHome()
@@ -21,6 +23,7 @@ const APP_TEMPLATE = `module RegApp {
       RegCounter()
     }
   }
+}
 }`;
 
 function buildRegistryModules() {
@@ -44,7 +47,7 @@ function buildRegistryModules() {
     .onAction("increment", ({ state }) => {
       state.count += 1;
     })
-    .ui(`module RegCounter { Column { Text("@{state.count}") } }`);
+    .ui(`module RegCounter { Column { Text("@{state.count}") Button(@actions.increment) { Text("+") } } }`);
 
   return appModule;
 }

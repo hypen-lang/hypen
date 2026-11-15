@@ -89,7 +89,7 @@ function makeConfig(): HypenDurableObjectConfig {
     .defineState<AppState>({ counter: 0 })
     .onAction("inc", ({ state }: any) => { state.counter += 1; })
     .persist(durableObjectStore(globalStrategy<AppState>()))
-    .ui('module App { Text("counter:@{state.counter}") }');
+    .ui('module App { Column { Text("counter:@{state.counter}") Button(@actions.inc) { Text("+") } } }');
   return { module, template: module.template ?? "", moduleName: "App" };
 }
 
@@ -141,7 +141,7 @@ describe("HypenDurableObject hibernation", () => {
             Column {
               Text("DETAIL")
               Grid(@state.menuItems, key: "id") {
-                Text("quantity:@{item.cartQuantity}")
+                Text("quantity:@{item.cartQuantity}").onClick(@actions.addToCart, itemId: @item.id)
               }
             }
           }

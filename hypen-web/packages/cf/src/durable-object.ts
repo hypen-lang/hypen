@@ -337,6 +337,15 @@ export interface HypenDurableObjectConfig {
    */
   syncActions?: boolean;
   /**
+   * Actions a client may dispatch **by name, without a rendered binding** —
+   * programmatic client calls such as the browser-back `backAction`
+   * (`navigateBack`). Everything else a client sends must resolve through a
+   * live node that binds it (a rendered `@actions.x`), so an action is only
+   * reachable while its control is on screen. Framework names (`__*`) can
+   * never be listed. Default: none.
+   */
+  clientActions?: string[];
+  /**
    * Device Capability Protocol (RFC 001). On by default: any client whose
    * hello offers `device` gets a device plane. `false` opts out — the DO then
    * behaves exactly like a UI-only host. The plane is also off (one warning)
@@ -646,6 +655,7 @@ export abstract class HypenDurableObject {
       resources: config.resources ?? {},
       app: config.app ?? null,
       syncActions: config.syncActions ?? false,
+      clientActions: config.clientActions ?? [],
       deviceDisabled: !deviceOn,
       deviceMaxRetainedBytes: DO_DEVICE_MAX_RETAINED_BYTES,
       // One Rust broker per device socket; the factory's pool is the

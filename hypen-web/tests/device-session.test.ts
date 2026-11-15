@@ -36,6 +36,11 @@ class HandlerFakeEngine extends BaseEngine {
           if (prop === "onAction") {
             return (name: string, h: (a: unknown) => void) => self.handlers.set(name, h);
           }
+          // No tree here: a client's node-less envelope resolves to its action.
+          if (prop === "resolveUIAction") {
+            return (_name: string, env: { action: string; payload?: unknown }) =>
+              new Map<string, unknown>([["name", env.action], ["payload", env.payload]]);
+          }
           if (prop === "dispatchAction") {
             return (name: string, payload: unknown) => {
               for (const [key, h] of self.handlers) {

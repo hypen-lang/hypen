@@ -158,6 +158,8 @@ function worker(opts: { device?: boolean; wasm?: CFWasmExports } = {}) {
     // No device option unless the test opts out: on by default.
     ...(opts.device !== undefined ? { device: opts.device } : {}),
     allowedOrigins: ["https://app.example"],
+    // Dispatched programmatically by the test client; no control renders them.
+    clientActions: ["query", "pick", "save"],
     doClassName: "DeviceDO",
   });
 }

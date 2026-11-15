@@ -170,6 +170,11 @@ beforeAll(async () => {
     .ui(
       `Column { ${STATE_KEYS.map((k) => `Text("${k}:@{state.${k}}")`).join(" ")} }`
     )
+    // The client calls these programmatically; no control renders them.
+    .clientActions(
+      "e2eSupports", "e2eQuery", "e2ePick", "e2eSave", "e2eScan", "e2eRecord",
+      "e2eSlowPick", "e2eCancelPick", "e2eSlowRequest"
+    )
     .config({
       allowedOrigins: [ORIGIN],
       authenticate: (req: Request) => {

@@ -49,6 +49,7 @@ beforeAll(async () => {
   server = new RemoteServer()
     .module("App", module)
     .ui('Text("routing")')
+    .clientActions("noop", "query")
     .config({ allowedOrigins: [ORIGIN], webClient: false });
   await server.listen(0);
   const port = (server as unknown as { server: { port: number } }).server.port;

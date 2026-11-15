@@ -150,6 +150,15 @@ export interface SessionHost {
   readonly app: HypenApp | null;
   readonly syncActions: boolean;
   /**
+   * Actions a client may dispatch **by name, without a rendered binding** —
+   * programmatic client calls such as the browser-back `backAction`
+   * (`navigateBack`). Everything else a client sends must resolve through a
+   * live node that binds it (a rendered `@actions.x`), so an action is only
+   * reachable while its control is on screen. Framework names (`__*`) can
+   * never be listed. Default: none.
+   */
+  readonly clientActions?: readonly string[];
+  /**
    * Opt-out of the Device Capability Protocol (RFC 001). The device plane is
    * on by default: any client whose hello offers `device` gets one, provided
    * the host supplies a `deviceBrokerFactory`. `true` makes the host behave
@@ -977,9 +986,21 @@ export class RemoteSession {
           // handler before sending the semantic outcome to another session.
           const retarget = this._retargetNext;
           this._retargetNext = false;
+          // The client is untrusted: a handler's name is never authority to
+          // run it. Everything it sends is resolved as a UI envelope — a bare
+          // (or pre-scoped) name becomes a node-less one — and the engine
+          // admits it only through a live rendered binding. An engine that
+          // predates node-less envelopes rejects them, so this fails closed.
+          // The host can name actions callable without one (`clientActions`).
           const resolved = action.action === "__hypen_dispatch"
             ? this.resolveUIDispatch(action.action, action.payload, retarget)
-            : { name: action.action, payload: action.payload };
+            : !action.action.startsWith("__") && this.host.clientActions?.includes(action.action)
+            ? { name: action.action, payload: action.payload }
+            : this.engine.resolveUIAction("__hypen_dispatch", {
+                action: action.action,
+                ...(action.payload === undefined ? {} : { payload: action.payload }),
+              });
+          // Trusted from here on: `resolved` names an engine-validated handler.
           this.engine.dispatchAction(resolved.name, resolved.payload);
 
           if (this.host.syncActions) {

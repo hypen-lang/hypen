@@ -26,6 +26,7 @@ const COUNTER_UI = `
     Column {
       Text("Count: @{state.count}")
       Button("@actions.increment") { Text("+") }
+      Button("@actions.add") { Text("+5") }
     }
   `;
 

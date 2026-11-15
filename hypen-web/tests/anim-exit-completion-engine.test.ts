@@ -43,7 +43,7 @@ describe("exit completion through the engine", () => {
     await Promise.all([alpha.waitForReady(), beta.waitForReady()]);
 
     const card = (name: string) =>
-      `module ${name} { Column { If(@state.show) { Row { Text("${name}") }.exit(fade, duration: 30).onAnimationComplete(@actions.done) } } }`;
+      `module ${name} { Column { If(@state.show) { Row { Text("${name}") }.exit(fade, duration: 30).onAnimationComplete(@actions.done).onClick(@actions.hide) } } }`;
     const sources = new Map([
       ["Alpha", card("Alpha")],
       ["Beta", card("Beta")],

@@ -212,6 +212,7 @@ export class RemoteServer {
   private _sessionManager: SessionManager | null = null;
   private _prepared = false;
   private _syncActions: boolean = false;
+  private _clientActions: string[] = [];
   /**
    * Device Capability Protocol (RFC 001) opt-out — the plane is on by
    * default. See `disableDevice()`.
@@ -270,6 +271,7 @@ export class RemoteServer {
       get resources() { return server._resources; },
       get app() { return server._app; },
       get syncActions() { return server._syncActions; },
+      get clientActions() { return server._clientActions; },
       get deviceDisabled() { return server._deviceOffReason !== null; },
       get deviceMaxRetainedBytes() { return server._deviceOptions.connectionRetainedBytes; },
       // The Rust device broker, one per device connection; the factory's pool
@@ -415,6 +417,18 @@ export class RemoteServer {
    */
   syncActions(): this {
     this._syncActions = true;
+    return this;
+  }
+
+  /**
+   * Name actions a client may dispatch without a rendered binding —
+   * programmatic client calls such as the browser-back `backAction`
+   * (`navigateBack`). By default a client can only run an action that is
+   * bound on a node currently rendered for its session; list here only
+   * actions that are safe for any connected client to call at any time.
+   */
+  clientActions(...names: string[]): this {
+    this._clientActions.push(...names);
     return this;
   }
 

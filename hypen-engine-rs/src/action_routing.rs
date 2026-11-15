@@ -21,6 +21,29 @@ pub fn safe_state_path(path: &str) -> bool {
             .all(|s| !s.is_empty() && !matches!(s, "__proto__" | "constructor" | "prototype"))
 }
 
+/// Whether the node's template binds `name`: an action reference in a prop
+/// (`onClick: @actions.x`, `.onDrop(@actions.x)`, the positional `action`),
+/// or one nested in a static map/list argument. Read from the **raw** props —
+/// the template — never the resolved ones, so state a user controls (a chat
+/// message reading `"@wipe"`) can never mint a binding.
+fn carries_action(node: &crate::reconcile::InstanceNode, name: &str) -> bool {
+    fn names(value: &Value, name: &str) -> bool {
+        match value {
+            Value::String(s) => s
+                .strip_prefix('@')
+                .is_some_and(|s| s.strip_prefix("actions.").unwrap_or(s) == name),
+            Value::Array(items) => items.iter().any(|v| names(v, name)),
+            Value::Object(map) => map.values().any(|v| names(v, name)),
+            _ => false,
+        }
+    }
+    node.raw_props.iter().any(|(_, value)| match value {
+        crate::ir::Value::Action(action) => action == name,
+        crate::ir::Value::Static(json) => names(json, name),
+        _ => false,
+    })
+}
+
 impl EngineCore {
     pub(crate) fn has_routable_handler(&self, name: &str) -> bool {
         self.registered_actions
@@ -58,34 +81,100 @@ impl EngineCore {
                 .scope
                 .clone(),
         };
-        if let Some(scope) = scope.as_ref() {
-            if self.modules.contains_key(scope) {
-                return Ok(scope.clone());
-            }
-            if self
-                .module
-                .as_ref()
-                .is_some_and(|m| m.module.name.eq_ignore_ascii_case(scope))
-            {
-                return Ok(String::new());
-            }
-            if crate::agent_core::effective_scope(self, &Some(scope.clone())).is_some() {
-                return Err(bad());
-            }
+        self.owner_key(scope.as_deref())
+    }
+
+    /// The handler-registry key for a raw `module_scope`: a named module's
+    /// key, `""` for the primary module, an error for a scope whose module
+    /// is known but no longer registered.
+    fn owner_key(&self, scope: Option<&str>) -> Result<String, EngineError> {
+        let Some(scope) = scope else {
+            return Ok(String::new());
+        };
+        if self.modules.contains_key(scope) {
+            return Ok(scope.to_string());
+        }
+        if self
+            .module
+            .as_ref()
+            .is_some_and(|m| m.module.name.eq_ignore_ascii_case(scope))
+        {
+            return Ok(String::new());
+        }
+        if crate::agent_core::effective_scope(self, &Some(scope.to_string())).is_some() {
+            return Err(EngineError::ActionNotFound("stale UI action target".into()));
         }
         Ok(String::new())
     }
 
-    /// Resolve the envelope once, before any host handler runs. Scope names
-    /// in application payloads are never used as UI routing authority.
+    /// Owner keys of every live (attached) node that carries a binding for
+    /// `name`, deduplicated. Detached router-cache subtrees are not reached:
+    /// the walk follows `children` from the root.
+    fn live_binding_owners(&self, name: &str) -> Vec<String> {
+        let mut owners = Vec::new();
+        let mut stack: Vec<(NodeId, Option<&str>)> =
+            self.tree.root().map(|r| (r, None)).into_iter().collect();
+        while let Some((id, inherited)) = stack.pop() {
+            let Some(node) = self.tree.get(id) else {
+                continue;
+            };
+            let scope = node.module_scope.as_deref().or(inherited);
+            if carries_action(node, name) {
+                if let Ok(owner) = self.owner_key(scope) {
+                    if !owners.contains(&owner) {
+                        owners.push(owner);
+                    }
+                }
+            }
+            stack.extend(node.children.iter().map(|c| (*c, scope)));
+        }
+        owners
+    }
+
+    /// Whether `name` has a live rendered binding owned by `scope`: on the
+    /// addressed node itself (the common case, O(props)), else anywhere in
+    /// the live tree under the same owner. Which node a renderer names is
+    /// not authority — a client can name any node it was sent — so the
+    /// guarantee is the one that matters: the action is on screen for this
+    /// session, in the module that will handle it.
+    fn has_live_binding(&self, node: Option<NodeId>, scope: &str, name: &str) -> bool {
+        node.and_then(|id| self.tree.get(id))
+            .is_some_and(|n| carries_action(n, name))
+            || self.live_binding_owners(name).iter().any(|o| o == scope)
+    }
+
+    /// Resolve an action that came from an **untrusted renderer** (a Remote
+    /// UI client). Everything is treated as a UI envelope: a bare or
+    /// pre-scoped name is a node-less envelope, so a handler's name alone is
+    /// never authority to run it. Session layers call this for every action
+    /// that arrives over the wire; trusted host code keeps
+    /// [`route_ui_action`](Self::route_ui_action).
+    pub fn route_client_action(&self, mut action: Action) -> Result<Action, EngineError> {
+        if action.name != UI_ACTION {
+            let mut envelope = serde_json::Map::new();
+            envelope.insert("action".into(), Value::String(action.name));
+            if let Some(payload) = action.payload.take() {
+                envelope.insert("payload".into(), payload);
+            }
+            action.name = UI_ACTION.into();
+            action.payload = Some(Value::Object(envelope));
+        }
+        self.route_ui_action(action)
+    }
+
+    /// Resolve an action for dispatch. A `__hypen_dispatch` envelope is a
+    /// renderer's request and is authorised against the live tree: the action
+    /// must be bound on a rendered node of the module that handles it (or be
+    /// a `.bind`/DnD write its node declares, or navigation). Any other name
+    /// is a **trusted host dispatch** and reaches the registered handler
+    /// directly — never pass a client-supplied name here; use
+    /// [`route_client_action`](Self::route_client_action).
     pub fn route_ui_action(&self, mut action: Action) -> Result<Action, EngineError> {
         if action.name == UI_ACTION {
             let envelope = action.payload.take().unwrap_or(Value::Null);
             let invalid = || EngineError::ActionNotFound("invalid scoped UI action".into());
-            let node = envelope
-                .get("node")
-                .and_then(Value::as_str)
-                .ok_or_else(invalid)?;
+            let unbound =
+                || EngineError::ActionNotFound("UI action has no rendered binding".into());
             let name = envelope
                 .get("action")
                 .and_then(Value::as_str)
@@ -93,18 +182,63 @@ impl EngineCore {
             if name == UI_ACTION || name.starts_with(SCOPED) {
                 return Err(invalid());
             }
-            let scope = self.ui_node_scope(node, Some(name))?;
+            let navigation = name.starts_with("router.");
+            let reserved_write = matches!(name, "__hypen_bind" | "__hypen_reorder" | "__hypen_pin");
+            let node = match envelope.get("node") {
+                Some(node) => Some(node.as_str().ok_or_else(invalid)?),
+                None => None,
+            };
+            let scope = match node {
+                Some(node) => {
+                    let scope = self.ui_node_scope(node, Some(name))?;
+                    let id = node
+                        .parse::<u64>()
+                        .ok()
+                        .map(|k| NodeId::from(slotmap::KeyData::from_ffi(k)));
+                    // A removed node only got this far through its exit
+                    // tombstone, which already matched this exact action.
+                    let live = id.is_some_and(|id| self.tree.attached_scope(id).is_some());
+                    if live
+                        && !navigation
+                        && !reserved_write
+                        && !self.has_live_binding(id, &scope, name)
+                    {
+                        return Err(unbound());
+                    }
+                    scope
+                }
+                // Node-less: a legacy renderer's bare name, or a programmatic
+                // control (browser back). Framework names need a node — the
+                // writes are validated against it — and anything else needs
+                // exactly one module with the action on screen.
+                None if navigation => String::new(),
+                None if name.starts_with("__") => return Err(invalid()),
+                None => {
+                    let mut owners = self.live_binding_owners(name);
+                    match (owners.pop(), owners.is_empty()) {
+                        (Some(owner), true) => owner,
+                        (Some(_), false) => {
+                            return Err(EngineError::ActionNotFound(
+                                "ambiguous unscoped action".into(),
+                            ))
+                        }
+                        (None, _) => return Err(unbound()),
+                    }
+                }
+            };
             let from_scope = envelope
                 .get("fromNode")
                 .and_then(Value::as_str)
                 .map(|id| self.ui_node_scope(id, None))
                 .transpose()?;
-            self.validate_ui_write(
-                node,
-                name,
-                envelope.get("payload"),
-                envelope.get("fromNode").and_then(Value::as_str),
-            )?;
+            if let Some(node) = node {
+                self.validate_ui_write(
+                    node,
+                    name,
+                    envelope.get("payload"),
+                    envelope.get("fromNode").and_then(Value::as_str),
+                )?;
+            }
             if name == "__hypen_reorder" && from_scope.as_ref().is_some_and(|s| s != &scope) {
                 return Err(EngineError::ActionNotFound(
                     "cross-module reorder requires an application handler".into(),
@@ -112,7 +246,9 @@ impl EngineCore {
             }
             action.name = scoped_action_name(&scope, name);
             action.payload = envelope.get("payload").cloned();
-            action.sender = Some(node.to_string());
+            if let Some(node) = node {
+                action.sender = Some(node.to_string());
+            }
             if let Some(Value::Object(payload)) = action.payload.as_mut() {
                 if let Some(from) = from_scope {
                     payload.insert("fromScope".into(), Value::String(from));
@@ -122,7 +258,7 @@ impl EngineCore {
             // A renderer speaking the new protocol must never reach an old
             // name-global host callback when multiple owners exist.
             if !self.registered_actions.contains(&action.name) {
-                if ((self.modules.is_empty() || name.starts_with("router."))
+                if ((self.modules.is_empty() || navigation)
                     && self.registered_actions.iter().any(|a| a == name))
                     || self.build_data_source_action(name, Value::Null).is_some()
                 {
@@ -273,8 +409,9 @@ mod tests {
                 scope,
                 ModuleInstance::new(Module::new(scope), json!({"items":[1,2]})),
             );
-            let mut element =
-                Element::new("Column").with_prop("bind", Prop::Static(json!("items")));
+            let mut element = Element::new("Column")
+                .with_prop("bind", Prop::Static(json!("items")))
+                .with_prop("onSort.0", Prop::Action("sorted".into()));
             element.module_scope = Some(scope.into());
             let id = engine.core.tree.create_node(&element, &json!({}));
             engine.core.tree.add_child(root, id, None);
@@ -357,6 +494,8 @@ mod tests {
             .tree
             .create_node(&Element::new("Button"), &json!({}));
         engine.core.tree.add_child(alpha, child, None);
+        // The wrapper carries no binding itself: its owner's rendered one
+        // (alpha's `onSort`) is what authorises the action.
         engine
             .dispatch_action(ui(child, "sorted", json!({})))
             .unwrap();
@@ -364,6 +503,14 @@ mod tests {
         let root = engine.core.tree.root().unwrap();
         engine.core.tree.get_mut(root).unwrap().module_scope = Some("app".into());
         engine.on_action(scoped_action_name("", "clicked"), |_| {});
+        assert!(engine
+            .dispatch_action(ui(root, "clicked", json!({})))
+            .is_err());
+        let button = engine.core.tree.create_node(
+            &Element::new("Button").with_prop("action", Prop::Action("clicked".into())),
+            &json!({}),
+        );
+        engine.core.tree.add_child(root, button, None);
         engine
             .dispatch_action(ui(root, "clicked", json!({})))
             .unwrap();

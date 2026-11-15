@@ -22,6 +22,8 @@ module App {
     }
     Button { Text("Go Profile") }
       .onClick(@actions.navigateToProfile)
+    Button { Text("Go Feed") }
+      .onClick(@actions.navigateToFeed)
     Button { Text("View Story") }
       .onClick(@actions.viewStory, id: "s1")
   }

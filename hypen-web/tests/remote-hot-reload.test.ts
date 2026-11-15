@@ -65,14 +65,14 @@ export default app
   .onAction("tap", ({ state }) => { state.taps += 1; })
   .build();
 `,
-    "Home/component.hypen": `module Home { Column { Text("Taps: @{state.taps}") } }`,
+    "Home/component.hypen": `module Home { Column { Text("Taps: @{state.taps}") Button(@actions.tap) { Text("tap") } } }`,
     "Counter/component.ts": `import { app } from "@hypen-space/core";
 export default app
   .defineState(${opts.counterState ?? `{ count: 0, label: "n" }`})
   .onAction("inc", ({ state }) => { state.count += 1; })
   .build();
 `,
-    "Counter/component.hypen": `module Counter { Column { Text("${opts.counterMarker} @{state.count}") } }`,
+    "Counter/component.hypen": `module Counter { Column { Text("${opts.counterMarker} @{state.count}") Button(@actions.inc) { Text("inc") } } }`,
   };
   for (const [rel, text] of Object.entries(files)) {
     mkdirSync(join(routedDir, rel, ".."), { recursive: true });
@@ -118,7 +118,7 @@ describe("RemoteServer hot reload", () => {
     const a = await connect(routed);
     const sessionId = a.messages.find((m) => m.type === "sessionAck").sessionId;
     for (let i = 0; i < 2; i++) {
-      await a.session.receive({ type: "dispatchAction", action: "__hypen_scoped:home:tap" } as any);
+      await a.session.receive({ type: "dispatchAction", action: "tap" } as any);
       await pause(50);
     }
     expect(allText(a.messages)).toContain("Taps: 2");
@@ -134,7 +134,7 @@ describe("RemoteServer hot reload", () => {
     // Navigate to Counter, +1, then edit Counter's TEMPLATE: value kept.
     await b.session.receive({ type: "dispatchAction", action: "router.push", payload: { to: "/counter" } } as any);
     await pause();
-    await b.session.receive({ type: "dispatchAction", action: "__hypen_scoped:counter:inc" } as any);
+    await b.session.receive({ type: "dispatchAction", action: "inc" } as any);
     await pause();
     expect(allText(b.messages)).toContain("Counter is 1");
     writeRoutedApp({ counterMarker: "Value" });

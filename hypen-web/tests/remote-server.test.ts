@@ -2,7 +2,7 @@ import { describe, expect, test, afterEach } from "bun:test";
 import { RemoteServer } from "../packages/server/src/remote/server";
 import { app } from "../packages/core/src/app";
 
-const UI = `module Counter { Text("Count: @{state.count}") Button { Text("+") }.onClick(@actions.increment) }`;
+const UI = `module Counter { Column { Text("Count: @{state.count}") Button { Text("+") }.onClick(@actions.increment) } }`;
 
 function createCounterModule() {
   return app
