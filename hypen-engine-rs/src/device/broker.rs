@@ -440,7 +440,7 @@ impl RetainedBytesPool {
         }
         self.inner
             .used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
                 used.checked_add(bytes).filter(|&n| n <= self.inner.limit)
             })
             .is_ok()
@@ -450,11 +450,10 @@ impl RetainedBytesPool {
         if bytes == 0 {
             return;
         }
-        let _ = self
-            .inner
+        self.inner
             .used
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |used| {
-                Some(used.saturating_sub(bytes))
+            .update(Ordering::SeqCst, Ordering::SeqCst, |used| {
+                used.saturating_sub(bytes)
             });
     }
 }
