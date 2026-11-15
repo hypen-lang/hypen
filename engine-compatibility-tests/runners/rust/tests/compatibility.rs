@@ -71,6 +71,10 @@ struct Step {
     allow_extra_patches: Option<bool>,
     state_change: Option<StateChange>,
     dispatch_action: Option<DispatchAction>,
+    /// A `dispatchClientAction` step: an action as an untrusted client
+    /// would send it, fed to `Engine::dispatch_client_action`.
+    client_action: Option<ClientAction>,
+    expect_refused: Option<bool>,
     /// Optional batch-animation context for this step's state update
     /// (Option D): a spec object or bare curve string, forwarded to
     /// `update_state_with_animation` so a changed-state render cycle is
@@ -107,6 +111,17 @@ struct StateChange {
 struct DispatchAction {
     name: String,
     payload: Option<Value>,
+}
+
+/// With `node` / `node_id` the runner sends a `__hypen_dispatch` envelope;
+/// with neither, `name` verbatim.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientAction {
+    name: String,
+    payload: Option<Value>,
+    node: Option<ExpectedAnchor>,
+    node_id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -651,6 +666,64 @@ fn run_fixture(tc: &TestCase) {
                                 step.animation.clone(),
                             );
                         }
+                    }
+                }
+                "dispatchClientAction" => {
+                    let client = step.client_action.as_ref().unwrap_or_else(|| {
+                        panic!("[{}] dispatchClientAction step needs `clientAction`", tc.name)
+                    });
+                    let node = client.node_id.clone().or_else(|| {
+                        let want = client.node.as_ref()?;
+                        let mut ids: Vec<&String> = created_by_id
+                            .iter()
+                            .filter(|(_, create)| {
+                                create.get("elementType").and_then(Value::as_str)
+                                    == want.element_type.as_deref()
+                                    && want.props.as_ref().map_or(true, |props| {
+                                        props.iter().all(|(k, v)| {
+                                            create.get("props").and_then(|p| p.get(k)) == Some(v)
+                                        })
+                                    })
+                            })
+                            .map(|(id, _)| id)
+                            .collect();
+                        // "First created": wire ids are issued in order.
+                        ids.sort_by_key(|id| id.parse::<u64>().unwrap_or(u64::MAX));
+                        Some(
+                            ids.first()
+                                .unwrap_or_else(|| {
+                                    panic!("[{}] {step_label}: no node matches {want:?}", tc.name)
+                                })
+                                .to_string(),
+                        )
+                    });
+                    let engine_action = match node {
+                        Some(node) => hypen_engine::dispatch::Action::new(
+                            hypen_engine::action_routing::UI_ACTION,
+                        )
+                        .with_payload(serde_json::json!({
+                            "node": node,
+                            "action": client.name,
+                            "payload": client.payload.clone().unwrap_or(Value::Null),
+                        })),
+                        None => hypen_engine::dispatch::Action {
+                            name: client.name.clone(),
+                            payload: client.payload.clone(),
+                            sender: None,
+                        },
+                    };
+                    let refused = engine.dispatch_client_action(engine_action).is_err();
+                    if let Some(expected) = step.expect_refused {
+                        assert_eq!(
+                            refused, expected,
+                            "[{}] {step_label}: client action refused = {refused}",
+                            tc.name
+                        );
+                    }
+                    let handler_state = state_cell.lock().unwrap().clone();
+                    if handler_state != current_state {
+                        current_state = handler_state;
+                        engine.update_state(None, current_state.clone());
                     }
                 }
                 "setViewport" => {

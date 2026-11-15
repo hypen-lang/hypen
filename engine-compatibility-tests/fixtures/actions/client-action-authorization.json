@@ -1,0 +1,102 @@
+{
+  "$schema": "../../schema/test-case.schema.json",
+  "name": "client-action-authorization",
+  "description": "An action received from an untrusted client (Remote UI wire input) runs only as a __hypen_dispatch envelope addressed to a live node that itself declares that action; bare names, pre-scoped names and envelopes naming an action the node does not carry are refused",
+  "category": "actions",
+  "priority": "P0",
+
+  "skip": {
+    "reason": "Needs the engine's client entry (route_client_action: JS resolveClientAction / WASI hypen_dispatch_client_action / UniFFI dispatch_client_action) in the shipped artifacts and a dispatchClientAction step in the runner",
+    "sdks": ["typescript", "golang", "kotlin"]
+  },
+
+  "input": {
+    "source": "Column { Button(text: \"Click me\", onClick: @actions.handleClick) Button(text: \"Pick\", onClick: @actions.selectItem) Text(\"Plain\") }",
+    "initialState": {
+      "clicked": false,
+      "selectedId": null
+    },
+    "module": {
+      "name": "ActionModule",
+      "actions": ["handleClick", "selectItem"],
+      "stateKeys": ["clicked", "selectedId"]
+    }
+  },
+
+  "steps": [
+    {
+      "description": "Initial render",
+      "action": "initialRender",
+      "expectedPatchCount": 8
+    },
+    {
+      "description": "A bare action name from a client is refused, even though a handler is registered and a live node binds it",
+      "action": "dispatchClientAction",
+      "clientAction": { "name": "handleClick" },
+      "expectRefused": true,
+      "expectedState": { "clicked": false, "selectedId": null }
+    },
+    {
+      "description": "A pre-scoped name from a client is refused",
+      "action": "dispatchClientAction",
+      "clientAction": { "name": "__hypen_scoped::handleClick" },
+      "expectRefused": true,
+      "expectedState": { "clicked": false, "selectedId": null }
+    },
+    {
+      "description": "A bare reserved write from a client is refused",
+      "action": "dispatchClientAction",
+      "clientAction": { "name": "__hypen_bind", "payload": { "path": "clicked", "value": true } },
+      "expectRefused": true,
+      "expectedState": { "clicked": false, "selectedId": null }
+    },
+    {
+      "description": "An envelope on a live node that declares no action is refused",
+      "action": "dispatchClientAction",
+      "clientAction": {
+        "node": { "elementType": "Text" },
+        "name": "handleClick"
+      },
+      "expectRefused": true,
+      "expectedState": { "clicked": false, "selectedId": null }
+    },
+    {
+      "description": "An envelope on a live node that declares a different action is refused",
+      "action": "dispatchClientAction",
+      "clientAction": {
+        "node": { "elementType": "Button", "props": { "text": "Pick" } },
+        "name": "handleClick"
+      },
+      "expectRefused": true,
+      "expectedState": { "clicked": false, "selectedId": null }
+    },
+    {
+      "description": "An envelope on a node id that was never issued is refused",
+      "action": "dispatchClientAction",
+      "clientAction": { "nodeId": "1", "name": "handleClick" },
+      "expectRefused": true,
+      "expectedState": { "clicked": false, "selectedId": null }
+    },
+    {
+      "description": "An envelope on the live node that declares the action runs it",
+      "action": "dispatchClientAction",
+      "clientAction": {
+        "node": { "elementType": "Button", "props": { "text": "Click me" } },
+        "name": "handleClick"
+      },
+      "expectRefused": false,
+      "expectedState": { "clicked": true, "selectedId": null }
+    },
+    {
+      "description": "The payload of an accepted envelope reaches the handler unchanged",
+      "action": "dispatchClientAction",
+      "clientAction": {
+        "node": { "elementType": "Button", "props": { "text": "Pick" } },
+        "name": "selectItem",
+        "payload": { "id": 42 }
+      },
+      "expectRefused": false,
+      "expectedState": { "clicked": true, "selectedId": 42 }
+    }
+  ]
+}

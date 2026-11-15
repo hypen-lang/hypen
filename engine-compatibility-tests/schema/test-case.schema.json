@@ -98,7 +98,7 @@
           },
           "action": {
             "type": "string",
-            "enum": ["initialRender", "updateState", "dispatchAction", "renderSource", "setViewport"],
+            "enum": ["initialRender", "updateState", "dispatchAction", "dispatchClientAction", "renderSource", "setViewport"],
             "description": "Type of action to perform"
           },
           "viewport": {
@@ -123,6 +123,30 @@
           "dispatchAction": {
             "$ref": "action.schema.json",
             "description": "Action to dispatch (for dispatchAction action)"
+          },
+          "clientAction": {
+            "type": "object",
+            "description": "Action as an UNTRUSTED client would send it (for dispatchClientAction action), fed to the engine's client entry (Rust Engine::dispatch_client_action / JS resolveClientAction / WASI hypen_dispatch_client_action / UniFFI dispatch_client_action). With `node` or `nodeId` the runner sends a `__hypen_dispatch` envelope `{node, action: name, payload}`; with neither it sends `name` verbatim as the action name. `node` selects the first element created so far whose create patch matches `elementType` and the `props` subset.",
+            "properties": {
+              "name": { "type": "string" },
+              "payload": {},
+              "node": {
+                "type": "object",
+                "properties": {
+                  "elementType": { "type": "string" },
+                  "props": { "type": "object" }
+                },
+                "required": ["elementType"],
+                "additionalProperties": false
+              },
+              "nodeId": { "type": "string", "description": "A literal wire node id (e.g. one the engine never issued)" }
+            },
+            "required": ["name"],
+            "additionalProperties": false
+          },
+          "expectRefused": {
+            "type": "boolean",
+            "description": "For dispatchClientAction: whether the engine must refuse the action (true) or run it (false). A refused action must leave state untouched (pair with expectedState)."
           },
           "animation": {
             "type": ["object", "string"],
