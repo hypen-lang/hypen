@@ -593,27 +593,30 @@ impl App {
     }
 
     /// Seek a player, updating the last-reported position so the seek's
-    /// own progress report doesn't read as a fresh change.
-    pub(crate) fn seek_video(&mut self, node_id: &str, seconds: f64) {
+    /// own progress report doesn't read as a fresh change. Returns `true`
+    /// when the pipeline accepted the seek.
+    pub(crate) fn seek_video(&mut self, node_id: &str, seconds: f64) -> bool {
         #[cfg(feature = "video")]
         {
             if !crate::media::seek(node_id, seconds) {
-                return;
+                return false;
             }
             if let Some(report) = self.video_bind_reports.get_mut(node_id) {
                 report.position = seconds;
             }
             self.request_redraw_full();
+            true
         }
         #[cfg(not(feature = "video"))]
         {
             let _ = (node_id, seconds);
+            false
         }
     }
 
     /// Seek now when the pipeline can honor it, or park the write until
-    /// it can: GStreamer silently drops a `seek_simple` on a pipeline
-    /// that has not prerolled, so an inbound `playback.position` write
+    /// it can: GStreamer refuses a `seek_simple` on a pipeline that has
+    /// not finished prerolling, so an inbound `playback.position` write
     /// issued during preroll (e.g. the resume point carried by a bind's
     /// first application, in the same flush that started the autoplay
     /// pipeline) would otherwise be lost. Parked writes are re-issued by
@@ -621,9 +624,12 @@ impl App {
     /// and dropped if the track changes underneath them.
     #[cfg(feature = "video")]
     fn seek_video_or_defer(&mut self, node_id: &str, seconds: f64) {
-        let prerolled = crate::media::status(node_id).is_some_and(|s| s.duration > 0.0);
-        if prerolled {
-            self.seek_video(node_id, seconds);
+        // "Seekable" is the pipeline's own answer (see
+        // `media::seekable`), not "the duration is known": a demuxer can
+        // report the duration before the pipeline finishes prerolling,
+        // and a seek issued in that window is refused. A seek refused
+        // anyway is parked like an early one.
+        if crate::media::seekable(node_id) && self.seek_video(node_id, seconds) {
             return;
         }
         // Pin the write to the track it targeted: the pipeline's current
@@ -670,8 +676,7 @@ impl App {
             };
             match crate::media::current_track(id) {
                 Some(cur) if &cur.url == url => {
-                    let seekable = crate::media::status(id).is_some_and(|s| s.duration > 0.0);
-                    if seekable {
+                    if crate::media::seekable(id) {
                         ready.push((id.clone(), *secs));
                     }
                 }
@@ -691,16 +696,19 @@ impl App {
             self.video_pending_bind_seeks.remove(&id);
         }
         for (id, secs) in ready {
-            self.video_pending_bind_seeks.remove(&id);
-            self.seek_video(&id, secs);
+            // Parked until the pipeline actually takes it.
+            if self.seek_video(&id, secs) {
+                self.video_pending_bind_seeks.remove(&id);
+            }
         }
     }
 
     /// `startPosition`: a one-time seek applied as soon as the source
-    /// becomes seekable. "Seekable" here is "the pipeline can answer a
-    /// duration query" — i.e. it has prerolled; before that a seek is
-    /// silently dropped by GStreamer, which is exactly the bug this
-    /// deferral exists to avoid. One-shot per `(node, source
+    /// becomes seekable — the pipeline has finished prerolling (no state
+    /// change pending) and answers a SEEKING query with `seekable`
+    /// ([`crate::media::seekable`]); before that GStreamer refuses the
+    /// seek, which is exactly the bug this deferral exists to avoid. The
+    /// seek is recorded as applied only once the pipeline accepted it. One-shot per `(node, source
     /// configuration)`: it re-arms when the `src`/`playlist`/`headers`
     /// props change, NOT when a playlist auto-advance moves the current
     /// track — resuming episode 1 at 5:00 must not also skip the first
@@ -730,19 +738,17 @@ impl App {
             if self.video_start_seeked.get(&node.id) == Some(&config) {
                 continue;
             }
-            // Not prerolled yet (or no pipeline at all) — try again on
+            // Not seekable yet (or no pipeline at all) — try again on
             // the next flush / frame.
-            let Some(status) = crate::media::status(&node.id) else {
-                continue;
-            };
-            if status.duration <= 0.0 {
+            if !crate::media::seekable(&node.id) {
                 continue;
             }
             pending.push((node.id.clone(), start as f64, config));
         }
         for (id, start, config) in pending {
-            self.video_start_seeked.insert(id.clone(), config);
-            self.seek_video(&id, start);
+            if self.seek_video(&id, start) {
+                self.video_start_seeked.insert(id, config);
+            }
         }
     }
 

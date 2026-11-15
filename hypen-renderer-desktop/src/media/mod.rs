@@ -95,6 +95,21 @@ pub(crate) struct PlayerShared {
     /// Set when the bus surfaced an error; painter shows no frame
     /// overlay changes, the window releases the player on the event.
     pub(crate) errored: AtomicBool,
+    /// Pipeline rebuilds spent on GStreamer 1.24's adaptivedemux2
+    /// unexposed-pad EOS race (see `gst_pipeline::is_unexposed_eos_race`),
+    /// carried over to the rebuilt player's slots.
+    pub(crate) race_restarts: std::sync::atomic::AtomicU32,
+}
+
+impl PlayerShared {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            frame: Mutex::new(None),
+            ended: AtomicBool::new(false),
+            errored: AtomicBool::new(false),
+            race_restarts: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
 }
 
 struct Player {
@@ -105,6 +120,11 @@ struct Player {
     src: String,
     /// Playlist index of the playing track (0 for single src).
     index: u64,
+    /// The options the pipeline was built with — `restrict_sources`
+    /// resolved (set when the window was in a remote asset scope), so a
+    /// rebuild off the window thread ([`rebuild_after_race`]) is exactly
+    /// as restricted.
+    opts: PlayOpts,
     pipeline: gstreamer::Element,
     shared: Arc<PlayerShared>,
     /// `true` while the user (or an error/EOS) has playback paused.
@@ -338,6 +358,35 @@ fn query_position_duration(pipeline: &gstreamer::Element) -> (f64, f64) {
     (position.max(0.0), duration.max(0.0))
 }
 
+/// `true` when `node_id`'s pipeline will take a seek now: it has
+/// finished its state change (no ASYNC change pending — prerolled) into
+/// at least PAUSED, and answers a SEEKING query in TIME with `seekable`.
+/// "The duration is known" is NOT enough: a demuxer can report it before
+/// the pipeline has prerolled, and GStreamer refuses a flushing seek
+/// until it has.
+pub fn seekable(node_id: &str) -> bool {
+    let pipeline = {
+        let players = registry().players.lock().expect("media registry poisoned");
+        match players.get(node_id) {
+            Some(p) => p.pipeline.clone(),
+            None => return false,
+        }
+    };
+    pipeline_seekable(&pipeline)
+}
+
+pub(crate) fn pipeline_seekable(pipeline: &gstreamer::Element) -> bool {
+    let (result, current, pending) = pipeline.state(gstreamer::ClockTime::ZERO);
+    if result.is_err()
+        || pending != gstreamer::State::VoidPending
+        || current < gstreamer::State::Paused
+    {
+        return false;
+    }
+    let mut query = gstreamer::query::Seeking::new(gstreamer::Format::Time);
+    pipeline.query(&mut query) && query.result().0
+}
+
 /// Seek `node_id` to `seconds` (clamped at 0, and to the known duration
 /// when the pipeline can answer). Returns `true` when the seek was
 /// issued. Flushing + key-unit: the same flags the ended-restart and
@@ -425,12 +474,12 @@ pub fn start(
     // Tear down any prior pipeline for this node OUTSIDE the lock.
     release(node_id);
 
-    let shared = Arc::new(PlayerShared {
-        frame: Mutex::new(None),
-        ended: AtomicBool::new(false),
-        errored: AtomicBool::new(false),
-    });
-    let pipeline = gst_pipeline::build(node_id, url, opts, Arc::clone(&shared))?;
+    let shared = PlayerShared::new();
+    let opts = PlayOpts {
+        restrict_sources: opts.restrict_sources || crate::paint::image::remote_origin().is_some(),
+        ..opts.clone()
+    };
+    let pipeline = gst_pipeline::build(node_id, url, &opts, Arc::clone(&shared))?;
     let target = if playing {
         gstreamer::State::Playing
     } else {
@@ -450,6 +499,7 @@ pub fn start(
         url: url.to_string(),
         src: src.to_string(),
         index,
+        opts,
         pipeline,
         shared,
         paused: !playing,
@@ -466,6 +516,84 @@ pub fn start(
         let _ = old.pipeline.set_state(gstreamer::State::Null);
     }
     Ok(true)
+}
+
+/// Rebuild `node_id`'s player after GStreamer 1.24's adaptivedemux2
+/// unexposed-pad EOS race failed its pipeline (`failed` is that
+/// pipeline's slots; see `gst_pipeline::is_unexposed_eos_race`): a fresh
+/// pipeline for the same track, options and play/pause state — an
+/// in-place `NULL` → `PLAYING` cycle of the failed `playbin3` trips its
+/// output reconfiguration assertion (`gstplaybin3.c` `reconfigure_output:
+/// assertion failed: (combine->sinkpad == NULL)`, an abort). Runs off the
+/// streaming thread (an element `call_async`). Does nothing when the node
+/// has moved on (a new track or a release): the player must still be the
+/// one that failed, checked again under the lock before the swap.
+pub(crate) fn rebuild_after_race(node_id: &str, failed: &Arc<PlayerShared>) {
+    let snapshot = {
+        let players = registry().players.lock().expect("media registry poisoned");
+        match players.get(node_id) {
+            Some(p) if Arc::ptr_eq(&p.shared, failed) => {
+                Some((p.url.clone(), p.opts.clone(), p.paused || p.suspended))
+            }
+            _ => None,
+        }
+    };
+    let Some((url, opts, paused)) = snapshot else {
+        return;
+    };
+    let shared = PlayerShared::new();
+    shared.race_restarts.store(
+        failed.race_restarts.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    let rebuilt = gst_pipeline::build(node_id, &url, &opts, Arc::clone(&shared)).and_then(|p| {
+        let target = if paused {
+            gstreamer::State::Paused
+        } else {
+            gstreamer::State::Playing
+        };
+        match p.set_state(target) {
+            Ok(_) => Ok(p),
+            Err(e) => {
+                let _ = p.set_state(gstreamer::State::Null);
+                Err(format!("set_state({target:?}) failed: {e}"))
+            }
+        }
+    });
+    let pipeline = match rebuilt {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("video: rebuilding {node_id} after the EOS race failed: {e}");
+            if !failed.errored.swap(true, Ordering::Relaxed) {
+                push_event(
+                    node_id,
+                    MediaEventKind::Error {
+                        code: "resource/NotFound".to_string(),
+                        message: "Couldn't download fragments".to_string(),
+                        status: None,
+                    },
+                );
+            }
+            return;
+        }
+    };
+    let old = {
+        let mut players = registry().players.lock().expect("media registry poisoned");
+        match players.get_mut(node_id) {
+            Some(p) if Arc::ptr_eq(&p.shared, failed) => {
+                p.shared = shared;
+                Some(std::mem::replace(&mut p.pipeline, pipeline))
+            }
+            _ => {
+                drop(players);
+                let _ = pipeline.set_state(gstreamer::State::Null);
+                None
+            }
+        }
+    };
+    if let Some(old) = old {
+        let _ = old.set_state(gstreamer::State::Null);
+    }
 }
 
 /// Toggle play/pause. Returns `Some(now_playing)`; `None` when the

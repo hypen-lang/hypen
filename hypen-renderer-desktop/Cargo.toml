@@ -39,7 +39,7 @@ mimalloc = ["dep:mimalloc"]
 # progressive MP4/WebM streams inline via a playbin → RGBA appsink
 # pipeline (see `src/media/`); without it the renderer keeps the
 # poster + play-glyph presentation byte-for-byte.
-video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:url"]
 # Native development HUD showing presented FPS plus this process's CPU and
 # resident-memory usage. Entirely compiled out of production builds.
 dev-overlay = ["dep:sysinfo"]
@@ -189,6 +189,9 @@ btleplug = { version = "0.13.2", optional = true }
 gstreamer = { version = "0.25", optional = true }
 gstreamer-app = { version = "0.25", optional = true }
 gstreamer-video = { version = "0.25", optional = true }
+# Feature `video`: resolves the variant playlists an HLS master names
+# for the restricted pipeline's playlist check (already in the build via ureq).
+url = { version = "2", optional = true }
 
 # macOS-only: reach into the CAMetalLayer wgpu/raw-window-metal create
 # under the NSView so we can set `presentsWithTransaction = YES`. That

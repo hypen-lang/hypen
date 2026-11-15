@@ -792,13 +792,7 @@ fn restricted_pipeline_refuses_a_local_top_level_uri() {
         eprintln!("skipping: GStreamer init failed in this sandbox");
         return;
     }
-    let shared = || {
-        Arc::new(PlayerShared {
-            frame: Mutex::new(None),
-            ended: AtomicBool::new(false),
-            errored: AtomicBool::new(false),
-        })
-    };
+    let shared = PlayerShared::new;
     for uri in ["file:///etc/hosts", "/etc/hosts"] {
         let err = super::gst_pipeline::build(
             "test-video-restrict-top",
@@ -827,13 +821,7 @@ fn restricted_pipeline_refuses_a_nested_local_segment_source() {
         return;
     }
     use gstreamer as gst;
-    let shared = || {
-        Arc::new(PlayerShared {
-            frame: Mutex::new(None),
-            ended: AtomicBool::new(false),
-            errored: AtomicBool::new(false),
-        })
-    };
+    let shared = PlayerShared::new;
     let secret = std::env::temp_dir().join(format!("hypen_secret_{}.ts", std::process::id()));
     std::fs::write(&secret, b"secret").unwrap();
     let file_uri = gst::glib::filename_to_uri(&secret, None)
@@ -1102,20 +1090,15 @@ fn manifest_scan_ignores_comments_and_decodes_what_the_demuxer_decodes() {
     );
 }
 
-/// The HTTP-only demuxer's manifest scan sees a manifest however it
-/// arrives — here as a buffer LIST — withholds its EOS, and posts the
-/// refusal on the pipeline.
-#[test]
-fn http_only_demuxer_scan_refuses_a_manifest_pushed_as_a_buffer_list() {
-    let _guard = lock_tests();
-    if !gst_ready() {
-        eprintln!("skipping: GStreamer init failed in this sandbox");
-        return;
-    }
+/// Feed a guarded, standalone `hlsdemux2` a manifest as ONE buffer list
+/// of `chunks`, and return the debug text of the `resource/NotAuthorized`
+/// refusal posted within 5 s (`Some(None)` when none was). `None` when
+/// hlsdemux2 is not installed.
+fn push_manifest_list_to_guarded_hlsdemux2(chunks: Vec<Vec<u8>>) -> Option<Option<String>> {
     use gstreamer as gst;
     let Ok(demux) = gst::ElementFactory::make("hlsdemux2").build() else {
         eprintln!("skipping: hlsdemux2 is not installed");
-        return;
+        return None;
     };
     let pipeline = gst::Pipeline::new();
     pipeline.add(&demux).unwrap();
@@ -1145,12 +1128,9 @@ fn http_only_demuxer_scan_refuses_a_manifest_pushed_as_a_buffer_list() {
     let mut list = gst::BufferList::new();
     {
         let list = list.get_mut().unwrap();
-        list.add(gst::Buffer::from_slice(
-            b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n".to_vec(),
-        ));
-        list.add(gst::Buffer::from_slice(
-            b"#EXTINF:1.0,\nfile:///etc/passwd\n#EXT-X-ENDLIST\n".to_vec(),
-        ));
+        for chunk in chunks {
+            list.add(gst::Buffer::from_slice(chunk));
+        }
     }
     let _ = src.push_list(list);
     let _ = src.push_event(gst::event::Eos::new());
@@ -1172,7 +1152,52 @@ fn http_only_demuxer_scan_refuses_a_manifest_pushed_as_a_buffer_list() {
         }
     }
     let _ = demux.set_state(gst::State::Null);
+    Some(refusal)
+}
+
+/// The HTTP-only demuxer's manifest scan sees a manifest however it
+/// arrives — here as a buffer LIST — withholds its EOS, and posts the
+/// refusal on the pipeline.
+#[test]
+fn http_only_demuxer_scan_refuses_a_manifest_pushed_as_a_buffer_list() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    let Some(refusal) = push_manifest_list_to_guarded_hlsdemux2(vec![
+        b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n".to_vec(),
+        b"#EXTINF:1.0,\nfile:///etc/passwd\n#EXT-X-ENDLIST\n".to_vec(),
+    ]) else {
+        return;
+    };
     let debug = refusal.expect("the refused manifest must post resource/NotAuthorized");
+    assert!(debug.contains("file:///etc/passwd"), "{debug}");
+}
+
+/// A pad without a chain-list function (adaptivedemux2's) hands a buffer
+/// list on one buffer at a time — through the scan's BUFFER probe AGAIN
+/// after its BUFFER_LIST probe saw the whole list. Each byte must count
+/// once: a 2.5 MiB manifest (under the 4 MiB scan limit) pushed as a list
+/// is scanned and refused, not double-counted past the limit and waved
+/// through unscanned.
+#[test]
+fn http_only_demuxer_scan_counts_a_buffer_list_once() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    let mut padding = b"#EXTM3U\n#EXT-X-TARGETDURATION:2\n#".to_vec();
+    padding.extend(std::iter::repeat(b'x').take(5 << 19)); // 2.5 MiB
+    padding.push(b'\n');
+    let Some(refusal) = push_manifest_list_to_guarded_hlsdemux2(vec![
+        padding,
+        b"#EXTINF:1.0,\nfile:///etc/passwd\n#EXT-X-ENDLIST\n".to_vec(),
+    ]) else {
+        return;
+    };
+    let debug = refusal.expect("a 2.5 MiB manifest list must still be scanned and refused");
     assert!(debug.contains("file:///etc/passwd"), "{debug}");
 }
 
@@ -1524,30 +1549,27 @@ fn restricted_pipeline_plays_http_mp4_and_hls() {
     let segment = std::env::temp_dir().join(format!("hypen_http_seg_{}.ts", std::process::id()));
     let hls = have("hlsdemux2") && build_ts_segment(&segment);
     if hls {
-        // TWO segments, the last one held back until the first frame is
-        // out. GStreamer 1.24's adaptivedemux2 errors a stream that
-        // reaches its end-of-manifest before the demuxer's output thread
-        // has exposed a pad ("Can't push EOS on non-exposed pad", posted
-        // as `resource/NotFound: Couldn't download fragments`) — which a
-        // single, instantly-served segment does whenever that thread is
-        // scheduled late (a loaded machine: ~1 run in 4 with every core
-        // busy). Holding the last segment keeps the end of the stream
-        // behind the first frame, so the test sees the restricted
-        // pipeline play, not that upstream race.
-        let body = std::fs::read(&segment).unwrap();
+        // ONE segment, served at once: the shape that hits GStreamer
+        // 1.24 adaptivedemux2's unexposed-pad EOS race when the demuxer's
+        // output thread is scheduled late (~1 run in 4 with every core
+        // busy, before the workaround — see
+        // `gst_pipeline::is_unexposed_eos_race`). The production rebuild
+        // must make it play regardless.
         files.push((
             "/live.m3u8".to_string(),
             "application/vnd.apple.mpegurl",
             b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
-              #EXTINF:1.0,\nseg0.ts\n#EXT-X-DISCONTINUITY\n#EXTINF:1.0,\nseg1.ts\n#EXT-X-ENDLIST\n"
+              #EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
                 .to_vec(),
         ));
-        files.push(("/seg0.ts".to_string(), "video/mp2t", body.clone()));
-        files.push(("/seg1.ts".to_string(), "video/mp2t", body));
+        files.push((
+            "/seg0.ts".to_string(),
+            "video/mp2t",
+            std::fs::read(&segment).unwrap(),
+        ));
         let _ = std::fs::remove_file(&segment);
     }
-    let gate: Gate = Arc::default();
-    let port = serve_gated(files, Some(("/seg1.ts".to_string(), Arc::clone(&gate))));
+    let port = serve(files);
     let mut cases = vec![(
         "test-remote-mp4",
         format!("http://127.0.0.1:{port}/clip.mp4"),
@@ -1565,7 +1587,6 @@ fn restricted_pipeline_plays_http_mp4_and_hls() {
         start(node, &url, &url, 0, &restricted_opts(), true)
             .unwrap_or_else(|e| panic!("{node}: {e}"));
         let frame = poll_until(Duration::from_secs(15), || current_frame(node));
-        open_gate(&gate);
         let errors: Vec<String> = take_events()
             .into_iter()
             .filter_map(|e| match e.kind {
@@ -1582,4 +1603,471 @@ fn restricted_pipeline_plays_http_mp4_and_hls() {
         );
         assert!(errors.is_empty(), "{node}: {errors:?}");
     }
+}
+
+/// What [`serve_dyn`] answers a request with.
+enum Reply {
+    Body(&'static str, Vec<u8>),
+    /// Accept the request and never answer it (a hung server), until the
+    /// test's `hang` gate opens (or 60 s pass).
+    Hang,
+    NotFound,
+}
+
+/// Serve every request through `reply(path, nth request for that path)`
+/// on an ephemeral localhost port, one thread per connection. A `Hang`
+/// reply holds its connection until `hang` is opened.
+fn serve_dyn(reply: impl Fn(&str, usize) -> Reply + Send + Sync + 'static, hang: Gate) -> u16 {
+    use std::io::{BufRead, BufReader, Write};
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    let reply = Arc::new(reply);
+    let counts: Arc<Mutex<std::collections::HashMap<String, usize>>> = Arc::default();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let (reply, counts, hang) =
+                (Arc::clone(&reply), Arc::clone(&counts), Arc::clone(&hang));
+            std::thread::spawn(move || {
+                let mut request_line = String::new();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let _ = reader.read_line(&mut request_line);
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+                        break;
+                    }
+                }
+                let path = request_line.split_whitespace().nth(1).unwrap_or("/");
+                let path = path.split('?').next().unwrap_or(path).to_string();
+                let nth = {
+                    let mut counts = counts.lock().unwrap();
+                    let n = counts.entry(path.clone()).or_insert(0);
+                    *n += 1;
+                    *n - 1
+                };
+                match reply(&path, nth) {
+                    Reply::Body(mime, body) => {
+                        let _ = write!(
+                            stream,
+                            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
+                             Cache-Control: no-cache\r\nConnection: close\r\n\r\n",
+                            body.len()
+                        );
+                        let _ = stream.write_all(&body);
+                    }
+                    Reply::Hang => {
+                        let (open, cvar) = &*hang;
+                        let guard = open.lock().unwrap();
+                        let _ = cvar.wait_timeout_while(guard, Duration::from_secs(60), |o| !*o);
+                    }
+                    Reply::NotFound => {
+                        let _ = stream.write_all(
+                            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                        );
+                    }
+                }
+            });
+        }
+    });
+    port
+}
+
+fn have_feature(name: &str) -> bool {
+    use gstreamer as gst;
+    gst::Registry::get()
+        .find_feature(name, gst::ElementFactory::static_type())
+        .is_some_and(|f| f.rank() > gst::Rank::NONE)
+}
+
+/// The `onError` codes `node` got (drains the event queue).
+fn error_codes(node: &str) -> Vec<String> {
+    take_events()
+        .into_iter()
+        .filter_map(|e| match e.kind {
+            MediaEventKind::Error { code, message, .. } if e.node_id == node => {
+                Some(format!("{code}: {message}"))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Run `f` with the stall watchdog's timeout set to `ms` (its suspect
+/// threshold shrinks to half), restoring the real one after.
+fn with_stall_timeout<T>(ms: u64, f: impl FnOnce() -> T) -> T {
+    use std::sync::atomic::Ordering::SeqCst;
+    struct Restore;
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            super::gst_pipeline::ADAPTIVE_STALL_TIMEOUT_MS_OVERRIDE.store(0, SeqCst);
+        }
+    }
+    super::gst_pipeline::ADAPTIVE_STALL_TIMEOUT_MS_OVERRIDE.store(ms, SeqCst);
+    let _restore = Restore;
+    f()
+}
+
+/// The playlist check's view of an HLS master playlist: every variant
+/// and rendition playlist it names, resolved, http(s) only; nothing for
+/// a media playlist (its URIs are segments the check must not fetch).
+#[test]
+fn hls_master_playlist_uris_lists_variants_and_renditions_only() {
+    use super::gst_pipeline::hls_master_playlist_uris;
+    let base = "http://cdn.test/show/master.m3u8";
+    let master = "#EXTM3U\n\
+        #EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"a\",NAME=\"en\",URI=\"audio/en.m3u8\"\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=1\n\
+        low/index.m3u8\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=2\n\
+        /abs/high.m3u8\n\
+        #EXT-X-I-FRAME-STREAM-INF:BANDWIDTH=3,URI=\"iframes.m3u8\"\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=4\n\
+        file:///etc/local.m3u8\n\
+        #EXT-X-STREAM-INF:BANDWIDTH=5\n\
+        low/index.m3u8\n";
+    assert_eq!(
+        hls_master_playlist_uris(base, master),
+        vec![
+            "http://cdn.test/show/audio/en.m3u8",
+            "http://cdn.test/show/low/index.m3u8",
+            "http://cdn.test/abs/high.m3u8",
+            "http://cdn.test/show/iframes.m3u8",
+        ]
+    );
+    let media = "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXTINF:1.0,\nseg0.ts\n";
+    assert!(hls_master_playlist_uris(base, media).is_empty());
+    assert!(hls_master_playlist_uris(base, "<MPD/>").is_empty());
+}
+
+/// The watchdog's reading of silence. Before playback: input silence
+/// alone counts, whatever the state (a paused pipeline still prerolls) —
+/// suspect, then timed out. During playback: only while PLAYING, only
+/// when nothing goes in AND nothing comes out (download-ahead pauses keep
+/// output flowing), a pause holds the timer, and it never "times out"
+/// (mid-stream network failures are the demuxer's to report).
+#[test]
+fn stall_verdict_separates_refusal_silence_from_pauses() {
+    use super::gst_pipeline::{StallVerdict, StallWatch};
+    let (suspect, timeout) = (Duration::from_millis(40), Duration::from_millis(120));
+    let w = StallWatch::new();
+    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(
+        w.verdict(true, suspect, timeout),
+        StallVerdict::Fine,
+        "not armed"
+    );
+    w.progress();
+    assert_eq!(w.verdict(false, suspect, timeout), StallVerdict::Fine);
+    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(w.verdict(false, suspect, timeout), StallVerdict::Suspect);
+    std::thread::sleep(Duration::from_millis(80));
+    assert_eq!(w.verdict(false, suspect, timeout), StallVerdict::TimedOut);
+
+    // Media out: playback has begun.
+    let w = StallWatch::new();
+    w.progress();
+    w.output();
+    std::thread::sleep(Duration::from_millis(60));
+    assert_eq!(
+        w.verdict(false, suspect, timeout),
+        StallVerdict::Fine,
+        "paused: nothing flows by design"
+    );
+    assert_eq!(
+        w.verdict(true, suspect, timeout),
+        StallVerdict::Fine,
+        "a pause holds the timer: resuming is not a stall"
+    );
+    std::thread::sleep(Duration::from_millis(60));
+    w.output(); // download-ahead pause: output still flowing
+    assert_eq!(w.verdict(true, suspect, timeout), StallVerdict::Fine);
+    std::thread::sleep(Duration::from_millis(200));
+    assert_eq!(
+        w.verdict(true, suspect, timeout),
+        StallVerdict::Suspect,
+        "nothing in, nothing out while PLAYING: suspect, never timed out"
+    );
+}
+
+/// A server that accepts the segment request and never answers is a
+/// NETWORK failure — `resource/Read`, the code `souphttpsrc` gives a
+/// server that stops answering — not a refusal: nothing the stream names
+/// is refused. (Before: `resource/NotAuthorized` after 20 s of silence.)
+#[test]
+fn remote_hls_silent_server_reports_a_network_timeout_not_a_refusal() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    if !have_feature("souphttpsrc") || !have_feature("hlsdemux2") {
+        eprintln!("skipping: souphttpsrc or hlsdemux2 is not installed");
+        return;
+    }
+    let hang: Gate = Arc::default();
+    let port = serve_dyn(
+        |path, _| match path {
+            "/master.m3u8" => Reply::Body(
+                "application/vnd.apple.mpegurl",
+                b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=64x48\nv.m3u8\n".to_vec(),
+            ),
+            "/v.m3u8" => Reply::Body(
+                "application/vnd.apple.mpegurl",
+                b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+                  #EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
+                    .to_vec(),
+            ),
+            "/seg0.ts" => Reply::Hang,
+            _ => Reply::NotFound,
+        },
+        Arc::clone(&hang),
+    );
+    let url = format!("http://127.0.0.1:{port}/master.m3u8");
+    let node = "test-hls-silent-server";
+    let _ = take_events();
+    let errored = with_stall_timeout(2_000, || {
+        start(node, &url, &url, 0, &restricted_opts(), true).expect("start");
+        poll_until(Duration::from_secs(15), || {
+            crate::media::status(node).filter(|s| s.errored).map(|_| ())
+        })
+    });
+    let errors = error_codes(node);
+    release(node);
+    open_gate(&hang);
+    assert!(
+        errored.is_some(),
+        "a hung server must end in onError, not a stall"
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].starts_with("resource/Read: "), "{errors:?}");
+}
+
+/// A refusal that appears only AFTER playback began: a live media
+/// playlist whose update (fetched by the demuxer itself, never through a
+/// pad) adds a `file://` segment. The demuxer refuses it silently and
+/// playback freezes; the watchdog must notice (nothing in, nothing out
+/// while PLAYING), find the refused URI in the playlist and report
+/// `resource/NotAuthorized` — not leave the node frozen.
+#[test]
+fn remote_hls_live_update_naming_a_local_segment_reports_onerror() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    if !have_feature("souphttpsrc") || !have_feature("hlsdemux2") {
+        eprintln!("skipping: souphttpsrc or hlsdemux2 is not installed");
+        return;
+    }
+    let segment = std::env::temp_dir().join(format!("hypen_live_seg_{}.ts", std::process::id()));
+    if !build_ts_segment(&segment) {
+        eprintln!("skipping: cannot encode an MPEG-TS segment here");
+        return;
+    }
+    let body = std::fs::read(&segment).unwrap();
+    let seg_uri = gst::glib::filename_to_uri(&segment, None)
+        .unwrap()
+        .to_string();
+    let first_frame: Gate = Arc::default();
+    let first_frame_for_server = Arc::clone(&first_frame);
+    let port = serve_dyn(
+        move |path, _| match path {
+            "/live.m3u8" => {
+                // Until the first frame is out: three HTTP segments. After:
+                // a fourth, local one — a live update the demuxer fetches.
+                let updated = *first_frame_for_server.0.lock().unwrap();
+                let mut text = String::from(
+                    "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:0\n\
+                     #EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXTINF:1.0,\nseg2.ts\n",
+                );
+                if updated {
+                    text.push_str(&format!("#EXTINF:1.0,\n{seg_uri}\n"));
+                }
+                Reply::Body("application/vnd.apple.mpegurl", text.into_bytes())
+            }
+            "/seg0.ts" | "/seg1.ts" | "/seg2.ts" => Reply::Body("video/mp2t", body.clone()),
+            _ => Reply::NotFound,
+        },
+        Arc::default(),
+    );
+    let url = format!("http://127.0.0.1:{port}/live.m3u8");
+    let node = "test-hls-live-update-remote";
+    let _ = take_events();
+    let (frame, errored) = with_stall_timeout(2_000, || {
+        start(node, &url, &url, 0, &restricted_opts(), true).expect("start");
+        let frame = poll_until(Duration::from_secs(15), || current_frame(node));
+        open_gate(&first_frame);
+        let errored = poll_until(Duration::from_secs(25), || {
+            crate::media::status(node).filter(|s| s.errored).map(|_| ())
+        });
+        (frame, errored)
+    });
+    let errors = error_codes(node);
+    release(node);
+    let _ = std::fs::remove_file(&segment);
+    assert!(frame.is_some(), "the live stream never played: {errors:?}");
+    assert!(
+        errored.is_some(),
+        "a mid-stream refused segment froze playback without onError"
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].starts_with("resource/NotAuthorized: "),
+        "{errors:?}"
+    );
+}
+
+/// GStreamer 1.24's adaptivedemux2 unexposed-pad EOS race, made
+/// deterministic: the demuxer posts the race's exact error at the race's
+/// exact moment (media parsed, no demuxer pad exposed yet). The stream is
+/// fine, so the pipeline restarts and plays — no `onError`.
+#[test]
+fn adaptive_unexposed_eos_race_restarts_the_stream_instead_of_failing_it() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    if !have_feature("souphttpsrc") || !have_feature("hlsdemux2") {
+        eprintln!("skipping: souphttpsrc or hlsdemux2 is not installed");
+        return;
+    }
+    let segment = std::env::temp_dir().join(format!("hypen_race_seg_{}.ts", std::process::id()));
+    if !build_ts_segment(&segment) {
+        eprintln!("skipping: cannot encode an MPEG-TS segment here");
+        return;
+    }
+    let body = std::fs::read(&segment).unwrap();
+    let _ = std::fs::remove_file(&segment);
+    let port = serve(vec![
+        (
+            "/one.m3u8".to_string(),
+            "application/vnd.apple.mpegurl",
+            b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+              #EXTINF:1.0,\nseg0.ts\n#EXT-X-ENDLIST\n"
+                .to_vec(),
+        ),
+        ("/seg0.ts".to_string(), "video/mp2t", body),
+    ]);
+    let url = format!("http://127.0.0.1:{port}/one.m3u8");
+    let node = "test-hls-eos-race";
+    let _ = take_events();
+    super::gst_pipeline::INJECT_UNEXPOSED_EOS_RACE.store(true, std::sync::atomic::Ordering::SeqCst);
+    start(node, &url, &url, 0, &restricted_opts(), true).expect("start");
+    let frame = poll_until(Duration::from_secs(15), || current_frame(node));
+    let injected = !super::gst_pipeline::INJECT_UNEXPOSED_EOS_RACE
+        .swap(false, std::sync::atomic::Ordering::SeqCst);
+    std::thread::sleep(Duration::from_millis(300));
+    let errors = error_codes(node);
+    release(node);
+    assert!(injected, "the race was never injected (no parser pad?)");
+    assert!(errors.is_empty(), "the race failed the stream: {errors:?}");
+    assert!(frame.is_some(), "the restarted stream never played");
+}
+
+/// The race workaround must not swallow a REAL download failure: a
+/// segment the server 404s still ends in `onError` (once).
+#[test]
+fn adaptive_missing_segment_still_reports_its_error() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    if !have_feature("souphttpsrc") || !have_feature("hlsdemux2") {
+        eprintln!("skipping: souphttpsrc or hlsdemux2 is not installed");
+        return;
+    }
+    let port = serve(vec![(
+        "/gone.m3u8".to_string(),
+        "application/vnd.apple.mpegurl",
+        b"#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+          #EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nseg1.ts\n#EXT-X-ENDLIST\n"
+            .to_vec(),
+    )]);
+    let url = format!("http://127.0.0.1:{port}/gone.m3u8");
+    let node = "test-hls-404";
+    let _ = take_events();
+    start(node, &url, &url, 0, &restricted_opts(), true).expect("start");
+    let errored = poll_until(Duration::from_secs(20), || {
+        crate::media::status(node).filter(|s| s.errored).map(|_| ())
+    });
+    let errors = error_codes(node);
+    release(node);
+    assert!(errored.is_some(), "a 404 segment must end in onError");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].starts_with("resource/"), "{errors:?}");
+}
+
+/// `seekable` is the pipeline's own answer, not "the duration is
+/// known": a source can report its duration before the pipeline has
+/// prerolled (here an `appsrc` with a set duration and no data yet), and
+/// GStreamer refuses a flushing seek until it has. Once prerolled, the
+/// seek a `true` answer promises is taken.
+#[test]
+fn pipeline_seekable_waits_for_preroll_not_for_the_duration() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    use gstreamer_app::AppSrc;
+    let Ok(pipeline) = gst::parse::launch(
+        "appsrc name=src format=time is-live=false stream-type=seekable \
+         caps=video/x-raw,format=RGBA,width=4,height=4,framerate=1/1 ! fakesink sync=false",
+    ) else {
+        eprintln!("skipping: appsrc/fakesink unavailable");
+        return;
+    };
+    let pipeline = pipeline.downcast::<gst::Pipeline>().unwrap();
+    let src = pipeline
+        .by_name("src")
+        .unwrap()
+        .downcast::<AppSrc>()
+        .unwrap();
+    src.set_duration(gst::ClockTime::from_seconds(10));
+    src.set_callbacks(
+        gstreamer_app::AppSrcCallbacks::builder()
+            .seek_data(|_, _| true)
+            .build(),
+    );
+    let element: gst::Element = pipeline.clone().upcast();
+    assert!(!super::pipeline_seekable(&element), "NULL");
+    let _ = element.set_state(gst::State::Paused);
+    // Prerolling: the duration is already known — what the window used to
+    // take for "seekable" — but the pipeline is not.
+    let duration = poll_until(Duration::from_secs(5), || {
+        element.query_duration::<gst::ClockTime>()
+    });
+    assert_eq!(duration, Some(gst::ClockTime::from_seconds(10)));
+    assert!(
+        !super::pipeline_seekable(&element),
+        "duration known but preroll pending: not seekable yet"
+    );
+    let mut buffer = gst::Buffer::from_slice(vec![0u8; 4 * 4 * 4]);
+    {
+        let b = buffer.get_mut().unwrap();
+        b.set_pts(gst::ClockTime::ZERO);
+        b.set_duration(gst::ClockTime::from_seconds(1));
+    }
+    src.push_buffer(buffer).unwrap();
+    let ready = poll_until(Duration::from_secs(5), || {
+        super::pipeline_seekable(&element).then_some(())
+    });
+    let seeked = ready.is_some()
+        && element
+            .seek_simple(
+                gst::SeekFlags::FLUSH | gst::SeekFlags::KEY_UNIT,
+                gst::ClockTime::from_seconds(5),
+            )
+            .is_ok();
+    let _ = element.set_state(gst::State::Null);
+    assert!(
+        ready.is_some(),
+        "prerolled pipeline never reported seekable"
+    );
+    assert!(seeked, "a seekable pipeline refused the seek");
 }
