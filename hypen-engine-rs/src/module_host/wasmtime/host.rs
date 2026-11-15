@@ -24,8 +24,8 @@ use super::storage::SharedKv;
 use super::store::{HostClock, HostState};
 use crate::module_host::kv::{KvBackend, ModuleName};
 use crate::module_host::{
-    DeniedCapability, HostAction, HostError, InstanceStatus, ModuleHost, ModuleInstanceId,
-    ModuleManifest, ReducerOutput, SiblingState,
+    DeniedCapability, HostAction, HostError, HttpGrant, InstanceStatus, ModuleHost,
+    ModuleInstanceId, ModuleManifest, ReducerOutput, SiblingState,
 };
 
 /// What an export that can fail at the module level returns: the outer
@@ -116,6 +116,8 @@ struct Registration<A: Abi> {
     _code: Arc<Compiled>,
     /// Cross-module grants, from the manifest's `reads` / `dispatches`.
     acl: Arc<Acl>,
+    /// What the manifest's `http` / `httpHosts` allow.
+    http: Arc<HttpGrant>,
 }
 
 struct Instance<A: Abi> {
@@ -444,7 +446,34 @@ impl<A: Abi> Host<A> {
         }
     }
 
-    /// [`call`](Self::call) for the exports that may use
+    /// [`call`](Self::call) for the exports that return a reducer output
+    /// (`dispatch`, `on-activated`, `on-deactivated`): opens the
+    /// `hypen:http/deferred` queue for the duration of the call and moves
+    /// what the guest queued into the output. Requests queued by a call that
+    /// fails are discarded with it.
+    fn call_reducer(
+        &mut self,
+        id: ModuleInstanceId,
+        export: Export,
+        run: impl AsyncFnOnce(&A::Bindings, &mut Store<HostState>) -> Reply<ReducerOutput>,
+    ) -> Result<ReducerOutput, HostError> {
+        let instance = self.instances.live_mut(id)?;
+        let grant = Arc::clone(&instance.registration.http);
+        instance.store.data_mut().deferred_http.begin(grant);
+
+        let result = self.call(id, export, run);
+
+        // A killed instance took its store (and queue) with it.
+        let Ok(instance) = self.instances.live_mut(id) else {
+            return result;
+        };
+        let queued = instance.store.data_mut().deferred_http.end();
+        let mut output = result?;
+        queued.attach_to(&mut output);
+        Ok(output)
+    }
+
+    /// [`call_reducer`](Self::call_reducer) for the exports that may use
     /// `hypen:engine/state` (`dispatch`, `on-activated`): opens the
     /// cross-module window (ACL + sibling snapshots) for the duration of the
     /// call and moves the requests the guest queued into the output.
@@ -459,7 +488,7 @@ impl<A: Abi> Host<A> {
         let acl = Arc::clone(&instance.registration.acl);
         instance.store.data_mut().cross.begin(acl, siblings);
 
-        let result = self.call(id, export, run);
+        let result = self.call_reducer(id, export, run);
 
         // If the call killed the instance its store (and context) is gone.
         // Otherwise close the window whether or not the reducer succeeded,
@@ -507,6 +536,7 @@ impl<A: Abi> ModuleHost for Host<A> {
             linkage,
             _code: code,
             acl: Arc::new(Acl::from_manifest(&manifest)),
+            http: Arc::new(manifest.http_grant()),
         };
         self.modules.insert(name, Arc::new(registration));
         Ok(())
@@ -530,6 +560,7 @@ impl<A: Abi> ModuleHost for Host<A> {
             self.shared.kv.clone(),
             self.clock.clone(),
             &self.limits,
+            Arc::clone(&registration.http),
         );
         let mut store = Store::new(self.shared.core.engine(), state);
         store.limiter(|state| &mut state.limiter);
@@ -607,7 +638,7 @@ impl<A: Abi> ModuleHost for Host<A> {
         // No cross-module window: the module is leaving the screen and gets
         // no sibling snapshots, so `hypen:engine/state` calls are denied.
         let state = state.to_vec();
-        self.call(id, Export::OnDeactivated, async |b, store| {
+        self.call_reducer(id, Export::OnDeactivated, async |b, store| {
             A::on_deactivated(b, store, state).await
         })
     }

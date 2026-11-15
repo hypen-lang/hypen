@@ -17,9 +17,11 @@ use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
 use wasmtime_wasi_http::WasiHttpCtx;
 
 use super::cross_module::CrossModuleCtx;
+use super::deferred_http::{AllowlistHooks, DeferredHttpCtx};
 use super::limits::{ModuleLimits, TotalMemoryLimiter, MAX_RESOURCE_TABLE_ENTRIES};
 use super::storage::{SharedKv, StorageCtx};
 use crate::module_host::kv::ModuleName;
+use crate::module_host::HttpGrant;
 
 /// The clock behind `hypen:time/clock`. `Real` reads the OS; `Virtual` is a
 /// counter — reads return it, `sleep-ms` advances it without waiting — which
@@ -74,12 +76,17 @@ pub(crate) struct HostState {
     /// `wasi:http` state. Only reachable when the manifest grants `http`
     /// (the interface is not linked otherwise).
     http: WasiHttpCtx,
+    /// Applies the manifest's `httpHosts` allowlist to each `wasi:http`
+    /// request.
+    http_hooks: AllowlistHooks,
     /// `hypen:storage`: the shared backend plus this instance's identity.
     pub(crate) storage: StorageCtx,
     /// `hypen:time` (v0.2 only; the v0.1 world has no clock import).
     pub(crate) clock: HostClock,
     /// `hypen:engine/state` context of the call in progress.
     pub(crate) cross: CrossModuleCtx,
+    /// `hypen:http/deferred` queue of the call in progress.
+    pub(crate) deferred_http: DeferredHttpCtx,
 }
 
 impl HostState {
@@ -88,6 +95,7 @@ impl HostState {
         kv: SharedKv,
         clock: HostClock,
         limits: &ModuleLimits,
+        http_grant: Arc<HttpGrant>,
     ) -> Self {
         let mut table = ResourceTable::new();
         table.set_max_capacity(MAX_RESOURCE_TABLE_ENTRIES);
@@ -96,9 +104,11 @@ impl HostState {
             limiter: TotalMemoryLimiter::new(limits.max_memory_bytes),
             wasi: WasiCtxBuilder::new().build(),
             http: WasiHttpCtx::new(),
+            http_hooks: AllowlistHooks::new(http_grant),
             storage: StorageCtx::new(module, kv, limits.kv_quota()),
             clock,
             cross: CrossModuleCtx::default(),
+            deferred_http: DeferredHttpCtx::default(),
         }
     }
 }
@@ -117,7 +127,7 @@ impl WasiHttpView for HostState {
         WasiHttpCtxView {
             ctx: &mut self.http,
             table: &mut self.table,
-            hooks: wasmtime_wasi_http::p2::default_hooks(),
+            hooks: &mut self.http_hooks,
         }
     }
 }

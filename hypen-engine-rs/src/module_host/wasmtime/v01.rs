@@ -240,6 +240,9 @@ impl Abi for V01 {
         (Capability::EngineState, |l| {
             hypen::engine::state::add_to_linker::<_, HasSelf<_>>(l, |s| s)
         }),
+        (Capability::DeferredHttp, |l| {
+            hypen::http::deferred::add_to_linker::<_, HasSelf<_>>(l, |s| s)
+        }),
         linker::HTTP,
     ];
 

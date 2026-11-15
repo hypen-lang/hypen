@@ -3,9 +3,11 @@
 //! A module's manifest decides which imports exist for it. A capability the
 //! manifest does not grant is simply **not linked**, so a component that
 //! imports it cannot be instantiated at all — there is no runtime
-//! "permission denied" path for storage scopes or HTTP. (Cross-module access
-//! is the exception: `hypen:engine/state` is always linked and checked per
-//! target at call time, see `cross_module.rs`.)
+//! "permission denied" path for storage scopes or for HTTP as a whole.
+//! (Two things are checked at call time instead: cross-module access —
+//! `hypen:engine/state` is always linked and checked per target, see
+//! `cross_module.rs` — and, once `http` is granted, the `httpHosts` allowlist
+//! of each request, see `deferred_http.rs`.)
 //!
 //! [`inspect`] reads a component's imports up front so the refusal can name
 //! the import and the manifest grant that would allow it, instead of
@@ -27,8 +29,11 @@ use crate::module_host::{ModuleManifest, StorageScope};
 pub(crate) enum Capability {
     /// `hypen:storage/{local,app,cloud}`.
     Storage(StorageScope),
-    /// `wasi:http/*` — outbound HTTP.
+    /// `wasi:http/*` — outbound HTTP, blocking.
     Http,
+    /// `hypen:http/deferred` — outbound HTTP, queued. Granted by the same
+    /// manifest `http` as [`Http`](Self::Http).
+    DeferredHttp,
     /// `hypen:engine/state` — cross-module read / dispatch / subscribe.
     EngineState,
     /// `hypen:time/clock` (v0.2).
@@ -43,7 +48,7 @@ impl Capability {
     pub(crate) fn granted_by(self, manifest: &ModuleManifest) -> bool {
         match self {
             Capability::Storage(scope) => manifest.grants_storage(scope),
-            Capability::Http => manifest.grants_http(),
+            Capability::Http | Capability::DeferredHttp => manifest.grants_http(),
             Capability::EngineState | Capability::Time => true,
         }
     }
@@ -62,6 +67,7 @@ impl Capability {
             "hypen:storage/cloud" => Some(Capability::Storage(StorageScope::Cloud)),
             "hypen:engine/state" => Some(Capability::EngineState),
             "hypen:time/clock" => Some(Capability::Time),
+            "hypen:http/deferred" => Some(Capability::DeferredHttp),
             other if other.starts_with("wasi:http/") => Some(Capability::Http),
             _ => None,
         }
@@ -77,7 +83,7 @@ impl fmt::Display for CapabilityGrant {
             Capability::Storage(StorageScope::Local) => f.write_str("storage scope `local`"),
             Capability::Storage(StorageScope::App) => f.write_str("storage scope `app`"),
             Capability::Storage(StorageScope::Cloud) => f.write_str("storage scope `cloud`"),
-            Capability::Http => f.write_str("`http`"),
+            Capability::Http | Capability::DeferredHttp => f.write_str("`http`"),
             Capability::EngineState => f.write_str("cross-module state access"),
             Capability::Time => f.write_str("the clock"),
         }
@@ -183,6 +189,8 @@ mod tests {
         assert_eq!(of("hypen:time/clock@0.2.0"), Some(Time));
         assert_eq!(of("wasi:http/outgoing-handler@0.2.4"), Some(Http));
         assert_eq!(of("wasi:http/types@0.2.4"), Some(Http));
+        assert_eq!(of("hypen:http/deferred@0.1.0"), Some(DeferredHttp));
+        assert_eq!(of("hypen:http/other@0.1.0"), None);
         // Not capabilities: types-only interfaces and the WASI base.
         assert_eq!(of("hypen:storage/types@0.1.0"), None);
         assert_eq!(of("wasi:io/poll@0.2.4"), None);
@@ -197,6 +205,7 @@ mod tests {
             Capability::Storage(StorageScope::App),
             Capability::Storage(StorageScope::Cloud),
             Capability::Http,
+            Capability::DeferredHttp,
         ] {
             assert!(!capability.granted_by(&none), "{capability:?}");
             assert!(capability.granted_by(&all), "{capability:?}");

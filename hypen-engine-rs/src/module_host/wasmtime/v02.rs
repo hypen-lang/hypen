@@ -277,6 +277,9 @@ impl Abi for V02 {
         (Capability::Time, |l| {
             hypen::time::clock::add_to_linker::<HostState, HostCap>(l, |s| s)
         }),
+        (Capability::DeferredHttp, |l| {
+            hypen::http::deferred::add_to_linker::<HostState, HostCap>(l, |s| s)
+        }),
         linker::HTTP,
     ];
 

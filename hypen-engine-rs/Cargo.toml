@@ -51,6 +51,10 @@ wasmtime-wasi = { version = "46", optional = true }
 # using idiomatic per-language clients (Rust waki/reqwest, Go net/http, etc.)
 # instead of going through a Hypen-shaped descriptor.
 wasmtime-wasi-http = { version = "46", optional = true }
+# Names `http::Request` in the `wasi:http` hook that applies a manifest's
+# `httpHosts` allowlist to blocking requests. Already a dependency of
+# wasmtime-wasi-http; no new crate.
+http = { version = "1", optional = true }
 # Current-thread runtime owned by the module hosts: every guest entry runs as
 # an async wasmtime call under `tokio::time::timeout`, so a guest blocked in a
 # host call (wasi:io poll, wasi:http, hypen:time sleep) is cancelled at the
@@ -62,6 +66,16 @@ base64 = { version = "0.22", optional = true }
 # Tiny synchronous HTTP server used by the `hypen-runtime --serve` mode.
 # Only the binary needs it (`runtime-bin` feature), not library embeds.
 tiny_http = { version = "0.12", optional = true }
+# The HTTP client `hypen-runtime` performs deferred requests
+# (`hypen:http/deferred`) with: hyper's HTTP/1 client connection over tokio,
+# TLS by rustls with the bundled Mozilla roots. Every one of these is already
+# compiled for wasmtime-wasi-http's blocking `wasi:http` (same versions, same
+# features), so naming them adds no crate to the build. `runtime-bin` only.
+hyper = { version = "1", default-features = false, features = ["client", "http1"], optional = true }
+http-body-util = { version = "0.1", optional = true }
+rustls = { version = "0.23", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+tokio-rustls = { version = "0.26", default-features = false, features = ["ring", "tls12", "logging"], optional = true }
+webpki-roots = { version = "0.26", optional = true }
 # Debounced filesystem watcher used by `hypen-runtime --serve` to hot-reload
 # the module .wasm when it changes on disk. `runtime-bin` only.
 notify-debouncer-mini = { version = "0.7", default-features = false, optional = true }
@@ -111,11 +125,20 @@ uniffi-cli = ["uniffi", "uniffi/cli"]
 # `hypen:module` guests on desktop/server/mobile. Native targets only.
 # This is the library surface (`WasmtimeHost` / `WasmtimeHostAsync` /
 # `DualHost`) that UniFFI / mobile / desktop embeds link.
-module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:tokio", "dep:base64", "dep:thiserror"]
+module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:http", "dep:tokio", "dep:base64", "dep:thiserror"]
 # The `hypen-runtime` dev binary: the module loader plus the HTTP server and
 # file watcher that only `--serve` needs. Kept out of `module-loader` so
 # library embeds don't link them.
-runtime-bin = ["module-loader", "dep:tiny_http", "dep:notify-debouncer-mini"]
+runtime-bin = [
+    "module-loader",
+    "dep:tiny_http",
+    "dep:notify-debouncer-mini",
+    "dep:hyper",
+    "dep:http-body-util",
+    "dep:rustls",
+    "dep:tokio-rustls",
+    "dep:webpki-roots",
+]
 # Hosted (WASM-component) modules for the JS build: the engine itself runs
 # in wasm and delegates module hosting to a JS module host (jco-based,
 # `@hypen-space/module-host`) via wasm-bindgen. Additive on top of `js`: it
@@ -168,6 +191,13 @@ required-features = ["module-loader"]
 name = "test_module_host_async"
 required-features = ["module-loader"]
 
+# `hypen:http/deferred` on the native host: queueing, bounds, link-time
+# denial, the `httpHosts` allowlist (deferred and blocking), and the round
+# trip through the engine.
+[[test]]
+name = "test_module_host_http"
+required-features = ["module-loader"]
+
 [[test]]
 name = "test_uniffi_host"
 required-features = ["uniffi", "module-loader"]
@@ -175,6 +205,12 @@ required-features = ["uniffi", "module-loader"]
 # Drives the `hypen-runtime` CLI binary as a subprocess.
 [[test]]
 name = "test_hypen_runtime"
+required-features = ["runtime-bin"]
+
+# Deferred HTTP end to end: the `hypen-runtime` binary performing a module's
+# queued requests against an HTTP server in the test process.
+[[test]]
+name = "test_hypen_runtime_http"
 required-features = ["runtime-bin"]
 
 # `hypen-runtime` hardening: admission policy, structured errors, crash

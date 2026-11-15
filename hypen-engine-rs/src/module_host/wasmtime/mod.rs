@@ -69,6 +69,7 @@
 mod cache_dir;
 mod core;
 mod cross_module;
+mod deferred_http;
 mod error;
 mod host;
 mod instances;

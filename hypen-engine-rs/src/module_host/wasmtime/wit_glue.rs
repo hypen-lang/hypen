@@ -7,7 +7,9 @@
 //! cannot express "the `Tier` of whichever world". This macro is the one
 //! place those conversions are written; it is invoked once inside each ABI
 //! module, where the bare `hypen::…` paths resolve to that module's
-//! generated bindings. It contains conversions only — no behaviour.
+//! generated bindings. It contains conversions only — no behaviour — plus the
+//! one import whose generated trait has the same (sync) shape in both worlds,
+//! `hypen:http/deferred`, forwarded to the shared queue.
 
 macro_rules! wit_conversions {
     () => {
@@ -63,6 +65,46 @@ macro_rules! wit_conversions {
                     // carries the human-readable reason.
                     E::Limit(why) => Self::ModuleError(why),
                 }
+            }
+        }
+
+        impl From<$crate::module_host::HttpRequestError> for hypen::http::deferred::Error {
+            fn from(e: $crate::module_host::HttpRequestError) -> Self {
+                use $crate::module_host::HttpRequestError as E;
+                match e {
+                    E::PermissionDenied(why) => Self::PermissionDenied(why),
+                    E::InvalidRequest(why) => Self::InvalidRequest(why),
+                    E::LimitExceeded(why) => Self::LimitExceeded(why),
+                }
+            }
+        }
+
+        impl From<hypen::http::deferred::Request> for $crate::module_host::HttpRequest {
+            fn from(request: hypen::http::deferred::Request) -> Self {
+                Self {
+                    method: request.method,
+                    url: request.url,
+                    headers: request.headers,
+                    body: request.body,
+                    timeout_ms: request.timeout_ms,
+                }
+            }
+        }
+
+        impl hypen::http::deferred::Host for $crate::module_host::wasmtime::store::HostState {
+            // Sync in both ABIs: `send` only queues.
+            fn send(
+                &mut self,
+                req: hypen::http::deferred::Request,
+                then: String,
+                tag: Option<String>,
+            ) -> Result<(), hypen::http::deferred::Error> {
+                let queued = $crate::module_host::QueuedHttpRequest {
+                    request: req.into(),
+                    then,
+                    tag,
+                };
+                Ok(self.deferred_http.send(queued)?)
             }
         }
 
@@ -131,10 +173,11 @@ macro_rules! wit_conversions {
                     state: output.state,
                     effects: output.effects.into_iter().map(Into::into).collect(),
                     emit: output.emit.into_iter().map(Into::into).collect(),
-                    // Filled by the host from the call's cross-module
-                    // window, not by the module's return value.
-                    cross_dispatch: Vec::new(),
-                    subscribe_requests: Vec::new(),
+                    // The cross-module requests are filled by the host from
+                    // the call's window, not by the module's return value.
+                    // Likewise filled by the host, from the call's
+                    // `hypen:http/deferred` queue.
+                    ..Default::default()
                 }
             }
         }

@@ -14,6 +14,10 @@ pub(crate) const MAX_CROSS_MODULE_REQUESTS: usize = 256;
 /// Largest single cross-module request (names + payload), in bytes.
 pub(crate) const MAX_CROSS_MODULE_REQUEST_BYTES: usize = 1024 * 1024;
 
+// The bounds on `hypen:http/deferred` requests are part of the contract
+// rather than of this host, so they live with the value types:
+// `MAX_HTTP_*` in `module_host/http.rs`.
+
 /// Most `hypen:storage` bucket handles one instance may hold open at once.
 /// Each handle pins a host-side copy of its namespace, so without a bound a
 /// guest opening buckets in a loop grows host memory outside its own budget.

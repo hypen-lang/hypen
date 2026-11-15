@@ -224,7 +224,7 @@ impl DeniedImport {
     /// for nothing that [`inspect`](super::linker::inspect) produces.
     pub(crate) fn to_public(&self) -> Option<DeniedCapability> {
         let grant = match self.capability {
-            Capability::Http => ManifestGrant::Http,
+            Capability::Http | Capability::DeferredHttp => ManifestGrant::Http,
             Capability::Storage(scope) => ManifestGrant::Storage(scope),
             Capability::EngineState | Capability::Time => return None,
         };

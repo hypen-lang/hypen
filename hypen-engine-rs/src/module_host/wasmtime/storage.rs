@@ -327,6 +327,7 @@ mod tests {
             kv.clone(),
             HostClock::real(),
             &limits,
+            Default::default(),
         )
     }
 
