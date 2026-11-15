@@ -338,8 +338,8 @@ interface Config {
   /** Path of the project's theme file (default: `theme.json` when present). */
   theme?: string;
   /**
-   * `hypen build --target wasm` options, passed through raw and validated by
-   * `parseWasmConfig` (src/build-wasm.ts): `language` override and per-module
+   * `hypen build --target wasm` options, passed through raw and parsed by
+   * `parseWasmConfig` (src/wasm/config.ts): `language` override and per-module
    * capability grants (`modules.<Name>.{reads,dispatches,storage,http}`).
    */
   wasm?: unknown;
@@ -852,7 +852,7 @@ async function buildProject(options: {
       );
       process.exit(1);
     }
-    const { buildWasm } = await import("../src/build-wasm.js");
+    const { buildWasm, BuildError, formatBuildError } = await import("../src/build-wasm.js");
     try {
       await buildWasm({
         root: process.cwd(),
@@ -862,12 +862,15 @@ async function buildProject(options: {
         keepTemp: options.keepTemp ?? false,
         wasm: config.wasm,
       });
-    } catch (err: any) {
-      // buildWasm never exits: config errors, a missing entry and toolchain
-      // failures (missing tinygo/cargo/jco, a failed compile) are thrown as
-      // BuildError — report the message, not a stack trace.
-      const prefix = err?.name === "BuildError" ? "Build failed" : "Error";
-      console.error(`\n  ${prefix}: ${err?.message ?? err}\n`);
+    } catch (err) {
+      // buildWasm never exits. Everything a user can fix (config, layout,
+      // toolchain, a failed compile) is a BuildError, printed as message /
+      // context / hint; anything else is a bug and keeps its stack trace.
+      if (err instanceof BuildError) {
+        console.error(`\n${formatBuildError(err)}\n`);
+      } else {
+        console.error(`\n  Error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
+      }
       process.exit(1);
     }
     return;
@@ -1797,7 +1800,15 @@ const command = positionals[0];
 // would "repair" them with a package.json + npm install and serve their
 // templates without their modules.
 const TS_ONLY_COMMANDS = new Set(["dev", "build", "generate", "studio", "test", "run"]);
-if (command && TS_ONLY_COMMANDS.has(command) && !(command === "run" && values.url)) {
+// `build --target wasm` is the exception: it compiles Go (and Rust) modules
+// itself and never writes a package.json into the project.
+const isWasmBuild = command === "build" && values.target?.toLowerCase() === "wasm";
+if (
+  command &&
+  TS_ONLY_COMMANDS.has(command) &&
+  !(command === "run" && values.url) &&
+  !isWasmBuild
+) {
   const kind = nonTsProjectKind(process.cwd());
   if (kind) {
     const lang = kind === "go" ? "Go" : "Kotlin";

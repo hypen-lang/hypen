@@ -18,7 +18,9 @@ hypen-cli/
 │   ├── dev-bun.ts            # Bun.serve() dev server implementation
 │   ├── dev-node.ts           # Node.js dev server (RemoteServer on node:http)
 │   ├── node-ws.ts            # Minimal RFC 6455 server for dev-node
-│   ├── build-wasm.ts         # `hypen build --target wasm` (TS/jco, Go/tinygo, Rust/cargo → .wasm components)
+│   ├── build-wasm.ts         # `hypen build --target wasm`: public entry, re-exports src/wasm/
+│   ├── build-error.ts        # BuildError (code/module/file/field/tool/hint) + formatBuildError
+│   ├── wasm/                 # The wasm build (see "Wasm Build" below)
 │   ├── run.ts                # Android/iOS native runner
 │   ├── skills.ts             # AI agent skill installation
 │   ├── skill-content.ts      # Hypen DSL skill documentation
@@ -117,19 +119,54 @@ Two implementations with intentionally different architectures:
 missing entry component or a taken port — it never calls `process.exit`;
 the CLI wrapper in `bin/hypen.ts` catches and exits.
 
-### Wasm Build (`src/build-wasm.ts`)
+### Wasm Build (`src/wasm/`, entry `src/build-wasm.ts`)
 `buildWasm({ root, components, entry, outDir, wasm })` throws `BuildError`
-(`src/build-error.ts`, shared with `build()`) and never exits. `wasm` is the
-raw hypen.json section: `language` (`ts`/`go`/`rust`, overrides
-Cargo.toml/go.mod detection) and `modules.<Name>.{reads,dispatches,storage,http}`
-capability grants, emitted explicitly on every stateful `app.json` entry
-(defaults `[]`/`[]`/`[]`/`false`; the host is deny-by-default). TS modules
-are componentized with the pinned `@bytecodealliance/jco` (optional peer +
-dev dependency; a project-local `node_modules/.bin/jco` overrides it) against
-a per-module world carrying only the granted storage imports. Rust artifacts
+and never exits. Layout, one responsibility per file:
+
+| File | Responsibility |
+|------|----------------|
+| `build.ts` | Orchestrator: config → language → output safety → discovery → capabilities → prepare → compile → manifest → publish |
+| `types.ts` | Vocabulary: `Language`, `Abi`, branded `ModuleName` / `ScopeName`, `StatefulModule<S>` / `StatelessComponent`, `Capabilities` |
+| `config.ts` | `parseWasmConfig` (raw hypen.json `wasm` → normalised `WasmConfig`), `resolveModuleCapabilities` |
+| `discover.ts` | Language detection, component-dir scan, `assertBuildable` (names, collisions, entry) |
+| `builders/{builder,ts,go,rust}.ts` | `ModuleBuilder<S, P>`: `discover` → `prepare` (toolchain + setup) → `build` |
+| `toolchain.ts` | jco / tinygo / cargo lookups as `ToolLookup` (found / missing / outdated + install hint) |
+| `process.ts` | `runTool` → `ToolRun`; `expectSuccess` → `TOOL_FAILED` with command, exit code, stderr tail |
+| `wit.ts` | TS per-module world (`tsBuildWorld`), Rust `wit/` provisioning |
+| `assets.ts` | Locates bundled WIT dirs and shims from `src/`, `dist/src/`, `dist/bin/` |
+| `artifact.ts` | Checks an output is a wasm *Component* (magic + layer bytes) |
+| `manifest.ts` | `app.json` types and serialisation |
+| `output.ts` | Private work dir, atomic publish into `<outDir>/wasm`, cleanup |
+| `node-stubs.ts` | esbuild plugin stubbing Node built-ins for the TS bundle |
+| `shims/module-shim.ts` | The TS shim (module definition → `hypen:module` exports). Runs *inside the guest*: no imports, no Node/Bun APIs. Type-checked by tsc, unit-tested in `tests/wasm-shims.test.ts` |
+| `shims/module_shim.go` | The Go shim template; a gofmt-valid file whose three `hypen.invalid/...` imports `renderGoShim` replaces |
+
+`build.ts` (the package build) compiles `module-shim.ts` to
+`dist/src/wasm/shims/module-shim.js` and copies `module_shim.go` beside it;
+both are read from disk at run time, not bundled into the CLI.
+
+`wasm` is the raw hypen.json section: `language` (`ts`/`go`/`rust`, overrides
+Cargo.toml/go.mod detection; required when both exist) and
+`modules.<Name>.{reads,dispatches,storage,http}` capability grants, emitted
+explicitly on every stateful `app.json` entry (defaults
+`[]`/`[]`/`[]`/`false`; the host is deny-by-default). TS modules are
+componentized with the pinned `@bytecodealliance/jco` (optional peer + dev
+dependency; a project-local `node_modules/.bin/jco` overrides it) against a
+per-module world carrying only the granted storage imports. Rust artifacts
 come from `cargo --message-format=json`; a CLI-provisioned crate `wit/`
-(marked `.hypen-provisioned`) is refreshed when it differs from the WIT for the
-crate's ABI. E2E tests: `HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts`.
+(marked `.hypen-provisioned`) is refreshed when it differs from the WIT for
+the crate's ABI.
+
+Errors: every user-fixable failure is a `BuildError` with a stable `code`
+(`BuildErrorCode` in `src/build-error.ts`), the `module` / `file` / `field` it
+concerns, `tool` (command, exit code, stderr tail) when a subprocess failed,
+and a `hint`. `bin/hypen.ts` prints them with `formatBuildError`. New failure
+modes get a code and a hint, not a bare message.
+
+Tests: `tests/build-wasm.test.ts` (units + E2E:
+`HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts`),
+`tests/wasm-shims.test.ts`, `tests/wasm-errors.test.ts` (bad paths, driven by
+fake toolchain scripts — no real toolchain needed).
 
 ### Studio
 `hypen studio` spawns `studio-ui/` as a child process via `bun --hot`, passing config through environment variables (`HYPEN_PROJECT_DIR`, `HYPEN_COMPONENTS_DIR`, `HYPEN_ENTRY`, etc.).

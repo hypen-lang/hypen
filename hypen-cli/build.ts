@@ -60,6 +60,34 @@ for (const entry of ENTRYPOINTS) {
   }
 }
 
+// Assets of the wasm build (`hypen build --target wasm`) that are read from
+// disk at run time rather than bundled into the CLI: they are source code for
+// the *user's* component. src/wasm/assets.ts looks for them here.
+//   - module-shim: bundled into every TS module by esbuild. Shipped compiled,
+//     so that bundle never depends on how the user's tsconfig would have
+//     transpiled the `.ts`.
+//   - module_shim.go: the Go shim template, rendered per module.
+const SHIM_DIR = "src/wasm/shims";
+const shimBuild = await Bun.build({
+  entrypoints: [`./${SHIM_DIR}/module-shim.ts`],
+  root: ".",
+  outdir: "./dist",
+  // The shim runs inside the wasm guest's JS engine: no Node, no Bun.
+  target: "browser",
+  format: "esm",
+});
+if (!shimBuild.success) {
+  for (const log of shimBuild.logs) console.error(log);
+  process.exit(1);
+}
+await $`cp ${SHIM_DIR}/module_shim.go dist/${SHIM_DIR}/module_shim.go`;
+for (const asset of ["module-shim.js", "module_shim.go"]) {
+  if (!(await Bun.file(`./dist/${SHIM_DIR}/${asset}`).exists())) {
+    console.error(`Build did not emit dist/${SHIM_DIR}/${asset}`);
+    process.exit(1);
+  }
+}
+
 console.log("✓ TypeScript compiled\n");
 
 // Prebuild the Studio UI bundle that ships in the package. Published

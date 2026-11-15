@@ -234,7 +234,9 @@ On failure the build exits 1 with `Build failed: <reason>`, for example when `@h
 
 Builds a component project into portable WebAssembly components instead of a site: `<outDir>/wasm/` gets one `<Module>.wasm` per stateful module, each component's `<Module>.hypen` template, and an `app.json` manifest that runs offline with `hypen-runtime --app dist/wasm/app.json`. `--keep-temp` keeps the intermediate files in `<outDir>/.wasm-temp`; `--minify` and `--sourcemap` don't apply.
 
-The language comes from the project: a `Cargo.toml` means Rust (needs `cargo` and `rustup target add wasm32-wasip2`), a `go.mod` means Go (needs TinyGo 0.39 or newer and `wit-bindgen-go`), anything else is TypeScript (needs `@bytecodealliance/jco`: `bun add -d @bytecodealliance/jco@1.42.0`). Set `"wasm": { "language": "ts" | "go" | "rust" }` in `hypen.json` to choose explicitly.
+The build works in a private directory and swaps the finished output into `<outDir>/wasm` at the end, so a failed or interrupted build leaves the previous output untouched. `<outDir>/wasm` is replaced as a whole: the build refuses to run if that directory holds anything other than earlier build output (`.wasm`, `.hypen`, `app.json`), or if it overlaps the project's sources.
+
+The language comes from the project: a `Cargo.toml` means Rust (needs `cargo` and `rustup target add wasm32-wasip2`), a `go.mod` means Go (needs TinyGo 0.39 or newer and `wit-bindgen-go`), anything else is TypeScript (needs `@bytecodealliance/jco`: `bun add -d @bytecodealliance/jco@1.42.0`). Set `"wasm": { "language": "ts" | "go" | "rust" }` in `hypen.json` to choose explicitly; that is required when the project has both a `Cargo.toml` and a `go.mod`. A build compiles one language: a component whose only module is written in another one fails the build instead of being emitted without its module.
 
 The runtime is deny-by-default: a module can't read or dispatch to other modules, gets only `local` storage and has no outbound HTTP unless `hypen.json` grants it under `wasm.modules`:
 
@@ -255,7 +257,19 @@ The runtime is deny-by-default: a module can't read or dispatch to other modules
 | `storage` | `"app"`, `"cloud"` | `[]` | Storage tiers beyond `local`, which is always granted |
 | `http` | boolean | `false` | Outbound HTTP |
 
-Every stateful module is written to `app.json` with all four fields; module names in `reads`/`dispatches` are written lowercased (the runtime's state scopes). An unknown module name, an unknown key or a value of the wrong type fails the build before anything compiles.
+Every stateful module is written to `app.json` with all four fields; module names in `reads`/`dispatches` are written lowercased (the runtime's state scopes). An unknown module name, an unknown key or a value of the wrong type fails the build before anything compiles. So do module names that differ only by case (they would share a state scope) or contain `:`.
+
+On failure the build exits 1 and prints the reason, the module, file or `hypen.json` field it concerns, the command and exit code if a tool failed, a stable error code (`CONFIG_INVALID`, `TOOLCHAIN_MISSING`, `TOOL_FAILED`, ...) and a hint with the next step:
+
+```text
+  Build failed: hypen.json: unknown key "wasm.modules.Cart.stoarge" (expected "reads", "dispatches", "storage" or "http")
+
+    file:    hypen.json
+    field:   wasm.modules.Cart.stoarge
+    code:    CONFIG_INVALID
+
+  Hint: did you mean "wasm.modules.Cart.storage"?
+```
 
 In TypeScript modules on the wasm target, `context.router.push`/`replace` navigate, but other router methods, unsubscribing from `context.on`, cross-module `setState`, data sources and `async` handlers throw an error saying they aren't supported yet. Node built-ins (`fs`, `path`, `crypto`, ...) can be imported but throw when used.
 

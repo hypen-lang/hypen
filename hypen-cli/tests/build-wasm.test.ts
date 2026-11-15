@@ -1,3 +1,9 @@
+/**
+ * `hypen build --target wasm`: the pieces behind the build (config, discovery,
+ * toolchain lookup, WIT provisioning) and — behind `HYPEN_WASM_E2E=1` — the
+ * real pipelines end to end. The shims are tested in wasm-shims.test.ts, the
+ * failure paths in wasm-errors.test.ts.
+ */
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import {
   cpSync,
@@ -13,14 +19,14 @@ import { tmpdir } from "os";
 import { join, resolve } from "path";
 import { spawn, spawnSync } from "bun";
 import {
-  shimSource,
-  goShimSource,
   detectLanguage,
   collectGoComponents,
   collectRustComponents,
   rustCrateAbi,
   resolveJco,
+  findJco,
   parseWasmConfig,
+  parseModuleName,
   resolveModuleCapabilities,
   nodeStubSource,
   nodeStubPlugin,
@@ -35,120 +41,36 @@ import {
   PROVISIONED_MARKER,
 } from "../src/build-wasm.js";
 
-/** A fresh temp dir (mkdtemp), removed by the returned cleanup. */
+/** A fresh temp dir (mkdtemp); callers remove it. */
 function tempDir(tag: string): string {
   return mkdtempSync(join(tmpdir(), `hypen-${tag}-`));
 }
 
-describe("build --target wasm: shim codegen", () => {
-  test("adapts a module definition to the hypen:module reducer ABI", () => {
-    const src = shimSource("/abs/path/to/Counter/component.ts");
+/** The error a call throws (fails the test if it does not throw a BuildError). */
+function buildErrorOf(fn: () => unknown): BuildError {
+  try {
+    fn();
+  } catch (e) {
+    if (e instanceof BuildError) return e;
+    throw e;
+  }
+  throw new Error("expected a BuildError");
+}
 
-    // Imports the user module by the exact path it was given.
-    expect(src).toContain('import def from "/abs/path/to/Counter/component.ts"');
+const names = (...raw: string[]) => raw.map(parseModuleName);
 
-    // Exports the five reducer/lifecycle functions + self-describing actions.
-    for (const sym of [
-      "export const init",
-      "export const dispatch",
-      "export const onActivated",
-      "export const onDeactivated",
-      "export const onDestroyed",
-      "export function actions",
-    ]) {
-      expect(src).toContain(sym);
-    }
-
-    // Routes by the definition's action handler map and self-describes actions.
-    expect(src).toContain("def.handlers.onAction.get(action.name)");
-    expect(src).toContain("return def.actions");
-
-    // Unsupported surfaces fail loudly rather than misbehaving silently.
-    expect(src).toContain("async handlers are not supported on the wasm target yet");
-    expect(src).toContain("data sources are not supported");
-  });
-
-  test("safely escapes the import path", () => {
-    const src = shimSource('/weird/"quoted"/path.ts');
-    // JSON.stringify keeps the generated import syntactically valid.
-    expect(src).toContain(JSON.stringify('/weird/"quoted"/path.ts'));
-  });
-
-  test("wires context cross-module read / emit / subscribe to hypen:engine/state", () => {
-    const src = shimSource("/abs/Counter/component.ts");
-    // Imports the sync cross-module capability (world: module-x).
-    // Versioned specifier, matching the vendored WIT package: componentize-js
-    // only binds world imports under their fully versioned name.
-    const stateWit = readFileSync(
-      join(import.meta.dir, "..", "wit", "deps", "hypen-engine", "state.wit"),
-      "utf8"
-    );
-    const pkg = stateWit.match(/^package\s+(hypen:engine)@([\d.]+);/m)!;
-    expect(src).toContain(`from "${pkg[1]}/state@${pkg[2]}"`);
-    // getModule/getGlobalState read a sibling's state via the engine.
-    expect(src).toContain("stateRead(");
-    // context.emit accumulates onto the reducer's ReducerOutput.emit.
-    expect(src).toContain("emitSink.push");
-    // context.on maps to a cross-module subscribe (onChange is an action name).
-    expect(src).toContain("stateSubscribe(");
-    // Cross-module *writes* still fail loudly.
-    expect(src).toContain("setState is not supported");
-  });
-
-  test("TS init shallow-merges declaration-site config over initialState", () => {
-    const src = shimSource("/abs/Counter/component.ts");
-    // init decodes the config bytes and, when it's a non-empty object, spreads
-    // it over initialState — so `module X(start: 5)` seeds state.start.
-    expect(src).toContain("const seed = decJson(config);");
-    expect(src).toContain("{ ...(def.initialState ?? {}), ...seed }");
-
-    // Behavioral check: reconstruct init's merge with a stub def and confirm
-    // config overrides initialState while absent config leaves it untouched.
-    const merge = (initialState: any, seed: any) => {
-      if (!seed || typeof seed !== "object" || Array.isArray(seed) || Object.keys(seed).length === 0) {
-        return initialState;
-      }
-      return { ...(initialState ?? {}), ...seed };
-    };
-    expect(merge({ count: 0 }, { count: 7 })).toEqual({ count: 7 });
-    expect(merge({ count: 0, label: "hi" }, { count: 7 })).toEqual({ count: 7, label: "hi" });
-    expect(merge({ count: 0 }, {})).toEqual({ count: 0 });
-    expect(merge({ count: 0 }, null)).toEqual({ count: 0 });
-  });
-
-  test("Go init shallow-merges declaration-site config over InitialState", () => {
-    const src = goShimSource("example.com/app/counter", "internal/bindings");
-    // Merge at the JSON layer (type-agnostic over InitialState's Go type).
-    expect(src).toContain("seed := decodeMap(config)");
-    expect(src).toContain("if len(seed) == 0 {");
-    expect(src).toContain("json.Marshal(def.InitialState)");
-    expect(src).toContain("for k, v := range seed {");
-    // The template's `\\t` escapes must render to real tabs in the emitted Go.
-    expect(src).toContain("\n\t\tseed := decodeMap(config)");
-    expect(src).not.toContain("\\t\\tseed := decodeMap");
-  });
-
-  test("Go shim imports the SDK by its real module path", () => {
-    const src = goShimSource("example.com/app/counter", "internal/bindings");
-    // Must match the `module` line of hypen-golang/go.mod, or `go mod tidy`
-    // in the user's project cannot resolve the shim's import.
-    const sdkGoMod = readFileSync(
-      join(import.meta.dir, "..", "..", "hypen-golang", "go.mod"),
-      "utf8"
-    );
-    const sdkModule = sdkGoMod.match(/^module\s+(\S+)/m)![1];
-    expect(src).toContain(`core ${JSON.stringify(sdkModule)}`);
-  });
-
+describe("build --target wasm: jco resolution", () => {
   test("jco resolves from the CLI's own pinned @bytecodealliance/jco", () => {
     // No project-local jco: falls back to the CLI's install (a pinned dev +
     // optional peer dependency), run with the current runtime — never an
     // unpinned bunx/npx download.
-    const { cmd, pre } = resolveJco("/nonexistent-hypen-project");
-    expect(cmd).toBe(process.execPath);
-    expect(pre).toHaveLength(1);
-    expect(pre[0]).toContain(join("node_modules", "@bytecodealliance", "jco"));
-    expect(existsSync(pre[0])).toBe(true);
+    const jco = resolveJco("/nonexistent-hypen-project");
+    expect(jco.cmd).toBe(process.execPath);
+    expect(jco.origin).toBe("cli");
+    expect(jco.version).toBe(JCO_VERSION);
+    expect(jco.pre).toHaveLength(1);
+    expect(jco.pre[0]).toContain(join("node_modules", "@bytecodealliance", "jco"));
+    expect(existsSync(jco.pre[0])).toBe(true);
     const pkg = JSON.parse(
       readFileSync(join(import.meta.dir, "..", "node_modules", "@bytecodealliance", "jco", "package.json"), "utf8")
     );
@@ -164,203 +86,25 @@ describe("build --target wasm: shim codegen", () => {
     try {
       mkdirSync(join(proj, "node_modules", ".bin"), { recursive: true });
       writeFileSync(join(proj, "node_modules", ".bin", "jco"), "#!/bin/sh\n");
-      expect(resolveJco(proj)).toEqual({ cmd: join(proj, "node_modules", ".bin", "jco"), pre: [] });
+      expect(resolveJco(proj)).toEqual({
+        cmd: join(proj, "node_modules", ".bin", "jco"),
+        pre: [],
+        origin: "project",
+        version: undefined,
+      });
     } finally {
       rmSync(proj, { recursive: true, force: true });
     }
   });
 
-  test("missing jco is a BuildError with pinned install instructions", () => {
+  test("missing jco is a typed lookup result, and a BuildError with pinned install instructions", () => {
     // Resolve from a dir with no node_modules anywhere above it.
-    expect(() => resolveJco("/nonexistent-hypen-project", "/")).toThrow(BuildError);
-    expect(() => resolveJco("/nonexistent-hypen-project", "/")).toThrow(
-      `bun add -d @bytecodealliance/jco@${JCO_VERSION}`
-    );
-  });
-});
-
-/**
- * Bundle the generated TS shim against a fake user module and a fake
- * `hypen:engine/state` import, then load it — exercising the shim's runtime
- * behavior without jco.
- */
-async function loadShim(moduleSrc: string): Promise<{ mod: any; state: any; cleanup: () => void }> {
-  const esbuild = await import("esbuild");
-  const dir = tempDir("shim");
-  writeFileSync(join(dir, "user.mjs"), moduleSrc);
-  writeFileSync(join(dir, "shim.mjs"), shimSource(join(dir, "user.mjs")));
-  const state: any = {
-    subscribed: [] as any[],
-    read: (id: string) => {
-      throw new Error("read not stubbed: " + id);
-    },
-  };
-  (globalThis as any).__hypenTestState = state;
-  await esbuild.build({
-    entryPoints: [join(dir, "shim.mjs")],
-    bundle: true,
-    outfile: join(dir, "out.mjs"),
-    format: "esm",
-    platform: "neutral",
-    logLevel: "silent",
-    plugins: [
-      {
-        name: "fake-engine-state",
-        setup(b: any) {
-          b.onResolve({ filter: /^hypen:engine\/state@/ }, (a: any) => ({ path: a.path, namespace: "fake" }));
-          b.onLoad({ filter: /.*/, namespace: "fake" }, () => ({
-            contents:
-              "export const read = (id) => globalThis.__hypenTestState.read(id);\n" +
-              "export const subscribe = (m, p, a) => { globalThis.__hypenTestState.subscribed.push([m, p, a]); };\n",
-            loader: "js",
-          }));
-        },
-      },
-    ],
-  });
-  const mod = await import(join(dir, "out.mjs"));
-  return { mod, state, cleanup: () => rmSync(dir, { recursive: true, force: true }) };
-}
-
-const enc = (v: unknown) => new TextEncoder().encode(JSON.stringify(v));
-const dec = (b: Uint8Array) => JSON.parse(new TextDecoder().decode(b));
-
-/** A fake `HypenModuleDefinition` source with the given action handlers. */
-function fakeModule(handlers: Record<string, string>, lifecycle = ""): string {
-  const entries = Object.entries(handlers)
-    .map(([name, body]) => `[${JSON.stringify(name)}, ${body}]`)
-    .join(",\n");
-  return (
-    `export default {\n` +
-    `  initialState: { count: 0 },\n` +
-    `  actions: ${JSON.stringify(Object.keys(handlers))},\n` +
-    `  handlers: { onAction: new Map([${entries}]) ${lifecycle ? ", " + lifecycle : ""} },\n` +
-    `};\n`
-  );
-}
-
-/** A componentize-js style variant error thrown by a WIT import. */
-const componentError = (tag: string, val?: string) =>
-  Object.assign(new Error("ComponentError"), { payload: val === undefined ? { tag } : { tag, val } });
-
-describe("build --target wasm: TS shim runtime behavior", () => {
-  test("errors leave exports as strings (err(string)), not trapping Error objects", async () => {
-    const { mod, state, cleanup } = await loadShim(
-      fakeModule({
-        boom: `() => { throw new Error("kaboom"); }`,
-        readDenied: `({ context }) => { context.getModule("secret").state; }`,
-      })
-    );
-    try {
-      state.read = () => {
-        throw componentError("permission-denied", "reads");
-      };
-      let thrown: unknown;
-      try {
-        mod.dispatch(enc({}), { name: "boom", payload: new Uint8Array() });
-      } catch (e) {
-        thrown = e;
-      }
-      expect(thrown).toBe("kaboom");
-      try {
-        mod.dispatch(enc({}), { name: "nope", payload: new Uint8Array() });
-      } catch (e) {
-        thrown = e;
-      }
-      expect(thrown).toBe("unknown action: nope");
-      try {
-        mod.dispatch(enc({}), { name: "readDenied", payload: new Uint8Array() });
-      } catch (e) {
-        thrown = e;
-      }
-      expect(thrown).toBe('host capability error: {"tag":"permission-denied","val":"reads"}');
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("router.push/replace/navigate emit the WIT navigate effect", async () => {
-    const { mod, cleanup } = await loadShim(
-      fakeModule({
-        go: `({ context }) => { context.router.push("/a"); context.router.replace("/b"); context.router.navigate("/c"); }`,
-      })
-    );
-    try {
-      const out = mod.dispatch(enc({ count: 0 }), { name: "go", payload: new Uint8Array() });
-      expect(out.effects).toEqual([
-        { tag: "navigate", val: "/a" },
-        { tag: "navigate", val: "/b" },
-        { tag: "navigate", val: "/c" },
-      ]);
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("unwired router members throw a clear error", async () => {
-    const { mod, cleanup } = await loadShim(fakeModule({ back: `({ context }) => { context.router.back(); }` }));
-    try {
-      expect(() => mod.dispatch(enc({}), { name: "back", payload: new Uint8Array() })).toThrow(
-        /context\.router\.back is not supported on the wasm target yet/
-      );
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("hasModule: not-found is false, permission-denied throws, present is true", async () => {
-    const { mod, state, cleanup } = await loadShim(
-      fakeModule({ probe: `({ state, context }) => { state.result = context.hasModule(state.target); }` })
-    );
-    try {
-      state.read = (id: string) => {
-        if (id === "missing") throw componentError("not-found");
-        if (id === "secret") throw componentError("permission-denied", "reads");
-        return enc({ ok: true });
-      };
-      const probe = (target: string) =>
-        dec(mod.dispatch(enc({ target }), { name: "probe", payload: new Uint8Array() }).state).result;
-      expect(probe("catalog")).toBe(true);
-      expect(probe("missing")).toBe(false);
-      expect(() => probe("secret")).toThrow(/permission denied/);
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("context.on subscribes; its unsubscribe throws (no WIT unsubscribe)", async () => {
-    const { mod, state, cleanup } = await loadShim(
-      fakeModule({
-        sub: `({ context }) => { context.on("catalog", "items", "refresh"); }`,
-        subUnsub: `({ context }) => { const off = context.on("catalog", "", "refresh"); off(); }`,
-      })
-    );
-    try {
-      mod.dispatch(enc({}), { name: "sub", payload: new Uint8Array() });
-      expect(state.subscribed).toEqual([["catalog", "items", "refresh"]]);
-      expect(() => mod.dispatch(enc({}), { name: "subUnsub", payload: new Uint8Array() })).toThrow(
-        /unsubscribing from context\.on\(\.\.\.\) is not supported on the wasm target/
-      );
-    } finally {
-      cleanup();
-    }
-  });
-
-  test("async handlers (action + lifecycle) throw instead of dropping the result", async () => {
-    const { mod, cleanup } = await loadShim(
-      fakeModule(
-        { later: `async ({ state }) => { state.count = 1; }` },
-        `onActivated: async () => {}`
-      )
-    );
-    try {
-      expect(() => mod.dispatch(enc({}), { name: "later", payload: new Uint8Array() })).toThrow(
-        /async handlers are not supported on the wasm target yet \(action handler "later"/
-      );
-      expect(() => mod.onActivated(enc({}))).toThrow(/async handlers are not supported.*onActivated/);
-    } finally {
-      cleanup();
-    }
+    const lookup = findJco("/nonexistent-hypen-project", "/");
+    expect(lookup.status).toBe("missing");
+    const err = buildErrorOf(() => resolveJco("/nonexistent-hypen-project", "/"));
+    expect(err.code).toBe("TOOLCHAIN_MISSING");
+    expect(err.message).toContain("@bytecodealliance/jco");
+    expect(err.hint).toContain(`bun add -d @bytecodealliance/jco@${JCO_VERSION}`);
   });
 });
 
@@ -446,8 +190,17 @@ describe("build --target wasm: hypen.json wasm config", () => {
       modules: { Cart: { reads: ["Catalog"], dispatches: ["Catalog"], storage: ["app", "app"], http: true } },
     });
     expect(cfg.language).toBe("rust");
-    expect(cfg.modules!.Cart).toEqual({ reads: ["Catalog"], dispatches: ["Catalog"], storage: ["app"], http: true });
-    expect(parseWasmConfig(undefined)).toEqual({});
+    expect(cfg.modules.get("Cart")).toEqual({ reads: ["Catalog"], dispatches: ["Catalog"], storage: ["app"], http: true });
+    // Parsing normalises: an absent section, and absent grant fields, become
+    // explicit defaults, so nothing downstream handles "maybe missing".
+    expect(parseWasmConfig(undefined)).toEqual({ language: undefined, modules: new Map() });
+    expect(parseWasmConfig(null)).toEqual({ language: undefined, modules: new Map() });
+    expect(parseWasmConfig({ modules: { Cart: {} } }).modules.get("Cart")).toEqual({
+      reads: [],
+      dispatches: [],
+      storage: [],
+      http: false,
+    });
   });
 
   test.each([
@@ -470,18 +223,19 @@ describe("build --target wasm: hypen.json wasm config", () => {
   test("every stateful module gets explicit deny-by-default capabilities", () => {
     const caps = resolveModuleCapabilities(
       parseWasmConfig({ modules: { Cart: { reads: ["Catalog"], dispatches: ["catalog"], storage: ["app"], http: true } } }),
-      ["Cart", "Catalog"],
-      ["Header"]
+      names("Cart", "Catalog"),
+      names("Header")
     );
     // Targets are emitted as the host's lowercased state scopes.
-    expect(caps.get("Cart")).toEqual({ reads: ["catalog"], dispatches: ["catalog"], storage: ["app"], http: true });
-    expect(caps.get("Catalog")).toEqual({ reads: [], dispatches: [], storage: [], http: false });
-    expect(caps.has("Header")).toBe(false);
+    const [cart, catalog, header] = names("Cart", "Catalog", "Header");
+    expect(caps.get(cart)).toEqual({ reads: ["catalog"], dispatches: ["catalog"], storage: ["app"], http: true });
+    expect(caps.get(catalog)).toEqual({ reads: [], dispatches: [], storage: [], http: false });
+    expect(caps.has(header)).toBe(false);
   });
 
   test("unknown module names are BuildErrors naming the offender", () => {
-    const resolveWith = (modules: any) =>
-      resolveModuleCapabilities(parseWasmConfig({ modules }), ["Cart", "Catalog"], ["Header"]);
+    const resolveWith = (modules: unknown) =>
+      resolveModuleCapabilities(parseWasmConfig({ modules }), names("Cart", "Catalog"), names("Header"));
     expect(() => resolveWith({ Nope: {} })).toThrow(/wasm\.modules\.Nope: no module named "Nope"/);
     expect(() => resolveWith({ cart: {} })).toThrow(/did you mean "Cart"/);
     expect(() => resolveWith({ Header: {} })).toThrow(/"Header" is a stateless/);
@@ -624,7 +378,7 @@ describe("build --target wasm: language detection + Go discovery", () => {
   });
 
   test("collectRustComponents (single-crate): entry is the root crate, rest stateless", () => {
-    const { modules, stateless } = collectRustComponents(
+    const { stateful: modules, stateless } = collectRustComponents(
       join(rustFixture, "src", "components"),
       "Counter",
       rustFixture
@@ -632,7 +386,7 @@ describe("build --target wasm: language detection + Go discovery", () => {
     expect(modules.map((m) => m.name)).toEqual(["Counter"]);
     expect(modules[0].template).toContain("@{state.count}");
     // The root Cargo.toml is the entry crate.
-    expect(modules[0].dir).toBe(rustFixture);
+    expect(modules[0].source.crateDir).toBe(rustFixture);
     // Banner has a .hypen but isn't the entry → stateless.
     expect(stateless.map((s) => s.name)).toContain("Banner");
   });
@@ -662,7 +416,7 @@ describe("build --target wasm: language detection + Go discovery", () => {
 
   test("collectRustComponents (multi-module): each Cargo.toml dir is its own crate", () => {
     const multiFixture = join(import.meta.dir, "fixtures", "wasm-rust-multi");
-    const { modules, stateless } = collectRustComponents(
+    const { stateful: modules, stateless } = collectRustComponents(
       join(multiFixture, "src", "components"),
       "Counter",
       multiFixture
@@ -670,35 +424,37 @@ describe("build --target wasm: language detection + Go discovery", () => {
     // Two crate-backed stateful modules, each built from its own component dir.
     expect(modules.map((m) => m.name).sort()).toEqual(["Counter", "Timer"]);
     const counter = modules.find((m) => m.name === "Counter")!;
-    expect(counter.dir).toBe(join(multiFixture, "src", "components", "Counter"));
+    expect(counter.source.crateDir).toBe(join(multiFixture, "src", "components", "Counter"));
     expect(counter.template).toContain("@{state.count}");
     // Banner has a `.hypen` but no `Cargo.toml` → stateless building block.
     expect(stateless.map((s) => s.name)).toEqual(["Banner"]);
   });
 
   test("collectGoComponents finds Go packages with their templates", () => {
-    const { modules, stateless } = collectGoComponents(
+    const { stateful: modules, stateless } = collectGoComponents(
       join(goFixture, "src", "components")
     );
     expect(stateless).toHaveLength(0);
     const counter = modules.find((m) => m.name === "Counter");
     expect(counter).toBeDefined();
     // Stateful Go component: has a package dir + its .hypen template.
-    expect(counter!.dir).toBe(join(goFixture, "src", "components", "Counter"));
+    expect(counter!.source.dir).toBe(join(goFixture, "src", "components", "Counter"));
     expect(counter!.template).toContain("@{state.count}");
   });
 
   test("classifies Go components: wit-mode (package main) vs app-mode", () => {
     // wit-mode fixture: main.go is `package main`.
     const wit = collectGoComponents(join(goFixture, "src", "components"));
-    expect(wit.modules.find((m) => m.name === "Counter")!.goMode).toBe("wit");
+    expect(wit.stateful.find((m) => m.name === "Counter")!.source.mode).toBe("wit");
 
     // app-mode fixture: counter.go is `package counter` (core.NewApp authoring).
     const apiFixture = join(import.meta.dir, "fixtures", "wasm-go-app-api");
     const app = collectGoComponents(join(apiFixture, "src", "components"));
-    const counter = app.modules.find((m) => m.name === "Counter")!;
-    expect(counter.goMode).toBe("app");
-    expect(counter.goPkg).toBe("counter");
+    const counter = app.stateful.find((m) => m.name === "Counter")!;
+    expect(counter.source.mode).toBe("app");
+    // The shim imports the package by its directory (import path), so that
+    // is what an app-mode module carries.
+    expect(counter.source.dir).toBe(join(apiFixture, "src", "components", "Counter"));
   });
 });
 
