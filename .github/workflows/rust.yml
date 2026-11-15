@@ -371,8 +371,11 @@ jobs:
           cargo test --features runtime-bin
           --test test_module_host
           --test test_module_host_async
+          --bin hypen-runtime
           --test test_module_host_routing
+          --test test_module_host_cascade
           --test test_hypen_runtime
+          --test test_hypen_runtime_hardening
         working-directory: hypen-engine-rs
 
       - name: Clippy module host (warnings are errors)

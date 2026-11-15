@@ -48,7 +48,8 @@ subshell so you can paste them in order without ending up in the wrong directory
 # `module-host` job). The wasmtime build is large: CARGO_PROFILE_DEV_DEBUG=0
 # and CARGO_PROFILE_TEST_DEBUG=0 keep the target dir manageable.
 (cd hypen-engine-rs && cargo test --features runtime-bin --test test_module_host \
-  --test test_module_host_async --test test_module_host_routing --test test_hypen_runtime)
+  --test test_module_host_async --test test_module_host_routing --test test_module_host_cascade \
+  --bin hypen-runtime --test test_hypen_runtime --test test_hypen_runtime_hardening)
 (cd hypen-engine-rs && cargo check --target wasm32-unknown-unknown --features module-loader-bridged)
 
 # Build the WASM targets (same as `bun run build:wasm` from the root)

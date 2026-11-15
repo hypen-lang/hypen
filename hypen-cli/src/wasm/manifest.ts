@@ -1,6 +1,6 @@
 /**
  * `app.json`: the manifest `hypen-runtime --app` loads (`ModuleEntry` in
- * hypen-engine-rs/src/bin/hypen_runtime.rs). Field order here is the order
+ * hypen-engine-rs/src/bin/hypen_runtime/manifest.rs). Field order here is the order
  * written to disk.
  */
 
