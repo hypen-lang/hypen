@@ -10054,3 +10054,277 @@ fn tailwind_font_family_classes_reach_text() {
         assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
     }
 }
+
+// ---------------------------------------------------------------------
+// `display: none`, responsive display variants, flex-wrap, axis gaps
+// (home-screen Files: `hidden sm:block`, `hidden md:flex`, the
+// `flex-wrap gap-x-3 gap-y-2` selection bar).
+// ---------------------------------------------------------------------
+
+/// The Files toolbar shape: an Upload label `hidden sm:block` and a
+/// list cell `block md:hidden` next to a `hidden md:block` column.
+fn responsive_display_tree() -> Tree {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch(
+        "label",
+        "Text",
+        &[
+            ("0", json!("Upload")),
+            ("display.0", json!("none")),
+            ("display@sm.0", json!("block")),
+        ],
+    ));
+    tree.apply(&insert_patch("row", "label"));
+    tree.apply(&create_patch(
+        "detail",
+        "Text",
+        &[
+            ("0", json!("Today · Empty")),
+            ("display.0", json!("block")),
+            ("display@md.0", json!("none")),
+        ],
+    ));
+    tree.apply(&insert_patch("row", "detail"));
+    tree.apply(&create_patch(
+        "kind",
+        "Column",
+        &[("display.0", json!("none")), ("display@md.0", json!("flex"))],
+    ));
+    tree.apply(&insert_patch("row", "kind"));
+    add_text(&mut tree, "kind", "kind_text", "Folder");
+    tree
+}
+
+#[test]
+fn display_none_with_breakpoint_variants_follows_the_window_width() {
+    let tree = responsive_display_tree();
+    let mut text = TextEngine::new();
+
+    // 430px phone window: below `sm` (640) and `md` (768).
+    let narrow = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    assert!(
+        narrow.item_by_id("label").is_none(),
+        "`hidden sm:block` must not paint below sm"
+    );
+    assert!(narrow.item_by_id("detail").is_some());
+    assert!(
+        narrow.item_by_id("kind").is_none() && narrow.item_by_id("kind_text").is_none(),
+        "a display:none subtree emits nothing"
+    );
+
+    // Desktop-wide window: above md.
+    let wide = LayoutPass::compute(&tree, &mut text, (1000, 900), 1.0);
+    assert!(wide.item_by_id("label").is_some(), "sm:block re-shows it");
+    assert!(wide.item_by_id("detail").is_none(), "md:hidden hides it");
+    assert!(wide.item_by_id("kind_text").is_some());
+}
+
+#[test]
+fn display_none_sibling_takes_no_space_in_a_row() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch(
+        "gone",
+        "Column",
+        &[("width.0", json!(200)), ("display.0", json!("none"))],
+    ));
+    tree.apply(&insert_patch("row", "gone"));
+    tree.apply(&create_patch("kept", "Column", &[("width.0", json!(50))]));
+    tree.apply(&insert_patch("row", "kept"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let row = find_item(&pass, "row");
+    let kept = find_item(&pass, "kept");
+    assert!(
+        (kept.rect.x - row.rect.x).abs() < 0.5,
+        "the hidden 200px sibling must not push `kept`: row={:?} kept={:?}",
+        row.rect,
+        kept.rect
+    );
+}
+
+#[test]
+fn display_setprop_restyles_through_the_retained_taffy_state() {
+    // `.display("@{cond ? 'flex' : 'none'}")` flips via SetProp.
+    let initial = vec![
+        create_patch("col", "Column", &[]),
+        insert_patch("root", "col"),
+        create_patch("btn", "Container", &[("width.0", json!(40)), ("height.0", json!(20))]),
+        insert_patch("col", "btn"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen| {
+        LayoutPass::compute_with_state(
+            taffy,
+            tree,
+            text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    assert!(compute(&mut taffy, &tree, &mut text, 1).item_by_id("btn").is_some());
+
+    let hide = vec![hypen_engine::Patch::SetProp {
+        id: "btn".into(),
+        name: "display.0".into(),
+        value: json!("none"),
+    }];
+    tree.apply_batch(&hide);
+    assert!(taffy.apply_patches(&hide, &tree, 1.0, vp(800.0)));
+    assert!(compute(&mut taffy, &tree, &mut text, 2).item_by_id("btn").is_none());
+
+    let show = vec![hypen_engine::Patch::SetProp {
+        id: "btn".into(),
+        name: "display.0".into(),
+        value: json!("flex"),
+    }];
+    tree.apply_batch(&show);
+    assert!(taffy.apply_patches(&show, &tree, 1.0, vp(800.0)));
+    assert!(compute(&mut taffy, &tree, &mut text, 3).item_by_id("btn").is_some());
+}
+
+#[test]
+fn flex_wrap_breaks_an_overflowing_row_onto_a_second_line_with_axis_gaps() {
+    // Files selection bar: `w-full flex-wrap gap-x-3 gap-y-2` with an
+    // info block (`flex-1 min-w-[220px]`) and a button group.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "bar",
+        "Row",
+        &[
+            ("width.0", json!(400)),
+            ("flexWrap.0", json!("wrap")),
+            ("columnGap.0", json!("12px")),
+            ("rowGap.0", json!("8px")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "bar"));
+    tree.apply(&create_patch(
+        "info",
+        "Row",
+        &[
+            ("flex.0", json!("1")),
+            ("minWidth.0", json!(220)),
+            ("height.0", json!(40)),
+        ],
+    ));
+    tree.apply(&insert_patch("bar", "info"));
+    tree.apply(&create_patch(
+        "buttons",
+        "Row",
+        &[("width.0", json!(300)), ("height.0", json!(30))],
+    ));
+    tree.apply(&insert_patch("bar", "buttons"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let info = find_item(&pass, "info");
+    let buttons = find_item(&pass, "buttons");
+    assert!(
+        (buttons.rect.y - (info.rect.y + info.rect.h + 8.0)).abs() < 0.5,
+        "buttons wrap to a second line one row-gap below: info={:?} buttons={:?}",
+        info.rect,
+        buttons.rect
+    );
+    assert!(
+        buttons.rect.x + buttons.rect.w <= 400.5,
+        "the wrapped line stays inside the bar: {:?}",
+        buttons.rect
+    );
+    assert!(
+        (info.rect.w - 400.0).abs() < 0.5,
+        "alone on its line, the flex-1 info block fills the bar: {:?}",
+        info.rect
+    );
+}
+
+#[test]
+fn column_gap_without_wrap_spaces_row_children() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[("columnGap.0", json!("12px"))]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch("a", "Container", &[("width.0", json!(10)), ("height.0", json!(10))]));
+    tree.apply(&insert_patch("row", "a"));
+    tree.apply(&create_patch("b", "Container", &[("width.0", json!(10)), ("height.0", json!(10))]));
+    tree.apply(&insert_patch("row", "b"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let a = find_item(&pass, "a");
+    let b = find_item(&pass, "b");
+    assert!(
+        (b.rect.x - (a.rect.x + 10.0 + 12.0)).abs() < 0.5,
+        "a={:?} b={:?}",
+        a.rect,
+        b.rect
+    );
+}
+
+#[test]
+fn margin_left_auto_pushes_a_row_child_to_the_end_of_its_line() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[("width.0", json!(400))]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch(
+        "end",
+        "Container",
+        &[
+            ("width.0", json!(100)),
+            ("height.0", json!(10)),
+            ("marginLeft.0", json!("auto")),
+        ],
+    ));
+    tree.apply(&insert_patch("row", "end"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let end = find_item(&pass, "end");
+    assert!((end.rect.x - 300.0).abs() < 0.5, "{:?}", end.rect);
+}
+
+#[test]
+fn overflow_hidden_content_does_not_extend_the_page() {
+    // Home Screen app frame: an `overflow-hidden` body holding an app
+    // whose root is taller than it. The hidden part must not make the
+    // window page-scrollable.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "frame",
+        "Column",
+        &[
+            ("width.0", json!(400)),
+            ("height.0", json!(300)),
+            ("overflow.0", json!("hidden")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "frame"));
+    tree.apply(&create_patch(
+        "app",
+        "Column",
+        &[("width.0", json!(400)), ("height.0", json!(900)), ("flexShrink.0", json!(0))],
+    ));
+    tree.apply(&insert_patch("frame", "app"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(
+        pass.content_size.1 <= 600.5,
+        "hidden overflow leaked into the page extent: {:?}",
+        pass.content_size
+    );
+
+    // Without the clip the same content does extend the page.
+    tree.apply(&hypen_engine::Patch::RemoveProp {
+        id: "frame".into(),
+        name: "overflow.0".into(),
+    });
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(pass.content_size.1 >= 899.5, "{:?}", pass.content_size);
+}
