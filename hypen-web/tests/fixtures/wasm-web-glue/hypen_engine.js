@@ -559,6 +559,38 @@ export class WasmEngine {
         wasm.wasmengine_clearTree(this.__wbg_ptr);
     }
     /**
+     * Complete a deferred HTTP request (`hypen:http/deferred`): report how
+     * the request an `{ type: "http", id, … }` effect asked for ended, and
+     * run the module's completion action with it.
+     *
+     * `result` is `{ ok: true, status, headers?, body? }` (any status — a
+     * 404 is a completed exchange) or `{ ok: false, error: { kind, message? } }`
+     * with `kind` one of `"network"`, `"timeout"`, `"denied"`,
+     * `"too-large"`, `"invalid-response"`. `headers` is an object or an
+     * array of `[name, value]` pairs; `body` a `Uint8Array`, `ArrayBuffer`
+     * or string.
+     *
+     * Returns `true` when the completion action ran, `false` when the
+     * module was destroyed or reloaded while the request was in flight (the
+     * result is dropped). Call it exactly once per effect, and not from
+     * inside the effect handler (the engine is busy there): perform the
+     * request asynchronously and complete it when it settles.
+     *
+     * Throws `invalidArgument` (nothing consumed: the request stays in
+     * flight), `unknownHttpRequest`, and — when the completion action ran
+     * and failed — `moduleCallFailed` / `cascadeIncomplete` with `report`.
+     * @param {number} id
+     * @param {any} result
+     * @returns {boolean}
+     */
+    completeHttpRequest(id, result) {
+        const ret = wasm.wasmengine_completeHttpRequest(this.__wbg_ptr, id, result);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * Return a JSON snapshot of the active module's current state.
      * @returns {any}
      */
@@ -780,6 +812,22 @@ export class WasmEngine {
         return ret;
     }
     /**
+     * Whether the deferred HTTP request in flight under `id` may be sent on
+     * to `url` — the allowlist check an effect handler makes before it
+     * follows a redirect (use `redirect: "manual"` and ask per hop). `false`
+     * for a URL the module may not request, one that is not a valid
+     * `http(s)` URL, or an id that is not in flight.
+     * @param {number} id
+     * @param {string} url
+     * @returns {boolean}
+     */
+    httpRedirectAllowed(id, url) {
+        const ptr0 = passStringToWasm0(url, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_httpRedirectAllowed(this.__wbg_ptr, id, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
      * Whether `scope` (any letter case) hosts a module.
      * @param {string} scope
      * @returns {boolean}
@@ -861,6 +909,14 @@ export class WasmEngine {
      */
     moduleDispatchBudget() {
         const ret = wasm.wasmengine_moduleDispatchBudget(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
+     * How many deferred HTTP requests one hosted module may have in flight.
+     * @returns {number}
+     */
+    moduleHttpInFlightLimit() {
+        const ret = wasm.wasmengine_moduleHttpInFlightLimit(this.__wbg_ptr);
         return ret >>> 0;
     }
     /**
@@ -1168,9 +1224,13 @@ export class WasmEngine {
      * Install (or, with `null` / `undefined`, remove) the handler for the
      * effects a hosted reducer returns that only the embedder can perform.
      * Called as `handler(scope, effect)` with
-     * `{ type: "navigate", path }` or `{ type: "delay", ms, then }` (after
-     * `ms`, dispatch `then` to `scope` with `dispatchModuleAction`). `log`
-     * effects go to the engine's logger and never reach it.
+     * `{ type: "navigate", path }`, `{ type: "delay", ms, then }` (after
+     * `ms`, dispatch `then` to `scope` with `dispatchModuleAction`) or
+     * `{ type: "http", id, request, then, tag, allowedHosts }` (perform the
+     * request, then report it with `completeHttpRequest(id, result)`; the
+     * shape is documented on `http_effect_js`). `log` effects go to the
+     * engine's logger and never reach it. Without a handler, deferred HTTP
+     * requests are refused and completed to the module as `denied`.
      *
      * The handler runs while the engine call that produced the effect is
      * still in progress: it must not call the engine synchronously.
@@ -1198,6 +1258,13 @@ export class WasmEngine {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * Set the per-module in-flight cap for deferred HTTP (at least 1).
+     * @param {number} limit
+     */
+    setModuleHttpInFlightLimit(limit) {
+        wasm.wasmengine_setModuleHttpInFlightLimit(this.__wbg_ptr, limit);
     }
     /**
      * Set the callback that receives UI patches after each render cycle.
@@ -2082,6 +2149,10 @@ function __wbg_get_imports() {
         },
         __wbg_error_51679600615c775d: function(arg0) {
             console.error(arg0);
+        },
+        __wbg_from_291708c278f9eb83: function(arg0) {
+            const ret = Array.from(arg0);
+            return ret;
         },
         __wbg_get_6f5cf69c8f3f094a: function() { return handleError(function (arg0, arg1) {
             const ret = Reflect.get(arg0, arg1);

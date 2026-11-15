@@ -236,6 +236,29 @@ export class WasmEngine {
      */
     clearTree(): void;
     /**
+     * Complete a deferred HTTP request (`hypen:http/deferred`): report how
+     * the request an `{ type: "http", id, … }` effect asked for ended, and
+     * run the module's completion action with it.
+     *
+     * `result` is `{ ok: true, status, headers?, body? }` (any status — a
+     * 404 is a completed exchange) or `{ ok: false, error: { kind, message? } }`
+     * with `kind` one of `"network"`, `"timeout"`, `"denied"`,
+     * `"too-large"`, `"invalid-response"`. `headers` is an object or an
+     * array of `[name, value]` pairs; `body` a `Uint8Array`, `ArrayBuffer`
+     * or string.
+     *
+     * Returns `true` when the completion action ran, `false` when the
+     * module was destroyed or reloaded while the request was in flight (the
+     * result is dropped). Call it exactly once per effect, and not from
+     * inside the effect handler (the engine is busy there): perform the
+     * request asynchronously and complete it when it settles.
+     *
+     * Throws `invalidArgument` (nothing consumed: the request stays in
+     * flight), `unknownHttpRequest`, and — when the completion action ran
+     * and failed — `moduleCallFailed` / `cascadeIncomplete` with `report`.
+     */
+    completeHttpRequest(id: number, result: any): boolean;
+    /**
      * Return a JSON snapshot of the active module's current state.
      */
     currentState(): any;
@@ -339,6 +362,14 @@ export class WasmEngine {
      */
     hostedModules(): any;
     /**
+     * Whether the deferred HTTP request in flight under `id` may be sent on
+     * to `url` — the allowlist check an effect handler makes before it
+     * follows a redirect (use `redirect: "manual"` and ask per hop). `false`
+     * for a URL the module may not request, one that is not a valid
+     * `http(s)` URL, or an id that is not in flight.
+     */
+    httpRedirectAllowed(id: number, url: string): boolean;
+    /**
      * Whether `scope` (any letter case) hosts a module.
      */
     isHostedModule(scope: string): boolean;
@@ -391,6 +422,10 @@ export class WasmEngine {
      * in-process handlers reached by cross-dispatch.
      */
     moduleDispatchBudget(): number;
+    /**
+     * How many deferred HTTP requests one hosted module may have in flight.
+     */
+    moduleHttpInFlightLimit(): number;
     /**
      * Create a new engine instance with an empty tree and no module.
      *
@@ -529,9 +564,13 @@ export class WasmEngine {
      * Install (or, with `null` / `undefined`, remove) the handler for the
      * effects a hosted reducer returns that only the embedder can perform.
      * Called as `handler(scope, effect)` with
-     * `{ type: "navigate", path }` or `{ type: "delay", ms, then }` (after
-     * `ms`, dispatch `then` to `scope` with `dispatchModuleAction`). `log`
-     * effects go to the engine's logger and never reach it.
+     * `{ type: "navigate", path }`, `{ type: "delay", ms, then }` (after
+     * `ms`, dispatch `then` to `scope` with `dispatchModuleAction`) or
+     * `{ type: "http", id, request, then, tag, allowedHosts }` (perform the
+     * request, then report it with `completeHttpRequest(id, result)`; the
+     * shape is documented on `http_effect_js`). `log` effects go to the
+     * engine's logger and never reach it. Without a handler, deferred HTTP
+     * requests are refused and completed to the module as `denied`.
      *
      * The handler runs while the engine call that produced the effect is
      * still in progress: it must not call the engine synchronously.
@@ -548,6 +587,10 @@ export class WasmEngine {
      * live in the current host).
      */
     setModuleHost(host: any): void;
+    /**
+     * Set the per-module in-flight cap for deferred HTTP (at least 1).
+     */
+    setModuleHttpInFlightLimit(limit: number): void;
     /**
      * Set the callback that receives UI patches after each render cycle.
      */

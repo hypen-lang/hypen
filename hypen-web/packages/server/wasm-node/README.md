@@ -173,6 +173,179 @@ let instance = ModuleInstance::new(
 engine.set_module(instance);
 ```
 
+## Native WASM module host and `hypen-runtime`
+
+With the `module-loader` feature the engine hosts `hypen:module` WASM
+Components natively (`WasmtimeHost`, `WasmtimeHostAsync`, `DualHost`); the
+`runtime-bin` feature adds the `hypen-runtime` dev binary on top
+(`hypen-runtime --help`). The sandbox model is documented in
+`src/module_host/wasmtime/mod.rs`; this section is what an embedder or a
+runtime user needs to know.
+
+### Startup cost and the compilation cache
+
+Compiling a component is the expensive part of start-up — seconds for a
+module that embeds a JS engine (a `jco componentize` build is ~14 MB), and
+tens of seconds in a debug build of the host, where the compiler itself is
+unoptimized.
+
+- **In-process:** a host compiles each *distinct* component once. Compiled
+  code is found by the SHA-256 of the component bytes, so registering the same
+  `.wasm` under several names (per-usage scopes such as `counter__a`), hot
+  reloading several scopes backed by one file, and both ABIs of a `DualHost`
+  share one compilation. Code is released when no registration or instance
+  uses it. `host.compile_stats()` reports compiled / reused / disk hits.
+- **Across processes (opt-in):** `HostConfig::cache_dir` (`hypen-runtime
+  --cache-dir DIR`, UniFFI `"cacheDir"`) turns on wasmtime's on-disk
+  compilation cache. Entries are keyed by the component bytes, the wasmtime
+  version and the engine's whole compiler configuration (so Cranelift and
+  Pulley never share entries), and re-checked on load: a stale artifact is
+  never used, it is recompiled.
+  **Trust:** a cache entry is code the process will execute, and it is
+  checked for compatibility, not authenticity. The cache is therefore off
+  unless a directory is named (`--data-dir` does not imply it); the directory
+  is created `0700` if missing and refused if it is writable by group/others
+  or owned by another user (Unix). Not checked — and the embedder's
+  responsibility — is that no parent directory lets someone else replace it,
+  and, on non-Unix platforms, that the location is private at all.
+- `ComponentCompiler` (`host.compiler()`) compiles from another thread
+  without borrowing the host; `hypen-runtime` uses it so a hot reload compiles
+  outside the engine lock and requests keep being served meanwhile.
+- `cargo test --features module-loader --test test_module_host startup_timing
+  -- --ignored --nocapture` (add `--release`) prints the cost phase by phase.
+
+### Liveness and capability denials as data
+
+- `ModuleHost::instance_status(id)` → `Live` / `Dead { reason }` / `Gone` /
+  `Unknown`, from the host's bookkeeping, without calling the guest. The
+  default implementation answers `Unknown`.
+- `ModuleHost::denied_capabilities(name)` → the imports the registered
+  component needs and its manifest does not grant (`DeniedCapability { import,
+  grant: ManifestGrant::Http | Storage(scope) }`). Non-empty exactly when
+  `instantiate(name)` is refused for missing grants. Default: empty.
+
+Neither changes `HostError`; both exist so embedders do not parse messages.
+
+### HTTP
+
+A manifest's `http: true` grants outbound HTTP in both of its forms;
+`httpHosts` (`ModuleManifest::http_hosts`, parsed `HostPattern`s) optionally
+limits it to an allowlist of hosts — `api.example.com`, `*.example.com`,
+either with `:port`; empty = any host.
+
+- **Blocking** — the module imports `wasi:http` and waits inside its
+  reducer. Performed by the host (`wasmtime-wasi-http`), bounded by the
+  per-call deadline. The allowlist is applied to every such request.
+- **Deferred** — the module imports `hypen:http/deferred` and *queues*
+  requests (`ReducerOutput::http_requests`). The engine admits each one and
+  hands it to the embedder's effect handler as `Effect::Http(HttpEffect { id,
+  request, url, grant, then, tag })`; the embedder performs it and calls
+  `Engine::complete_http_request(id, HttpOutcome)`, which runs the module's
+  `then` action with the payload documented in `wit/deps/hypen-http/http.wit`.
+
+```rust
+engine.set_effect_handler(move |scope, effect| {
+    if let Effect::Http(http) = effect {
+        outbox.push(scope.to_string(), http.clone());   // perform it elsewhere, off the engine
+    }
+});
+// … later, from the thread that owns the engine:
+match engine.complete_http_request(id, HttpOutcome::Response(HttpResponse { status, headers, body })) {
+    Ok(HttpDelivery::Delivered) => {}
+    Ok(HttpDelivery::ModuleGone) => {}                    // destroyed / reloaded meanwhile: dropped
+    Err(HttpCompletionError::UnknownRequest(_)) => {}     // never issued, or completed twice
+    Err(HttpCompletionError::Cascade(e)) => {}            // `then` ran and failed; see last_module_cascade_report()
+}
+```
+
+What the embedder owes the contract: connect to `http.url` (the engine's
+parse — do not re-parse `request.url`), honour `request.effective_timeout_ms()`,
+cap the response at `MAX_HTTP_RESPONSE_BODY_BYTES`, follow at most
+`MAX_HTTP_REDIRECTS` redirects and check `http.grant` on every hop, and
+complete every effect exactly once. The engine re-validates each queued
+request whatever the host enforced and keeps at most
+`Engine::module_http_in_flight_limit()` (default 32) in flight per module.
+Refusals are `FailureCause::{HttpNotGranted, HttpDenied { host }, HttpInvalid,
+HttpLimit, HttpUnavailable}` (codes `httpNotGranted`, `httpDenied`,
+`httpInvalid`, `httpLimit`, `httpUnavailable`) in the cascade report of the
+dispatch that queued the request — which still succeeds in applying its
+state — and the module's `then` receives `{ ok: false, error: { kind:
+"denied" } }` for them.
+
+### Storage
+
+`hypen:storage` key-value buckets are backed by one in-memory store per host,
+optionally persisted to `<data_dir>/storage.json` (`local` and `app` scopes;
+`cloud` is an in-process simulation of a sync service and is not persisted).
+`entry-info.modified-ms` is the writing instance's host clock at the last
+successful write (deterministic under `set_virtual_clock`). The file's
+`format` is 3; a format-2 file (no modification times) is migrated in memory
+— its entries read `modified-ms` 0 until rewritten — and rewritten by the
+next flush. Any other format is refused with an error naming the file.
+
+**Blob storage is not implemented.** The `blob-bucket` / `blob-handle` /
+`blob-writer` resources of `hypen:storage` exist in the WIT and are linked,
+but every operation answers `unavailable` on the native hosts (v0.1 and
+v0.2). A module that needs large binary values must not depend on them yet.
+
+### `hypen-runtime`: grants and deferred HTTP
+
+Single-module mode grants nothing but private `local` storage unless asked:
+
+| Flag | `app.json` field (per module) | Grants |
+|---|---|---|
+| `--grant-http` | `"http": true` | outbound HTTP: `hypen:http/deferred` and `wasi:http` |
+| `--grant-http-host PATTERN` (repeatable; needs `--grant-http`) | `"httpHosts": ["api.example.com", "*.example.com:8443"]` (needs `"http": true`) | limits `http` to matching hosts; a malformed pattern is a startup error naming the flag / field |
+| `--grant-storage app,cloud` | `"storage": ["app", "cloud"]` | shared storage scopes |
+| `--grant-all` | — | HTTP (any host unless `--grant-http-host` is given) and every storage scope |
+
+The runtime performs deferred requests itself. Under `--serve` they run on up
+to 8 worker threads, off the engine lock, and each completion is dispatched
+like a fired timer: its re-render goes to `GET /events` subscribers, and
+whatever it queues in turn (more requests, delays) is performed too. In the
+REPL they are performed inline, in order, before the next line is read
+(`http: GET <url> -> <scope>:<then>` then the resulting `state:`).
+
+The client is HTTP/1.1 over the hyper, tokio and rustls that `wasi:http`
+already links, with the same bundled Mozilla roots (`webpki-roots`): one
+connection per hop, the request's time budget for the whole exchange
+(default 30 s, max 120 s), responses up to 4 MiB, up to 5 redirects with the
+allowlist re-checked on each hop (a refused hop completes the request as
+`denied`, saying which host), `Authorization` / `Cookie` dropped when a
+redirect leaves the origin. Not supported: HTTP/2, proxies
+(`HTTPS_PROXY` is ignored), response decompression, connection reuse.
+
+### `hypen-runtime --serve`
+
+| Situation | Status | `error.code` |
+|---|---|---|
+| unknown route / method / bad JSON / foreign Host or Origin | 404 / 405 / 400 / 403 | see `server/request.rs` |
+| no module handles the action (`error.candidates` lists `scope:action` forms that exist) | 404 | `action_not_found` |
+| a bare action name several modules export (`error.candidates` lists them) | 409 | `ambiguous_action` |
+| the body did not arrive within `--request-timeout-ms` (default 10 s) | 408 | `request_timeout` |
+| a reducer returned an error | 500 | `module_error` |
+| an instance trapped or timed out (`error.scopes`, `error.reasons`) | 500 | `module_crashed` |
+
+Request bodies: the `/dispatch` body is read under a deadline on a helper
+thread, and a request that misses it stops counting against the 64 requests
+handled at once. Known limits of the embedded HTTP library (`tiny_http`
+0.12, which exposes no socket or timeout): a stalled connection still parks
+one thread until the client disconnects; a request that declares more than
+16 MiB of body is answered and its connection deliberately leaked (letting
+the library free it would allocate the declared size); and connections opened
+in a burst can queue inside the library behind long-lived ones (its thread
+pool hands a connection to an "idle" thread that may already be taken).
+`src/bin/hypen_runtime/server/mod.rs` states these precisely.
+
+Hot reload: a changed `.wasm` swaps every scope it backs, keeping engine
+state (the files' directories are watched, so a `.wasm` replaced by rename is
+noticed every time); a changed `.hypen` re-renders, mints per-usage scopes
+the edit introduced and retires the ones no template references any more
+(`on_destroyed`, then the engine scope and host instance are removed). In
+single-module mode, an edit that changes the `--ui` root declaration's
+arguments (`module Counter(start: 5)`) restarts the module with the new
+`init` config; other edits keep its state.
+
 ## Compilation Targets
 
 ### Native (Development)
