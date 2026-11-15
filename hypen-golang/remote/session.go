@@ -1490,9 +1490,16 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 		s.sendStateUpdate(moduleName)
 		return
 	}
-	// Reached with no engine (nothing is rendered, so there is no binding to
-	// check: the module is a plain RPC surface), with a host-allowed action,
-	// or with an action the engine authorised for the shim.
+	// Reached with a host-allowed action, with an action the engine
+	// authorised for the shim, or with no engine. No engine and no UI is the
+	// state-only mode: nothing is rendered, the module is a plain RPC
+	// surface. No engine although a UI is configured means the engine failed
+	// to start or the session is torn down — there is no tree to authorise
+	// against, so fail closed.
+	if engine == nil && !allowed && s.host.UI() != "" {
+		logServer.Error("Refused %q: session %s has a UI but no engine to authorise against", actionName, s.ID)
+		return
+	}
 
 	// Legacy path: the ModuleConfig.OnAction shim.
 	if module == nil || module.OnAction == nil {

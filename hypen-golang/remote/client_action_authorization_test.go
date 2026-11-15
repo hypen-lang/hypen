@@ -127,3 +127,29 @@ func TestClientAction_LegacyShimNeedsARenderedBindingToo(t *testing.T) {
 	unrendered(send)
 	log.want(t, "save")
 }
+
+// A UI is configured but the session has no engine (it failed to start, or
+// the session was torn down): there is no tree to authorise against, so the
+// shim must not run.
+func TestClientAction_NoEngineFailsClosed(t *testing.T) {
+	log := &callLog{}
+	shim := func(action string, _ any, state map[string]any) map[string]any {
+		log.add(action)
+		return state
+	}
+	core.App.Clear()
+	t.Cleanup(func() { core.App.Clear() })
+
+	withUI := NewRemoteServer().WithState("Admin", map[string]any{"show": false}).OnAction(shim).UI(authUI)
+	sess, tr := helloSession(t, withUI)
+	if waitForMessage(t, tr, MessageTypeInitialTree, 5*time.Second) == nil {
+		t.Fatal("no initialTree")
+	}
+	<-sess.Ready()
+	sess.mu.Lock()
+	sess.engine = nil
+	sess.mu.Unlock()
+	sess.dispatchNow("save", nil)
+	sess.dispatchNow("wipe", nil)
+	log.want(t)
+}
