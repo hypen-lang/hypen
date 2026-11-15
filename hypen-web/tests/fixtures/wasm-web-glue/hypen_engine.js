@@ -502,6 +502,22 @@ export class WasmEngine {
         return v1;
     }
     /**
+     * Run the hosted module's `on_activated` and fold its output like a
+     * dispatch (this is where a module subscribes to other scopes). Returns
+     * `false`, doing nothing, when `scope` hosts no module.
+     * @param {string} scope
+     * @returns {boolean}
+     */
+    activateHostedModule(scope) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_activateHostedModule(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * Run the dev-mode accessibility conformance pass over a DSL source and
      * return any findings as
      * `[{ rule, elementType, message, span?, line?, col?, suppressed? }]`.
@@ -551,6 +567,21 @@ export class WasmEngine {
         return ret;
     }
     /**
+     * Run the hosted module's `on_deactivated` and fold its output. Returns
+     * `false`, doing nothing, when `scope` hosts no module.
+     * @param {string} scope
+     * @returns {boolean}
+     */
+    deactivateHostedModule(scope) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_deactivateHostedModule(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
+    }
+    /**
      * Parse a component and return a human-readable debug string.
      * @param {string} source
      * @returns {string}
@@ -574,6 +605,27 @@ export class WasmEngine {
         } finally {
             wasm.__wbindgen_free(deferred3_0, deferred3_1, 1);
         }
+    }
+    /**
+     * Tear a hosted module down: run `on_destroyed`, remove everything the
+     * engine holds for the scope (instance, routing, grants, subscriptions
+     * in both directions, the state slot), destroy the host-side instance.
+     * Returns `false` when `scope` hosts no module.
+     *
+     * The teardown always completes; when the hook or the host's `destroy`
+     * failed, that is thrown afterwards (`hostError`, `stage`
+     * `"onDestroyed"` / `"destroy"`).
+     * @param {string} scope
+     * @returns {boolean}
+     */
+    destroyHostedModule(scope) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_destroyHostedModule(this.__wbg_ptr, ptr0, len0);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return ret[0] !== 0;
     }
     /**
      * Parse a DSL source and return every `Router { Route ... }` block
@@ -627,6 +679,31 @@ export class WasmEngine {
         }
     }
     /**
+     * Dispatch `name` straight to the hosted module under `scope`.
+     *
+     * **Host-trusted**: it skips the renderer's ownership checks, so never
+     * feed it a scope or name taken from client input (that is
+     * `dispatchAction`). `payload` is any JSON value.
+     *
+     * Throws `unknownModule` / `actionNotAccepted` before anything runs;
+     * `moduleCallFailed` when the module's own call failed (nothing
+     * applied); `cascadeIncomplete` when it ran and some follow-ups failed
+     * (applied state stands). The last two carry `report`.
+     * @param {string} scope
+     * @param {string} name
+     * @param {any} payload
+     */
+    dispatchModuleAction(scope, name, payload) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_dispatchModuleAction(this.__wbg_ptr, ptr0, len0, ptr1, len1, payload);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
      * The built-in external action names, as
      * `{ navigate, back, setInput, bindAction }`.
      *
@@ -638,6 +715,23 @@ export class WasmEngine {
      */
     externalBuiltinNames() {
         const ret = wasm.wasmengine_externalBuiltinNames(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * The whole current state of the module registered under `scope` (any
+     * letter case) — hosted or in-process — or `null` when there is none.
+     *
+     * **Host-trusted**: unlike `getStateAt`, which serves an external caller
+     * only what the rendered templates declare, this returns everything the
+     * module holds. A hosted module's state lives only in the engine, so
+     * this is how server code reads it.
+     * @param {string} scope
+     * @returns {any}
+     */
+    getModuleState(scope) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_getModuleState(this.__wbg_ptr, ptr0, len0);
         return ret;
     }
     /**
@@ -664,6 +758,53 @@ export class WasmEngine {
         var ptr1 = isLikeNone(path) ? 0 : passStringToWasm0(path, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
         var len1 = WASM_VECTOR_LEN;
         const ret = wasm.wasmengine_getStateAt(this.__wbg_ptr, ptr0, len0, ptr1, len1);
+        return ret;
+    }
+    /**
+     * Whether a module host is installed.
+     * @returns {boolean}
+     */
+    hasModuleHost() {
+        const ret = wasm.wasmengine_hasModuleHost(this.__wbg_ptr);
+        return ret !== 0;
+    }
+    /**
+     * Every hosted module, in registration order:
+     * `[{ scope, component, instanceId, actions, wildcard }]`. `actions`
+     * are the names the module lists; `wildcard` says it also accepts any
+     * other application action.
+     * @returns {any}
+     */
+    hostedModules() {
+        const ret = wasm.wasmengine_hostedModules(this.__wbg_ptr);
+        return ret;
+    }
+    /**
+     * Whether `scope` (any letter case) hosts a module.
+     * @param {string} scope
+     * @returns {boolean}
+     */
+    isHostedModule(scope) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_isHostedModule(this.__wbg_ptr, ptr0, len0);
+        return ret !== 0;
+    }
+    /**
+     * The structured failures of the most recent module cascade — a
+     * dispatch (`dispatchAction` reaching a hosted module, or
+     * `dispatchModuleAction`), a lifecycle call, or the subscriber
+     * notifications of an `updateState*` — or `null` when it had none.
+     *
+     * `{ root: { kind, scope, action, hook? }, rootFailed, failureCount,
+     * failures: [{ scope, action, outcome, isRoot, origin: { kind, … },
+     * cause: { code, … }, message }], message }`. It is the only place the
+     * failures of a state write's notifications surface, since
+     * `updateState*` do not throw for them.
+     * @returns {any}
+     */
+    lastModuleCascadeReport() {
+        const ret = wasm.wasmengine_lastModuleCascadeReport(this.__wbg_ptr);
         return ret;
     }
     /**
@@ -713,6 +854,16 @@ export class WasmEngine {
         return ret;
     }
     /**
+     * The most reducer invocations (the root included) one dispatch,
+     * lifecycle call or state write may cause in hosted modules and
+     * in-process handlers reached by cross-dispatch.
+     * @returns {number}
+     */
+    moduleDispatchBudget() {
+        const ret = wasm.wasmengine_moduleDispatchBudget(this.__wbg_ptr);
+        return ret >>> 0;
+    }
+    /**
      * Create a new engine instance with an empty tree and no module.
      *
      * After construction, you typically:
@@ -752,6 +903,44 @@ export class WasmEngine {
         wasm.wasmengine_registerDefaultPrimitives(this.__wbg_ptr);
     }
     /**
+     * Instantiate a hosted module and wire it into the engine under `scope`.
+     *
+     * - `component`: the name the component is registered (and, for a
+     *   `JsModuleHost`, `prepare()`d) under in the module host. Defaults to
+     *   `scope` as given.
+     * - `manifest`: `{ name?, version?, storage?, reads?, dispatches?,
+     *   http? }`. `reads` / `dispatches` become the scope's grants, enforced
+     *   by the engine; they may name in-process modules. Omitted = no
+     *   cross-module access. The whole manifest is handed to the host's
+     *   `register` (with empty bytes: the component must already be there).
+     * - `config`: the module's `init` config — JSON-encoded, or a
+     *   `Uint8Array` passed as is. Omitted = `{}`.
+     * - `actions`: an action-list override; omitted = the module's own
+     *   `actions` export.
+     *
+     * Runs `register` → `instantiate` → `init` → `actions` in the host and
+     * seeds the scope's state from what `init` returned. Returns
+     * `{ scope, component, instanceId, actions, wildcard }`. On any failure
+     * nothing stays wired and the instance is destroyed again.
+     * @param {string} scope
+     * @param {string | null | undefined} component
+     * @param {any} manifest
+     * @param {any} config
+     * @param {any} actions
+     * @returns {any}
+     */
+    registerHostedModule(scope, component, manifest, config, actions) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(component) ? 0 : passStringToWasm0(component, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_registerHostedModule(this.__wbg_ptr, ptr0, len0, ptr1, len1, manifest, config, actions);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Register a named module for multi-module apps.
      * @param {string} name
      * @param {string[]} actions
@@ -788,6 +977,34 @@ export class WasmEngine {
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
+    }
+    /**
+     * Swap the instance behind a hosted scope for a fresh one of its
+     * component, **keeping the scope's state** (hot reload): `register` →
+     * `instantiate` → `actions` in the host, re-wire, destroy the old
+     * instance. `init` does not run. The old instance's subscriptions are
+     * dropped; call `activateHostedModule` so the new one can re-subscribe.
+     *
+     * `component`, `manifest` and `actions` default to what the scope was
+     * registered with (the action list is re-queried from the module).
+     * Returns the same descriptor as `registerHostedModule`. On failure the
+     * old instance stays in charge.
+     * @param {string} scope
+     * @param {string | null | undefined} component
+     * @param {any} manifest
+     * @param {any} actions
+     * @returns {any}
+     */
+    reloadHostedModule(scope, component, manifest, actions) {
+        const ptr0 = passStringToWasm0(scope, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        var ptr1 = isLikeNone(component) ? 0 : passStringToWasm0(component, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        var len1 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_reloadHostedModule(this.__wbg_ptr, ptr0, len0, ptr1, len1, manifest, actions);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
     }
     /**
      * Remove a data source context entirely.
@@ -856,6 +1073,24 @@ export class WasmEngine {
         wasm.wasmengine_reset(this.__wbg_ptr);
     }
     /**
+     * Authorise and resolve an action received from an untrusted client
+     * (Remote UI wire input): only a `__hypen_dispatch` envelope whose live
+     * node carries the binding resolves; scoped and bare names are refused.
+     * The result is trusted input for `dispatchAction`.
+     * @param {string} name
+     * @param {any} payload
+     * @returns {any}
+     */
+    resolveClientAction(name, payload) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_resolveClientAction(this.__wbg_ptr, ptr0, len0, payload);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Resolve session-local node identity before trusted server fan-out.
      * @param {string} name
      * @param {any} payload
@@ -918,6 +1153,48 @@ export class WasmEngine {
         const ptr2 = passArrayJsValueToWasm0(state_keys, wasm.__wbindgen_malloc);
         const len2 = WASM_VECTOR_LEN;
         const ret = wasm.wasmengine_setModule(this.__wbg_ptr, ptr0, len0, ptr1, len1, ptr2, len2, initial_state);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Set the dispatch budget (at least 1).
+     * @param {number} budget
+     */
+    setModuleDispatchBudget(budget) {
+        wasm.wasmengine_setModuleDispatchBudget(this.__wbg_ptr, budget);
+    }
+    /**
+     * Install (or, with `null` / `undefined`, remove) the handler for the
+     * effects a hosted reducer returns that only the embedder can perform.
+     * Called as `handler(scope, effect)` with
+     * `{ type: "navigate", path }` or `{ type: "delay", ms, then }` (after
+     * `ms`, dispatch `then` to `scope` with `dispatchModuleAction`). `log`
+     * effects go to the engine's logger and never reach it.
+     *
+     * The handler runs while the engine call that produced the effect is
+     * still in progress: it must not call the engine synchronously.
+     * @param {any} handler
+     */
+    setModuleEffectHandler(handler) {
+        const ret = wasm.wasmengine_setModuleEffectHandler(this.__wbg_ptr, handler);
+        if (ret[1]) {
+            throw takeFromExternrefTable0(ret[0]);
+        }
+    }
+    /**
+     * Install the JS module host that runs hosted modules: an object with
+     * the `JsModuleHost` methods (`register`, `instantiate`, `destroy`,
+     * `init`, `dispatch`, `onActivated`, `onDeactivated`, `onDestroyed`,
+     * `actions`) — `new JsModuleHost()` from `@hypen-space/module-host`.
+     *
+     * Throws `invalidArgument` when a method is missing, and
+     * `modulesRegistered` when hosted modules are wired (their instances
+     * live in the current host).
+     * @param {any} host
+     */
+    setModuleHost(host) {
+        const ret = wasm.wasmengine_setModuleHost(this.__wbg_ptr, host);
         if (ret[1]) {
             throw takeFromExternrefTable0(ret[0]);
         }
@@ -1684,6 +1961,10 @@ function __wbg_get_imports() {
             const ret = Error(getStringFromWasm0(arg0, arg1));
             return ret;
         },
+        __wbg_Number_7da99b0afe51b89a: function(arg0) {
+            const ret = Number(arg0);
+            return ret;
+        },
         __wbg_String_8564e559799eccda: function(arg0, arg1) {
             const ret = String(arg1);
             const ptr1 = passStringToWasm0(ret, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
@@ -1763,6 +2044,10 @@ function __wbg_get_imports() {
         __wbg___wbindgen_throw_df03e93053e0f4bc: function(arg0, arg1) {
             throw new Error(getStringFromWasm0(arg0, arg1));
         },
+        __wbg_actions_faf4828b4ebdc842: function() { return handleError(function (arg0, arg1) {
+            const ret = arg0.actions(arg1);
+            return ret;
+        }, arguments); },
         __wbg_call_2989817bf2a245b5: function() { return handleError(function (arg0, arg1, arg2, arg3) {
             const ret = arg0.call(arg1, arg2, arg3);
             return ret;
@@ -1778,6 +2063,15 @@ function __wbg_get_imports() {
         __wbg_debug_5cd215874b9b39cc: function(arg0) {
             console.debug(arg0);
         },
+        __wbg_destroy_c765e940e4cea0d5: function() { return handleError(function (arg0, arg1) {
+            arg0.destroy(arg1);
+        }, arguments); },
+        __wbg_dispatch_5d915140649d97fe: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4, arg5) {
+            var v0 = getArrayU8FromWasm0(arg2, arg3).slice();
+            wasm.__wbindgen_free(arg2, arg3 * 1, 1);
+            const ret = arg0.dispatch(arg1, v0, arg4, arg5);
+            return ret;
+        }, arguments); },
         __wbg_done_0ad70482cae88a68: function(arg0) {
             const ret = arg0.done;
             return ret;
@@ -1805,9 +2099,22 @@ function __wbg_get_imports() {
             const ret = arg0[arg1 >>> 0];
             return ret;
         },
+        __wbg_get_with_ref_key_6412cf3094599694: function(arg0, arg1) {
+            const ret = arg0[arg1];
+            return ret;
+        },
         __wbg_info_3039b9f214340fcd: function(arg0) {
             console.info(arg0);
         },
+        __wbg_init_c8edffefb8b7c954: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
+            var v0 = getArrayU8FromWasm0(arg3, arg4).slice();
+            wasm.__wbindgen_free(arg3, arg4 * 1, 1);
+            const ret = arg1.init(arg2, v0);
+            const ptr2 = passArray8ToWasm0(ret, wasm.__wbindgen_malloc);
+            const len2 = WASM_VECTOR_LEN;
+            getDataViewMemory0().setInt32(arg0 + 4 * 1, len2, true);
+            getDataViewMemory0().setInt32(arg0 + 4 * 0, ptr2, true);
+        }, arguments); },
         __wbg_instanceof_ArrayBuffer_d8e4e51f1cf7287a: function(arg0) {
             let result;
             try {
@@ -1838,6 +2145,10 @@ function __wbg_get_imports() {
             const ret = result;
             return ret;
         },
+        __wbg_instantiate_a6deb9af27e3b177: function() { return handleError(function (arg0, arg1, arg2) {
+            const ret = arg0.instantiate(getStringFromWasm0(arg1, arg2));
+            return ret;
+        }, arguments); },
         __wbg_isArray_2efa5973cef6ec32: function(arg0) {
             const ret = Array.isArray(arg0);
             return ret;
@@ -1860,6 +2171,10 @@ function __wbg_get_imports() {
         },
         __wbg_log_91f1dd1dfd5a4ae8: function(arg0) {
             console.log(arg0);
+        },
+        __wbg_new_58794ce12509602d: function(arg0, arg1) {
+            const ret = new Error(getStringFromWasm0(arg0, arg1));
+            return ret;
         },
         __wbg_new_62f131e968c83d75: function() {
             const ret = new Object();
@@ -1897,6 +2212,23 @@ function __wbg_get_imports() {
             const ret = Date.now();
             return ret;
         },
+        __wbg_onActivated_7a80866264c35fe4: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4) {
+            var v0 = getArrayU8FromWasm0(arg2, arg3).slice();
+            wasm.__wbindgen_free(arg2, arg3 * 1, 1);
+            const ret = arg0.onActivated(arg1, v0, arg4);
+            return ret;
+        }, arguments); },
+        __wbg_onDeactivated_164724c536f9bd11: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+            var v0 = getArrayU8FromWasm0(arg2, arg3).slice();
+            wasm.__wbindgen_free(arg2, arg3 * 1, 1);
+            const ret = arg0.onDeactivated(arg1, v0);
+            return ret;
+        }, arguments); },
+        __wbg_onDestroyed_f36d08b71e609442: function() { return handleError(function (arg0, arg1, arg2, arg3) {
+            var v0 = getArrayU8FromWasm0(arg2, arg3).slice();
+            wasm.__wbindgen_free(arg2, arg3 * 1, 1);
+            arg0.onDestroyed(arg1, v0);
+        }, arguments); },
         __wbg_prototypesetcall_d1a7133bc8d83aa9: function(arg0, arg1, arg2) {
             Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
@@ -1904,6 +2236,9 @@ function __wbg_get_imports() {
             const ret = arg0.push(arg1);
             return ret;
         },
+        __wbg_register_d958a008d6600e60: function() { return handleError(function (arg0, arg1, arg2, arg3, arg4, arg5) {
+            arg0.register(getStringFromWasm0(arg1, arg2), getArrayU8FromWasm0(arg3, arg4), arg5);
+        }, arguments); },
         __wbg_set_3ba5af57f57f831c: function(arg0, arg1, arg2) {
             const ret = arg0.set(arg1, arg2);
             return ret;
@@ -1918,6 +2253,9 @@ function __wbg_get_imports() {
             const ret = Reflect.set(arg0, arg1, arg2);
             return ret;
         }, arguments); },
+        __wbg_set_name_280167a140c1fb41: function(arg0, arg1, arg2) {
+            arg0.name = getStringFromWasm0(arg1, arg2);
+        },
         __wbg_stringify_c585a2d825a78689: function() { return handleError(function (arg0) {
             const ret = JSON.stringify(arg0);
             return ret;

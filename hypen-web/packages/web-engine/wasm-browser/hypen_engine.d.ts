@@ -245,6 +245,13 @@ export class WasmEngine {
      */
     reset(): void;
     /**
+     * Authorise and resolve an action received from an untrusted client
+     * (Remote UI wire input): only a `__hypen_dispatch` envelope whose live
+     * node carries the binding resolves; scoped and bare names are refused.
+     * The result is trusted input for `dispatchAction`.
+     */
+    resolveClientAction(name: string, payload: any): any;
+    /**
      * Resolve session-local node identity before trusted server fan-out.
      */
     resolveUIAction(name: string, payload: any): any;
@@ -480,6 +487,7 @@ export interface InitOutput {
     readonly wasmengine_renderInto: (a: number, b: number, c: number, d: number, e: number, f: any) => [number, number];
     readonly wasmengine_renderLazyComponent: (a: number, b: number, c: number) => [number, number];
     readonly wasmengine_reset: (a: number) => void;
+    readonly wasmengine_resolveClientAction: (a: number, b: number, c: number, d: any) => [number, number, number];
     readonly wasmengine_resolveUIAction: (a: number, b: number, c: number, d: any) => [number, number, number];
     readonly wasmengine_setComponentResolver: (a: number, b: any) => void;
     readonly wasmengine_setContext: (a: number, b: number, c: number, d: any) => [number, number];

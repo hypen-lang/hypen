@@ -203,6 +203,12 @@ export class WasmEngine {
      */
     a11yRules(): string[];
     /**
+     * Run the hosted module's `on_activated` and fold its output like a
+     * dispatch (this is where a module subscribes to other scopes). Returns
+     * `false`, doing nothing, when `scope` hosts no module.
+     */
+    activateHostedModule(scope: string): boolean;
+    /**
      * Run the dev-mode accessibility conformance pass over a DSL source and
      * return any findings as
      * `[{ rule, elementType, message, span?, line?, col?, suppressed? }]`.
@@ -234,9 +240,25 @@ export class WasmEngine {
      */
     currentState(): any;
     /**
+     * Run the hosted module's `on_deactivated` and fold its output. Returns
+     * `false`, doing nothing, when `scope` hosts no module.
+     */
+    deactivateHostedModule(scope: string): boolean;
+    /**
      * Parse a component and return a human-readable debug string.
      */
     debugParseComponent(source: string): string;
+    /**
+     * Tear a hosted module down: run `on_destroyed`, remove everything the
+     * engine holds for the scope (instance, routing, grants, subscriptions
+     * in both directions, the state slot), destroy the host-side instance.
+     * Returns `false` when `scope` hosts no module.
+     *
+     * The teardown always completes; when the hook or the host's `destroy`
+     * failed, that is thrown afterwards (`hostError`, `stage`
+     * `"onDestroyed"` / `"destroy"`).
+     */
+    destroyHostedModule(scope: string): boolean;
     /**
      * Parse a DSL source and return every `Router { Route ... }` block
      * it contains, for SDKs that want to auto-wire a ManagedRouter
@@ -261,6 +283,19 @@ export class WasmEngine {
      */
     dispatchExternal(name: string, payload: any): void;
     /**
+     * Dispatch `name` straight to the hosted module under `scope`.
+     *
+     * **Host-trusted**: it skips the renderer's ownership checks, so never
+     * feed it a scope or name taken from client input (that is
+     * `dispatchAction`). `payload` is any JSON value.
+     *
+     * Throws `unknownModule` / `actionNotAccepted` before anything runs;
+     * `moduleCallFailed` when the module's own call failed (nothing
+     * applied); `cascadeIncomplete` when it ran and some follow-ups failed
+     * (applied state stands). The last two carry `report`.
+     */
+    dispatchModuleAction(scope: string, name: string, payload: any): void;
+    /**
      * The built-in external action names, as
      * `{ navigate, back, setInput, bindAction }`.
      *
@@ -270,6 +305,16 @@ export class WasmEngine {
      * declared action) broke all four silently instead of at the call site.
      */
     externalBuiltinNames(): any;
+    /**
+     * The whole current state of the module registered under `scope` (any
+     * letter case) — hosted or in-process — or `null` when there is none.
+     *
+     * **Host-trusted**: unlike `getStateAt`, which serves an external caller
+     * only what the rendered templates declare, this returns everything the
+     * module holds. A hosted module's state lives only in the engine, so
+     * this is how server code reads it.
+     */
+    getModuleState(scope: string): any;
     /**
      * Get the current revision number.
      */
@@ -282,6 +327,34 @@ export class WasmEngine {
      * module is unknown or the path is absent.
      */
     getStateAt(module?: string | null, path?: string | null): any;
+    /**
+     * Whether a module host is installed.
+     */
+    hasModuleHost(): boolean;
+    /**
+     * Every hosted module, in registration order:
+     * `[{ scope, component, instanceId, actions, wildcard }]`. `actions`
+     * are the names the module lists; `wildcard` says it also accepts any
+     * other application action.
+     */
+    hostedModules(): any;
+    /**
+     * Whether `scope` (any letter case) hosts a module.
+     */
+    isHostedModule(scope: string): boolean;
+    /**
+     * The structured failures of the most recent module cascade — a
+     * dispatch (`dispatchAction` reaching a hosted module, or
+     * `dispatchModuleAction`), a lifecycle call, or the subscriber
+     * notifications of an `updateState*` — or `null` when it had none.
+     *
+     * `{ root: { kind, scope, action, hook? }, rootFailed, failureCount,
+     * failures: [{ scope, action, outcome, isRoot, origin: { kind, … },
+     * cause: { code, … }, message }], message }`. It is the only place the
+     * failures of a state write's notifications surface, since
+     * `updateState*` do not throw for them.
+     */
+    lastModuleCascadeReport(): any;
     /**
      * List every action an external caller may dispatch, as
      * `[{ name, module, builtin }]`.
@@ -313,6 +386,12 @@ export class WasmEngine {
      */
     mcpManifest(): any;
     /**
+     * The most reducer invocations (the root included) one dispatch,
+     * lifecycle call or state write may cause in hosted modules and
+     * in-process handlers reached by cross-dispatch.
+     */
+    moduleDispatchBudget(): number;
+    /**
      * Create a new engine instance with an empty tree and no module.
      *
      * After construction, you typically:
@@ -336,6 +415,28 @@ export class WasmEngine {
      */
     registerDefaultPrimitives(): void;
     /**
+     * Instantiate a hosted module and wire it into the engine under `scope`.
+     *
+     * - `component`: the name the component is registered (and, for a
+     *   `JsModuleHost`, `prepare()`d) under in the module host. Defaults to
+     *   `scope` as given.
+     * - `manifest`: `{ name?, version?, storage?, reads?, dispatches?,
+     *   http? }`. `reads` / `dispatches` become the scope's grants, enforced
+     *   by the engine; they may name in-process modules. Omitted = no
+     *   cross-module access. The whole manifest is handed to the host's
+     *   `register` (with empty bytes: the component must already be there).
+     * - `config`: the module's `init` config — JSON-encoded, or a
+     *   `Uint8Array` passed as is. Omitted = `{}`.
+     * - `actions`: an action-list override; omitted = the module's own
+     *   `actions` export.
+     *
+     * Runs `register` → `instantiate` → `init` → `actions` in the host and
+     * seeds the scope's state from what `init` returned. Returns
+     * `{ scope, component, instanceId, actions, wildcard }`. On any failure
+     * nothing stays wired and the instance is destroyed again.
+     */
+    registerHostedModule(scope: string, component: string | null | undefined, manifest: any, config: any, actions: any): any;
+    /**
      * Register a named module for multi-module apps.
      */
     registerModule(name: string, actions: string[], state_keys: string[], initial_state: any): void;
@@ -347,6 +448,19 @@ export class WasmEngine {
      * Register resources from a JavaScript object (name -> SVG string map).
      */
     registerResources(resources_js: any): void;
+    /**
+     * Swap the instance behind a hosted scope for a fresh one of its
+     * component, **keeping the scope's state** (hot reload): `register` →
+     * `instantiate` → `actions` in the host, re-wire, destroy the old
+     * instance. `init` does not run. The old instance's subscriptions are
+     * dropped; call `activateHostedModule` so the new one can re-subscribe.
+     *
+     * `component`, `manifest` and `actions` default to what the scope was
+     * registered with (the action list is re-queried from the module).
+     * Returns the same descriptor as `registerHostedModule`. On failure the
+     * old instance stays in charge.
+     */
+    reloadHostedModule(scope: string, component: string | null | undefined, manifest: any, actions: any): any;
     /**
      * Remove a data source context entirely.
      */
@@ -379,6 +493,13 @@ export class WasmEngine {
      */
     reset(): void;
     /**
+     * Authorise and resolve an action received from an untrusted client
+     * (Remote UI wire input): only a `__hypen_dispatch` envelope whose live
+     * node carries the binding resolves; scoped and bare names are refused.
+     * The result is trusted input for `dispatchAction`.
+     */
+    resolveClientAction(name: string, payload: any): any;
+    /**
      * Resolve session-local node identity before trusted server fan-out.
      */
     resolveUIAction(name: string, payload: any): any;
@@ -400,6 +521,33 @@ export class WasmEngine {
      * Initialize (or replace) the active module with the given configuration.
      */
     setModule(name: string, actions: string[], state_keys: string[], initial_state: any): void;
+    /**
+     * Set the dispatch budget (at least 1).
+     */
+    setModuleDispatchBudget(budget: number): void;
+    /**
+     * Install (or, with `null` / `undefined`, remove) the handler for the
+     * effects a hosted reducer returns that only the embedder can perform.
+     * Called as `handler(scope, effect)` with
+     * `{ type: "navigate", path }` or `{ type: "delay", ms, then }` (after
+     * `ms`, dispatch `then` to `scope` with `dispatchModuleAction`). `log`
+     * effects go to the engine's logger and never reach it.
+     *
+     * The handler runs while the engine call that produced the effect is
+     * still in progress: it must not call the engine synchronously.
+     */
+    setModuleEffectHandler(handler: any): void;
+    /**
+     * Install the JS module host that runs hosted modules: an object with
+     * the `JsModuleHost` methods (`register`, `instantiate`, `destroy`,
+     * `init`, `dispatch`, `onActivated`, `onDeactivated`, `onDestroyed`,
+     * `actions`) — `new JsModuleHost()` from `@hypen-space/module-host`.
+     *
+     * Throws `invalidArgument` when a method is missing, and
+     * `modulesRegistered` when hosted modules are wired (their instances
+     * live in the current host).
+     */
+    setModuleHost(host: any): void;
     /**
      * Set the callback that receives UI patches after each render cycle.
      */

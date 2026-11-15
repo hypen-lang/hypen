@@ -44,6 +44,7 @@ export const wasmengine_removeContext: (a: number, b: number, c: number) => void
 export const wasmengine_renderInto: (a: number, b: number, c: number, d: number, e: number, f: any) => [number, number];
 export const wasmengine_renderLazyComponent: (a: number, b: number, c: number) => [number, number];
 export const wasmengine_reset: (a: number) => void;
+export const wasmengine_resolveClientAction: (a: number, b: number, c: number, d: any) => [number, number, number];
 export const wasmengine_resolveUIAction: (a: number, b: number, c: number, d: any) => [number, number, number];
 export const wasmengine_setComponentResolver: (a: number, b: any) => void;
 export const wasmengine_setContext: (a: number, b: number, c: number, d: any) => [number, number];

@@ -436,6 +436,24 @@ export class WasmEngine {
         wasm.wasmengine_reset(this.__wbg_ptr);
     }
     /**
+     * Authorise and resolve an action received from an untrusted client
+     * (Remote UI wire input): only a `__hypen_dispatch` envelope whose live
+     * node carries the binding resolves; scoped and bare names are refused.
+     * The result is trusted input for `dispatchAction`.
+     * @param {string} name
+     * @param {any} payload
+     * @returns {any}
+     */
+    resolveClientAction(name, payload) {
+        const ptr0 = passStringToWasm0(name, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.wasmengine_resolveClientAction(this.__wbg_ptr, ptr0, len0, payload);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    /**
      * Resolve session-local node identity before trusted server fan-out.
      * @param {string} name
      * @param {any} payload
