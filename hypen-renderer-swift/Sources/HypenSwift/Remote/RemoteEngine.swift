@@ -84,6 +84,8 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
     /// Resume credential from the last `sessionAck` (RFC 001 §5). In memory
     /// only; never logged.
     private var resumeCredential = RemoteResumeCredential()
+    /// The system color scheme reported to the server (hello + changes).
+    private var colorSchemeReport: RemoteColorSchemeReport
 
     // MARK: - Publishers
 
@@ -159,6 +161,7 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
         self.sessionOptions = sessionOptions
         self.currentSessionId = sessionOptions?.id
         self.device = device
+        self.colorSchemeReport = RemoteColorSchemeReport(initial: config.colorScheme.fixedScheme)
         super.init()
     }
 
@@ -476,6 +479,28 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
         sendMessage(message, logContents: false)
     }
 
+    // MARK: - System color scheme
+
+    /// The system color scheme this engine reports to the server, or nil
+    /// when it reports none.
+    public var colorScheme: HypenColorScheme? {
+        colorSchemeReport.scheme
+    }
+
+    /// Report the system color scheme to the server (and remember it for the
+    /// hello of every later connection). A server-side theme whose preference
+    /// is "system" follows it. Reporting the value already held sends nothing.
+    ///
+    /// `HypenView` calls this per `RemoteEngineConfig.colorScheme`; call it
+    /// yourself when you own the engine, e.g. from
+    /// `traitCollectionDidChange` with `traitCollection.userInterfaceStyle`.
+    public func setColorScheme(_ scheme: HypenColorScheme) {
+        // The hello goes out in the same main-actor turn that opens the
+        // socket, so "open" means "hello sent".
+        guard let message = colorSchemeReport.report(scheme, helloSent: lifecycle.phase == .open) else { return }
+        sendMessage(message)
+    }
+
     /// - Parameter logContents: false for messages carrying credentials
     ///   (`hello.resumeToken`), which must never reach the log.
     private func sendMessage(_ message: [String: Any], logContents: Bool = true) {
@@ -502,7 +527,8 @@ public final class RemoteEngine: NSObject, @unchecked Sendable {
             sessionId: currentSessionId ?? sessionOptions?.id,
             credential: resumeCredential,
             props: sessionOptions?.props,
-            device: deviceAttached ? device?.advertisement : nil)
+            device: deviceAttached ? device?.advertisement : nil,
+            colorScheme: colorSchemeReport.scheme)
 
         log.debug("Sending hello message")
         // The hello may carry the resume credential: never log its contents.

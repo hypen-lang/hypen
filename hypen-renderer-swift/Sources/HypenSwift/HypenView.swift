@@ -17,7 +17,11 @@ public struct HypenView: View {
     /// Create a new HypenView connected to a remote server
     /// - Parameters:
     ///   - url: WebSocket URL of the Hypen server
-    ///   - config: Configuration for the remote connection
+    ///   - config: Configuration for the remote connection. By default
+    ///     (`colorScheme: .auto`) the view's light/dark appearance is reported
+    ///     to the server, and again when it changes, so a server-side theme
+    ///     set to "system" matches the device; `.light` / `.dark` report a
+    ///     fixed value and `.off` reports nothing.
     ///   - componentRegistry: Custom component registry (defaults to standard components)
     ///   - applicatorRegistry: Custom applicator registry (defaults to standard applicators)
     ///   - loadingContent: View to show while connecting
@@ -45,6 +49,15 @@ public struct HypenView: View {
 
     @Environment(\.backNavigationOptions) private var backNavigationOptions
 
+    /// The scheme this view is displayed in: the device's light/dark setting,
+    /// or what the host forced with `.preferredColorScheme` / `.colorScheme`.
+    @Environment(\.colorScheme) private var systemColorScheme
+
+    /// `systemColorScheme` as the Remote UI protocol names it.
+    private var reportedColorScheme: HypenColorScheme {
+        systemColorScheme == .dark ? .dark : .light
+    }
+
     public var body: some View {
         GeometryReader { geometry in
             content
@@ -71,7 +84,15 @@ public struct HypenView: View {
                 // ignore the safe area; that stays the embedder's choice.
                 .environment(\.hypenPlatformSafeAreaInsets, HypenSafeArea.PlatformInsets(geometry.safeAreaInsets))
                 .onAppear {
+                    // Before connecting, so the hello carries it.
+                    viewModel.reportSystemColorScheme(reportedColorScheme)
                     viewModel.connect()
+                }
+                // A light/dark switch while connected reaches the server as a
+                // `colorScheme` message (the engine sends nothing for an
+                // unchanged value).
+                .onChangeCompat(of: reportedColorScheme) { scheme in
+                    viewModel.reportSystemColorScheme(scheme)
                 }
                 .onDisappear {
                     viewModel.disconnect()
@@ -159,10 +180,14 @@ final class HypenViewModel: ObservableObject {
     let renderer = HypenRenderer()
     private var engine: RemoteEngine?
     private var cancellables = Set<AnyCancellable>()
+    /// Whether the view's color scheme is forwarded to the server
+    /// (`RemoteEngineConfig.colorScheme == .auto`).
+    private let followsSystemColorScheme: Bool
 
     private(set) var actionDispatcher: ActionDispatcher = MockActionDispatcher()
 
     init(url: String, config: RemoteEngineConfig, device: DeviceEndpoint? = nil) {
+        followsSystemColorScheme = config.colorScheme == .auto
         log.debug("Creating HypenViewModel for URL: %@", url)
         do {
             engine = try RemoteEngine(urlString: url, config: config, device: device)
@@ -259,6 +284,14 @@ final class HypenViewModel: ObservableObject {
                 log.error("Error: %@", error.localizedDescription)
             }
             .store(in: &cancellables)
+    }
+
+    /// The scheme the hosting view is displayed in. Forwarded only when the
+    /// configuration follows the device; a fixed or disabled option is the
+    /// engine's own business.
+    func reportSystemColorScheme(_ scheme: HypenColorScheme) {
+        guard followsSystemColorScheme else { return }
+        engine?.setColorScheme(scheme)
     }
 
     func connect() {

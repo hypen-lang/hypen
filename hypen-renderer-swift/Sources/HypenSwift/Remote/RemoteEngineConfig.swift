@@ -62,6 +62,13 @@ public struct RemoteEngineConfig: Sendable {
     /// an allowlisted origin.
     public let origin: String?
 
+    /// The system color scheme reported to the server, which a server-side
+    /// theme follows while its preference is "system". `.auto` (default)
+    /// follows the device under `HypenView`; `.light` / `.dark` report a fixed
+    /// value; `.off` reports nothing. A host that owns its `RemoteEngine`
+    /// calls `setColorScheme(_:)` itself.
+    public let colorScheme: ColorSchemeReporting
+
     public init(
         autoReconnect: Bool = true,
         reconnectInterval: TimeInterval = 3.0,
@@ -74,7 +81,8 @@ public struct RemoteEngineConfig: Sendable {
         maximumMessageSize: Int = 32 * 1024 * 1024,
         upgradeHeaders: [String: String] = [:],
         upgradeHeaderProvider: (@Sendable (URL) -> [String: String])? = nil,
-        origin: String? = nil
+        origin: String? = nil,
+        colorScheme: ColorSchemeReporting = .auto
     ) {
         self.autoReconnect = autoReconnect
         self.reconnectInterval = reconnectInterval
@@ -88,6 +96,7 @@ public struct RemoteEngineConfig: Sendable {
         self.upgradeHeaders = upgradeHeaders
         self.upgradeHeaderProvider = upgradeHeaderProvider
         self.origin = origin
+        self.colorScheme = colorScheme
     }
 
     /// Default configuration
