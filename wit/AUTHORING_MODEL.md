@@ -561,16 +561,19 @@ now starts growing into an actual stdlib:
   foundation for deterministic record/replay of reducer runs.
   `virtual_clock_makes_time_deterministic` asserts exact timestamps;
   `async_reducer_sleeps_on_real_clock` proves the task suspends through
-  the component event loop for real. Real sleeps are capped by the
-  per-call budget (the epoch deadline would trap right after anyway).
+  the component event loop for real. A real sleep suspends on the host's runtime
+  and is cancelled — the call fails and the instance dies — if it outlives
+  the per-call budget.
   v0.1 stays frozen — stdlib growth happens on 0.2 only.
 - **Persistent storage on the native hosts** — the shared `KvBackend`
   (extracted to `module_host/kv.rs`, both hosts now use it) takes an
   optional snapshot path: `set_storage_path` loads what a previous process
-  wrote and every `local`/`app` mutation writes through atomically
-  (tmp+rename JSON). `cloud` is deliberately NOT persisted — it simulates
+  wrote, and `local`/`app` mutations are flushed atomically (tmp+rename
+  JSON, values base64) once at the end of each module call. `local` data
+  is partitioned by registered module name (module-private); `app` is
+  shared between modules holding the grant; writes are quota-checked. `cloud` is deliberately NOT persisted — it simulates
   a sync service and stays memory until a real one exists.
-  `hypen-runtime --data-dir DIR` wires it (one snapshot per ABI host);
+  `hypen-runtime --data-dir DIR` wires it (`DIR/storage.json`, one backend for both ABI hosts);
   `data_dir_persists_state_across_runtime_restarts` kills the process and
   proves the next one warm-starts from disk.
 - **Browser persistence for the bridged host** — `web-host/src/storage.mjs`
@@ -589,7 +592,8 @@ Three follow-ups to the async promotion, one commit series:
   `"http": false`) gates the `wasi:http` linker on BOTH hosts at register
   time — an importing module fails to instantiate, so "can this module reach
   the network?" is answerable from the manifest alone, exactly like storage.
-  Absent field keeps the historical grant (back-compat); this is the security
+  Manifests are deny-by-default (an absent `http` is denied, absent `storage`
+  is `local` only — grant with `"http": true`); this is the security
   prerequisite for the eventual TS async cutover (which re-enables http for
   JS modules). Tests: `http_denied_module_fails_to_instantiate`,
   `http_denial_does_not_affect_non_importers`,

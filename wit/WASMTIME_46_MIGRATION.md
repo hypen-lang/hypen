@@ -75,10 +75,11 @@ whole story.)
 
 ```bash
 cd hypen-engine-rs
-cargo build  --features module-loader --bin  hypen-runtime
+# (the binary and its test now live behind `runtime-bin` = module-loader + bin-only deps)
+cargo build  --features runtime-bin   --bin  hypen-runtime
 cargo test   --features module-loader --test test_module_host    # 16/16
-cargo test   --features module-loader --test test_hypen_runtime  # 32/32
-cargo clippy --features module-loader --bin  hypen-runtime       # no new warnings
+cargo test   --features runtime-bin   --test test_hypen_runtime  # 32/32
+cargo clippy --features runtime-bin   --bin  hypen-runtime       # no new warnings
 cd ../parser && cargo test                                       # green
 cd ../hypen-cli && bun test tests/build-wasm.test.ts             # 10 pass / 4 skip
 ```

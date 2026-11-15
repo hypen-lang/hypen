@@ -50,7 +50,11 @@ Elm-style effect descriptors (navigate/delay) — see `wit/hypen-module.wit`.
 
 **Engine / host** (`hypen-engine-rs/src/module_host/`, `src/engine.rs`)
 - `ModuleHost` trait; `WasmtimeHost` (native), `BridgedHost` (browser JS-delegated).
-- Resource limits (epoch-interruption timeout + `StoreLimits` memory cap).
+- Resource limits (`ModuleLimits`): per-call wall-clock deadline covering guest CPU (epoch
+  interruption) *and* time blocked in host calls (async stores + `tokio::time::timeout`; a
+  trapped/timed-out instance is dead), a total memory budget per instance, storage quotas.
+- Storage isolation: `local` keys are partitioned by registered module name; `app`/`cloud`
+  are shared between modules holding the grant.
 - Cross-module `read`/`dispatch`/`subscribe` (`hypen:engine/state`), ACL-gated;
   `dispatch_depth` cycle guard; subscriptions folded from `dispatch` **and** `on_activated`.
 - JS-bridged subscribe on `BridgedHost` — native path fully tested, and the wasm32
@@ -70,10 +74,12 @@ Elm-style effect descriptors (navigate/delay) — see `wit/hypen-module.wit`.
 - **`wasi:http` egress is a manifest capability** (declare→grant→enforce, like storage):
   `ModuleManifest.http` / app.json `"http": false` skip the http linker at register
   time, so an importing module fails to instantiate — the pre-A5 security gate.
-  Enforced on both hosts; absent field keeps the historical grant for back-compat.
+  Enforced on both hosts. Manifests are **deny-by-default**: an absent `http` is denied,
+  absent `storage` is `local` only, absent `reads`/`dispatches` are none — grant with an
+  explicit `"http": true` / `"storage": ["app", "cloud"]`.
 - **Async modules can do real HTTP** (the constrained-data-access shape): the async
-  host links the p2 `wasi:http` surface (coexists with CM-async imports; the sync
-  wrappers bring their own tokio via `in_tokio`), and the async reference module's
+  host links the p2 `wasi:http` surface (async host implementation, driven by the host's
+  own runtime; coexists with CM-async imports), and the async reference module's
   `fetch` action does a live GET + an awaited storage write in one reducer pass —
   `async_reducer_fetches_over_wasi_http`.
 - **v0.1/v0.2 coexistence strategy: DualHost** (in `hypen-runtime`). No sync→async
@@ -83,7 +89,7 @@ Elm-style effect descriptors (navigate/delay) — see `wit/hypen-module.wit`.
 - **Stdlib phase 1 (2026-07)**: `hypen:time@0.2.0` — first post-pioneer capability
   package (sync reads, CM-async `sleep-ms`, host-swappable **virtual clock** for
   deterministic replay; implicitly granted, virtualizable-not-deniable). Persistent
-  storage: shared `module_host/kv.rs` backend with atomic JSON write-through
+  storage: shared `module_host/kv.rs` backend with an atomic JSON snapshot flushed once per module call
   (`set_storage_path` on both hosts, `hypen-runtime --data-dir`, restart-survival
   proven end-to-end), cloud CAS intentionally still in-memory. Browser: the bridged
   host's `storage.mjs` auto-selects localStorage when present (sync like the v0.1
@@ -156,12 +162,13 @@ This is the forward path. Do it **in order**, only starting the TS cutover when 
 ## 6. Build / test / verify
 
 ```bash
-# Engine + native runtime (needs the module-loader feature)
+# Engine + native hosts (`module-loader` = the library hosts; `runtime-bin` =
+# module-loader + the hypen-runtime binary's HTTP server / file watcher)
 cd hypen-engine-rs
-cargo build --features module-loader --bin hypen-runtime
-cargo test  --features module-loader --test test_hypen_runtime
-cargo test  --features module-loader --test test_module_host
-cargo clippy --features module-loader --bin hypen-runtime
+cargo build --features runtime-bin --bin hypen-runtime
+cargo test  --features runtime-bin --test test_hypen_runtime
+cargo test  --features module-loader --test test_module_host --test test_module_host_async
+cargo clippy --features runtime-bin --all-targets
 
 # Parser
 cd parser && cargo test

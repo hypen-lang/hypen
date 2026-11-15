@@ -164,10 +164,6 @@ name = "test_module_host_async"
 required-features = ["module-loader"]
 
 [[test]]
-name = "test_async_gate_ts"
-required-features = ["module-loader"]
-
-[[test]]
 name = "test_uniffi_host"
 required-features = ["uniffi", "module-loader"]
 

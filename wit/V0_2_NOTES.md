@@ -161,9 +161,8 @@ default `component-model-async` feature), so the draft above was promoted:
   read, and `subscribe` from `on-activated` are all awaited inline.
 - **Native async host** — `WasmtimeHostAsync`
   (`hypen-engine-rs/src/module_host/wasmtime_host_async.rs`): same sync
-  `ModuleHost` surface, each call pumps `Store::run_concurrent` under
-  `futures_executor::block_on` (no tokio needed until tokio-backed p3
-  imports are linked). WIT `async func` needs no bindgen options; the sync
+  `ModuleHost` surface, each call pumps `Store::run_concurrent` on the
+  host's current-thread tokio runtime under the per-call timeout. WIT `async func` needs no bindgen options; the sync
   `actions` export is lifted with `exports: { "actions": async | store }`;
   instantiation goes through `instantiate_async`. Manifest ACLs, link-time
   scope denial, and the epoch timeout all carry over.
