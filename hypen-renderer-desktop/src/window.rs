@@ -248,18 +248,22 @@ impl PatchQueue {
         Arc::new(Self::default())
     }
 
+    /// Queue one callback transaction, taking the batch BY VALUE: it is
+    /// moved into the queue, never copied (CLAUDE.md "Arc-Shared Props")
+    /// — the module delivers it owned ([`HypenModule::on_owned_patches`]).
+    ///
     /// Returns `true` if the queue went from empty to non-empty —
     /// callers use this to fire `AppEvent::Wake` only on the
     /// rising edge so a chatty engine doesn't flood winit's user
     /// event queue with redundant wake-ups.
-    pub fn push(&self, patches: &[Patch]) -> bool {
+    pub fn push(&self, patches: Vec<Patch>) -> bool {
         if patches.is_empty() {
             return false;
         }
         let mut q = self.queued.lock().expect("patch queue poisoned");
         let was_empty = q.batches.is_empty();
         q.patch_count = q.patch_count.saturating_add(patches.len());
-        q.batches.push_back(patches.to_vec());
+        q.batches.push_back(patches);
         if q.patch_count > PATCH_QUEUE_CAP {
             let before = q.patch_count;
             let mut dropped = 0usize;
@@ -319,8 +323,8 @@ mod patch_queue_tests {
     #[test]
     fn preserves_callback_transaction_boundaries() {
         let queue = PatchQueue::new();
-        assert!(queue.push(&[remove("host-a"), remove("host-b")]));
-        assert!(!queue.push(&[remove("embedded-child")]));
+        assert!(queue.push(vec![remove("host-a"), remove("host-b")]));
+        assert!(!queue.push(vec![remove("embedded-child")]));
 
         let first = queue.drain();
         assert_eq!(first.len(), 2);
@@ -329,6 +333,57 @@ mod patch_queue_tests {
         let second = queue.drain();
         assert_eq!(second.len(), 1);
         assert!(queue.is_empty());
+    }
+
+    /// A queued batch is the module's own allocation: the `Vec`, a
+    /// `Create`'s props map and a `SetProp`'s value all come back out of
+    /// `drain` as the very allocations that were pushed — no deep copy
+    /// on the way through the queue.
+    #[test]
+    fn queued_batches_are_moved_not_copied() {
+        use std::sync::Arc;
+        let props: hypen_engine::reconcile::tree::ResolvedProps = Arc::new(
+            [("0".to_string(), serde_json::json!("hello"))]
+                .into_iter()
+                .collect(),
+        );
+        let value = serde_json::json!("x".repeat(1024));
+        let value_ptr = value.as_str().unwrap().as_ptr();
+        let batch = vec![
+            Patch::Create {
+                id: "t".into(),
+                element_type: "Text".into(),
+                props: Arc::clone(&props),
+                semantics: None,
+            },
+            Patch::SetProp {
+                id: "t".into(),
+                name: "0".into(),
+                value,
+            },
+        ];
+        let vec_ptr = batch.as_ptr();
+        let queue = PatchQueue::new();
+        assert!(queue.push(batch));
+        let out = queue.drain();
+        assert_eq!(out.as_ptr(), vec_ptr, "batch Vec re-allocated");
+        match &out[0] {
+            Patch::Create { props: p, .. } => {
+                assert!(Arc::ptr_eq(p, &props));
+                assert_eq!(Arc::strong_count(&props), 2, "props map cloned");
+            }
+            other => panic!("{other:?}"),
+        }
+        match &out[1] {
+            Patch::SetProp { value, .. } => {
+                assert_eq!(
+                    value.as_str().unwrap().as_ptr(),
+                    value_ptr,
+                    "value deep-copied"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
     }
 }
 
@@ -732,7 +787,9 @@ impl App {
             last_scroll_y_in_layout: 0.0,
             last_scroll_y_emitted: 0.0,
             last_a11y_fingerprint: None,
-            device_overlay: crate::device::overlay::OverlayController::new(crate::device::overlay_hub()),
+            device_overlay: crate::device::overlay::OverlayController::new(
+                crate::device::overlay_hub(),
+            ),
             last_overlay_a11y: None,
             layout_generation: 0,
             last_a11y_layout_generation: 0,
@@ -1064,11 +1121,8 @@ impl App {
                     // (once per (node, entry), like any sticky error).
                     let (skipped, next) =
                         crate::layout::next_playlist_track(&playlist, cur_idx, wraps);
-                    let refused = refused_track_dispatches(
-                        node,
-                        &skipped,
-                        &mut self.dispatched_media_errors,
-                    );
+                    let refused =
+                        refused_track_dispatches(node, &skipped, &mut self.dispatched_media_errors);
                     let next = next.and_then(|(i, s)| {
                         Some((s.url()?.to_string(), s.authored().to_string(), i))
                     });
@@ -1983,7 +2037,7 @@ impl App {
             self.layout_generation = self.layout_generation.wrapping_add(1);
         }
         if !pad_patches.is_empty() {
-            self.queue.push(&pad_patches);
+            self.queue.push(pad_patches);
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -2391,9 +2445,13 @@ impl App {
                 scale,
                 std::time::Instant::now(),
                 &mut |text: &str, size: f32, wrap: Option<f32>, weight: u16| {
-                    painter
-                        .text_engine_mut()
-                        .measure_weighted_line_height(text, size, wrap, weight, size * 1.2)
+                    painter.text_engine_mut().measure_weighted_line_height(
+                        text,
+                        size,
+                        wrap,
+                        weight,
+                        size * 1.2,
+                    )
                 },
             )
         };
@@ -2734,8 +2792,9 @@ impl App {
         };
         let overlay = &self.device_overlay;
         adapter.update_if_active(|| {
-            let mut update =
-                tree_update_for_layout_excluding(layout, &|id| exit_excluded.iter().any(|e| e == id));
+            let mut update = tree_update_for_layout_excluding(layout, &|id| {
+                exit_excluded.iter().any(|e| e == id)
+            });
             crate::accessibility::apply_set_positions(&mut update, &set_positions);
             // Device host UI: its nodes join the window root; a modal
             // dialog (or F6 into the indicators) takes the focus.
@@ -4511,8 +4570,7 @@ pub(crate) fn collect_media_error_dispatches(
         // Refused tracks first: entries the initial playlist selection
         // skipped, then a refused current track (shared dedupe with the
         // auto-advance path — see `refused_source_key`).
-        let mut refused: Vec<(u64, &MediaSource)> =
-            skipped.iter().map(|(i, s)| (*i, s)).collect();
+        let mut refused: Vec<(u64, &MediaSource)> = skipped.iter().map(|(i, s)| (*i, s)).collect();
         if let Some(src @ MediaSource::Refused { .. }) = &source {
             refused.push((index, src));
         }
@@ -4689,7 +4747,9 @@ pub(crate) fn structural_fragment_invalidation(
     let mut paint_roots: Vec<&str> = restyle.iter().map(String::as_str).collect();
     for patch in forwarded {
         match patch {
-            Patch::SetProp { id, .. } | Patch::RemoveProp { id, .. } | Patch::SetText { id, .. } => {
+            Patch::SetProp { id, .. }
+            | Patch::RemoveProp { id, .. }
+            | Patch::SetText { id, .. } => {
                 paint_roots.push(id.as_ref());
             }
             Patch::Insert { id, .. }

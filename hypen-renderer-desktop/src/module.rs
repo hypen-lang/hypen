@@ -21,6 +21,18 @@ pub trait HypenModule: Send + Sync + 'static {
     /// including the initial render fired by `mount()`.
     fn on_patches(&self, cb: Arc<dyn Fn(&[Patch]) + Send + Sync>);
 
+    /// [`Self::on_patches`] for a consumer that KEEPS each batch (the
+    /// window's patch queue): `cb` receives the batch by value. A module
+    /// whose batches are already owned on their way here (a local
+    /// engine, a [`crate::RemoteModule`], the browser's merged stream)
+    /// overrides this to move them through — no batch, `SetProp` value
+    /// or props map is copied (CLAUDE.md "Arc-Shared Props"). The
+    /// default, for borrowed-only modules (test doubles), copies the
+    /// batch once. Replaces any earlier callback, like `on_patches`.
+    fn on_owned_patches(&self, cb: Arc<dyn Fn(Vec<Patch>) + Send + Sync>) {
+        self.on_patches(Arc::new(move |patches: &[Patch]| cb(patches.to_vec())));
+    }
+
     /// Trigger the initial render and run the sync `on_created` handler.
     fn mount(&self);
 
@@ -59,6 +71,10 @@ pub trait HypenModule: Send + Sync + 'static {
 impl<S: State> HypenModule for ModuleInstance<S> {
     fn on_patches(&self, cb: Arc<dyn Fn(&[Patch]) + Send + Sync>) {
         ModuleInstance::on_patches(self, move |patches| cb(patches));
+    }
+
+    fn on_owned_patches(&self, cb: Arc<dyn Fn(Vec<Patch>) + Send + Sync>) {
+        ModuleInstance::on_owned_patches(self, move |patches| cb(patches));
     }
 
     fn mount(&self) {

@@ -843,6 +843,10 @@ impl HypenModule for RemoteModule {
         self.on_owned_patches(Arc::new(move |patches: Vec<Patch>| cb(&patches)));
     }
 
+    fn on_owned_patches(&self, cb: OwnedPatchCallback) {
+        RemoteModule::on_owned_patches(self, cb);
+    }
+
     fn mount(&self) {
         // Worker is already running and the server pushes the initial
         // tree right after `Hello` / `SessionAck`, so there's nothing
@@ -1095,7 +1099,9 @@ mod tests {
         module.on_owned_patches(Arc::new(move |batch: Vec<Patch>| {
             for p in batch {
                 if let Patch::SetProp { value, .. } = p {
-                    sink.lock().unwrap().push(value.as_str().unwrap().as_ptr() as usize);
+                    sink.lock()
+                        .unwrap()
+                        .push(value.as_str().unwrap().as_ptr() as usize);
                 }
             }
         }));

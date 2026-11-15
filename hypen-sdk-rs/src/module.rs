@@ -1050,6 +1050,18 @@ impl<S: State> ModuleInstance<S> {
         engine.set_render_callback(callback);
     }
 
+    /// [`Self::on_patches`] for a consumer that keeps each batch (a
+    /// renderer's patch queue): `callback` receives the engine's own
+    /// `Vec<Patch>`, moved rather than copied. Replaces any earlier
+    /// callback of either kind.
+    pub fn on_owned_patches<F>(&self, callback: F)
+    where
+        F: Fn(Vec<hypen_engine::Patch>) + Send + Sync + 'static,
+    {
+        let mut engine = self.engine.lock().unwrap();
+        engine.set_owned_render_callback(callback);
+    }
+
     /// Report a windowed list's visible range (list virtualization,
     /// `hypen-web/docs/virtualization.md` §3). Renderer-facing: a renderer
     /// embedding this module in-process calls it as the user scrolls.

@@ -349,7 +349,9 @@ impl DesktopApp {
         // reflects the dispatched action.
         let q_for_cb = Arc::clone(&queue);
         let proxy_for_cb = proxy.clone();
-        module.on_patches(Arc::new(move |patches| {
+        // Owned delivery: each batch moves into the queue untouched (no
+        // per-batch copy of patches, values or props).
+        module.on_owned_patches(Arc::new(move |patches| {
             // `push` returns true only on the empty → non-empty
             // transition. Without this gate, an engine that fires a
             // patch batch per frame (or worse, mid-frame) floods
@@ -424,7 +426,10 @@ mod tests {
     #[test]
     fn screenshot_delay_defaults_to_the_window_default_and_is_configurable() {
         let app = DesktopApp::new().screenshot("out.png");
-        assert_eq!(app.screenshot_delay, None, "unset: the window default applies");
+        assert_eq!(
+            app.screenshot_delay, None,
+            "unset: the window default applies"
+        );
         assert_eq!(
             crate::window::DEFAULT_SCREENSHOT_DELAY,
             Duration::from_millis(750)
