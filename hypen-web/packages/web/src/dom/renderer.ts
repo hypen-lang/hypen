@@ -255,6 +255,7 @@ import { ensureA11yStyles } from "./a11y-styles.js";
 import { ensureAnimStyles } from "./anim-styles.js";
 import type { SafeAreaInsetOverrides } from "../safe-area.js";
 import { createSafeAreaHandler } from "./components/safearea.js";
+import { flushPendingHeadingLevelStyles } from "./components/heading.js";
 import { createImageHandler } from "./components/image.js";
 import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
 import {
@@ -825,6 +826,11 @@ export class DOMRenderer {
     // rebuilt ONCE here (one measure pass after all the batch's DOM writes),
     // before the animator measures Last.
     this.dnd.flushStructural();
+
+    // Heading level rules for headings re-levelled while detached: their
+    // root (shadow root or document) is known now that the batch attached
+    // them (see `flushPendingHeadingLevelStyles`).
+    flushPendingHeadingLevelStyles();
 
     // Animation post-batch hook: play queued enters and FLIP moves now that
     // the whole batch (including late-arriving descendants) is in the DOM.

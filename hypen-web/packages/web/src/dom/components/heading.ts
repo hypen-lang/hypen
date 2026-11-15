@@ -54,13 +54,48 @@ export const HEADING_LEVEL_CSS = Object.entries(HEADING_LEVEL_METRICS)
   .join("\n");
 
 /**
+ * Re-levelled headings that were not in the document when re-levelled (a
+ * `SetProp` reaching a node whose Router route is cached off-screen, or one
+ * not yet inserted): where their rules belong — a shadow root or the
+ * document — is only known once they are connected, so they wait here (weakly
+ * held: a node that is never attached again is not kept alive) until
+ * `flushPendingHeadingLevelStyles` finds them connected.
+ */
+const pendingHeadingStyles = new Set<WeakRef<HTMLElement>>();
+
+/**
+ * Install the level rules for every pending re-levelled heading that is now
+ * connected (see `pendingHeadingStyles`). The DOM renderer calls this at the
+ * end of every patch batch (cheap when nothing is pending).
+ */
+export function flushPendingHeadingLevelStyles(): void {
+  if (pendingHeadingStyles.size === 0) return;
+  for (const ref of pendingHeadingStyles) {
+    const el = ref.deref();
+    if (!el || !el.dataset.hypenLevel) {
+      pendingHeadingStyles.delete(ref);
+    } else if (el.isConnected) {
+      pendingHeadingStyles.delete(ref);
+      ensureHeadingLevelStyles(el);
+    }
+  }
+}
+
+/**
  * Install `HEADING_LEVEL_CSS` where `el` will match it: its shadow root when
  * it lives in one (document-level rules never cross a shadow boundary), else
  * its OWN document — which, for a renderer mounted in an iframe or another
  * window's document, is not the global `document`. Once per root (re-added
- * if a host app replaced `<head>` or the shadow root's content).
+ * if a host app replaced `<head>` or the shadow root's content). A heading
+ * that is not connected yet is deferred (see `pendingHeadingStyles`).
  */
 function ensureHeadingLevelStyles(el: HTMLElement): void {
+  if (el.isConnected === false) {
+    if (typeof WeakRef === "function") {
+      pendingHeadingStyles.add(new WeakRef(el));
+      return;
+    }
+  }
   const root: any = typeof el.getRootNode === "function" ? el.getRootNode() : null;
   const isShadowRoot =
     !!root && root.nodeType === 11 /* DOCUMENT_FRAGMENT_NODE */ && "host" in root && !!root.host;

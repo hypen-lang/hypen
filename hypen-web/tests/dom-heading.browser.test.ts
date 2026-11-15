@@ -12,7 +12,9 @@
  *   to 4 computes the size and block margins of a real `<h4>` beside it,
  *   while a heading with an author `.fontSize(40)` keeps 40px throughout;
  * - the rules reach a heading rendered inside a shadow root (document-level
- *   rules never cross a shadow boundary).
+ *   rules never cross a shadow boundary), with the real `<h4>`'s margins
+ *   there too (no host reset in that root to mask them) — also for a heading
+ *   re-levelled while DETACHED (a Router-cached route) and attached later.
  *
  * Skipped when Chromium is not available (HYPEN_BROWSER_REQUIRE=1 makes that
  * an error).
@@ -184,14 +186,18 @@ describe.skipIf(!enabled)("real Chromium: Heading level change", () => {
     // Expose the handler on window without a module loader.
     const source = (await built.outputs[0].text()).replace(
       /export\s*\{[^}]*\};?\s*$/,
-      "window.__heading = { headingHandler };"
+      "window.__heading = { headingHandler, flushPendingHeadingLevelStyles };"
     );
     const page = await browser.newPage();
     try {
       await page.setContent("<!doctype html><html><head></head><body><div id=host></div></body></html>");
       await page.addScriptTag({ content: source });
       const result = await page.evaluate(() => {
-        const { headingHandler } = (window as any).__heading;
+        const { headingHandler, flushPendingHeadingLevelStyles } = (window as any).__heading;
+        const metrics = (e: Element) => {
+          const cs = getComputedStyle(e);
+          return { size: cs.fontSize, top: cs.marginTop, bottom: cs.marginBottom };
+        };
         const shadow = document.getElementById("host")!.attachShadow({ mode: "open" });
         const wrap = document.createElement("div");
         shadow.appendChild(wrap);
@@ -200,18 +206,43 @@ describe.skipIf(!enabled)("real Chromium: Heading level change", () => {
         wrap.appendChild(el);
         const ref = document.createElement("h4");
         wrap.appendChild(ref);
-        const before = getComputedStyle(el).fontSize;
+        const before = metrics(el);
         headingHandler.applyProps(el, { level: 4 });
+        const after = metrics(el);
+        const inShadow = !!shadow.getElementById("hypen-heading-level-styles");
+
+        // Re-levelled while DETACHED, in a second shadow root: its rules
+        // can only be placed once the renderer's batch attaches it.
+        const host2 = document.createElement("div");
+        document.body.appendChild(host2);
+        const shadow2 = host2.attachShadow({ mode: "open" });
+        const ref2 = document.createElement("h4");
+        shadow2.appendChild(ref2);
+        const detached = headingHandler.create({ level: 1 }) as HTMLElement;
+        headingHandler.applyProps(detached, { level: 1, 0: "D" });
+        headingHandler.applyProps(detached, { level: 4 });
+        shadow2.appendChild(detached);
+        flushPendingHeadingLevelStyles(); // the renderer's end of batch
         return {
           before,
-          after: getComputedStyle(el).fontSize,
-          h4: getComputedStyle(ref).fontSize,
-          inShadow: !!shadow.getElementById("hypen-heading-level-styles"),
+          after,
+          h4: metrics(ref),
+          inShadow,
+          detached: metrics(detached),
+          h4b: metrics(ref2),
+          inShadow2: !!shadow2.getElementById("hypen-heading-level-styles"),
+          inDocument: !!document.getElementById("hypen-heading-level-styles"),
         };
       });
       expect(result.inShadow).toBe(true);
-      expect(result.after).toBe(result.h4);
-      expect(result.after).not.toBe(result.before);
+      expect(result.after).toEqual(result.h4);
+      expect(result.after.size).not.toBe(result.before.size);
+      // The h4's own UA margins (no reset in this root): a re-levelled h1
+      // is spaced like the h4 it stands in for.
+      expect(result.after.top).not.toBe(result.before.top);
+      expect(result.inShadow2).toBe(true);
+      expect(result.detached).toEqual(result.h4b);
+      expect(result.inDocument).toBe(false);
     } finally {
       await page.close();
     }
