@@ -289,12 +289,30 @@ or times out fails that dispatch (`module_crashed`) and is re-instantiated + re-
 original config on the next action. When two worktrees share a target dir, copy the built binary
 aside and point the subprocess suites at it with `HYPEN_RUNTIME_BIN`.
 
-`Engine::dispatch_action` is the renderer-facing entry: its input is client-controlled, and with or
-without a module instance wired it is resolved by `route_ui_action` first (a `__hypen_dispatch`
-envelope by node ownership, a registered `__hypen_scoped:<scope>:<name>`, or a bare name exactly
-one scope handles). A resolved scoped name owned by a hosted instance drives that module, anything
-else the closure dispatcher. There is no `scope:action` qualifier and no sender-node shortcut;
-trusted embedder code (REPL, timers, tests) uses `Engine::dispatch_module_action(scope, name, payload)`.
+Two action entries, by where the input comes from (`src/action_routing.rs`):
+
+- `Engine::dispatch_action` (`route_ui_action`; JS `dispatchAction`, WASI `hypen_dispatch_action`,
+  UniFFI `dispatch_action`) is the **same-trust-domain** entry: an in-process renderer, or host code
+  replaying an already-resolved action. It resolves a `__hypen_dispatch` envelope by node
+  *ownership* (any live node of a scope may name any handler of that scope), takes a registered
+  `__hypen_scoped:<scope>:<name>` as given, and dispatches a bare name exactly one scope handles —
+  reserved writes (`__hypen_bind`) included. A resolved scoped name owned by a hosted instance
+  drives that module, anything else the closure dispatcher. There is no `scope:action` qualifier
+  and no sender-node shortcut.
+- `Engine::dispatch_client_action` / `resolve_client_action` (`route_client_action`; JS
+  `resolveClientAction`, WASI `hypen_dispatch_client_action`, UniFFI `dispatch_client_action`) is
+  the entry for input that **crossed a trust boundary** (a Remote UI client). Only an envelope is
+  accepted, and its node must be live, attached, and itself carry the binding: a `Value::Action`
+  (or data-source binding) of that name in its own raw props — rendered data can never forge one —
+  or, for `__hypen_bind` / `__hypen_reorder` / `__hypen_pin`, the `.bind` / pin declaration
+  `validate_ui_write` checks. Scoped names, bare names and every other `__hypen_*` name are
+  refused. The result is trusted input for `dispatch_action`. A remote-session server must feed
+  wire input to this entry, never to `dispatch_action`; bare names it wants to accept (a client's
+  back action) are its own explicit allowlist. Pinned by `tests/test_client_action_authorization.rs`
+  and `engine-compatibility-tests/fixtures/actions/client-action-authorization.json`.
+
+Trusted embedder code (REPL, timers, tests) addresses a hosted scope with
+`Engine::dispatch_module_action(scope, name, payload)`.
 
 The hosted-module subsystem is `src/hosted/` (`HostedModules`, one field of `Engine`; the `Engine`
 module-instance methods are delegations). It never takes `&mut Engine`: each call gets an `EngineCtx`

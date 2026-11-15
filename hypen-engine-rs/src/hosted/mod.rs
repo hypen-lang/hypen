@@ -361,6 +361,31 @@ impl HostedModules {
         }
     }
 
+    /// Run an action that `EngineCore::route_client_action` already
+    /// resolved: in the hosted module that owns the scoped name, or else
+    /// through the closure dispatcher. No routing happens here — see
+    /// `Engine::dispatch_client_action`.
+    pub(crate) fn dispatch_routed(
+        &mut self,
+        ctx: &mut EngineCtx<'_>,
+        action: Action,
+    ) -> Result<(), EngineError> {
+        let hit = split_scoped_action(&action.name).and_then(|(scope, name)| {
+            let (scope, module) = self.registry.resolve(scope)?;
+            module
+                .actions
+                .accepts(name)
+                .then(|| (scope.clone(), name.to_string()))
+        });
+        match hit {
+            Some((scope, name)) => {
+                let action = HostAction::new(name, encode_payload(action.payload));
+                self.run_cascade(ctx, scope, Call::Dispatch(action))
+            }
+            None => ctx.closures.dispatch(&action),
+        }
+    }
+
     /// Run `name` in the module wired under `scope`, skipping renderer
     /// routing. See `Engine::dispatch_module_action`.
     pub(crate) fn dispatch_trusted(

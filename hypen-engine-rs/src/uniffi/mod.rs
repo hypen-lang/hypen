@@ -974,30 +974,19 @@ impl HypenEngine {
         action_name: String,
         payload_json: Option<String>,
     ) -> Result<(), HypenError> {
-        let mut state = self
-            .state
-            .lock()
-            .map_err(|e| HypenError::ActionError(e.to_string()))?;
+        self.dispatch_action_from(action_name, payload_json, false)
+    }
 
-        let payload = payload_json
-            .as_deref()
-            .map(serde_json::from_str)
-            .transpose()
-            .map_err(|e| HypenError::ActionError(format!("invalid payload: {e}")))?;
-        let mut action = crate::dispatch::Action::new(action_name);
-        action.payload = payload;
-        let action = state
-            .core
-            .route_ui_action(action)
-            .map_err(|e| HypenError::ActionError(e.to_string()))?;
-        if state.core.registered_actions.contains(&action.name) {
-            state.pending_actions.push(Action {
-                name: action.name,
-                payload_json: action.payload.map(|p| p.to_string()),
-            });
-        }
-
-        Ok(())
+    /// Dispatch an action received from an **untrusted client** (Remote UI
+    /// wire input). Queued like [`dispatch_action`](Self::dispatch_action),
+    /// but only a `__hypen_dispatch` envelope whose live node carries the
+    /// action binding is accepted; a `__hypen_scoped:` or bare name errors.
+    pub fn dispatch_client_action(
+        &self,
+        action_name: String,
+        payload_json: Option<String>,
+    ) -> Result<(), HypenError> {
+        self.dispatch_action_from(action_name, payload_json, true)
     }
 
     // ── External capability surface ─────────────────────────────────
@@ -1572,5 +1561,41 @@ mod tests {
                 .any(|p| p.props_json.as_deref().is_some_and(|j| j.contains("home"))),
             "the matched route renders: {patches:?}"
         );
+    }
+}
+
+impl HypenEngine {
+    fn dispatch_action_from(
+        &self,
+        action_name: String,
+        payload_json: Option<String>,
+        client: bool,
+    ) -> Result<(), HypenError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|e| HypenError::ActionError(e.to_string()))?;
+
+        let payload = payload_json
+            .as_deref()
+            .map(serde_json::from_str)
+            .transpose()
+            .map_err(|e| HypenError::ActionError(format!("invalid payload: {e}")))?;
+        let mut action = crate::dispatch::Action::new(action_name);
+        action.payload = payload;
+        let action = if client {
+            state.core.route_client_action(action)
+        } else {
+            state.core.route_ui_action(action)
+        }
+        .map_err(|e| HypenError::ActionError(e.to_string()))?;
+        if state.core.registered_actions.contains(&action.name) {
+            state.pending_actions.push(Action {
+                name: action.name,
+                payload_json: action.payload.map(|p| p.to_string()),
+            });
+        }
+
+        Ok(())
     }
 }

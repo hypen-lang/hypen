@@ -95,7 +95,88 @@ impl EngineCore {
 
     /// Resolve the envelope once, before any host handler runs. Scope names
     /// in application payloads are never used as UI routing authority.
-    pub fn route_ui_action(&self, mut action: Action) -> Result<Action, EngineError> {
+    ///
+    /// **Same-trust-domain entry.** An envelope is resolved by node
+    /// *ownership* only (any live node of a scope may name any handler of
+    /// that scope), a registered `__hypen_scoped:` name is taken as given,
+    /// and a bare name one scope handles is dispatched — including the
+    /// reserved write actions. That is right for an in-process renderer and
+    /// for host code replaying an already-resolved action; input that crossed
+    /// a trust boundary (a Remote UI client) goes through
+    /// [`route_client_action`](Self::route_client_action) instead.
+    pub fn route_ui_action(&self, action: Action) -> Result<Action, EngineError> {
+        self.route(action, false)
+    }
+
+    /// Resolve an action received from an **untrusted client** (a Remote UI
+    /// renderer on someone else's device). Strictly narrower than
+    /// [`route_ui_action`](Self::route_ui_action):
+    ///
+    /// - only the `__hypen_dispatch` envelope form is accepted — a
+    ///   pre-scoped `__hypen_scoped:<scope>:<name>` or a bare name is
+    ///   refused, whatever is registered;
+    /// - the addressed node must be live and attached (or be the exit
+    ///   tombstone of exactly this completion action), **and must itself
+    ///   carry the binding**: an `@actions.<name>` / `@router.<method>` /
+    ///   data-source action reference in its own declared props. Rendered
+    ///   data never counts — only `Value::Action` (and data-source
+    ///   bindings), which row/state substitution cannot produce;
+    /// - `__hypen_bind` / `__hypen_reorder` / `__hypen_pin` are authorised by
+    ///   the node's `.bind` / pin declaration (`validate_ui_write`), every
+    ///   other `__hypen_*` name is refused.
+    ///
+    /// The result is a resolved action for the trusted dispatch path
+    /// (`route_ui_action` accepts it unchanged).
+    pub fn route_client_action(&self, action: Action) -> Result<Action, EngineError> {
+        if action.name != UI_ACTION {
+            return Err(EngineError::ActionNotFound(
+                "client actions must be node-addressed".into(),
+            ));
+        }
+        self.route(action, true)
+    }
+
+    /// Whether the node addressed by a client envelope declares `name`.
+    fn authorize_client_binding(&self, node: &str, name: &str) -> Result<(), EngineError> {
+        // Authorised by `validate_ui_write` against the node's declarations.
+        if matches!(name, "__hypen_bind" | "__hypen_reorder" | "__hypen_pin") {
+            return Ok(());
+        }
+        let unbound =
+            || EngineError::ActionNotFound("UI action is not bound on the target node".into());
+        if name.starts_with("__hypen_") {
+            return Err(unbound());
+        }
+        let id = node
+            .parse::<u64>()
+            .map(|key| NodeId::from(slotmap::KeyData::from_ffi(key)))
+            .map_err(|_| unbound())?;
+        let Some(target) = self.tree.get(id) else {
+            // Removed node: `ui_node_scope` only let it through on an exit
+            // tombstone, re-checked here against this very action.
+            return self
+                .tree
+                .exit_tombstone(id)
+                .filter(|t| t.action == name)
+                .map(|_| ())
+                .ok_or_else(unbound);
+        };
+        let carried = target.raw_props.iter().any(|(_, value)| match value {
+            crate::ir::Value::Action(action) => {
+                action == name || action.strip_prefix("actions.") == Some(name)
+            }
+            crate::ir::Value::Binding(binding) => {
+                matches!(
+                    binding.source,
+                    crate::reactive::BindingSource::DataSource(_)
+                ) && binding.full_path_with_source() == name
+            }
+            _ => false,
+        });
+        carried.then_some(()).ok_or_else(unbound)
+    }
+
+    fn route(&self, mut action: Action, client: bool) -> Result<Action, EngineError> {
         if action.name == UI_ACTION {
             let envelope = action.payload.take().unwrap_or(Value::Null);
             let invalid = || EngineError::ActionNotFound("invalid scoped UI action".into());
@@ -122,6 +203,9 @@ impl EngineCore {
                 envelope.get("payload"),
                 envelope.get("fromNode").and_then(Value::as_str),
             )?;
+            if client {
+                self.authorize_client_binding(node, name)?;
+            }
             if name == "__hypen_reorder" && from_scope.as_ref().is_some_and(|s| s != &scope) {
                 return Err(EngineError::ActionNotFound(
                     "cross-module reorder requires an application handler".into(),

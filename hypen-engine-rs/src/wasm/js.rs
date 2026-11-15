@@ -872,6 +872,23 @@ impl WasmEngine {
             .map_err(|e| structured_error("actionError", &e.to_string()))
     }
 
+    /// Authorise and resolve an action received from an untrusted client
+    /// (Remote UI wire input): only a `__hypen_dispatch` envelope whose live
+    /// node carries the binding resolves; scoped and bare names are refused.
+    /// The result is trusted input for `dispatchAction`.
+    #[wasm_bindgen(js_name = resolveClientAction)]
+    pub fn resolve_client_action(&self, name: &str, payload: JsValue) -> Result<JsValue, JsValue> {
+        let payload: serde_json::Value =
+            from_value(payload).map_err(|e| structured_error("actionError", &e.to_string()))?;
+        let action = self
+            .core
+            .route_client_action(Action::new(name).with_payload(payload))
+            .map_err(|e| structured_error("actionError", &e.to_string()))?;
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        serde::Serialize::serialize(&action, &serializer)
+            .map_err(|e| structured_error("actionError", &e.to_string()))
+    }
+
     /// Dispatch a named action, invoking the registered handler (if any).
     #[wasm_bindgen(js_name = dispatchAction)]
     pub fn dispatch_action(&mut self, name: &str, payload: JsValue) -> Result<(), JsValue> {

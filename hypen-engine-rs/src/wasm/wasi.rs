@@ -816,27 +816,46 @@ pub extern "C" fn hypen_register_action(name_ptr: *const u8, name_len: usize) ->
 /// 0 on success, non-zero on error
 #[no_mangle]
 pub extern "C" fn hypen_dispatch_action(action_ptr: *const u8, action_len: usize) -> i32 {
+    dispatch_action_from(action_ptr, action_len, false, "hypen_dispatch_action")
+}
+
+/// Dispatch an action received from an **untrusted client** (Remote UI wire
+/// input). Same contract as [`hypen_dispatch_action`], but only a
+/// `__hypen_dispatch` envelope whose live node carries the action binding is
+/// accepted — a `__hypen_scoped:` or bare name is refused (code 4). See
+/// `EngineCore::route_client_action`.
+///
+/// # Returns
+/// 0 on success, non-zero on error
+#[no_mangle]
+pub extern "C" fn hypen_dispatch_client_action(action_ptr: *const u8, action_len: usize) -> i32 {
+    dispatch_action_from(action_ptr, action_len, true, "hypen_dispatch_client_action")
+}
+
+fn dispatch_action_from(action_ptr: *const u8, action_len: usize, client: bool, op: &str) -> i32 {
     let action_str = match ptr_to_str(action_ptr, action_len) {
         Ok(s) => s,
-        Err(_) => return fail(1, "hypen_dispatch_action: invalid UTF-8 action pointer"),
+        Err(_) => return fail(1, &format!("{op}: invalid UTF-8 action pointer")),
     };
 
     let action_payload: ActionPayload = match serde_json::from_str(action_str) {
         Ok(v) => v,
-        Err(e) => return fail(2, &format!("hypen_dispatch_action: invalid JSON: {}", e)),
+        Err(e) => return fail(2, &format!("{op}: invalid JSON: {}", e)),
     };
 
     ENGINE.with(|engine| {
         let mut engine_ref = engine.borrow_mut();
         let engine = match engine_ref.as_mut() {
             Some(e) => e,
-            None => return fail(3, "hypen_dispatch_action: engine not initialized"),
+            None => return fail(3, &format!("{op}: engine not initialized")),
         };
 
-        let routed = match engine
-            .core
-            .route_ui_action(Action::new(action_payload.name).with_payload(action_payload.payload))
-        {
+        let inbound = Action::new(action_payload.name).with_payload(action_payload.payload);
+        let routed = match if client {
+            engine.core.route_client_action(inbound)
+        } else {
+            engine.core.route_ui_action(inbound)
+        } {
             Ok(action) => action,
             Err(e) => return fail(4, &e.to_string()),
         };

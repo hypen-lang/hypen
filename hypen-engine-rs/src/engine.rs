@@ -599,6 +599,31 @@ impl Engine {
         hosted.dispatch_ui_action(&mut ctx, action)
     }
 
+    /// Dispatch an action received from an **untrusted client** — the entry
+    /// a Remote UI server feeds wire input to.
+    ///
+    /// Unlike [`dispatch_action`](Self::dispatch_action) (same trust domain
+    /// as the app: an in-process renderer, or host code), this accepts only a
+    /// `__hypen_dispatch` envelope whose live node itself carries the action
+    /// binding; a pre-scoped `__hypen_scoped:` name or a bare name is refused.
+    /// See [`EngineCore::route_client_action`] for the full rule. The resolved
+    /// action then runs exactly as `dispatch_action` would run it.
+    pub fn dispatch_client_action(&mut self, action: Action) -> Result<(), EngineError> {
+        let action = self.core.route_client_action(action)?;
+        if self.hosted.is_empty() {
+            return self.actions.dispatch(&action);
+        }
+        let (hosted, mut ctx) = self.hosted_parts();
+        hosted.dispatch_routed(&mut ctx, action)
+    }
+
+    /// [`dispatch_client_action`](Self::dispatch_client_action) for hosts that
+    /// own their dispatch loop: authorise and resolve, run nothing. The result
+    /// is trusted input for [`dispatch_action`](Self::dispatch_action).
+    pub fn resolve_client_action(&self, action: Action) -> Result<Action, EngineError> {
+        self.core.route_client_action(action)
+    }
+
     /// Dispatch `name` straight to the hosted module wired under `scope`.
     ///
     /// **Host-trusted API** for embedders: REPLs, timers resuming an
