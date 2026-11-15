@@ -1,19 +1,22 @@
-//! Engine-native effects (`Navigate`, `Delay`) the host has to perform.
+//! Effects (`Navigate`, `Delay`, `Http`) the host has to perform.
 //!
 //! The engine cannot perform these itself — navigation needs a router, delay
-//! needs a timer — so it hands each `(scope, effect)` to a handler. The
-//! handler here just records them in an [`EffectOutbox`]; after a dispatch
-//! the runtime drains the outbox into [`HostEffects`], and the front end
-//! (server or REPL) decides what performing them means: the server schedules
-//! delays on the timer thread and returns navigations in the response, the
-//! REPL prints both.
+//! needs a timer, a deferred HTTP request needs a client — so it hands each
+//! `(scope, effect)` to a handler. The handler here just records them in an
+//! [`EffectOutbox`]; after a dispatch the runtime drains the outbox into
+//! [`HostEffects`], and the front end (server or REPL) decides what
+//! performing them means: the server schedules delays on the timer thread,
+//! puts HTTP requests on the worker pool and returns navigations in the
+//! response; the REPL prints navigations and delays and performs HTTP
+//! requests inline.
 
 use std::sync::Mutex;
 use std::time::Duration;
 
-use hypen_engine::module_host::Effect;
+use hypen_engine::module_host::{Effect, HttpEffect};
 
 use crate::sync::lock;
+use crate::http::{HttpJob, HttpPoolHandle};
 use crate::timers::{TimerFire, TimerHandle};
 
 /// Effects recorded by the engine's effect handler, awaiting a drain.
@@ -24,6 +27,8 @@ pub struct EffectOutbox {
 
 impl EffectOutbox {
     pub fn push(&self, scope: &str, effect: &Effect) {
+        // The clone is the engine's hand-off of the effect (for `Http`, the
+        // one copy of the request body made on its way to the client).
         lock(&self.pending, "effect outbox").push((scope.to_string(), effect.clone()));
     }
 
@@ -48,6 +53,9 @@ pub struct HostEffects {
     /// Paths to navigate to, in emission order.
     pub navigations: Vec<String>,
     pub delays: Vec<DelayRequest>,
+    /// Deferred HTTP requests to perform and then complete, with the scope
+    /// that queued each.
+    pub http: Vec<(String, HttpEffect)>,
 }
 
 impl HostEffects {
@@ -61,6 +69,7 @@ impl HostEffects {
                     action: then,
                     delay: Duration::from_millis(u64::from(ms)),
                 }),
+                Effect::Http(request) => out.http.push((scope, request)),
                 // Handled engine-side; never reaches the outbox.
                 Effect::Log { .. } => {}
             }
@@ -76,6 +85,25 @@ impl HostEffects {
             if let Err(e) = timers.schedule(d.delay, fire) {
                 eprintln!("[timers] {e}");
             }
+        }
+    }
+
+    /// Put every HTTP request on the worker pool. Each one is completed
+    /// through the pool's callback, whatever happens to it.
+    pub fn start_http(&mut self, pool: &HttpPoolHandle) {
+        for (scope, effect) in self.http.drain(..) {
+            pool.submit(HttpJob { scope, effect });
+        }
+    }
+
+    /// Perform everything a background dispatch (a fired timer, an HTTP
+    /// completion) asked for; `source` names it in the log. Navigations have
+    /// no response to ride on, so they are only logged.
+    pub fn perform_in_background(mut self, timers: &TimerHandle, pool: &HttpPoolHandle, source: &str) {
+        self.schedule_delays(timers);
+        self.start_http(pool);
+        for path in &self.navigations {
+            eprintln!("{source} asked to navigate to {path}");
         }
     }
 }

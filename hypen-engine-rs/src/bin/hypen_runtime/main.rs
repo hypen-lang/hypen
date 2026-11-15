@@ -14,7 +14,8 @@
 //! | [`usage_plan`] | one instance per distinct usage config + template rewriting |
 //! | [`app`] | [`app::Runtime`]: engine + hosted modules; boot, dispatch, crash recovery |
 //! | [`patches`] | [`patches::PatchHub`]: tree mirror, exact patch attribution, SSE fan-out |
-//! | [`effects`] | draining `Navigate` / `Delay` effects |
+//! | [`effects`] | draining `Navigate` / `Delay` / `Http` effects |
+//! | [`http`] | deferred HTTP: the client and its worker pool |
 //! | [`timers`] | the single timer thread behind `Delay` |
 //! | [`reload`] | `.wasm` / `.hypen` hot reload and the file watcher |
 //! | [`server`] | `--serve`: admission policy, routes, SSE |
@@ -26,6 +27,7 @@ mod app;
 mod cli;
 mod effects;
 mod error;
+mod http;
 mod manifest;
 mod names;
 mod patches;

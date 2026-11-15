@@ -8,7 +8,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use hypen_engine::module_host::{ModuleManifest, StorageScope};
+use hypen_engine::module_host::{HostPattern, ModuleManifest, StorageScope};
 
 use crate::error::RuntimeError;
 use crate::names::ScopeName;
@@ -69,6 +69,8 @@ pub enum ActionSource {
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct Grants {
     pub http: bool,
+    /// `--grant-http-host`: the hosts `http` is limited to. Empty = any host.
+    pub http_hosts: Vec<HostPattern>,
     /// Storage scopes granted beyond the always-available `local`.
     pub storage: Vec<StorageScope>,
 }
@@ -76,7 +78,11 @@ pub struct Grants {
 impl Grants {
     /// Everything (`--grant-all`).
     fn all() -> Self {
-        Grants { http: true, storage: vec![StorageScope::App, StorageScope::Cloud] }
+        Grants {
+            http: true,
+            http_hosts: Vec::new(),
+            storage: vec![StorageScope::App, StorageScope::Cloud],
+        }
     }
 
     /// The host manifest these grants amount to for `scope`.
@@ -85,6 +91,7 @@ impl Grants {
             name: scope.as_str().to_string(),
             storage: self.storage.clone(),
             http: self.http,
+            http_hosts: self.http_hosts.clone(),
             ..ModuleManifest::default()
         }
     }
@@ -111,7 +118,8 @@ hypen-runtime — drive a hypen:module .wasm interactively or over HTTP
 
 Usage:
   hypen-runtime <module.wasm> [--scope NAME] [--ui FILE.hypen] [--actions a,b,c]
-                              [--grant-http] [--grant-storage app,cloud]
+                              [--grant-http [--grant-http-host PATTERN]...]
+                              [--grant-storage app,cloud]
                               [--serve PORT [--allow-origin ORIGIN]...]
   hypen-runtime --app MANIFEST.json [--serve PORT [--allow-origin ORIGIN]...]
   (both forms: [--data-dir DIR] [--cache-dir DIR] [--call-timeout-ms N])
@@ -159,7 +167,15 @@ Options:
 Capabilities (single-module mode; with --app they come from the manifest):
   A module gets module-private `local` storage and nothing else unless
   granted. A module that imports an ungranted capability fails to start.
-  --grant-http     Allow outbound HTTP (wasi:http).
+  --grant-http     Allow outbound HTTP: deferred requests (hypen:http/deferred,
+                   performed by this runtime after the reducer returns) and
+                   blocking ones (wasi:http).
+  --grant-http-host PATTERN
+                   Limit --grant-http to hosts matching PATTERN; repeat for
+                   several. A pattern is a host (api.example.com), a wildcard
+                   for its subdomains (*.example.com), or either with a port
+                   (localhost:8080). Without this flag any host is allowed.
+                   Checked for every request and every redirect hop.
   --grant-storage LIST
                    Comma-separated shared storage scopes to grant: app, cloud.
   --grant-all      Grant HTTP and every storage scope (trusted modules only).
@@ -211,6 +227,8 @@ where
     let mut body_timeout: Option<Duration> = None;
     let mut allow_origins: Vec<Origin> = Vec::new();
     let mut grants = Grants::default();
+    // Kept apart from `grants` so `--grant-all` in any position keeps them.
+    let mut http_hosts: Vec<HostPattern> = Vec::new();
     // Single-module-only flags seen, to refuse them alongside --app.
     let mut module_only: Vec<&'static str> = Vec::new();
 
@@ -273,6 +291,16 @@ where
                 grants.http = true;
                 module_only.push("--grant-http");
             }
+            "--grant-http-host" => {
+                let raw = value("a host pattern such as api.example.com or *.example.com")?;
+                let pattern: HostPattern = raw
+                    .parse()
+                    .map_err(|e| RuntimeError::usage(format!("--grant-http-host: {e}")))?;
+                if !http_hosts.contains(&pattern) {
+                    http_hosts.push(pattern);
+                }
+                module_only.push("--grant-http-host");
+            }
             "--grant-storage" => {
                 for name in split_list(&value("a comma-separated list of app, cloud")?) {
                     let scope = parse_storage_grant(&name)?;
@@ -297,6 +325,13 @@ where
             }
         }
     }
+
+    if !http_hosts.is_empty() && !grants.http {
+        return Err(RuntimeError::usage(
+            "--grant-http-host narrows --grant-http; pass --grant-http (or --grant-all) too",
+        ));
+    }
+    grants.http_hosts = http_hosts;
 
     let source = match (wasm, app) {
         (Some(_), Some(_)) => {
@@ -377,6 +412,7 @@ fn resolve_scope(explicit: Option<&str>, wasm: &std::path::Path) -> Result<Scope
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hypen_engine::module_host::HttpGrant;
 
     fn run(args: &[&str]) -> Result<Command, RuntimeError> {
         parse(args.iter().map(|s| s.to_string()))
@@ -421,6 +457,27 @@ mod tests {
         assert_eq!(m.grants, Grants::all());
 
         assert!(usage_error(&["m.wasm", "--grant-storage", "disk"]).contains("unknown storage scope"));
+
+        let o = options(&[
+            "m.wasm", "--grant-http-host", "API.example.com", "--grant-http",
+            "--grant-http-host", "*.example.com:8443", "--grant-http-host", "api.example.com",
+        ]);
+        let Source::Module(m) = &o.source else { panic!("module") };
+        let hosts: Vec<String> = m.grants.http_hosts.iter().map(ToString::to_string).collect();
+        assert_eq!(hosts, ["api.example.com", "*.example.com:8443"]);
+        let manifest = m.grants.to_manifest(&m.scope);
+        assert_eq!(manifest.http_grant(), HttpGrant::Hosts(m.grants.http_hosts.clone()));
+
+        // `--grant-all` keeps an allowlist given before or after it.
+        let o = options(&["m.wasm", "--grant-http-host", "a.test", "--grant-all"]);
+        let Source::Module(m) = &o.source else { panic!("module") };
+        assert!(m.grants.http && m.grants.http_hosts.len() == 1);
+
+        let e = usage_error(&["m.wasm", "--grant-http-host", "a.test"]);
+        assert!(e.contains("pass --grant-http"), "{e}");
+        let e = usage_error(&["m.wasm", "--grant-http", "--grant-http-host", "https://a.test/x"]);
+        assert!(e.contains("--grant-http-host") && e.contains("drop the scheme"), "{e}");
+        assert!(usage_error(&["m.wasm", "--grant-http-host"]).contains("needs a host pattern"));
     }
 
     #[test]

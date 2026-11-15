@@ -47,10 +47,10 @@ use std::time::{Duration, Instant};
 use hypen_engine::dispatch::Action;
 use hypen_engine::ir::ResolvedComponent;
 use hypen_engine::module_host::{
-    ComponentCompiler, DualHost, Effect, HostConfig, HostError, InstanceStatus, ModuleHost,
-    ModuleInstanceId, ModuleManifest,
+    ComponentCompiler, DualHost, Effect, HostConfig, HostError, HttpOutcome, HttpRequestId,
+    InstanceStatus, ModuleHost, ModuleInstanceId, ModuleManifest,
 };
-use hypen_engine::hosted::FailureCause;
+use hypen_engine::hosted::{FailureCause, HttpCompletionError, HttpDelivery};
 use hypen_engine::{Engine, EngineError, ModuleGrants, Patch};
 use serde_json::{json, Map, Value};
 
@@ -895,6 +895,40 @@ impl Runtime {
         if let Err(e) = core.classify(None, (RoutedBy::Scope, fired), still_crashed) {
             eprintln!("[timers] {scope}:{action} failed: {}", crate::error::one_line(&e));
         }
+        self.outbox.drain()
+    }
+
+    /// Complete a deferred HTTP request `scope` queued: run its `then`
+    /// action with `outcome` through the engine. Like a fired timer, its
+    /// render is out-of-band (broadcast to SSE subscribers) and the effects
+    /// it emitted in turn are returned.
+    pub fn complete_http(&self, scope: &str, id: HttpRequestId, outcome: HttpOutcome) -> HostEffects {
+        let mut core = self.core();
+        // A module that crashed is re-instantiated first, as for any other
+        // dispatch; its old instance's requests then complete into nothing.
+        let still_crashed = core.revive_crashed();
+        match core.engine.complete_http_request(id, outcome) {
+            Ok(HttpDelivery::Delivered) => {}
+            Ok(HttpDelivery::ModuleGone) => eprintln!(
+                "[http] dropped the completion of request {id}: module `{scope}` was destroyed \
+                 or reloaded while it was in flight"
+            ),
+            Err(HttpCompletionError::Cascade(e)) => {
+                if let Err(e) = core.classify(None, (RoutedBy::Scope, Err(e)), still_crashed) {
+                    eprintln!("[http] {scope}: completion of request {id} failed: {}", crate::error::one_line(&e));
+                }
+            }
+            // A pool bug, not a module's: each job is reported exactly once.
+            Err(e @ HttpCompletionError::UnknownRequest(_)) => eprintln!("[http] {scope}: {e}"),
+        }
+        self.outbox.drain()
+    }
+
+    /// Effects recorded outside a dispatch — by the `on_activated` hooks of
+    /// boot — for the front end to perform once its timer and HTTP workers
+    /// exist.
+    pub fn take_pending_effects(&self) -> HostEffects {
+        let _core = self.core();
         self.outbox.drain()
     }
 

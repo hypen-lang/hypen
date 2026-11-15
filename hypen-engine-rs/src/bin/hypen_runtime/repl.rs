@@ -6,14 +6,19 @@
 //! ```
 //!
 //! The REPL has no timer thread, so a `Delay` effect is reported rather than
-//! scheduled (use `--serve` for real timers).
+//! scheduled (use `--serve` for real timers). Deferred HTTP requests *are*
+//! performed — inline, one after the other, before the next line is read —
+//! and each completion's state is printed, so a fetch can be tried from the
+//! prompt.
 
 use std::io::{BufRead, Write};
 
 use hypen_engine::Patch;
 use serde_json::Value;
 
-use crate::app::{Booted, DispatchRequest};
+use crate::app::{Booted, DispatchRequest, Runtime};
+use crate::effects::HostEffects;
+use crate::http::perform_blocking;
 use crate::error::{one_line, RuntimeError};
 
 /// One parsed REPL line.
@@ -97,24 +102,47 @@ pub fn run(booted: Booted, input: impl BufRead, mut output: impl Write) -> Resul
         } else {
             writeln!(output, "state: {after}").map_err(io_error)?;
         }
-        for path in &outcome.effects.navigations {
-            writeln!(output, "navigate: {path}").map_err(io_error)?;
+        if has_ui {
+            writeln!(output, "patches: {}", patches_text(&outcome.patches, false))
+                .map_err(io_error)?;
         }
-        for delay in &outcome.effects.delays {
+        report_effects(&runtime, outcome.effects, &mut output).map_err(io_error)?;
+        output.flush().map_err(io_error)?;
+    }
+    Ok(())
+}
+
+/// Print what a dispatch asked the host to do, and perform its deferred HTTP
+/// requests: each is carried out, completed through the engine, and whatever
+/// its completion asked for in turn is handled the same way (a queue, so a
+/// chain of requests is followed to its end).
+fn report_effects(
+    runtime: &Runtime,
+    effects: HostEffects,
+    output: &mut impl Write,
+) -> std::io::Result<()> {
+    let mut pending = std::collections::VecDeque::from([effects]);
+    while let Some(effects) = pending.pop_front() {
+        for path in &effects.navigations {
+            writeln!(output, "navigate: {path}")?;
+        }
+        for delay in &effects.delays {
             writeln!(
                 output,
                 "delay: {}ms -> {}:{} (scheduled only under --serve)",
                 delay.delay.as_millis(),
                 delay.scope,
                 delay.action
-            )
-            .map_err(io_error)?;
+            )?;
         }
-        if has_ui {
-            writeln!(output, "patches: {}", patches_text(&outcome.patches, false))
-                .map_err(io_error)?;
+        for (scope, request) in effects.http {
+            let (id, then) = (request.id, request.then.clone());
+            writeln!(output, "http: {} {} -> {scope}:{then}", request.request.method, request.url)?;
+            output.flush()?;
+            let outcome = perform_blocking(request);
+            pending.push_back(runtime.complete_http(&scope, id, outcome));
+            writeln!(output, "state: {}", runtime.module_state(&scope))?;
         }
-        output.flush().map_err(io_error)?;
     }
     Ok(())
 }

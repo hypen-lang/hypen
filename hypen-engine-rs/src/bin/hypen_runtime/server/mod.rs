@@ -90,6 +90,7 @@ use serde_json::{json, Value};
 
 use crate::app::Runtime;
 use crate::error::{one_line, RuntimeError};
+use crate::http::{HttpDone, HttpPool, HttpPoolHandle};
 use crate::reload;
 use crate::timers::{TimerHandle, Timers};
 use request::{Admission, Method, Origin, Policy, RequestError, RequestHead, Route};
@@ -249,6 +250,7 @@ struct Context {
     runtime: Arc<Runtime>,
     policy: Policy,
     timers: TimerHandle,
+    http: HttpPoolHandle,
     body_timeout: Duration,
 }
 
@@ -265,16 +267,38 @@ pub fn serve(
     // `--serve 0` binds an ephemeral port; the policy needs the real one.
     let port = server.server_addr().to_ip().map(|a| a.port()).unwrap_or(port);
 
+    // Background dispatches — a fired `Delay`, a completed deferred HTTP
+    // request — go through the runtime and can each emit more of both, so the
+    // timer thread and the HTTP workers hold a handle to one another. The
+    // pool exists first (it starts no thread until a request arrives); its
+    // callback gets the timer handle once the timer thread is up.
+    let timers_for_http: Arc<std::sync::OnceLock<TimerHandle>> = Arc::default();
+    let http_runtime = Arc::clone(&runtime);
+    let http_timers = Arc::clone(&timers_for_http);
+    let http = HttpPool::new(move |done: HttpDone, pool: &HttpPoolHandle| {
+        let effects = http_runtime.complete_http(&done.scope, done.id, done.outcome);
+        // Set before any request can be submitted (see below).
+        if let Some(timers) = http_timers.get() {
+            effects.perform_in_background(timers, pool, &format!("[http] {}", done.scope));
+        }
+    });
+
     // One timer thread for every `Delay` effect. A fired timer dispatches
-    // through the runtime and schedules whatever delays that dispatch emits.
+    // through the runtime and performs whatever that dispatch emits.
     let timer_runtime = Arc::clone(&runtime);
+    let timer_http = http.handle();
     let timers = Timers::start(move |fire, timers| {
         let effects = timer_runtime.fire_timer(&fire.scope, &fire.action);
-        effects.schedule_delays(timers);
-        for path in &effects.navigations {
-            eprintln!("[timers] {}:{} asked to navigate to {path}", fire.scope, fire.action);
-        }
+        let source = format!("[timers] {}:{}", fire.scope, fire.action);
+        effects.perform_in_background(timers, &timer_http, &source);
     })?;
+    // First set, cannot fail; nothing was submitted to the pool before it.
+    let _ = timers_for_http.set(timers.handle());
+
+    // What the `on_activated` hooks of boot asked for.
+    runtime
+        .take_pending_effects()
+        .perform_in_background(&timers.handle(), &http.handle(), "[boot]");
 
     // Dropping the handle stops watching; keep it for the server's lifetime.
     let _watcher = reload::spawn_watcher(Arc::clone(&runtime))?;
@@ -287,6 +311,7 @@ pub fn serve(
         runtime,
         policy: Policy::new(port, allow_origins),
         timers: timers.handle(),
+        http: http.handle(),
         body_timeout: body_timeout.unwrap_or(DEFAULT_BODY_TIMEOUT),
     });
     let limiter = Limiter::new(MAX_IN_FLIGHT);
@@ -534,9 +559,11 @@ fn respond(context: &Context, route: Route, body: &[u8]) -> Result<Reply, Runtim
         Route::Patches => Ok(Reply::json(200, &patches_json(&context.runtime.tree_snapshot())?)),
         Route::Dispatch => {
             let dispatch = request::parse_dispatch(body)?;
-            let outcome = context.runtime.dispatch(&dispatch);
-            // Delays go on the timer thread; navigations ride the response.
+            let mut outcome = context.runtime.dispatch(&dispatch);
+            // Delays go on the timer thread and deferred HTTP requests on the
+            // worker pool; navigations ride the response.
             outcome.effects.schedule_delays(&context.timers);
+            outcome.effects.start_http(&context.http);
 
             // State and patches are returned even when the dispatch failed:
             // a cascade can apply some steps before one fails.

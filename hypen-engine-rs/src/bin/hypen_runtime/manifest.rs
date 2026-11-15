@@ -17,7 +17,7 @@
 
 use std::path::{Path, PathBuf};
 
-use hypen_engine::module_host::{ModuleManifest, StorageScope};
+use hypen_engine::module_host::{HostPattern, InvalidHostPattern, ModuleManifest, StorageScope};
 
 use crate::error::RuntimeError;
 use crate::names::{ComponentName, NameError, ScopeName};
@@ -44,6 +44,8 @@ struct RawModule {
     dispatches: Option<Vec<String>>,
     #[serde(default)]
     http: Option<bool>,
+    #[serde(default, rename = "httpHosts")]
+    http_hosts: Option<Vec<String>>,
 }
 
 // ── validated model ─────────────────────────────────────────────────────────
@@ -88,8 +90,10 @@ pub struct Capabilities {
     pub reads: Vec<ScopeName>,
     /// Sibling scopes the module may dispatch to.
     pub dispatches: Vec<ScopeName>,
-    /// Outbound HTTP (`wasi:http`).
+    /// Outbound HTTP: blocking `wasi:http` and deferred `hypen:http/deferred`.
     pub http: bool,
+    /// `httpHosts`: the hosts `http` is limited to. Empty = any host.
+    pub http_hosts: Vec<HostPattern>,
 }
 
 impl Capabilities {
@@ -102,6 +106,7 @@ impl Capabilities {
             reads: self.reads.iter().map(|s| s.as_str().to_string()).collect(),
             dispatches: self.dispatches.iter().map(|s| s.as_str().to_string()).collect(),
             http: self.http,
+            http_hosts: self.http_hosts.clone(),
             ..ModuleManifest::default()
         }
     }
@@ -140,6 +145,10 @@ pub enum ManifestProblem {
     UnknownTarget { target: String },
     #[error("stateless component `{module}` (no `wasm`) cannot be granted capabilities")]
     StatelessGrant { module: String },
+    #[error("{0}")]
+    HostPattern(#[from] InvalidHostPattern),
+    #[error("`httpHosts` narrows the `http` grant, but `http` is not true for this module")]
+    HostsWithoutHttp,
 }
 
 impl ManifestProblem {
@@ -157,6 +166,14 @@ impl ManifestProblem {
             ),
             ManifestProblem::StatelessGrant { .. } => {
                 Some("add a `wasm` for the module, or remove the capability fields".to_string())
+            }
+            ManifestProblem::HostPattern(_) => Some(
+                "`httpHosts` entries look like \"api.example.com\", \"*.example.com\" or \
+                 \"localhost:8080\"; leave the list out to allow any host"
+                    .to_string(),
+            ),
+            ManifestProblem::HostsWithoutHttp => {
+                Some("add `\"http\": true`, or remove `httpHosts`".to_string())
             }
             _ => None,
         }
@@ -230,7 +247,7 @@ impl AppManifest {
                 }
                 None => {
                     let grants_something = m.http == Some(true)
-                        || [&m.storage, &m.reads, &m.dispatches]
+                        || [&m.storage, &m.reads, &m.dispatches, &m.http_hosts]
                             .iter()
                             .any(|list| list.as_ref().is_some_and(|l| !l.is_empty()));
                     if grants_something {
@@ -331,6 +348,18 @@ fn capabilities(
         }
         Ok(out)
     };
+    for (j, pattern) in m.http_hosts.iter().flatten().enumerate() {
+        let pattern: HostPattern = pattern
+            .parse()
+            .map_err(|e: InvalidHostPattern| (format!("modules[{index}].httpHosts[{j}]"), e.into()))?;
+        if !caps.http_hosts.contains(&pattern) {
+            caps.http_hosts.push(pattern);
+        }
+    }
+    if !caps.http_hosts.is_empty() && !caps.http {
+        return Err((format!("modules[{index}].httpHosts"), ManifestProblem::HostsWithoutHttp));
+    }
+
     caps.reads = targets(&m.reads, "reads")?;
     caps.dispatches = targets(&m.dispatches, "dispatches")?;
     Ok(caps)
@@ -559,6 +588,46 @@ mod tests {
             r#"{ "entry": "App", "modules": [ { "name": "App", "ui": "app.hypen", "http": true } ] }"#,
         );
         assert_eq!(field, "modules[0]");
+        assert!(matches!(p, ManifestProblem::StatelessGrant { .. }), "{p}");
+    }
+
+    #[test]
+    fn http_hosts_are_parsed_once_and_need_the_http_grant() {
+        use hypen_engine::module_host::HttpGrant;
+        let dir = app_dir();
+        let m = parse(
+            &dir,
+            r#"{ "entry": "App", "modules": [ { "name": "App", "wasm": "a.wasm", "ui": "app.hypen",
+                 "http": true, "httpHosts": ["API.example.com", "*.example.com:8443", "api.example.com"] } ] }"#,
+        )
+        .expect("valid manifest");
+        let ModuleKind::Stateful { capabilities, .. } = &m.entry().kind else { panic!("stateful") };
+        let hosts: Vec<String> = capabilities.http_hosts.iter().map(ToString::to_string).collect();
+        assert_eq!(hosts, ["api.example.com", "*.example.com:8443"], "canonical, deduped");
+        let host = capabilities.to_manifest("app");
+        assert_eq!(host.http_grant(), HttpGrant::Hosts(capabilities.http_hosts.clone()));
+
+        let (field, p) = problem(
+            &dir,
+            r#"{ "entry": "App", "modules": [ { "name": "App", "wasm": "a.wasm", "ui": "app.hypen",
+                 "http": true, "httpHosts": ["ok.test", "https://api.example.com/v1"] } ] }"#,
+        );
+        assert_eq!(field, "modules[0].httpHosts[1]");
+        assert!(p.to_string().contains("drop the scheme"), "{p}");
+        assert!(p.hint().is_some());
+
+        let (field, p) = problem(
+            &dir,
+            r#"{ "entry": "App", "modules": [ { "name": "App", "wasm": "a.wasm", "ui": "app.hypen",
+                 "httpHosts": ["api.example.com"] } ] }"#,
+        );
+        assert_eq!(field, "modules[0].httpHosts");
+        assert!(matches!(p, ManifestProblem::HostsWithoutHttp), "{p}");
+
+        let (_, p) = problem(
+            &dir,
+            r#"{ "entry": "App", "modules": [ { "name": "App", "ui": "app.hypen", "httpHosts": ["a.test"] } ] }"#,
+        );
         assert!(matches!(p, ManifestProblem::StatelessGrant { .. }), "{p}");
     }
 }
