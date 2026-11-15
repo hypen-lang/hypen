@@ -172,6 +172,12 @@ required-features = ["uniffi", "module-loader"]
 name = "test_hypen_runtime"
 required-features = ["runtime-bin"]
 
+# `hypen-runtime` hardening: admission policy, structured errors, crash
+# recovery, hostile manifests. Also drives the binary as a subprocess.
+[[test]]
+name = "test_hypen_runtime_hardening"
+required-features = ["runtime-bin"]
+
 # wasm-pack metadata: disable wasm-opt since we don't have binaryen
 # available in this sandbox. Local builds can still optimise by hand
 # with `wasm-opt -O3` after `wasm-pack build`.
