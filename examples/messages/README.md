@@ -13,6 +13,7 @@ messages/
     ├── src/
     │   ├── worker.ts     # worker + DO subclass: visitor cookie, socket scope, /img/<id>
     │   ├── messages.ts   # the module: thin action handlers + the inline DSL template
+    │   ├── icons.ts      # inline SVG icons for the chrome (`Icon(@resources.<name>)`)
     │   ├── hub.ts        # ChatHub: SQLite schema, fan-out, presence, typing, receipts, rate limits
     │   ├── state.ts      # per-session state shape (pre-formatted views for the template)
     │   ├── scope.ts      # AsyncLocalStorage: which socket/visitor a handler runs for
@@ -49,12 +50,38 @@ takeover, though, so do one of these:
 - apply the same one-line patch to this example's `node_modules/wrangler`
   yourself.
 
-Without the patch, everything except photo messages works and the `+` button
-stays hidden.
+Without the patch, everything except photo messages works and the photo
+button stays hidden.
 
 `wrangler dev` logs `no allowedOrigins/authenticate configured`. Before
 deploying, set `allowedOrigins` in `worker.ts` to this worker's origin plus the
 launcher's.
+
+## Design
+
+A dark, warm-ink theme with a single signal colour. Lime (`#C9F24D`) always
+means "you" or "live": your own bubbles, unread badges, presence dots, the
+typing indicator and the primary action. Everything else is ink surfaces and
+bone-white text. People are bright tints (`PALETTE` in `text.ts`) with dark
+initials, so every avatar clears 7:1.
+
+- Bubbles keep a tight corner next to their author, like a speech mark, and
+  the corner above it tightens when a bubble continues a group.
+- The conversation list lives outside the screen `When`, so it keeps its
+  scroll position and its rows glide (`.layout(spring)`) when a new message
+  reorders them.
+- Setup shows a live preview of your bubble while you type a name and pick a
+  colour.
+- On a wide window the app is a centred 720 px column. There are no
+  breakpoints: breakpoints follow the viewport, and embedded in the launcher
+  the app is phone-sized inside a desktop viewport.
+
+The template sticks to what both the DOM and the desktop (Vello) renderer
+draw. Where they differ it sets a portable base and lets the DOM refine it:
+`.cornerRadius(20)` under a four-value `.borderRadius(...)` (the desktop
+renderer has uniform corners only), a state-driven `width` next to `display`
+(no `display: none` there), `paddingHorizontal`/`paddingVertical` instead of
+`padding(horizontal:, vertical:)`, borders instead of `box-shadow` rings.
 
 ## Durable Object topology
 
@@ -145,7 +172,7 @@ scroll events.
   your own reaction.
 - **Link previews:** the first URL of a message is fetched server-side after
   the message is sent. The preview appears as a card when it arrives.
-- **Photos:** the `+` button uses `context.device.request("gallery.pick")`,
+- **Photos:** the photo button uses `context.device.request("gallery.pick")`,
   falling back to `file.pick`. The bytes arrive over the device plane, are
   sniffed, and are stored in SQLite.
 - **New-DM notifications:** a toast slides in when a DM arrives in a
@@ -199,12 +226,19 @@ scroll events.
   focus/visibility signal from the client. New DMs therefore use an in-app
   toast. Once a `notification.show` capability exists, `ChatHub.showToast` is
   the place to call it (from the receiving session's context).
-- **`When` case switches reuse the case root node, and the DOM renderer
-  (`@hypen-space/web` 0.6.5) does not clear some removed props.** The engine
-  sends `RemoveProp maxWidth.0` / `overflowY.0`, but the CSS stays, so the
-  setup screen's `max-width: 420px` leaked onto the conversation list. As a
-  workaround, every screen root sets the same prop names (`maxWidth`,
-  `overflowY`, …).
+- **`When` case switches reuse nodes, and the DOM renderer
+  (`@hypen-space/web` 0.6.5) does not clear some removed props.** A case
+  switch diffs the new case against the old one, reusing nodes of the same
+  type at the same position. The engine sends `RemoveProp`, but the CSS stays,
+  so a tile's `height` and `border` from one screen leaked onto a text column
+  of the next, and a removed `padding` wiped the new `paddingTop`. As a
+  workaround, every case sits in its own pair of plain wrappers
+  (`Column`/`Column`, `Column`/`Row`, `Row`/`Column`, `Row`/`Row`): a type
+  change replaces the subtree, so each screen is built fresh. `If`/`Else`
+  branches follow the same rule (same prop names, or different types).
+- **Breakpoint variants follow the viewport, not the embed.** Inside
+  `HypenApp` on a desktop-wide launcher, `md:` variants apply to the
+  phone-sized app. The layout therefore uses none.
 - **`.label()` with an `@{}` binding produces no accessible name.** For
   example, `.label("Colour @{swatch.color}")` inside a `ForEach`: no
   `semantics.name` is emitted. Static labels work.

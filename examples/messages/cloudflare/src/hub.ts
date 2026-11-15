@@ -28,6 +28,7 @@ import { EMPTY_ROOM, EMPTY_TOAST } from "./state";
 import {
   LIMITS,
   PALETTE,
+  paletteColor,
   REACTIONS,
   agoLabel,
   clockTime,
@@ -113,6 +114,8 @@ const OLDER_PAGE = 30;
 const WINDOW_CAP = 300;
 const TYPING_MS = 4000;
 const GROUP_GAP_MS = 5 * 60_000;
+/** Avatar tile behind a room's "#". */
+const ROOM_COLOR = "#262331";
 const TOAST_MS = 5000;
 
 const ROOM_TOPICS: Record<string, string> = {
@@ -213,7 +216,7 @@ export class ChatHub {
 
     const profile = this.visitor(visitorId);
     if (profile) {
-      state.me = { id: profile.id, name: profile.name, color: profile.color, initial: initialOf(profile.name) };
+      state.me = { id: profile.id, name: profile.name, color: paletteColor(profile.color), initial: initialOf(profile.name) };
       this.q("UPDATE visitors SET last_seen = ? WHERE id = ?", Date.now(), visitorId);
       if (state.screen === "setup") state.screen = "list";
     } else {
@@ -596,7 +599,7 @@ export class ChatHub {
           title: authorRow.name,
           text: msg.kind === "image" ? "📷 Photo" : (msg.body ?? ""),
           initial: initialOf(authorRow.name),
-          color: authorRow.color,
+          color: paletteColor(authorRow.color),
         });
       }
     }
@@ -717,7 +720,7 @@ export class ChatHub {
         title: `#${room.title}`,
         subtitle: `${ROOM_TOPICS[room.title] ?? "Public room"} · ${online} online`,
         initial: "#",
-        color: "#334155",
+        color: ROOM_COLOR,
         online: false,
       };
     }
@@ -731,7 +734,7 @@ export class ChatHub {
       title: name,
       subtitle: online ? "Online" : other ? `Last seen ${agoLabel(other.last_seen, Date.now())}` : "Offline",
       initial: initialOf(name),
-      color: other?.color ?? "#94A3B8",
+      color: paletteColor(other?.color),
       online,
     };
   }
@@ -766,12 +769,12 @@ export class ChatHub {
       if (r.kind === "room") {
         title = `#${r.title}`;
         initial = "#";
-        color = "#334155";
+        color = ROOM_COLOR;
       } else {
         const other = who(r.a === c.visitorId ? r.b : r.a);
         title = other?.name ?? "Someone";
         initial = initialOf(title);
-        color = other?.color ?? "#94A3B8";
+        color = paletteColor(other?.color);
         online = !!other && this.isOnline(other.id);
       }
       let preview = r.kind === "room" ? ROOM_TOPICS[r.title] ?? "No messages yet" : "Say hello 👋";
@@ -810,7 +813,7 @@ export class ChatHub {
         id: v.id,
         name: v.name,
         initial: initialOf(v.name),
-        color: v.color,
+        color: paletteColor(v.color),
         online: online.has(v.id),
         status: online.has(v.id) ? "Online" : `Last seen ${agoLabel(v.last_seen, now)}`,
       }))
@@ -887,10 +890,12 @@ export class ChatHub {
       const first = !prev || prev.author !== r.author || r.created - prev.created > GROUP_GAP_MS || dayKey(prev.created, c.tz) !== day;
       const last = !next || next.author !== r.author || next.created - r.created > GROUP_GAP_MS || dayKey(next.created, c.tz) !== day;
       const mine = r.author === c.visitorId;
-      const big = "18px", small = "5px";
+      // The corner next to the author is always tight, like a speech mark; the
+      // corner above it tightens too when the bubble continues a group.
+      const big = "20px", small = "6px";
       const radius = mine
-        ? `${big} ${first ? big : small} ${last ? big : small} ${big}`
-        : `${first ? big : small} ${big} ${big} ${last ? big : small}`;
+        ? `${big} ${first ? big : small} ${small} ${big}`
+        : `${first ? big : small} ${big} ${big} ${small}`;
       const name = r.name ?? "Someone";
       let preview: LinkPreview | null = null;
       if (r.preview) {
@@ -911,7 +916,7 @@ export class ChatHub {
         mine,
         author: name,
         initial: initialOf(name),
-        color: r.color ?? "#94A3B8",
+        color: paletteColor(r.color),
         text: r.body,
         hasText: r.kind === "text" && r.body !== "",
         time: clockTime(r.created, c.tz),

@@ -19,16 +19,32 @@ export const LIMITS = {
   imageBytes: 1024 * 1024, // per image, stored in DO SQLite (< 2 MB row cap)
 } as const;
 
+// Avatar colours: bright tints picked for the dark theme. Initials are drawn
+// in dark ink on top, and every one clears 7:1 against it.
 export const PALETTE = [
-  "#6366F1", // indigo
-  "#EC4899", // pink
-  "#F97316", // orange
-  "#10B981", // emerald
-  "#0EA5E9", // sky
-  "#8B5CF6", // violet
-  "#EF4444", // red
-  "#14B8A6", // teal
+  "#A79BFF", // periwinkle
+  "#FF8FC2", // pink
+  "#FF9A5C", // tangerine
+  "#6FE0A0", // mint
+  "#62C6FF", // sky
+  "#D49BFF", // orchid
+  "#FF7F73", // coral
+  "#FFCB47", // amber
 ] as const;
+
+/** Colours saved before the redesign, mapped onto today's palette by position. */
+const LEGACY_PALETTE = ["#6366F1", "#EC4899", "#F97316", "#10B981", "#0EA5E9", "#8B5CF6", "#EF4444", "#14B8A6"];
+
+/** Neutral avatar colour for someone we know nothing about. */
+export const UNKNOWN_COLOR = "#B4AFC2";
+
+/** A stored colour as a current palette colour (legacy colours are remapped). */
+export function paletteColor(c: unknown): string {
+  if (typeof c !== "string") return UNKNOWN_COLOR;
+  if ((PALETTE as readonly string[]).includes(c)) return c;
+  const legacy = LEGACY_PALETTE.indexOf(c.toUpperCase());
+  return legacy >= 0 ? PALETTE[legacy]! : UNKNOWN_COLOR;
+}
 
 export const REACTIONS = ["👍", "❤️", "😂", "😮", "😢", "🎉"] as const;
 
