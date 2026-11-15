@@ -12,9 +12,11 @@ const COUNTER: &[u8] = include_bytes!("fixtures/counter_module.wasm");
 const ASYNC_COUNTER: &[u8] = include_bytes!("fixtures/async_counter_module.wasm");
 const FETCHER: &[u8] = include_bytes!("fixtures/fetcher_module.wasm");
 
-/// The counter fixtures import `hypen:storage/cloud`; manifests are
-/// deny-by-default, so the grant is spelled out.
+/// Manifests are deny-by-default, so the grants the fixtures need are
+/// spelled out: both counters import `hypen:storage/cloud`, and the async
+/// one also imports `wasi:http` (its `fetch` action).
 const COUNTER_GRANTS: &str = r#"{"storage": ["cloud"]}"#;
+const ASYNC_COUNTER_GRANTS: &str = r#"{"storage": ["cloud"], "http": true}"#;
 
 fn count(state_json: &str) -> i64 {
     let v: serde_json::Value = serde_json::from_str(state_json).unwrap();
@@ -29,7 +31,7 @@ fn ffi_surface_drives_both_abis() {
     let host = HypenModuleHost::new().unwrap();
 
     host.register("counter".into(), COUNTER.to_vec(), COUNTER_GRANTS.into()).unwrap();
-    host.register("acounter".into(), ASYNC_COUNTER.to_vec(), COUNTER_GRANTS.into()).unwrap();
+    host.register("acounter".into(), ASYNC_COUNTER.to_vec(), ASYNC_COUNTER_GRANTS.into()).unwrap();
 
     // v0.1 sync module.
     let id = host.instantiate("counter".into()).unwrap();
