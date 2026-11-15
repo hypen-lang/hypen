@@ -195,8 +195,14 @@ const COMMAND_HELP: Record<string, string> = {
     <Module>.hypen templates and an app.json manifest, runnable with
     ${dim("hypen-runtime --app <outDir>/wasm/app.json")}. The language is detected
     from the project: Cargo.toml (Rust, needs cargo + the wasm32-wasip2
-    target), go.mod (Go, needs tinygo + wit-bindgen-go), else TypeScript
-    (needs jco). --minify / --sourcemap do not apply.
+    target), go.mod (Go, needs tinygo >= 0.39 + wit-bindgen-go), else
+    TypeScript (needs @bytecodealliance/jco); hypen.json "wasm.language"
+    ("ts" | "go" | "rust") overrides detection. --minify / --sourcemap do
+    not apply.
+    Modules are deny-by-default: grant capabilities per module in hypen.json,
+    e.g. ${dim('"wasm": { "modules": { "Cart": { "reads": ["Catalog"],')}
+    ${dim('"dispatches": ["Catalog"], "storage": ["app"], "http": true } } }')}
+    (defaults: no reads/dispatches, local storage only, no HTTP).
 
   ${boldYellow("Examples:")}
     ${dim("$")} hypen build
@@ -331,6 +337,12 @@ interface Config {
   check?: { ignoreRules?: string[] };
   /** Path of the project's theme file (default: `theme.json` when present). */
   theme?: string;
+  /**
+   * `hypen build --target wasm` options, passed through raw and validated by
+   * `parseWasmConfig` (src/build-wasm.ts): `language` override and per-module
+   * capability grants (`modules.<Name>.{reads,dispatches,storage,http}`).
+   */
+  wasm?: unknown;
 }
 
 async function loadConfig(): Promise<Config> {
@@ -372,6 +384,7 @@ async function loadConfig(): Promise<Config> {
                   : undefined,
               }
             : undefined,
+        wasm: config.wasm,
       };
       // Validate port from config file
       if (parsedConfig.port !== undefined) {
@@ -842,15 +855,19 @@ async function buildProject(options: {
     const { buildWasm } = await import("../src/build-wasm.js");
     try {
       await buildWasm({
+        root: process.cwd(),
         components: config.components,
         entry: config.entry,
         outDir: options.outDir || config.outDir || "dist",
         keepTemp: options.keepTemp ?? false,
+        wasm: config.wasm,
       });
     } catch (err: any) {
-      // Toolchain failures (missing tinygo/cargo/jco, a failed compile) are
-      // expected errors: report the message, not a stack trace.
-      console.error(`\n  Error: ${err?.message ?? err}\n`);
+      // buildWasm never exits: config errors, a missing entry and toolchain
+      // failures (missing tinygo/cargo/jco, a failed compile) are thrown as
+      // BuildError — report the message, not a stack trace.
+      const prefix = err?.name === "BuildError" ? "Build failed" : "Error";
+      console.error(`\n  ${prefix}: ${err?.message ?? err}\n`);
       process.exit(1);
     }
     return;

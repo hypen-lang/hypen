@@ -62,9 +62,18 @@
     "@hypen-space/ios-streamer": "^0.1.0"
   },
   "devDependencies": {
+    "@bytecodealliance/jco": "1.42.0",
     "@types/bun": "latest",
     "@types/node": "^20",
     "typescript": "^5"
+  },
+  "peerDependencies": {
+    "@bytecodealliance/jco": "1.42.0"
+  },
+  "peerDependenciesMeta": {
+    "@bytecodealliance/jco": {
+      "optional": true
+    }
   },
   "keywords": [
     "hypen",

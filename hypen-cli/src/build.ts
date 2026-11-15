@@ -33,6 +33,7 @@ import { createHypenSourceValidator } from "./dev-diagnostics.js";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
 import { generateComponentsCode } from "@hypen-space/server";
 import { pink, yellow, dim, boldPink } from "./colors.js";
+import { BuildError } from "./build-error.js";
 import { findPackageRoot, resolveFromProject } from "./dev-resolve.js";
 // Bun inlines the runtime's sources as strings (also when bundling the CLI
 // into dist/), so they can be written next to the generated entries and
@@ -67,12 +68,7 @@ export interface BuildResult {
   files: string[];
 }
 
-export class BuildError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = "BuildError";
-  }
-}
+export { BuildError };
 
 export const ENGINE_ASSET_DIR = "hypen";
 const ENGINE_FILES = ["hypen_engine.js", "hypen_engine_bg.wasm"] as const;

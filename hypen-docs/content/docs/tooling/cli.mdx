@@ -230,6 +230,35 @@ Script-entry projects (`"entry": "./src/app.ts"`, the server-based layout) are b
 
 On failure the build exits 1 with `Build failed: <reason>`, for example when `@hypen-space/web-engine` or `@hypen-space/web` is missing, the entry component doesn't exist, a `.hypen` template doesn't parse (reported as `file:line:col`), or bundling fails.
 
+#### `hypen build --target wasm`
+
+Builds a component project into portable WebAssembly components instead of a site: `<outDir>/wasm/` gets one `<Module>.wasm` per stateful module, each component's `<Module>.hypen` template, and an `app.json` manifest that runs offline with `hypen-runtime --app dist/wasm/app.json`. `--keep-temp` keeps the intermediate files in `<outDir>/.wasm-temp`; `--minify` and `--sourcemap` don't apply.
+
+The language comes from the project: a `Cargo.toml` means Rust (needs `cargo` and `rustup target add wasm32-wasip2`), a `go.mod` means Go (needs TinyGo 0.39 or newer and `wit-bindgen-go`), anything else is TypeScript (needs `@bytecodealliance/jco`: `bun add -d @bytecodealliance/jco@1.42.0`). Set `"wasm": { "language": "ts" | "go" | "rust" }` in `hypen.json` to choose explicitly.
+
+The runtime is deny-by-default: a module can't read or dispatch to other modules, gets only `local` storage and has no outbound HTTP unless `hypen.json` grants it under `wasm.modules`:
+
+```json
+{
+  "wasm": {
+    "modules": {
+      "Cart": { "reads": ["Catalog"], "dispatches": ["Catalog"], "storage": ["app"], "http": true }
+    }
+  }
+}
+```
+
+| Key | Type | Default | Grants |
+|-----|------|---------|--------|
+| `reads` | module names | `[]` | Reading and subscribing to those modules' state (`context.getModule`, `context.on`) |
+| `dispatches` | module names | `[]` | Dispatching actions to those modules |
+| `storage` | `"app"`, `"cloud"` | `[]` | Storage tiers beyond `local`, which is always granted |
+| `http` | boolean | `false` | Outbound HTTP |
+
+Every stateful module is written to `app.json` with all four fields; module names in `reads`/`dispatches` are written lowercased (the runtime's state scopes). An unknown module name, an unknown key or a value of the wrong type fails the build before anything compiles.
+
+In TypeScript modules on the wasm target, `context.router.push`/`replace` navigate, but other router methods, unsubscribing from `context.on`, cross-module `setState`, data sources and `async` handlers throw an error saying they aren't supported yet. Node built-ins (`fs`, `path`, `crypto`, ...) can be imported but throw when used.
+
 ### `hypen generate`
 
 Write a module listing of all discovered components.

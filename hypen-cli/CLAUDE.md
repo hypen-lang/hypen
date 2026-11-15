@@ -114,6 +114,20 @@ Two implementations with intentionally different architectures:
 missing entry component or a taken port — it never calls `process.exit`;
 the CLI wrapper in `bin/hypen.ts` catches and exits.
 
+### Wasm Build (`src/build-wasm.ts`)
+`buildWasm({ root, components, entry, outDir, wasm })` throws `BuildError`
+(`src/build-error.ts`, shared with `build()`) and never exits. `wasm` is the
+raw hypen.json section: `language` (`ts`/`go`/`rust`, overrides
+Cargo.toml/go.mod detection) and `modules.<Name>.{reads,dispatches,storage,http}`
+capability grants, emitted explicitly on every stateful `app.json` entry
+(defaults `[]`/`[]`/`[]`/`false`; the host is deny-by-default). TS modules
+are componentized with the pinned `@bytecodealliance/jco` (optional peer +
+dev dependency; a project-local `node_modules/.bin/jco` overrides it) against
+a per-module world carrying only the granted storage imports. Rust artifacts
+come from `cargo --message-format=json`; a CLI-provisioned crate `wit/`
+(marked `.hypen-provisioned`) is refreshed when it differs from the WIT for the
+crate's ABI. E2E tests: `HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts`.
+
 ### Studio
 `hypen studio` spawns `studio-ui/` as a child process via `bun --hot`, passing config through environment variables (`HYPEN_PROJECT_DIR`, `HYPEN_COMPONENTS_DIR`, `HYPEN_ENTRY`, etc.).
 
