@@ -1,51 +1,30 @@
 //! Integration test driving the `hypen-runtime` binary as a subprocess.
 //!
-//! Run with: `cargo test --features module-loader --test test_hypen_runtime`.
-//! Builds the binary if needed and verifies the stdin→action / stdout→state
-//! REPL works end-to-end, including a `wasi:http` round-trip through a
-//! real TCP server.
-
-#![cfg(feature = "module-loader")]
+//! Run with: `cargo test --features runtime-bin --test test_hypen_runtime`
+//! (cargo builds the binary for the test). Verifies the stdin→action /
+//! stdout→state REPL works end-to-end, including a `wasi:http` round-trip
+//! through a real TCP server.
 
 use std::io::{Read, Write};
 use std::net::TcpListener;
 use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::Once;
 
 const COUNTER: &str = "tests/fixtures/counter_module.wasm";
 const FETCHER: &str = "tests/fixtures/fetcher_module.wasm";
 const EFFECTS: &str = "tests/fixtures/effects_module.wasm";
 
-static BUILD: Once = Once::new();
-
+/// The `hypen-runtime` binary under test. Cargo builds it for this test
+/// target (both declare `required-features = ["runtime-bin"]`) and hands us
+/// its path, so by default the suite drives the binary built from this
+/// checkout. Set `HYPEN_RUNTIME_BIN` to run the suite against another build
+/// (a release binary, or a private copy when several checkouts share one
+/// target dir and would otherwise overwrite each other's `hypen-runtime`).
 fn runtime_path() -> PathBuf {
-    BUILD.call_once(|| {
-        let status = Command::new("cargo")
-            .args([
-                "build",
-                "--features",
-                "module-loader",
-                "--bin",
-                "hypen-runtime",
-            ])
-            .status()
-            .expect("failed to invoke cargo build");
-        assert!(status.success(), "cargo build hypen-runtime failed");
-    });
-
-    // The test binary runs from the crate dir; the workspace target lives
-    // one level up (`../target/...`).
-    let crate_target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("target/debug/hypen-runtime");
-    let crate_local = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/debug/hypen-runtime");
-    if crate_target.exists() {
-        crate_target
-    } else {
-        crate_local
+    match std::env::var_os("HYPEN_RUNTIME_BIN") {
+        Some(path) => PathBuf::from(path),
+        None => PathBuf::from(env!("CARGO_BIN_EXE_hypen-runtime")),
     }
 }
 
@@ -983,8 +962,8 @@ fn start_serve_app_writable() -> (Server, tempfile::TempDir, PathBuf) {
     std::fs::write(
         tmp.path().join("app.json"),
         r#"{ "entry": "App", "modules": [
-            { "name": "App", "wasm": "counter.wasm", "ui": "app.hypen" },
-            { "name": "Counter", "wasm": "counter.wasm", "ui": "counter.hypen" }
+            { "name": "App", "wasm": "counter.wasm", "ui": "app.hypen", "storage": ["cloud"] },
+            { "name": "Counter", "wasm": "counter.wasm", "ui": "counter.hypen", "storage": ["cloud"] }
         ] }"#,
     )
     .unwrap();

@@ -56,11 +56,10 @@ wasmtime-wasi-http = { version = "46", optional = true }
 # impls resolve without real I/O).
 futures-executor = { version = "0.3", optional = true }
 # Tiny synchronous HTTP server used by the `hypen-runtime --serve` mode.
-# Pulled in under module-loader because that's where the binary lives;
-# adds ~no dependencies of its own.
+# Only the binary needs it (`runtime-bin` feature), not library embeds.
 tiny_http = { version = "0.12", optional = true }
 # Debounced filesystem watcher used by `hypen-runtime --serve` to hot-reload
-# the module .wasm when it changes on disk.
+# the module .wasm when it changes on disk. `runtime-bin` only.
 notify-debouncer-mini = { version = "0.7", default-features = false, optional = true }
 
 # WASM JS dependencies (only needed for js feature)
@@ -106,7 +105,13 @@ uniffi = ["dep:uniffi", "dep:thiserror", "device-broker"]
 uniffi-cli = ["uniffi", "uniffi/cli"]
 # Native WASM Component module loader (wasmtime). Lets the engine host
 # `hypen:module` guests on desktop/server/mobile. Native targets only.
-module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:futures-executor", "dep:thiserror", "dep:tiny_http", "dep:notify-debouncer-mini"]
+# This is the library surface (`WasmtimeHost` / `WasmtimeHostAsync` /
+# `DualHost`) that UniFFI / mobile / desktop embeds link.
+module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:futures-executor", "dep:thiserror"]
+# The `hypen-runtime` dev binary: the module loader plus the HTTP server and
+# file watcher that only `--serve` needs. Kept out of `module-loader` so
+# library embeds don't link them.
+runtime-bin = ["module-loader", "dep:tiny_http", "dep:notify-debouncer-mini"]
 # Browser-side module loader: the engine itself runs in wasm and delegates
 # module hosting to a JS shim (jco-based) via wasm-bindgen. Pairs with the
 # `js` feature; requires wasm32 target.
@@ -141,18 +146,31 @@ required-features = ["uniffi-cli"]
 [[bin]]
 name = "hypen-runtime"
 path = "src/bin/hypen_runtime.rs"
-required-features = ["module-loader"]
+required-features = ["runtime-bin"]
 
-# Integration test for the WASM module loader — only built when the
-# native loader feature is enabled.
+# Integration tests for the WASM module loader — only built when the native
+# loader feature is enabled (declared here rather than as an in-file
+# `#![cfg]`, which would still build and link an empty test binary).
 [[test]]
 name = "test_module_host"
 required-features = ["module-loader"]
 
+[[test]]
+name = "test_module_host_async"
+required-features = ["module-loader"]
+
+[[test]]
+name = "test_async_gate_ts"
+required-features = ["module-loader"]
+
+[[test]]
+name = "test_uniffi_host"
+required-features = ["uniffi", "module-loader"]
+
 # Drives the `hypen-runtime` CLI binary as a subprocess.
 [[test]]
 name = "test_hypen_runtime"
-required-features = ["module-loader"]
+required-features = ["runtime-bin"]
 
 # wasm-pack metadata: disable wasm-opt since we don't have binaryen
 # available in this sandbox. Local builds can still optimise by hand
