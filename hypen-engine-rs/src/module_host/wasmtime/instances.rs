@@ -89,6 +89,12 @@ impl<I> InstanceTable<I> {
         }
     }
 
+    /// The slot behind `id`, live or dead; `None` for a destroyed instance
+    /// or an id this table never issued.
+    pub(crate) fn slot(&self, id: ModuleInstanceId) -> Option<&InstanceSlot<I>> {
+        self.slots.get(&id.0)
+    }
+
     /// Why the instance behind `id` is dead; `None` if it is live or unknown.
     pub(crate) fn death_reason(&self, id: ModuleInstanceId) -> Option<&CallFailure> {
         match self.slots.get(&id.0) {

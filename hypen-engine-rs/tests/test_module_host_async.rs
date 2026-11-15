@@ -778,3 +778,41 @@ fn async_reregistering_does_not_change_live_instances() {
         .unwrap();
     assert_eq!(count(&out.state.unwrap()), 1);
 }
+
+/// v0.2 `info` reports `modified-ms` from the same virtual clock `hypen:time`
+/// reads: the stamp is the clock at the write, and a write after a virtual
+/// sleep is stamped later by exactly the sleep.
+#[test]
+fn async_info_reports_modified_ms_from_the_virtual_clock() {
+    let mut host = WasmtimeHostAsync::new().unwrap();
+    host.set_virtual_clock(1_000_000);
+    host.register("counter", ASYNC_COUNTER, ModuleManifest::all("counter"))
+        .unwrap();
+    let id = host.instantiate("counter").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+    let mut run = |state: &[u8], action: &str, payload: &[u8]| {
+        host.dispatch(id, state, HostAction::new(action, payload.to_vec()), &[])
+            .unwrap()
+            .state
+            .unwrap()
+    };
+    let modified = |state: &[u8]| {
+        serde_json::from_slice::<serde_json::Value>(state).unwrap()["modified_ms"].clone()
+    };
+
+    // Nothing persisted yet.
+    let state = run(&state, "modified", b"{}");
+    assert_eq!(modified(&state), serde_json::Value::Null);
+
+    let state = run(&state, "increment", b"{}");
+    let state = run(&state, "modified", b"{}");
+    assert_eq!(modified(&state), 1_000_000);
+
+    // Sleep 250 virtual ms, write again: stamped exactly 250 ms later.
+    let state = run(&state, "tick", br#"{"ms":250}"#);
+    let state = run(&state, "modified", b"{}");
+    assert_eq!(modified(&state), 1_000_000, "a sleep and reads do not restamp");
+    let state = run(&state, "increment", b"{}");
+    let state = run(&state, "modified", b"{}");
+    assert_eq!(modified(&state), 1_000_250);
+}

@@ -44,6 +44,7 @@
 //!
 //! Error mapping is centralised in `error.rs`.
 
+mod cache_dir;
 mod core;
 mod cross_module;
 mod error;
@@ -57,8 +58,8 @@ mod v01;
 mod v02;
 mod wit_glue;
 
-pub use self::core::ExecStrategy;
-pub use self::host::Host;
+pub use self::core::{CompileStats, ExecStrategy};
+pub use self::host::{ComponentCompiler, Host, HostConfig, PrecompiledComponent};
 pub use self::limits::ModuleLimits;
 
 pub(crate) use self::host::Shared;

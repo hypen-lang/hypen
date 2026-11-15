@@ -37,7 +37,10 @@ pub use registry::{BundledRegistry, ModuleRegistry, RegistryError};
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
 mod wasmtime;
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
-pub use wasmtime::{ExecStrategy, Host, ModuleLimits, WasmtimeHost, WasmtimeHostAsync};
+pub use wasmtime::{
+    CompileStats, ComponentCompiler, ExecStrategy, Host, HostConfig, ModuleLimits,
+    PrecompiledComponent, WasmtimeHost, WasmtimeHostAsync,
+};
 
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
 mod dual;
@@ -209,6 +212,55 @@ impl ModuleManifest {
     }
 }
 
+/// What a host knows about an instance id, without calling into the guest.
+/// See [`ModuleHost::instance_status`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum InstanceStatus {
+    /// The instance exists and can be called.
+    Live,
+    /// A trap or deadline overrun killed the instance; every call on it
+    /// answers [`HostError::DeadInstance`] until it is destroyed. `reason`
+    /// says what killed it (module, export, cause) when the host kept it.
+    Dead { reason: Option<String> },
+    /// The host has no instance under this id: it was destroyed, or the id
+    /// was never issued by this host.
+    Gone,
+    /// The host cannot tell without calling the instance (the default for
+    /// hosts that do not track instance health).
+    Unknown,
+}
+
+impl InstanceStatus {
+    /// Whether a call on the instance is certain to answer
+    /// [`HostError::DeadInstance`]. `Unknown` is not known to be dead.
+    pub fn is_dead(&self) -> bool {
+        matches!(self, InstanceStatus::Dead { .. } | InstanceStatus::Gone)
+    }
+}
+
+/// A capability a module manifest can grant and a host can refuse to link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum ManifestGrant {
+    /// [`ModuleManifest::http`]: `wasi:http` (outbound HTTP).
+    Http,
+    /// An entry of [`ModuleManifest::storage`]: `hypen:storage/<scope>`.
+    Storage(StorageScope),
+}
+
+/// An import a registered component needs and its manifest does not grant —
+/// the structured form of a link-time capability denial. See
+/// [`ModuleHost::denied_capabilities`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DeniedCapability {
+    /// The import as the component names it, e.g. `hypen:storage/cloud@0.1.0`
+    /// (for `wasi:http`, the first of its interfaces the component imports).
+    pub import: String,
+    /// The manifest grant that would allow it.
+    pub grant: ManifestGrant,
+}
+
 /// Errors a [`ModuleHost`] can return.
 #[derive(Debug)]
 pub enum HostError {
@@ -316,4 +368,30 @@ pub trait ModuleHost: Send {
     /// routing without an out-of-band action list. A `"*"` entry means
     /// "accept any action name".
     fn actions(&mut self, id: ModuleInstanceId) -> Result<Vec<String>, HostError>;
+
+    /// Whether the instance behind `id` is live, dead or gone — answered
+    /// from the host's own bookkeeping, **without calling the guest**. This
+    /// is how an embedder tells a crashed instance from one whose export
+    /// merely returned an error, instead of probing it with a call or
+    /// reading error text.
+    ///
+    /// The default is [`InstanceStatus::Unknown`]: a host that does not
+    /// track instance health claims nothing.
+    fn instance_status(&self, id: ModuleInstanceId) -> InstanceStatus {
+        let _ = id;
+        InstanceStatus::Unknown
+    }
+
+    /// The capabilities the component registered under `name` imports but
+    /// its manifest does not grant. Non-empty exactly when
+    /// [`instantiate`](Self::instantiate) of `name` is refused for missing
+    /// grants (the [`HostError::Instantiate`] message says the same in
+    /// prose); empty for a linkable module and for an unknown name.
+    ///
+    /// The default is empty: a host that does not gate capabilities at link
+    /// time, or cannot say which were missing, reports none.
+    fn denied_capabilities(&self, name: &str) -> Vec<DeniedCapability> {
+        let _ = name;
+        Vec::new()
+    }
 }

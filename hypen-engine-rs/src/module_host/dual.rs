@@ -14,11 +14,11 @@
 use std::collections::HashMap;
 use std::path::Path;
 
-use super::kv::KvBackend;
 use super::wasmtime::{IdTag, Shared};
 use super::{
-    ExecStrategy, HostAction, HostError, ModuleHost, ModuleInstanceId, ModuleLimits,
-    ModuleManifest, ReducerOutput, SiblingState, WasmtimeHost, WasmtimeHostAsync,
+    CompileStats, ComponentCompiler, DeniedCapability, ExecStrategy, HostAction, HostConfig,
+    HostError, InstanceStatus, ModuleHost, ModuleInstanceId, ModuleLimits, ModuleManifest,
+    ReducerOutput, SiblingState, WasmtimeHost, WasmtimeHostAsync,
 };
 
 /// Which `hypen:module` world a component targets.
@@ -59,6 +59,8 @@ pub fn detect_abi(bytes: &[u8]) -> ModuleAbi {
 pub struct DualHost {
     v1: WasmtimeHost,
     v2: WasmtimeHostAsync,
+    /// The core and storage both hosts run on.
+    shared: Shared,
     /// Which host holds the current registration of each name.
     routing: HashMap<String, ModuleAbi>,
 }
@@ -85,17 +87,41 @@ impl DualHost {
         strategy: ExecStrategy,
         data_dir: Option<&Path>,
     ) -> Result<Self, HostError> {
-        let backend = match data_dir {
-            Some(dir) => KvBackend::file_backed(dir.join("storage.json"))
-                .map_err(|e| HostError::Runtime(e.to_string()))?,
-            None => KvBackend::default(),
-        };
-        let shared = Shared::new(strategy, backend)?;
+        Self::with_config(&HostConfig {
+            limits,
+            strategy,
+            data_dir: data_dir.map(Path::to_path_buf),
+            ..HostConfig::default()
+        })
+    }
+
+    /// Construction from a full [`HostConfig`] — everything
+    /// [`with_options`](Self::with_options) takes, plus the opt-in on-disk
+    /// compilation cache ([`HostConfig::cache_dir`]).
+    ///
+    /// The core's compiled-component table is shared by both ABI hosts and
+    /// keyed by content, so registering the same bytes under several names
+    /// compiles them once.
+    pub fn with_config(config: &HostConfig) -> Result<Self, HostError> {
+        let shared = Shared::new(config)?;
         Ok(Self {
-            v1: WasmtimeHost::on(shared.clone(), limits, IdTag::Plain),
-            v2: WasmtimeHostAsync::on(shared, limits, IdTag::Async),
+            v1: WasmtimeHost::on(shared.clone(), config.limits, IdTag::Plain),
+            v2: WasmtimeHostAsync::on(shared.clone(), config.limits, IdTag::Async),
+            shared,
             routing: HashMap::new(),
         })
+    }
+
+    /// A handle that compiles components for this host from other threads
+    /// (see [`ComponentCompiler`]).
+    pub fn compiler(&self) -> ComponentCompiler {
+        self.shared.compiler()
+    }
+
+    /// How many components were compiled and how many registrations reused
+    /// one, across both ABI hosts (see [`CompileStats`]).
+    pub fn compile_stats(&self) -> CompileStats {
+        self.shared.compile_stats()
     }
 
     /// The two inner hosts, for host-specific knobs (e.g.
@@ -116,6 +142,14 @@ impl DualHost {
         match IdTag::of(id) {
             IdTag::Plain => self.v1.death_reason(id),
             IdTag::Async => self.v2.death_reason(id),
+        }
+    }
+
+    /// The host that issued `id`, by shared reference.
+    fn host_ref(&self, id: ModuleInstanceId) -> &dyn ModuleHost {
+        match IdTag::of(id) {
+            IdTag::Plain => &self.v1,
+            IdTag::Async => &self.v2,
         }
     }
 
@@ -204,5 +238,17 @@ impl ModuleHost for DualHost {
 
     fn actions(&mut self, id: ModuleInstanceId) -> Result<Vec<String>, HostError> {
         self.host_of(id).actions(id)
+    }
+
+    fn instance_status(&self, id: ModuleInstanceId) -> InstanceStatus {
+        self.host_ref(id).instance_status(id)
+    }
+
+    fn denied_capabilities(&self, name: &str) -> Vec<DeniedCapability> {
+        match self.routing.get(name) {
+            Some(ModuleAbi::V1Sync) => self.v1.denied_capabilities(name),
+            Some(ModuleAbi::V2Async) => self.v2.denied_capabilities(name),
+            None => Vec::new(),
+        }
     }
 }

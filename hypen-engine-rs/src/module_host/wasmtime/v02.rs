@@ -17,14 +17,13 @@
 //! v0.2 adds `hypen:time/clock`, and its blob buckets move payloads as
 //! `stream<u8>` (unimplemented here, as in v0.1).
 
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use wasmtime::component::{Accessor, HasData, InstancePre, Resource, StreamReader};
 use wasmtime::Store;
 
-use super::host::{Abi, Host, Reply};
+use super::host::{Abi, Reply};
 use super::linker::{self, Capability, LinkFn};
 use super::storage::{Blob, Bucket};
 use super::store::{HostClock, HostState};
@@ -345,16 +344,5 @@ impl Abi for V02 {
         store
             .run_concurrent(async |a| b.call_actions(a).await)
             .await?
-    }
-}
-
-impl Host<V02> {
-    /// Swap in a deterministic clock starting at `start_ms`. Returns the
-    /// counter so callers can advance or inspect it; existing instances
-    /// keep the clock they were created with.
-    pub fn set_virtual_clock(&mut self, start_ms: u64) -> Arc<AtomicU64> {
-        let counter = Arc::new(AtomicU64::new(start_ms));
-        self.set_clock(HostClock::Virtual(Arc::clone(&counter)));
-        counter
     }
 }

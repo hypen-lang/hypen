@@ -1,15 +1,20 @@
 //! What every native host shares: the wasmtime engine, the epoch ticker, the
 //! tokio runtime, and the deadline every guest call runs under.
 
+use std::collections::HashMap;
 use std::future::Future;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::path::Path;
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, PoisonError, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use wasmtime::{Config, Engine, Store};
+use sha2::{Digest, Sha256};
+use wasmtime::component::Component;
+use wasmtime::{Cache, CacheConfig, Config, Engine, Store};
 
-use super::error::Fault;
+use super::cache_dir;
+use super::error::{Fault, RegisterError};
 use super::store::HostState;
 use crate::module_host::HostError;
 
@@ -81,14 +86,59 @@ impl Deadline {
 /// reference stops the ticker.
 pub(crate) struct HostCore {
     engine: Engine,
+    /// Components compiled on this engine that something still uses, by the
+    /// SHA-256 of their bytes (see [`HostCore::compile`]).
+    compiled: Mutex<HashMap<[u8; 32], Arc<CompileSlot>>>,
+    /// wasmtime's on-disk compilation cache, when a cache directory was
+    /// configured. Kept for its hit/miss counters; the engine holds its own
+    /// handle and does the reading and writing.
+    disk_cache: Option<Cache>,
+    compilations: AtomicU64,
+    reuses: AtomicU64,
     /// `Some` until drop (`shutdown_background` consumes the runtime).
     runtime: Option<tokio::runtime::Runtime>,
     epoch_stop: Arc<AtomicBool>,
     ticker: Option<JoinHandle<()>>,
 }
 
+/// A component compiled for one [`HostCore`]'s engine. Registrations hold it
+/// (and instances hold their registration), so the compiled code lives
+/// exactly as long as something can still instantiate or run it.
+pub(crate) struct Compiled {
+    pub(crate) component: Component,
+}
+
+/// One entry of the compiled-component table. The mutex serialises
+/// compilations of the same bytes (a second caller waits for the first and
+/// reuses its result); the `Weak` lets the code be freed once the last
+/// registration and instance using it are gone.
+#[derive(Default)]
+struct CompileSlot(Mutex<Weak<Compiled>>);
+
+/// How often this core compiled a component and how often it reused one.
+/// A diagnostic: the numbers only ever grow.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CompileStats {
+    /// Components this host compiled itself or loaded from the disk cache
+    /// (`disk_hits` says how many of them were loads).
+    pub compiled: u64,
+    /// `register` / `precompile` calls answered from the in-memory table
+    /// without touching the compiler or the disk.
+    pub reused: u64,
+    /// Compilations wasmtime answered from the on-disk cache. Always 0
+    /// without a cache directory.
+    pub disk_hits: u64,
+    /// Compilations that missed the on-disk cache and wrote a new entry.
+    pub disk_misses: u64,
+}
+
 impl HostCore {
-    pub(crate) fn new(strategy: ExecStrategy) -> Result<Arc<Self>, HostError> {
+    /// `cache_dir`, when given, turns on wasmtime's on-disk compilation
+    /// cache there (see `cache_dir.rs` for what the directory must be).
+    pub(crate) fn new(
+        strategy: ExecStrategy,
+        cache_dir: Option<&Path>,
+    ) -> Result<Arc<Self>, HostError> {
         let mut config = Config::new();
         config.wasm_component_model(true);
         // CM-async (the v0.2 world) is default-enabled with wasmtime's
@@ -106,6 +156,22 @@ impl HostCore {
                 .target(pulley_triple())
                 .map_err(|e| HostError::Runtime(format!("pulley target: {e}")))?;
         }
+        let disk_cache = match cache_dir {
+            Some(dir) => {
+                let dir = cache_dir::prepare(dir)?;
+                let mut cache_config = CacheConfig::new();
+                cache_config.with_directory(&dir);
+                let cache = Cache::new(cache_config).map_err(|e| {
+                    HostError::Runtime(format!(
+                        "compilation cache directory {}: {e:#}",
+                        dir.display()
+                    ))
+                })?;
+                config.cache(Some(cache.clone()));
+                Some(cache)
+            }
+            None => None,
+        };
         let engine = Engine::new(&config)
             .map_err(|e| HostError::Runtime(format!("wasmtime engine: {e}")))?;
 
@@ -133,6 +199,10 @@ impl HostCore {
 
         Ok(Arc::new(Self {
             engine,
+            compiled: Mutex::new(HashMap::new()),
+            disk_cache,
+            compilations: AtomicU64::new(0),
+            reuses: AtomicU64::new(0),
             runtime: Some(runtime),
             epoch_stop,
             ticker: Some(ticker),
@@ -141,6 +211,73 @@ impl HostCore {
 
     pub(crate) fn engine(&self) -> &Engine {
         &self.engine
+    }
+
+    /// Compile `bytes` for this engine — once per distinct component.
+    ///
+    /// The table is keyed by the SHA-256 of the bytes alone, and that is the
+    /// whole key: the table belongs to one engine (so one compiler
+    /// configuration), and a compiled component does not depend on the
+    /// module ABI, the registered name or the manifest — those only decide
+    /// how it is *linked*, which happens per registration. So one app that
+    /// registers the same `.wasm` under several scopes, a hot reload of
+    /// several scopes backed by one file, and both hosts of a `DualHost`
+    /// all share one compilation.
+    ///
+    /// Entries are weak: the returned handle keeps the code alive, and a
+    /// component nothing references any more is recompiled if it comes back
+    /// (or loaded from the disk cache, when one is configured). Failures
+    /// are not remembered.
+    pub(crate) fn compile(&self, bytes: &[u8]) -> Result<Arc<Compiled>, RegisterError> {
+        // Say what the bytes are before wasmtime says what they are not.
+        match bytes.get(..8) {
+            Some([0, b'a', b's', b'm', version @ ..]) => {
+                // Layer 0 (`01 00 00 00`) is a core module, layer 1 a
+                // component.
+                if version == [1, 0, 0, 0] {
+                    return Err(RegisterError::CoreModule);
+                }
+            }
+            _ => return Err(RegisterError::NotWasm),
+        }
+        let digest: [u8; 32] = Sha256::digest(bytes).into();
+        let slot = {
+            let mut table = self.compiled.lock().unwrap_or_else(PoisonError::into_inner);
+            // Forget components nothing uses any more, so the table does not
+            // grow with every rebuild a hot-reload session goes through.
+            // (A slot someone else holds is mid-compilation: keep it.)
+            table.retain(|key, slot| {
+                *key == digest
+                    || Arc::strong_count(slot) > 1
+                    || slot.0.try_lock().is_ok_and(|code| code.strong_count() > 0)
+            });
+            Arc::clone(table.entry(digest).or_default())
+        };
+        // Held across the compilation: a concurrent caller with the same
+        // bytes waits here and then finds the result.
+        let mut code = slot.0.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some(compiled) = code.upgrade() {
+            self.reuses.fetch_add(1, Ordering::Relaxed);
+            return Ok(compiled);
+        }
+        let component = Component::from_binary(&self.engine, bytes)
+            .map_err(|e| RegisterError::Invalid(format!("{e:#}")))?;
+        self.compilations.fetch_add(1, Ordering::Relaxed);
+        let compiled = Arc::new(Compiled { component });
+        *code = Arc::downgrade(&compiled);
+        Ok(compiled)
+    }
+
+    pub(crate) fn compile_stats(&self) -> CompileStats {
+        let (disk_hits, disk_misses) = self.disk_cache.as_ref().map_or((0, 0), |cache| {
+            (cache.cache_hits() as u64, cache.cache_misses() as u64)
+        });
+        CompileStats {
+            compiled: self.compilations.load(Ordering::Relaxed),
+            reused: self.reuses.load(Ordering::Relaxed),
+            disk_hits,
+            disk_misses,
+        }
     }
 
     /// Run one guest call on `store` under `deadline`.
@@ -211,7 +348,7 @@ mod tests {
     /// to the core drops, nothing keeps ticking the engine's epoch.
     #[test]
     fn dropping_the_core_stops_the_epoch_ticker() {
-        let core = HostCore::new(ExecStrategy::Jit).unwrap();
+        let core = HostCore::new(ExecStrategy::Jit, None).unwrap();
         let stop = Arc::clone(&core.epoch_stop);
         let second = Arc::clone(&core);
         drop(core);
@@ -228,7 +365,7 @@ mod tests {
     /// The deadline wrapper cancels a future that never completes.
     #[test]
     fn block_on_cancels_at_the_deadline() {
-        let core = HostCore::new(ExecStrategy::Jit).unwrap();
+        let core = HostCore::new(ExecStrategy::Jit, None).unwrap();
         let started = std::time::Instant::now();
         let res = core.block_on(Duration::from_millis(50), std::future::pending::<()>());
         assert!(res.is_err());

@@ -1834,3 +1834,447 @@ fn a_corrupt_storage_file_is_an_error_at_startup() {
         assert!(host.set_storage_path(&file).is_err(), "{body:?}");
     }
 }
+
+// ── storage: modification times ─────────────────────────────────────────────
+
+/// v0.1 `info` reports when an entry was last written, by the host clock:
+/// under the virtual clock the stamps are exact, an overwrite restamps, and
+/// the stamp survives the process through the storage file.
+#[test]
+fn info_reports_modified_ms_from_the_host_clock() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kv.json");
+    {
+        let mut host = WasmtimeHost::new().unwrap();
+        host.set_storage_path(&file).unwrap();
+        let clock = host.set_virtual_clock(1_700_000_000_000);
+        let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+
+        assert_eq!(probe_call(&mut host, m, "kv-modified", &["local", "ns", "k"]), "none");
+        assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "ns", "k", "v1"]), "ok");
+        assert_eq!(
+            probe_call(&mut host, m, "kv-modified", &["local", "ns", "k"]),
+            "1700000000000"
+        );
+        clock.store(1_700_000_005_000, std::sync::atomic::Ordering::Relaxed);
+        assert_eq!(probe_call(&mut host, m, "kv-set", &["app", "ns", "shared", "x"]), "ok");
+        // Reading does not restamp; the first entry keeps its time.
+        assert_eq!(probe_call(&mut host, m, "kv-get", &["local", "ns", "k"]), "some:v1");
+        assert_eq!(
+            probe_call(&mut host, m, "kv-modified", &["local", "ns", "k"]),
+            "1700000000000"
+        );
+        assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "ns", "k", "v2"]), "ok");
+        assert_eq!(
+            probe_call(&mut host, m, "kv-modified", &["local", "ns", "k"]),
+            "1700000005000"
+        );
+    }
+    // A second host (a later process) reads the persisted stamps, whatever
+    // its own clock says.
+    let mut host = WasmtimeHost::new().unwrap();
+    host.set_storage_path(&file).unwrap();
+    host.set_virtual_clock(5);
+    let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    assert_eq!(
+        probe_call(&mut host, m, "kv-modified", &["local", "ns", "k"]),
+        "1700000005000"
+    );
+    assert_eq!(
+        probe_call(&mut host, m, "kv-modified", &["app", "ns", "shared"]),
+        "1700000005000"
+    );
+}
+
+/// On the real clock a fresh write is stamped with the current wall time.
+#[test]
+fn modified_ms_defaults_to_the_wall_clock() {
+    let now_ms = || {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis()
+    };
+    let mut host = WasmtimeHost::new().unwrap();
+    let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    let before = now_ms();
+    assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "ns", "k", "v"]), "ok");
+    let stamp: u128 = probe_call(&mut host, m, "kv-modified", &["local", "ns", "k"])
+        .parse()
+        .unwrap();
+    assert!((before..=now_ms()).contains(&stamp), "{before} <= {stamp}");
+}
+
+/// A storage file in the previous format (no modification times) still
+/// loads: its entries read `modified-ms` 0 until rewritten, and the first
+/// module call that stores something rewrites the file in the current format.
+#[test]
+fn a_previous_format_storage_file_is_migrated() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kv.json");
+    // "hello" under module m, namespace "ns", key "k", as format 2 wrote it.
+    let v2 = r#"{"format":2,"partitions":[{"scope":"local","owner":"m","entries":{"persistent/2:nsk":"aGVsbG8="}}]}"#;
+    std::fs::write(&file, v2).unwrap();
+
+    let mut host = WasmtimeHost::new().unwrap();
+    host.set_storage_path(&file).unwrap();
+    host.set_virtual_clock(42);
+    let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    assert_eq!(probe_call(&mut host, m, "kv-get", &["local", "ns", "k"]), "some:hello");
+    assert_eq!(probe_call(&mut host, m, "kv-modified", &["local", "ns", "k"]), "0");
+    assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "ns", "k2", "x"]), "ok");
+    let text = std::fs::read_to_string(&file).unwrap();
+    assert!(text.starts_with(r#"{"format":3,"#), "{text}");
+    assert!(text.contains(r#""persistent/2:nsk":{"v":"aGVsbG8=","m":0}"#), "{text}");
+    assert!(text.contains(r#""m":42"#), "{text}");
+}
+
+// ── liveness and link denials as data ───────────────────────────────────────
+
+/// `instance_status` tells live, dead (with what killed it) and gone apart
+/// without calling the guest — on the plain host and through `DualHost`.
+#[test]
+fn instance_status_reports_liveness_without_a_guest_call() {
+    use hypen_engine::module_host::{DualHost, InstanceStatus};
+
+    fn check(host: &mut dyn ModuleHost) {
+        let id = probe_instance(host, "m", ModuleManifest::all("m"));
+        let bystander = probe_instance(host, "other", ModuleManifest::all("other"));
+        assert_eq!(host.instance_status(id), InstanceStatus::Live);
+        assert!(!host.instance_status(id).is_dead());
+
+        // A module-level error is not a death.
+        assert!(matches!(
+            host.dispatch(id, b"{}", HostAction::new("kv-set", Vec::new()), &[]),
+            Err(HostError::ModuleError(_))
+        ));
+        assert_eq!(host.instance_status(id), InstanceStatus::Live);
+
+        assert!(matches!(
+            host.dispatch(id, b"{}", HostAction::new("trap", Vec::new()), &[]),
+            Err(HostError::Trap(_))
+        ));
+        match host.instance_status(id) {
+            InstanceStatus::Dead { reason: Some(reason) } => {
+                assert!(reason.contains("module 'm' export `dispatch` trapped"), "{reason}");
+            }
+            other => panic!("expected Dead with a reason, got {other:?}"),
+        }
+        assert!(host.instance_status(id).is_dead());
+        assert_eq!(host.instance_status(bystander), InstanceStatus::Live);
+
+        host.destroy(id).unwrap();
+        assert_eq!(host.instance_status(id), InstanceStatus::Gone);
+        assert_eq!(
+            host.instance_status(ModuleInstanceId(u64::MAX >> 1)),
+            InstanceStatus::Gone,
+            "never issued"
+        );
+    }
+
+    check(&mut WasmtimeHost::new().unwrap());
+    let mut dual = DualHost::new().unwrap();
+    check(&mut dual);
+    // An async-host instance through the mux.
+    dual.register("a", ASYNC_COUNTER_V02, ModuleManifest::all("a")).unwrap();
+    let a = dual.instantiate("a").unwrap();
+    let state = dual.init(a, b"{}").unwrap();
+    assert_eq!(dual.instance_status(a), InstanceStatus::Live);
+    let limits_hit = dual.dispatch(a, &state, HostAction::new("nope", Vec::new()), &[]);
+    assert!(matches!(limits_hit, Err(HostError::ModuleError(_))));
+    assert_eq!(dual.instance_status(a), InstanceStatus::Live);
+    dual.destroy(a).unwrap();
+    assert_eq!(dual.instance_status(a), InstanceStatus::Gone);
+}
+
+/// The link-time denial is available as data: which import, which manifest
+/// grant — every one of them, not only the first.
+#[test]
+fn denied_capabilities_lists_every_missing_grant() {
+    use hypen_engine::module_host::{DeniedCapability, DualHost, ManifestGrant};
+    const FETCHER: &[u8] = include_bytes!("fixtures/fetcher_module.wasm");
+
+    fn check(host: &mut dyn ModuleHost) {
+        host.register("cart", COUNTER, ModuleManifest::default()).unwrap();
+        assert_eq!(
+            host.denied_capabilities("cart"),
+            vec![DeniedCapability {
+                import: "hypen:storage/cloud@0.1.0".into(),
+                grant: ManifestGrant::Storage(StorageScope::Cloud),
+            }]
+        );
+        assert!(matches!(host.instantiate("cart"), Err(HostError::Instantiate(_))));
+
+        // Storage granted, network not.
+        let storage_only = ModuleManifest {
+            storage: vec![StorageScope::App, StorageScope::Cloud],
+            ..ModuleManifest::default()
+        };
+        host.register("net", FETCHER, storage_only).unwrap();
+        let denied = host.denied_capabilities("net");
+        let grants: Vec<ManifestGrant> = denied.iter().map(|d| d.grant).collect();
+        assert_eq!(grants, [ManifestGrant::Http], "{denied:?}");
+        assert!(denied[0].import.starts_with("wasi:http/"), "{denied:?}");
+
+        // Nothing granted: every missing grant is listed, each once.
+        host.register("net", FETCHER, ModuleManifest::default()).unwrap();
+        let grants: Vec<ManifestGrant> =
+            host.denied_capabilities("net").iter().map(|d| d.grant).collect();
+        assert!(grants.contains(&ManifestGrant::Http), "{grants:?}");
+        let mut unique = grants.clone();
+        unique.dedup();
+        assert_eq!(unique.len(), grants.len(), "{grants:?}");
+
+        // A linkable module and an unknown name deny nothing.
+        host.register("cart", COUNTER, ModuleManifest::all("cart")).unwrap();
+        assert!(host.denied_capabilities("cart").is_empty());
+        assert!(host.denied_capabilities("nobody").is_empty());
+    }
+
+    check(&mut WasmtimeHost::new().unwrap());
+    check(&mut DualHost::new().unwrap());
+}
+
+// ── compilation: once per component, optionally cached on disk ──────────────
+
+/// The same bytes registered under several names — and re-registered — are
+/// compiled once; different bytes are compiled separately; and both hosts
+/// of a `DualHost` share the table.
+#[test]
+fn a_component_is_compiled_once_however_often_it_is_registered() {
+    use hypen_engine::module_host::DualHost;
+
+    let mut host = DualHost::new().unwrap();
+    assert_eq!(host.compile_stats().compiled, 0);
+    for name in ["counter", "counter__a", "counter__b"] {
+        host.register(name, COUNTER, ModuleManifest::all(name)).unwrap();
+    }
+    let stats = host.compile_stats();
+    assert_eq!((stats.compiled, stats.reused), (1, 2), "{stats:?}");
+    // Each name is still its own module, with its own grants and instances.
+    let a = host.instantiate("counter__a").unwrap();
+    let b = host.instantiate("counter__b").unwrap();
+    let state = host.init(a, b"{}").unwrap();
+    let out = host
+        .dispatch(a, &state, HostAction::new("increment", b"{}".to_vec()), &[])
+        .unwrap();
+    assert_eq!(count(&out.state.unwrap()), 1);
+    assert_eq!(count(&host.init(b, b"{}").unwrap()), 0, "its own local storage");
+
+    // A hot reload of unchanged bytes, under a different manifest.
+    host.register("counter", COUNTER, ModuleManifest::default()).unwrap();
+    assert_eq!(host.compile_stats().compiled, 1);
+    assert!(!host.denied_capabilities("counter").is_empty());
+
+    // Different bytes are a different component — also on the other ABI.
+    host.register("mirror", MIRROR, ModuleManifest::all("mirror")).unwrap();
+    host.register("async", ASYNC_COUNTER_V02, ModuleManifest::all("async")).unwrap();
+    host.register("async2", ASYNC_COUNTER_V02, ModuleManifest::all("async2")).unwrap();
+    let stats = host.compile_stats();
+    assert_eq!((stats.compiled, stats.reused), (3, 4), "{stats:?}");
+    assert_eq!((stats.disk_hits, stats.disk_misses), (0, 0), "no disk cache configured");
+
+    // Bytes that do not compile are not remembered as compiled.
+    assert!(host.register("bad", b"\0asm\x0d\0\x01\0garbage", ModuleManifest::default()).is_err());
+    assert_eq!(host.compile_stats().compiled, 3);
+}
+
+/// Compiled code is kept only while a registration or instance uses it: once
+/// every name has moved to other bytes and the old instances are gone, the
+/// old component is forgotten (and would be compiled again).
+#[test]
+fn compiled_code_is_released_when_nothing_uses_it() {
+    let mut host = WasmtimeHost::new().unwrap();
+    host.register("m", COUNTER, ModuleManifest::all("m")).unwrap();
+    let id = host.instantiate("m").unwrap();
+    host.register("m", MIRROR, ModuleManifest::all("m")).unwrap();
+    // The live instance still runs the old code, so it is still there.
+    host.register("again", COUNTER, ModuleManifest::all("again")).unwrap();
+    assert_eq!(host.compile_stats().compiled, 2);
+    host.register("again", MIRROR, ModuleManifest::all("again")).unwrap();
+    host.destroy(id).unwrap();
+    // No registration and no instance of COUNTER is left.
+    host.register("back", COUNTER, ModuleManifest::all("back")).unwrap();
+    assert_eq!(host.compile_stats().compiled, 3);
+}
+
+/// `ComponentCompiler` compiles off to the side (another thread, no `&mut`
+/// host); the registration that follows reuses the result.
+#[test]
+fn precompiling_on_another_thread_spares_register_the_compilation() {
+    use hypen_engine::module_host::DualHost;
+
+    let mut host = DualHost::new().unwrap();
+    let compiler = host.compiler();
+    let precompiled = std::thread::spawn(move || compiler.precompile("counter", COUNTER))
+        .join()
+        .unwrap()
+        .unwrap();
+    assert_eq!(host.compile_stats().compiled, 1);
+    host.register("counter", COUNTER, ModuleManifest::all("counter")).unwrap();
+    let stats = host.compile_stats();
+    assert_eq!((stats.compiled, stats.reused), (1, 1), "{stats:?}");
+    drop(precompiled);
+    let id = host.instantiate("counter").unwrap();
+    assert_eq!(count(&host.init(id, b"{}").unwrap()), 0);
+
+    // Bad bytes fail in `precompile`, naming the label.
+    let err = host.compiler().precompile("broken", b"not wasm").unwrap_err();
+    assert!(matches!(err, HostError::Instantiate(_)), "{err}");
+    assert!(err.to_string().contains("module 'broken' cannot be registered"), "{err}");
+    // The compiler outlives the host it came from without keeping it usable.
+    let compiler = host.compiler();
+    drop(host);
+    assert!(compiler.precompile("late", COUNTER).is_ok());
+}
+
+/// With a cache directory, a second host (a later process) loads the
+/// compiled component from disk instead of compiling; a host with another
+/// engine configuration does not share the entry; a corrupted entry is
+/// recompiled, never trusted.
+#[test]
+fn the_disk_cache_spares_a_later_host_the_compilation() {
+    use hypen_engine::module_host::{DualHost, HostConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let cache_dir = dir.path().join("cache");
+    let mut config = HostConfig::default();
+    config.cache_dir = Some(cache_dir.clone());
+
+    let run = |config: &HostConfig| {
+        let mut host = DualHost::with_config(config).unwrap();
+        host.register("counter", COUNTER, ModuleManifest::all("counter")).unwrap();
+        let id = host.instantiate("counter").unwrap();
+        let state = host.init(id, b"{}").unwrap();
+        let out = host
+            .dispatch(id, &state, HostAction::new("increment", b"{}".to_vec()), &[])
+            .unwrap();
+        assert_eq!(count(&out.state.unwrap()), 1);
+        host.compile_stats()
+    };
+
+    let cold = run(&config);
+    assert_eq!((cold.disk_hits, cold.disk_misses), (0, 1), "{cold:?}");
+    let warm = run(&config);
+    assert_eq!((warm.disk_hits, warm.disk_misses), (1, 0), "{warm:?}");
+
+    // Another engine configuration (the interpreter) has its own entries.
+    let mut interpreted = config.clone();
+    interpreted.strategy = ExecStrategy::Interpreter;
+    let other = run(&interpreted);
+    assert_eq!((other.disk_hits, other.disk_misses), (0, 1), "{other:?}");
+    assert_eq!(run(&interpreted).disk_hits, 1);
+
+    // Corrupt every cached artifact: the next host must not load any.
+    fn files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                files(&path, out);
+            } else {
+                out.push(path);
+            }
+        }
+    }
+    let mut cached = Vec::new();
+    files(&cache_dir, &mut cached);
+    assert!(!cached.is_empty(), "the cache wrote something");
+    for path in &cached {
+        std::fs::write(path, b"this is not a compiled component").unwrap();
+    }
+    let recompiled = run(&config);
+    assert_eq!(recompiled.disk_hits, 0, "{recompiled:?}");
+}
+
+/// A cache directory that cannot be trusted or used is an error at host
+/// construction, naming the directory — never a silent fallback to loading
+/// from it.
+#[test]
+fn an_unusable_cache_directory_fails_host_construction() {
+    use hypen_engine::module_host::{DualHost, HostConfig};
+
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("not-a-dir");
+    std::fs::write(&file, "x").unwrap();
+    let mut config = HostConfig::default();
+    config.cache_dir = Some(file);
+    let err = match DualHost::with_config(&config) {
+        Ok(_) => panic!("a file was accepted as the cache directory"),
+        Err(e) => e,
+    };
+    assert!(matches!(err, HostError::Runtime(_)), "{err}");
+    assert!(err.to_string().contains("not-a-dir"), "{err}");
+    assert!(err.to_string().contains("is not a directory"), "{err}");
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shared = dir.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        config.cache_dir = Some(shared);
+        let err = match WasmtimeHost::with_config(&config) {
+            Ok(_) => panic!("a world-writable cache directory was accepted"),
+            Err(e) => e,
+        };
+        assert!(err.to_string().contains("writable by other users"), "{err}");
+    }
+}
+
+/// Startup cost of a large component (the ~14 MB TS fixture, which embeds a
+/// JS engine), phase by phase. Not a test — a measurement:
+///
+/// ```text
+/// cargo test [--release] --features module-loader --test test_module_host \
+///     startup_timing -- --ignored --nocapture
+/// ```
+#[test]
+#[ignore = "measurement; run explicitly with --ignored --nocapture"]
+fn startup_timing() {
+    use hypen_engine::module_host::{DualHost, HostConfig};
+
+    let bytes = std::fs::read(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/tests/fixtures/ts_counter_module.wasm"
+    ))
+    .unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let limits = ModuleLimits {
+        max_call: Duration::from_secs(600),
+        ..ModuleLimits::default()
+    };
+    let ms = |d: Duration| format!("{:>9.1} ms", d.as_secs_f64() * 1e3);
+
+    for strategy in [ExecStrategy::Jit, ExecStrategy::Interpreter] {
+        for (label, cached) in [("no disk cache", false), ("disk cache, cold", true), ("disk cache, warm", true)] {
+            let mut config = HostConfig::default();
+            config.limits = limits;
+            config.strategy = strategy;
+            if cached {
+                config.cache_dir = Some(dir.path().join(format!("{strategy:?}")));
+            }
+            let mut host = DualHost::with_config(&config).unwrap();
+
+            let t = Instant::now();
+            host.register("ts", &bytes, ModuleManifest::all("ts")).unwrap();
+            let register = t.elapsed();
+            let t = Instant::now();
+            host.register("ts__b", &bytes, ModuleManifest::all("ts__b")).unwrap();
+            let register_again = t.elapsed();
+            let t = Instant::now();
+            let id = host.instantiate("ts").unwrap();
+            let instantiate = t.elapsed();
+            let t = Instant::now();
+            let state = host.init(id, b"{}").unwrap();
+            let init = t.elapsed();
+            let t = Instant::now();
+            host.dispatch(id, &state, HostAction::new("increment", b"{}".to_vec()), &[])
+                .unwrap();
+            let dispatch = t.elapsed();
+            println!(
+                "{strategy:?} / {label:<17} register {}  2nd name {}  instantiate {}  init {}  dispatch {}",
+                ms(register), ms(register_again), ms(instantiate), ms(init), ms(dispatch)
+            );
+        }
+    }
+}

@@ -24,7 +24,7 @@ use wasmtime::Trap;
 use super::limits::TotalMemoryLimiter;
 use super::linker::Capability;
 use crate::module_host::kv::ModuleName;
-use crate::module_host::HostError;
+use crate::module_host::{DeniedCapability, HostError, ManifestGrant};
 
 /// A guest entry point the host calls.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -216,6 +216,23 @@ pub(crate) struct DeniedImport {
     /// The import as the component names it, e.g. `hypen:storage/cloud@0.1.0`.
     pub import: String,
     pub capability: Capability,
+}
+
+impl DeniedImport {
+    /// The public form. Only capabilities a manifest can grant are ever
+    /// denied (the others are linked for every module), so this is `None`
+    /// for nothing that [`inspect`](super::linker::inspect) produces.
+    pub(crate) fn to_public(&self) -> Option<DeniedCapability> {
+        let grant = match self.capability {
+            Capability::Http => ManifestGrant::Http,
+            Capability::Storage(scope) => ManifestGrant::Storage(scope),
+            Capability::EngineState | Capability::Time => return None,
+        };
+        Some(DeniedCapability {
+            import: self.import.clone(),
+            grant,
+        })
+    }
 }
 
 pub(crate) fn capability_denied(module: &ModuleName, denied: &[DeniedImport]) -> HostError {

@@ -8,23 +8,24 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::atomic::AtomicU64;
 use std::sync::Arc;
 
-use wasmtime::component::{Component, InstancePre, Linker};
+use wasmtime::component::{InstancePre, Linker};
 use wasmtime::Store;
 
-use super::core::{Deadline, ExecStrategy, HostCore};
+use super::core::{CompileStats, Compiled, Deadline, ExecStrategy, HostCore};
 use super::cross_module::Acl;
 use super::error::{self, CallFailure, DeniedImport, Export, RegisterError};
-use super::instances::{IdTag, InstanceTable};
+use super::instances::{IdTag, InstanceSlot, InstanceTable};
 use super::limits::ModuleLimits;
 use super::linker::{self, Capability, LinkFn};
 use super::storage::SharedKv;
 use super::store::{HostClock, HostState};
 use crate::module_host::kv::{KvBackend, ModuleName};
 use crate::module_host::{
-    HostAction, HostError, ModuleHost, ModuleInstanceId, ModuleManifest, ReducerOutput,
-    SiblingState,
+    DeniedCapability, HostAction, HostError, InstanceStatus, ModuleHost, ModuleInstanceId,
+    ModuleManifest, ReducerOutput, SiblingState,
 };
 
 /// What an export that can fail at the module level returns: the outer
@@ -110,6 +111,9 @@ enum Linkage<A: Abi> {
 struct Registration<A: Abi> {
     name: ModuleName,
     linkage: Linkage<A>,
+    /// Keeps the compiled component in the core's table for as long as this
+    /// registration (or an instance created from it) exists.
+    _code: Arc<Compiled>,
     /// Cross-module grants, from the manifest's `reads` / `dispatches`.
     acl: Arc<Acl>,
 }
@@ -129,11 +133,26 @@ pub(crate) struct Shared {
 }
 
 impl Shared {
-    pub(crate) fn new(strategy: ExecStrategy, backend: KvBackend) -> Result<Self, HostError> {
+    /// Build the core and storage backend `config` describes.
+    pub(crate) fn new(config: &HostConfig) -> Result<Self, HostError> {
+        let backend = match &config.data_dir {
+            Some(dir) => KvBackend::file_backed(dir.join("storage.json")).map_err(storage_error)?,
+            None => KvBackend::default(),
+        };
         Ok(Self {
-            core: HostCore::new(strategy)?,
+            core: HostCore::new(config.strategy, config.cache_dir.as_deref())?,
             kv: SharedKv::new(backend),
         })
+    }
+
+    pub(crate) fn compiler(&self) -> ComponentCompiler {
+        ComponentCompiler {
+            core: Arc::clone(&self.core),
+        }
+    }
+
+    pub(crate) fn compile_stats(&self) -> CompileStats {
+        self.core.compile_stats()
     }
 
     /// Persist what the call that just ended wrote. A failed flush must not
@@ -144,6 +163,82 @@ impl Shared {
         if let Err(e) = self.kv.flush() {
             eprintln!("hypen: {e}; changes are kept in memory and the next call retries");
         }
+    }
+}
+
+/// How to build a native host. `Default` is the default limits, JIT
+/// execution, in-memory storage and no on-disk compilation cache; set the
+/// fields that differ:
+///
+/// ```ignore
+/// let mut config = HostConfig::default();
+/// config.cache_dir = Some("/home/me/.cache/my-app/wasm".into());
+/// let host = DualHost::with_config(&config)?;
+/// ```
+#[derive(Clone, Debug, Default)]
+#[non_exhaustive]
+pub struct HostConfig {
+    /// Bounds on every instance the host creates.
+    pub limits: ModuleLimits,
+    /// JIT (Cranelift) or interpreter (Pulley).
+    pub strategy: ExecStrategy,
+    /// Persist `local`/`app` storage to `<data_dir>/storage.json`. `None`
+    /// keeps storage in memory.
+    pub data_dir: Option<PathBuf>,
+    /// Keep compiled components in this directory across processes, so a
+    /// component is compiled once per (wasmtime version, engine
+    /// configuration, component bytes) instead of once per process.
+    /// **Off unless set**, because the directory is trusted: a file in it
+    /// is code the process will run. It is created `0700` if missing and
+    /// refused if other users can write to it — see the `cache_dir` module
+    /// docs in `module_host/wasmtime/` for the full trust statement.
+    pub cache_dir: Option<PathBuf>,
+}
+
+/// Compiles components for a host from any thread, without borrowing the
+/// host — so a slow compilation (seconds for a component embedding a JS
+/// engine) does not have to happen inside whatever lock guards the host.
+/// Obtain one from [`Host::compiler`] / `DualHost::compiler`.
+///
+/// [`precompile`](Self::precompile) the bytes, keep the returned
+/// [`PrecompiledComponent`] alive, then `register` the same bytes: the
+/// registration finds the compiled code instead of compiling again.
+#[derive(Clone)]
+pub struct ComponentCompiler {
+    core: Arc<HostCore>,
+}
+
+impl ComponentCompiler {
+    /// Compile `bytes` (or find them already compiled). `label` names the
+    /// module in the error if the bytes are not a compilable component.
+    ///
+    /// Blocks the calling thread for the duration of the compilation; a
+    /// concurrent `precompile` or `register` of the same bytes waits for
+    /// this one and reuses its result.
+    pub fn precompile(&self, label: &str, bytes: &[u8]) -> Result<PrecompiledComponent, HostError> {
+        self.core
+            .compile(bytes)
+            .map(|code| PrecompiledComponent { _code: code })
+            .map_err(|e| e.into_host_error(label))
+    }
+}
+
+/// Keeps a component compiled by [`ComponentCompiler::precompile`] available
+/// to `register`. Drop it once the bytes are registered (the registration
+/// keeps the code from then on) or no longer wanted.
+pub struct PrecompiledComponent {
+    _code: Arc<Compiled>,
+}
+
+impl std::fmt::Debug for PrecompiledComponent {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PrecompiledComponent").finish_non_exhaustive()
+    }
+}
+
+impl std::fmt::Debug for ComponentCompiler {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ComponentCompiler").finish_non_exhaustive()
     }
 }
 
@@ -187,8 +282,18 @@ impl<A: Abi> Host<A> {
     /// ([`ExecStrategy::Interpreter`] = Pulley, for JIT-forbidden platforms
     /// such as iOS).
     pub fn with_options(limits: ModuleLimits, strategy: ExecStrategy) -> Result<Self, HostError> {
-        let shared = Shared::new(strategy, KvBackend::default())?;
-        Ok(Self::on(shared, limits, IdTag::Plain))
+        Self::with_config(&HostConfig {
+            limits,
+            strategy,
+            ..HostConfig::default()
+        })
+    }
+
+    /// Create a host from a full [`HostConfig`] (limits, execution strategy,
+    /// persistent storage directory, on-disk compilation cache).
+    pub fn with_config(config: &HostConfig) -> Result<Self, HostError> {
+        let shared = Shared::new(config)?;
+        Ok(Self::on(shared, config.limits, IdTag::Plain))
     }
 
     /// Create a host on an existing core and storage backend, so `DualHost`
@@ -233,49 +338,58 @@ impl<A: Abi> Host<A> {
         self.instances.death_reason(id).map(ToString::to_string)
     }
 
+    /// A handle that compiles components for this host from other threads
+    /// (see [`ComponentCompiler`]).
+    pub fn compiler(&self) -> ComponentCompiler {
+        self.shared.compiler()
+    }
+
+    /// How many components this host's core compiled and how many
+    /// registrations reused one (a diagnostic; see [`CompileStats`]).
+    pub fn compile_stats(&self) -> CompileStats {
+        self.shared.compile_stats()
+    }
+
+    /// Swap in a deterministic clock starting at `start_ms`: `hypen:time`
+    /// reads return the counter and `sleep-ms` advances it without waiting
+    /// (v0.2), and storage writes are stamped with it (`modified-ms`, both
+    /// ABIs). Returns the counter so callers can advance or inspect it;
+    /// existing instances keep the clock they were created with.
+    pub fn set_virtual_clock(&mut self, start_ms: u64) -> Arc<AtomicU64> {
+        let counter = Arc::new(AtomicU64::new(start_ms));
+        self.clock = HostClock::Virtual(Arc::clone(&counter));
+        counter
+    }
+
     /// Forget a registration (used when a name moves to the other ABI).
     /// Existing instances keep running the code they were created from.
     pub(crate) fn unregister(&mut self, name: &str) {
         self.modules.remove(name);
     }
 
-    pub(crate) fn set_clock(&mut self, clock: HostClock) {
-        self.clock = clock;
-    }
-
     fn deadline(&self) -> Deadline {
         Deadline::after(self.limits.max_call)
     }
 
-    /// Compile and type-check a component for registration.
+    /// Compile (once per distinct component, see [`HostCore::compile`]) and
+    /// type-check a component for registration.
     fn prepare(
         &self,
         bytes: &[u8],
         manifest: &ModuleManifest,
-    ) -> Result<Linkage<A>, RegisterError> {
-        // Say what the bytes are before wasmtime says what they are not.
-        match bytes.get(..8) {
-            Some([0, b'a', b's', b'm', version @ ..]) => {
-                // Layer 0 (`01 00 00 00`) is a core module, layer 1 a
-                // component.
-                if version == [1, 0, 0, 0] {
-                    return Err(RegisterError::CoreModule);
-                }
-            }
-            _ => return Err(RegisterError::NotWasm),
-        }
+    ) -> Result<(Arc<Compiled>, Linkage<A>), RegisterError> {
+        let code = self.shared.core.compile(bytes)?;
         let engine = self.shared.core.engine();
-        let component = Component::from_binary(engine, bytes)
-            .map_err(|e| RegisterError::Invalid(format!("{e:#}")))?;
+        let component = &code.component;
 
-        let denied = linker::inspect::<A>(engine, &component, manifest)?;
+        let denied = linker::inspect::<A>(engine, component, manifest)?;
         if !denied.is_empty() {
-            return Ok(Linkage::Denied(denied));
+            return Ok((code, Linkage::Denied(denied)));
         }
         let linker: Linker<HostState> = linker::build::<A>(engine, manifest)
             .map_err(|e| RegisterError::Host(format!("{e:#}")))?;
         let pre = linker
-            .instantiate_pre(&component)
+            .instantiate_pre(component)
             .map_err(|e| RegisterError::Unlinkable {
                 world: A::WORLD,
                 why: format!("{e:#}"),
@@ -284,7 +398,7 @@ impl<A: Abi> Host<A> {
             world: A::WORLD,
             why: format!("{e:#}"),
         })?;
-        Ok(Linkage::Ready(pre))
+        Ok((code, Linkage::Ready(pre)))
     }
 
     /// Run one export of a live instance under the per-call deadline.
@@ -384,13 +498,14 @@ impl<A: Abi> ModuleHost for Host<A> {
         component_bytes: &[u8],
         manifest: ModuleManifest,
     ) -> Result<(), HostError> {
-        let linkage = self
+        let (code, linkage) = self
             .prepare(component_bytes, &manifest)
             .map_err(|e| e.into_host_error(name))?;
         let name = ModuleName::new(name);
         let registration = Registration {
             name: name.clone(),
             linkage,
+            _code: code,
             acl: Arc::new(Acl::from_manifest(&manifest)),
         };
         self.modules.insert(name, Arc::new(registration));
@@ -509,5 +624,24 @@ impl<A: Abi> ModuleHost for Host<A> {
         self.call(id, Export::Actions, async |b, store| {
             A::actions(b, store).await.map(Ok)
         })
+    }
+
+    fn instance_status(&self, id: ModuleInstanceId) -> InstanceStatus {
+        match self.instances.slot(id) {
+            Some(InstanceSlot::Live(_)) => InstanceStatus::Live,
+            Some(InstanceSlot::Dead { reason }) => InstanceStatus::Dead {
+                reason: Some(reason.to_string()),
+            },
+            None => InstanceStatus::Gone,
+        }
+    }
+
+    fn denied_capabilities(&self, name: &str) -> Vec<DeniedCapability> {
+        match self.modules.get(name).map(|r| &r.linkage) {
+            Some(Linkage::Denied(denied)) => {
+                denied.iter().filter_map(DeniedImport::to_public).collect()
+            }
+            Some(Linkage::Ready(_)) | None => Vec::new(),
+        }
     }
 }
