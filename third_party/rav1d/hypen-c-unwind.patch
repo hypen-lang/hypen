@@ -1,0 +1,1436 @@
+diff -ru rav1d-1.1.0/include/dav1d/picture.rs rav1d/include/dav1d/picture.rs
+--- rav1d-1.1.0/include/dav1d/picture.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/include/dav1d/picture.rs	2026-11-15 15:16:04.912033835 +0000
+@@ -618,7 +618,7 @@
+     /// [`allocator_data`]: Dav1dPicture::allocator_data
+     /// [`release_picture_callback`]: Self::release_picture_callback
+     pub alloc_picture_callback: Option<
+-        unsafe extern "C" fn(
++        unsafe extern "C-unwind" fn(
+             pic: *mut Dav1dPicture,
+             cookie: Option<SendSyncNonNull<c_void>>,
+         ) -> Dav1dResult,
+@@ -660,7 +660,7 @@
+     /// [`dav1d_get_picture`]: crate::src::lib::dav1d_get_picture
+     /// [`alloc_picture_callback`]: Self::alloc_picture_callback
+     pub release_picture_callback: Option<
+-        unsafe extern "C" fn(pic: *mut Dav1dPicture, cookie: Option<SendSyncNonNull<c_void>>) -> (),
++        unsafe extern "C-unwind" fn(pic: *mut Dav1dPicture, cookie: Option<SendSyncNonNull<c_void>>) -> (),
+     >,
+ }
+ 
+@@ -699,7 +699,7 @@
+     ///
+     /// If frame threading is used, accesses to [`Self::cookie`] must be thread-safe,
+     /// i.e. [`Self::cookie`] must be [`Send`]` + `[`Sync`].
+-    pub alloc_picture_callback: unsafe extern "C" fn(
++    pub alloc_picture_callback: unsafe extern "C-unwind" fn(
+         pic: *mut Dav1dPicture,
+         cookie: Option<SendSyncNonNull<c_void>>,
+     ) -> Dav1dResult,
+@@ -713,7 +713,7 @@
+     /// If frame threading is used, accesses to [`Self::cookie`] must be thread-safe,
+     /// i.e. [`Self::cookie`] must be [`Send`]` + `[`Sync`].
+     pub release_picture_callback:
+-        unsafe extern "C" fn(pic: *mut Dav1dPicture, cookie: Option<SendSyncNonNull<c_void>>) -> (),
++        unsafe extern "C-unwind" fn(pic: *mut Dav1dPicture, cookie: Option<SendSyncNonNull<c_void>>) -> (),
+ }
+ 
+ impl TryFrom<Dav1dPicAllocator> for Rav1dPicAllocator {
+diff -ru rav1d-1.1.0/src/c_box.rs rav1d/src/c_box.rs
+--- rav1d-1.1.0/src/c_box.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/c_box.rs	2026-11-15 15:16:04.895078763 +0000
+@@ -8,7 +8,7 @@
+ use std::ptr::drop_in_place;
+ use std::ptr::NonNull;
+ 
+-pub type FnFree = unsafe extern "C" fn(ptr: *const u8, cookie: Option<SendSyncNonNull<c_void>>);
++pub type FnFree = unsafe extern "C-unwind" fn(ptr: *const u8, cookie: Option<SendSyncNonNull<c_void>>);
+ 
+ /// A `free` "closure", i.e. a [`FnFree`] and an enclosed context [`Self::cookie`].
+ #[derive(Debug)]
+diff -ru rav1d-1.1.0/src/cdef.rs rav1d/src/cdef.rs
+--- rav1d-1.1.0/src/cdef.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/cdef.rs	2026-11-15 15:16:04.891527593 +0000
+@@ -43,7 +43,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn cdef(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn cdef(
+     dst_ptr: *mut DynPixel,
+     stride: ptrdiff_t,
+     left: *const [LeftPixelRow2px<DynPixel>; 8],
+@@ -115,7 +115,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn cdef_dir(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn cdef_dir(
+     dst_ptr: *const DynPixel,
+     dst_stride: ptrdiff_t,
+     variance: &mut c_uint,
+@@ -373,7 +373,7 @@
+ ///
+ /// Must be called by [`cdef::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn cdef_filter_block_c_erased<BD: BitDepth, const W: usize, const H: usize>(
++unsafe extern "C-unwind" fn cdef_filter_block_c_erased<BD: BitDepth, const W: usize, const H: usize>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     left: *const [LeftPixelRow2px<DynPixel>; 8],
+@@ -418,7 +418,7 @@
+ ///
+ /// Must be called by [`cdef_dir::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn cdef_find_dir_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn cdef_find_dir_c_erased<BD: BitDepth>(
+     _img_ptr: *const DynPixel,
+     _stride: ptrdiff_t,
+     variance: &mut c_uint,
+@@ -512,7 +512,7 @@
+ mod neon {
+     use super::*;
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn padding(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn padding(
+         tmp: *mut u16,
+         src: *const DynPixel,
+         src_stride: ptrdiff_t,
+@@ -554,7 +554,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn filter(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn filter(
+         dst: *mut DynPixel,
+         dst_stride: ptrdiff_t,
+         tmp: *const u16,
+@@ -613,7 +613,7 @@
+     }
+ 
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn cdef_filter_neon_erased<
++    pub unsafe extern "C-unwind" fn cdef_filter_neon_erased<
+         BD: BitDepth,
+         const W: usize,
+         const H: usize,
+diff -ru rav1d-1.1.0/src/cpu.rs rav1d/src/cpu.rs
+--- rav1d-1.1.0/src/cpu.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/cpu.rs	2026-11-15 15:16:04.909553109 +0000
+@@ -250,7 +250,7 @@
+ 
+ #[no_mangle]
+ #[cold]
+-pub extern "C" fn dav1d_set_cpu_flags_mask(mask: c_uint) {
++pub extern "C-unwind" fn dav1d_set_cpu_flags_mask(mask: c_uint) {
+     rav1d_set_cpu_flags_mask(mask)
+ }
+ 
+diff -ru rav1d-1.1.0/src/filmgrain.rs rav1d/src/filmgrain.rs
+--- rav1d-1.1.0/src/filmgrain.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/filmgrain.rs	2026-11-15 15:16:04.895147138 +0000
+@@ -47,7 +47,7 @@
+ const SUB_GRAIN_WIDTH: usize = 44;
+ const SUB_GRAIN_HEIGHT: usize = 38;
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn generate_grain_y(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn generate_grain_y(
+     buf: *mut GrainLut<DynEntry>,
+     data: &Dav1dFilmGrainData,
+     bitdepth_max: c_int,
+@@ -68,7 +68,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn generate_grain_uv(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn generate_grain_uv(
+     buf: *mut GrainLut<DynEntry>,
+     buf_y: *const GrainLut<DynEntry>,
+     data: &Dav1dFilmGrainData,
+@@ -95,7 +95,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn fgy_32x32xn(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn fgy_32x32xn(
+     dst_row_ptr: *mut DynPixel,
+     src_row_ptr: *const DynPixel,
+     stride: ptrdiff_t,
+@@ -157,7 +157,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn fguv_32x32xn(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn fguv_32x32xn(
+     dst_row_ptr: *mut DynPixel,
+     src_row_ptr: *const DynPixel,
+     stride: ptrdiff_t,
+@@ -281,7 +281,7 @@
+ ///
+ /// Must be called by [`generate_grain_y::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn generate_grain_y_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn generate_grain_y_c_erased<BD: BitDepth>(
+     buf: *mut GrainLut<DynEntry>,
+     data: &Dav1dFilmGrainData,
+     bitdepth_max: c_int,
+@@ -478,7 +478,7 @@
+ /// Must be called by [`generate_grain_uv::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+ #[inline(never)]
+-unsafe extern "C" fn generate_grain_uv_c_erased<
++unsafe extern "C-unwind" fn generate_grain_uv_c_erased<
+     BD: BitDepth,
+     const NM: usize,
+     const IS_SUBX: bool,
+@@ -527,7 +527,7 @@
+ ///
+ /// Must be called by [`fgy_32x32xn::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn fgy_32x32xn_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn fgy_32x32xn_c_erased<BD: BitDepth>(
+     _dst_row_ptr: *mut DynPixel,
+     _src_row_ptr: *const DynPixel,
+     _stride: ptrdiff_t,
+@@ -857,7 +857,7 @@
+ /// Must be called by [`fguv_32x32xn::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+ #[inline(never)]
+-unsafe extern "C" fn fguv_32x32xn_c_erased<
++unsafe extern "C-unwind" fn fguv_32x32xn_c_erased<
+     BD: BitDepth,
+     const NM: usize,
+     const IS_SX: bool,
+@@ -917,7 +917,7 @@
+ mod neon {
+     use super::*;
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn fgy_32x32xn_neon(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn fgy_32x32xn_neon(
+         dst: *mut DynPixel,
+         src: *const DynPixel,
+         stride: ptrdiff_t,
+@@ -979,7 +979,7 @@
+     ///
+     /// Must be called by [`fgy_32x32xn::Fn::call`].
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn fgy_32x32xn_neon_erased<BD: BitDepth>(
++    pub unsafe extern "C-unwind" fn fgy_32x32xn_neon_erased<BD: BitDepth>(
+         dst_row_ptr: *mut DynPixel,
+         src_row_ptr: *const DynPixel,
+         stride: ptrdiff_t,
+@@ -1061,7 +1061,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn fguv_32x32xn_neon(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn fguv_32x32xn_neon(
+         dst: *mut DynPixel,
+         src: *const DynPixel,
+         stride: ptrdiff_t,
+@@ -1134,7 +1134,7 @@
+     ///
+     /// Must be called by [`fguv_32x32xn::Fn::call`].
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn fguv_32x32xn_neon_erased<
++    pub unsafe extern "C-unwind" fn fguv_32x32xn_neon_erased<
+         BD: BitDepth,
+         const NM: usize,
+         const IS_SX: bool,
+diff -ru rav1d-1.1.0/src/ipred.rs rav1d/src/ipred.rs
+--- rav1d-1.1.0/src/ipred.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/ipred.rs	2026-11-15 15:16:04.905553109 +0000
+@@ -55,7 +55,7 @@
+ #[cfg(all(feature = "asm", target_arch = "x86_64"))]
+ use crate::include::common::bitdepth::bpc_fn;
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn angular_ipred(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn angular_ipred(
+     dst_ptr: *mut DynPixel,
+     stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -113,7 +113,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn cfl_ac(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn cfl_ac(
+     ac: &mut [i16; SCRATCH_AC_TXTP_LEN],
+     y_ptr: *const DynPixel,
+     stride: ptrdiff_t,
+@@ -142,7 +142,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn cfl_pred(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn cfl_pred(
+     dst_ptr: *mut DynPixel,
+     stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -190,7 +190,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn pal_pred(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn pal_pred(
+     dst_ptr: *mut DynPixel,
+     stride: ptrdiff_t,
+     pal: *const [DynPixel; 8],
+@@ -390,7 +390,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_dc_c_erased<BD: BitDepth, const DC_GEN: u8>(
++unsafe extern "C-unwind" fn ipred_dc_c_erased<BD: BitDepth, const DC_GEN: u8>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -418,7 +418,7 @@
+ ///
+ /// Must be called by [`cfl_pred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_cfl_c_erased<BD: BitDepth, const DC_GEN: u8>(
++unsafe extern "C-unwind" fn ipred_cfl_c_erased<BD: BitDepth, const DC_GEN: u8>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -445,7 +445,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_dc_128_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_dc_128_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     _topleft: *const DynPixel,
+@@ -469,7 +469,7 @@
+ ///
+ /// Must be called by [`cfl_pred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_cfl_128_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_cfl_128_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     _topleft: *const DynPixel,
+@@ -512,7 +512,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_v_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_v_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -556,7 +556,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_h_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_h_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -614,7 +614,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_paeth_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_paeth_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     tl_ptr: *const DynPixel,
+@@ -665,7 +665,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_smooth_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_smooth_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -712,7 +712,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_smooth_v_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_smooth_v_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -759,7 +759,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_smooth_h_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_smooth_h_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft: *const DynPixel,
+@@ -1195,7 +1195,7 @@
+ ///
+ /// Must be called by [`angular_ipred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn ipred_z_c_erased<BD: BitDepth, const Z: usize>(
++unsafe extern "C-unwind" fn ipred_z_c_erased<BD: BitDepth, const Z: usize>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft_in: *const DynPixel,
+@@ -1285,7 +1285,7 @@
+     }
+ }
+ 
+-unsafe extern "C" fn ipred_filter_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn ipred_filter_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     topleft_in: *const DynPixel,
+@@ -1385,7 +1385,7 @@
+ ///
+ /// Must be called by [`cfl_ac::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn cfl_ac_c_erased<BD: BitDepth, const IS_SS_HOR: bool, const IS_SS_VER: bool>(
++unsafe extern "C-unwind" fn cfl_ac_c_erased<BD: BitDepth, const IS_SS_HOR: bool, const IS_SS_VER: bool>(
+     ac: &mut [i16; SCRATCH_AC_TXTP_LEN],
+     _y_ptr: *const DynPixel,
+     _stride: ptrdiff_t,
+@@ -1431,7 +1431,7 @@
+ ///
+ /// Must be called by [`pal_pred::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn pal_pred_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn pal_pred_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     pal: *const [DynPixel; 8],
+@@ -1461,7 +1461,7 @@
+     #[cfg(feature = "bitdepth_16")]
+     use crate::include::common::bitdepth::BitDepth16;
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn z13_fill(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn z13_fill(
+         dst: *mut DynPixel,
+         stride: ptrdiff_t,
+         topleft: *const DynPixel,
+@@ -1489,7 +1489,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn z2_fill(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn z2_fill(
+         dst: *mut DynPixel,
+         stride: ptrdiff_t,
+         top: *const DynPixel,
+@@ -1520,7 +1520,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn z1_upsample_edge(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn z1_upsample_edge(
+         out: *mut DynPixel,
+         hsz: c_int,
+         in_0: *const DynPixel,
+@@ -1545,7 +1545,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn z1_filter_edge(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn z1_filter_edge(
+         out: *mut DynPixel,
+         sz: c_int,
+         in_0: *const DynPixel,
+@@ -1569,7 +1569,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn z2_upsample_edge(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn z2_upsample_edge(
+         out: *mut DynPixel,
+         hsz: c_int,
+         in_0: *const DynPixel,
+@@ -1592,7 +1592,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn reverse(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn reverse(
+         dst: *mut DynPixel,
+         src: *const DynPixel,
+         n: c_int,
+@@ -1612,7 +1612,7 @@
+         // Since it's not behind a ptr, we can't make it a `DynPixel`
+         // and call it uniformly with `bd_fn!`.
+ 
+-        extern "C" {
++        extern "C-unwind" {
+             #[cfg(feature = "bitdepth_8")]
+             fn dav1d_ipred_pixel_set_8bpc_neon(
+                 out: *mut DynPixel,
+@@ -1976,7 +1976,7 @@
+     ///
+     /// Must be called from [`angular_ipred::Fn::call`].
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn ipred_z_neon_erased<BD: BitDepth, const Z: usize>(
++    pub unsafe extern "C-unwind" fn ipred_z_neon_erased<BD: BitDepth, const Z: usize>(
+         dst: *mut DynPixel,
+         stride: ptrdiff_t,
+         topleft_in: *const DynPixel,
+diff -ru rav1d-1.1.0/src/itx.rs rav1d/src/itx.rs
+--- rav1d-1.1.0/src/itx.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/itx.rs	2026-11-15 15:16:04.894434601 +0000
+@@ -260,7 +260,7 @@
+ ///
+ /// Must be called by [`itxfm::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn inv_txfm_add_c_erased<
++unsafe extern "C-unwind" fn inv_txfm_add_c_erased<
+     const W: usize,
+     const H: usize,
+     const TYPE: TxfmType,
+@@ -282,7 +282,7 @@
+     inv_txfm_add_rust::<W, H, TYPE, BD>(dst, coeff, eob, bd)
+ }
+ 
+-wrap_fn_ptr!(unsafe extern "C" fn itxfm(
++wrap_fn_ptr!(unsafe extern "C-unwind" fn itxfm(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     coeff: *mut DynCoef,
+diff -ru rav1d-1.1.0/src/lib.rs rav1d/src/lib.rs
+--- rav1d-1.1.0/src/lib.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/lib.rs	2026-11-15 15:16:04.894810759 +0000
+@@ -87,7 +87,7 @@
+ 
+ #[no_mangle]
+ #[cold]
+-pub extern "C" fn dav1d_version() -> *const c_char {
++pub extern "C-unwind" fn dav1d_version() -> *const c_char {
+     DAV1D_VERSION.as_ptr()
+ }
+ 
+@@ -101,7 +101,7 @@
+ /// `YY` the minor version, and `ZZ` the patch version.
+ #[no_mangle]
+ #[cold]
+-pub extern "C" fn dav1d_version_api() -> c_uint {
++pub extern "C-unwind" fn dav1d_version_api() -> c_uint {
+     u32::from_be_bytes([
+         0,
+         DAV1D_API_VERSION_MAJOR,
+@@ -135,7 +135,7 @@
+ ///   The former contents of `s` are not [`drop`]ped and it may be uninitialized.
+ #[no_mangle]
+ #[cold]
+-pub unsafe extern "C" fn dav1d_default_settings(s: NonNull<Dav1dSettings>) {
++pub unsafe extern "C-unwind" fn dav1d_default_settings(s: NonNull<Dav1dSettings>) {
+     let settings = Rav1dSettings::default().into();
+     // SAFETY: `s` is safe to `ptr::write` to.
+     unsafe { s.as_ptr().write(settings) };
+@@ -174,7 +174,7 @@
+ /// * `s`, if [`NonNull`], must valid to [`ptr::read`] from.
+ #[no_mangle]
+ #[cold]
+-pub unsafe extern "C" fn dav1d_get_frame_delay(s: Option<NonNull<Dav1dSettings>>) -> Dav1dResult {
++pub unsafe extern "C-unwind" fn dav1d_get_frame_delay(s: Option<NonNull<Dav1dSettings>>) -> Dav1dResult {
+     (|| {
+         let s = validate_input!(s.ok_or(EINVAL))?;
+         // SAFETY: `s` is safe to `ptr::read`.
+@@ -320,7 +320,7 @@
+ /// * `s`, if [`NonNull`], is valid to [`ptr::read`] from.
+ #[no_mangle]
+ #[cold]
+-pub unsafe extern "C" fn dav1d_open(
++pub unsafe extern "C-unwind" fn dav1d_open(
+     c_out: Option<NonNull<Option<Dav1dContext>>>,
+     s: Option<NonNull<Dav1dSettings>>,
+ ) -> Dav1dResult {
+@@ -346,7 +346,7 @@
+ /// * `out`, if [`NonNull`], is valid to [`ptr::write`] to.
+ /// * `ptr`, if [`NonNull`], is the start of a `&[u8]` slice of length `sz`.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_parse_sequence_header(
++pub unsafe extern "C-unwind" fn dav1d_parse_sequence_header(
+     out: Option<NonNull<Dav1dSequenceHeader>>,
+     ptr: Option<NonNull<u8>>,
+     sz: usize,
+@@ -540,7 +540,7 @@
+ /// * `c`, if [`NonNull`], must be from [`dav1d_open`] and not be passed to [`dav1d_close`] yet.
+ /// * `r#in`, if [`NonNull`], must be valid to [`ptr::read`] from and [`ptr::write`] to.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_send_data(
++pub unsafe extern "C-unwind" fn dav1d_send_data(
+     c: Option<Dav1dContext>,
+     r#in: Option<NonNull<Dav1dData>>,
+ ) -> Dav1dResult {
+@@ -581,7 +581,7 @@
+ /// * `c`, if [`NonNull`], must be from [`dav1d_open`] and not be passed to [`dav1d_close`] yet.
+ /// * `out`, if [`NonNull`], must be valid to [`ptr::write`] to.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_get_picture(
++pub unsafe extern "C-unwind" fn dav1d_get_picture(
+     c: Option<Dav1dContext>,
+     out: Option<NonNull<Dav1dPicture>>,
+ ) -> Dav1dResult {
+@@ -640,7 +640,7 @@
+ /// * `out`, if [`NonNull`], must be valid to [`ptr::write`] to.
+ /// * `r#in`, if [`NonNull`], must be valid to [`ptr::read`] from.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_apply_grain(
++pub unsafe extern "C-unwind" fn dav1d_apply_grain(
+     c: Option<Dav1dContext>,
+     out: Option<NonNull<Dav1dPicture>>,
+     r#in: Option<NonNull<Dav1dPicture>>,
+@@ -719,7 +719,7 @@
+ ///
+ /// * `c` must be from [`dav1d_open`] and not be passed to [`dav1d_close`] yet.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_flush(c: Dav1dContext) {
++pub unsafe extern "C-unwind" fn dav1d_flush(c: Dav1dContext) {
+     // SAFETY: `c` is from `dav1d_open` and thus from `RawArc::from_arc`.
+     // It has not yet been passed to `dav1d_close` and thus not to `RawArc::into_arc` yet.
+     let c = unsafe { c.as_ref() };
+@@ -739,7 +739,7 @@
+ ///   The `Dav1dContext` pointed to by `c_out` must be from [`dav1d_open`].
+ #[no_mangle]
+ #[cold]
+-pub unsafe extern "C" fn dav1d_close(c_out: Option<NonNull<Option<Dav1dContext>>>) {
++pub unsafe extern "C-unwind" fn dav1d_close(c_out: Option<NonNull<Option<Dav1dContext>>>) {
+     let Ok(mut c_out) = validate_input!(c_out.ok_or(())) else {
+         return;
+     };
+@@ -771,7 +771,7 @@
+ /// * `c`, if [`NonNull`], must be from [`dav1d_open`] and not be passed to [`dav1d_close`] yet.
+ /// * `flags`, if [`NonNull`], must be valid to [`ptr::write`] to.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_get_event_flags(
++pub unsafe extern "C-unwind" fn dav1d_get_event_flags(
+     c: Option<Dav1dContext>,
+     flags: Option<NonNull<Dav1dEventFlags>>,
+ ) -> Dav1dResult {
+@@ -796,7 +796,7 @@
+ /// * `c`, if [`NonNull`], must be from [`dav1d_open`] and not be passed to [`dav1d_close`] yet.
+ /// * `out`, if [`NonNull`], is valid to [`ptr::write`] to.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_get_decode_error_data_props(
++pub unsafe extern "C-unwind" fn dav1d_get_decode_error_data_props(
+     c: Option<Dav1dContext>,
+     out: Option<NonNull<Dav1dDataProps>>,
+ ) -> Dav1dResult {
+@@ -820,7 +820,7 @@
+ ///
+ /// * `p`, if [`NonNull`], must be valid to [`ptr::read`] from and [`ptr::write`] to.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_picture_unref(p: Option<NonNull<Dav1dPicture>>) {
++pub unsafe extern "C-unwind" fn dav1d_picture_unref(p: Option<NonNull<Dav1dPicture>>) {
+     let Ok(p) = validate_input!(p.ok_or(())) else {
+         return;
+     };
+@@ -838,7 +838,7 @@
+ /// * `buf`, if [`NonNull`], is valid to [`ptr::write`] to.
+ ///   After this call, `buf.data` will be an allocated slice of length `sz`.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_data_create(buf: Option<NonNull<Dav1dData>>, sz: usize) -> *mut u8 {
++pub unsafe extern "C-unwind" fn dav1d_data_create(buf: Option<NonNull<Dav1dData>>, sz: usize) -> *mut u8 {
+     || -> Rav1dResult<*mut u8> {
+         let buf = validate_input!(buf.ok_or(EINVAL))?;
+         validate_input!((sz <= usize::MAX / 2, EINVAL))?;
+@@ -861,7 +861,7 @@
+ /// * `ptr`, if [`NonNull`], is the start of a `&[u8]` slice of length `sz`.
+ /// * `ptr`'s slice must be valid to dereference until `free_callback` is called on it, which must deallocate it.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_data_wrap(
++pub unsafe extern "C-unwind" fn dav1d_data_wrap(
+     buf: Option<NonNull<Dav1dData>>,
+     ptr: Option<NonNull<u8>>,
+     sz: usize,
+@@ -889,7 +889,7 @@
+ /// * `buf`, if [`NonNull`], is valid to [`ptr::read`] from and [`ptr::write`] to.
+ /// * `user_data`, if [`NonNull`], is valid to dereference until `free_callback` is called on it, which must deallocate it.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_data_wrap_user_data(
++pub unsafe extern "C-unwind" fn dav1d_data_wrap_user_data(
+     buf: Option<NonNull<Dav1dData>>,
+     user_data: Option<NonNull<u8>>,
+     free_callback: Option<FnFree>,
+@@ -916,7 +916,7 @@
+ ///
+ /// * `buf`, if [`NonNull`], is safe to [`ptr::read`] from and [`ptr::write`] from.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_data_unref(buf: Option<NonNull<Dav1dData>>) {
++pub unsafe extern "C-unwind" fn dav1d_data_unref(buf: Option<NonNull<Dav1dData>>) {
+     let buf = validate_input!(buf.ok_or(()));
+     let Ok(mut buf) = buf else { return };
+     // SAFETY: `buf` is safe to read from and write to.
+@@ -928,7 +928,7 @@
+ ///
+ /// * `props`, if [`NonNull`], is safe to [`ptr::read`] from and [`ptr::write`] from.
+ #[no_mangle]
+-pub unsafe extern "C" fn dav1d_data_props_unref(props: Option<NonNull<Dav1dDataProps>>) {
++pub unsafe extern "C-unwind" fn dav1d_data_props_unref(props: Option<NonNull<Dav1dDataProps>>) {
+     let props = validate_input!(props.ok_or(()));
+     let Ok(mut props) = props else { return };
+     // SAFETY: `props` is safe to read from and write to.
+diff -ru rav1d-1.1.0/src/log.rs rav1d/src/log.rs
+--- rav1d-1.1.0/src/log.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/log.rs	2026-11-15 15:16:04.894671160 +0000
+@@ -9,7 +9,7 @@
+ use std::io::Write as _;
+ use std::ptr::fn_addr_eq;
+ 
+-pub type Dav1dLoggerCallback = unsafe extern "C" fn(
++pub type Dav1dLoggerCallback = unsafe extern "C-unwind" fn(
+     // [`Dav1dLogger::cookie`].
+     cookie: Option<SendSyncNonNull<c_void>>,
+     // A `printf`-style format specifier.
+@@ -132,7 +132,7 @@
+ mod marker {
+     use super::*;
+ 
+-    type Callback = extern "C" fn(cookie: *mut c_void, fmt: *const c_char);
++    type Callback = extern "C-unwind" fn(cookie: *mut c_void, fmt: *const c_char);
+ 
+     const fn cast(callback: Callback) -> Dav1dLoggerCallback {
+         // SAFETY: It should always be safe to ignore variadic args.
+@@ -143,7 +143,7 @@
+     pub const STDOUT: Dav1dLoggerCallback = {
+         /// Create an empty [`Dav1dLoggerCallback`] for use as a marker `fn`
+         /// for special `fn`s stored in [`Dav1dLogger::callback`].
+-        extern "C" fn stdout(_cookie: *mut c_void, _fmt: *const c_char) {
++        extern "C-unwind" fn stdout(_cookie: *mut c_void, _fmt: *const c_char) {
+             // The `fn` needs a unique body so that
+             // multiple ones don't get optimized into the same `fn`.
+             unimplemented!(stringify!(stdout));
+@@ -154,7 +154,7 @@
+     pub const STDERR: Dav1dLoggerCallback = {
+         /// Create an empty [`Dav1dLoggerCallback`] for use as a marker `fn`
+         /// for special `fn`s stored in [`Dav1dLogger::callback`].
+-        extern "C" fn stderr(_cookie: *mut c_void, _fmt: *const c_char) {
++        extern "C-unwind" fn stderr(_cookie: *mut c_void, _fmt: *const c_char) {
+             // The `fn` needs a unique body so that
+             // multiple ones don't get optimized into the same `fn`.
+             unimplemented!(stringify!(stderr));
+diff -ru rav1d-1.1.0/src/loopfilter.rs rav1d/src/loopfilter.rs
+--- rav1d-1.1.0/src/loopfilter.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/loopfilter.rs	2026-11-15 15:16:04.895498436 +0000
+@@ -25,7 +25,7 @@
+ ))]
+ use crate::include::common::bitdepth::bd_fn;
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn loopfilter_sb(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn loopfilter_sb(
+     dst_ptr: *mut DynPixel,
+     stride: ptrdiff_t,
+     mask: &[u32; 3],
+@@ -358,7 +358,7 @@
+ ///
+ /// Must be called by [`loopfilter_sb::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn loop_filter_sb128_c_erased<BD: BitDepth, const HV: usize, const YUV: usize>(
++unsafe extern "C-unwind" fn loop_filter_sb128_c_erased<BD: BitDepth, const HV: usize, const YUV: usize>(
+     _dst_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     vmask: &[u32; 3],
+diff -ru rav1d-1.1.0/src/looprestoration.rs rav1d/src/looprestoration.rs
+--- rav1d-1.1.0/src/looprestoration.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/looprestoration.rs	2026-11-15 15:16:04.893046968 +0000
+@@ -108,7 +108,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn loop_restoration_filter(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn loop_restoration_filter(
+     dst_ptr: *mut DynPixel,
+     dst_stride: ptrdiff_t,
+     left: *const LeftPixelRow<DynPixel>,
+@@ -353,7 +353,7 @@
+ ///
+ /// Must be called by [`loop_restoration_filter::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn wiener_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn wiener_c_erased<BD: BitDepth>(
+     _p_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     left: *const LeftPixelRow<DynPixel>,
+@@ -769,7 +769,7 @@
+ ///
+ /// Must be called by [`loop_restoration_filter::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn sgr_5x5_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn sgr_5x5_c_erased<BD: BitDepth>(
+     _p_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     left: *const LeftPixelRow<DynPixel>,
+@@ -835,7 +835,7 @@
+ ///
+ /// Must be called by [`loop_restoration_filter::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn sgr_3x3_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn sgr_3x3_c_erased<BD: BitDepth>(
+     _p_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     left: *const LeftPixelRow<DynPixel>,
+@@ -896,7 +896,7 @@
+ ///
+ /// Must be called by [`loop_restoration_filter::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn sgr_mix_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn sgr_mix_c_erased<BD: BitDepth>(
+     _p_ptr: *mut DynPixel,
+     _stride: ptrdiff_t,
+     left: *const LeftPixelRow<DynPixel>,
+@@ -966,7 +966,7 @@
+     use libc::intptr_t;
+     use std::ptr;
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn wiener_filter_h(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn wiener_filter_h(
+         dst: *mut i16,
+         left: *const LeftPixelRow<DynPixel>,
+         src: *const DynPixel,
+@@ -1001,7 +1001,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn wiener_filter_v(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn wiener_filter_v(
+         dst: *mut DynPixel,
+         stride: ptrdiff_t,
+         mid: *const i16,
+@@ -1039,7 +1039,7 @@
+     ///
+     /// Must be called by [`loop_restoration_filter::Fn::call`].
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn wiener_filter_neon_erased<BD: BitDepth>(
++    pub unsafe extern "C-unwind" fn wiener_filter_neon_erased<BD: BitDepth>(
+         p: *mut DynPixel,
+         stride: ptrdiff_t,
+         left: *const LeftPixelRow<DynPixel>,
+@@ -1124,7 +1124,7 @@
+         );
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_box3_h(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_box3_h(
+         sumsq: *mut i32,
+         sum: *mut i16,
+         left: *const LeftPixelRow<DynPixel>,
+@@ -1162,7 +1162,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_box_v(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_box_v(
+         sumsq: *mut i32,
+         sum: *mut i16,
+         w: c_int,
+@@ -1187,7 +1187,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_calc_ab(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_calc_ab(
+         a: *mut i32,
+         b: *mut i16,
+         w: c_int,
+@@ -1223,7 +1223,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_finish_filter(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_finish_filter(
+         tmp: &mut Align16<[i16; 64 * 384]>,
+         src: *const DynPixel,
+         stride: ptrdiff_t,
+@@ -1327,7 +1327,7 @@
+         sgr_finish_filter::Fn::neon1::<BD>().call::<BD>(tmp, src, a, b, w, h);
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_box5_h(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_box5_h(
+         sumsq: *mut i32,
+         sum: *mut i16,
+         left: *const LeftPixelRow<DynPixel>,
+@@ -1432,7 +1432,7 @@
+         sgr_finish_filter::Fn::neon2::<BD>().call::<BD>(tmp, src, a, b, w, h);
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_weighted1(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_weighted1(
+         dst: *mut DynPixel,
+         dst_stride: ptrdiff_t,
+         src: *const DynPixel,
+@@ -1470,7 +1470,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_weighted2(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_weighted2(
+         dst: *mut DynPixel,
+         dst_stride: ptrdiff_t,
+         src: *const DynPixel,
+@@ -1588,7 +1588,7 @@
+         b.rotate_left(MID);
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_box_row_h(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_box_row_h(
+         sumsq: *mut i32,
+         sum: *mut i16,
+         left: *const LeftPixelRow<DynPixel>,
+@@ -1627,7 +1627,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_box35_row_h(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_box35_row_h(
+         sumsq3: *mut i32,
+         sum3: *mut i16,
+         sumsq5: *mut i32,
+@@ -1666,7 +1666,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_box_vert(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_box_vert(
+         sumsq: *mut *mut i32,
+         sum: *mut *mut i16,
+         aa: *mut i32,
+@@ -1730,7 +1730,7 @@
+         rotate::<5, 2>(sumsq, sum);
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_finish_weighted1(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_finish_weighted1(
+         dst: *mut DynPixel,
+         a_ptrs: *mut *mut i32,
+         b_ptrs: *mut *mut i16,
+@@ -1767,7 +1767,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_finish_weighted2(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_finish_weighted2(
+         dst: *mut DynPixel,
+         stride: ptrdiff_t,
+         a_ptrs: *mut *mut i32,
+@@ -1808,7 +1808,7 @@
+         }
+     }
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_finish_filter_2rows(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_finish_filter_2rows(
+         tmp: *mut i16,
+         src: *const DynPixel,
+         src_stride: ptrdiff_t,
+@@ -1905,7 +1905,7 @@
+ 
+     const FILTER_OUT_STRIDE: usize = 384;
+ 
+-    wrap_fn_ptr!(unsafe extern "C" fn sgr_weighted2(
++    wrap_fn_ptr!(unsafe extern "C-unwind" fn sgr_weighted2(
+         dst: *mut DynPixel,
+         dst_stride: ptrdiff_t,
+         t1: *const i16,
+@@ -3317,7 +3317,7 @@
+     ///
+     /// Must be called by [`loop_restoration_filter::Fn::call`].
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn sgr_filter_5x5_neon_erased<BD: BitDepth>(
++    pub unsafe extern "C-unwind" fn sgr_filter_5x5_neon_erased<BD: BitDepth>(
+         _p_ptr: *mut DynPixel,
+         _stride: ptrdiff_t,
+         left: *const LeftPixelRow<DynPixel>,
+@@ -3346,7 +3346,7 @@
+     ///
+     /// Must be called by [`loop_restoration_filter::Fn::call`].
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn sgr_filter_3x3_neon_erased<BD: BitDepth>(
++    pub unsafe extern "C-unwind" fn sgr_filter_3x3_neon_erased<BD: BitDepth>(
+         _p_ptr: *mut DynPixel,
+         _stride: ptrdiff_t,
+         left: *const LeftPixelRow<DynPixel>,
+@@ -3375,7 +3375,7 @@
+     ///
+     /// Must be called by [`loop_restoration_filter::Fn::call`].
+     #[deny(unsafe_op_in_unsafe_fn)]
+-    pub unsafe extern "C" fn sgr_filter_mix_neon_erased<BD: BitDepth>(
++    pub unsafe extern "C-unwind" fn sgr_filter_mix_neon_erased<BD: BitDepth>(
+         _p_ptr: *mut DynPixel,
+         _stride: ptrdiff_t,
+         left: *const LeftPixelRow<DynPixel>,
+diff -ru rav1d-1.1.0/src/mc.rs rav1d/src/mc.rs
+--- rav1d-1.1.0/src/mc.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/mc.rs	2026-11-15 15:16:04.908515922 +0000
+@@ -1035,7 +1035,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn mc(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn mc(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     src_ptr: *const DynPixel,
+@@ -1076,7 +1076,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn mc_scaled(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn mc_scaled(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     src_ptr: *const DynPixel,
+@@ -1121,7 +1121,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn warp8x8(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn warp8x8(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     src_ptr: *const DynPixel,
+@@ -1160,7 +1160,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn mct(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn mct(
+     tmp: *mut i16,
+     src_ptr: *const DynPixel,
+     src_stride: isize,
+@@ -1193,7 +1193,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn mct_scaled(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn mct_scaled(
+     tmp: *mut i16,
+     src_ptr: *const DynPixel,
+     src_stride: isize,
+@@ -1230,7 +1230,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn warp8x8t(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn warp8x8t(
+     tmp: *mut i16,
+     tmp_stride: usize,
+     src_ptr: *const DynPixel,
+@@ -1269,7 +1269,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn avg(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn avg(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1299,7 +1299,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn w_avg(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn w_avg(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1331,7 +1331,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn mask(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn mask(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1364,7 +1364,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn w_mask(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn w_mask(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1398,7 +1398,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn blend(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn blend(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     tmp: *const [DynPixel; SCRATCH_INTER_INTRA_BUF_LEN],
+@@ -1427,7 +1427,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn blend_dir(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn blend_dir(
+     dst_ptr: *mut DynPixel,
+     dst_stride: isize,
+     tmp: *const [DynPixel; SCRATCH_LAP_LEN],
+@@ -1453,7 +1453,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn emu_edge(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn emu_edge(
+     bw: isize,
+     bh: isize,
+     iw: isize,
+@@ -1494,7 +1494,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn resize(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn resize(
+     dst: *mut DynPixel,
+     dst_stride: isize,
+     src_ptr: *const DynPixel,
+@@ -1562,7 +1562,7 @@
+ ///
+ /// Must be called by [`mc::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn put_c_erased<BD: BitDepth, const FILTER: usize>(
++unsafe extern "C-unwind" fn put_c_erased<BD: BitDepth, const FILTER: usize>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     _src_ptr: *const DynPixel,
+@@ -1596,7 +1596,7 @@
+ ///
+ /// Must be called by [`mc_scaled::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn put_scaled_c_erased<BD: BitDepth, const FILTER: usize>(
++unsafe extern "C-unwind" fn put_scaled_c_erased<BD: BitDepth, const FILTER: usize>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     _src_ptr: *const DynPixel,
+@@ -1634,7 +1634,7 @@
+ ///
+ /// Must be called by [`mct::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn prep_c_erased<BD: BitDepth, const FILTER: usize>(
++unsafe extern "C-unwind" fn prep_c_erased<BD: BitDepth, const FILTER: usize>(
+     tmp: *mut i16,
+     _src_ptr: *const DynPixel,
+     _src_stride: isize,
+@@ -1666,7 +1666,7 @@
+ ///
+ /// Must be called by [`mct_scaled::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn prep_scaled_c_erased<BD: BitDepth, const FILTER: usize>(
++unsafe extern "C-unwind" fn prep_scaled_c_erased<BD: BitDepth, const FILTER: usize>(
+     tmp: *mut i16,
+     _src_ptr: *const DynPixel,
+     _src_stride: isize,
+@@ -1702,7 +1702,7 @@
+ ///
+ /// Must be called by [`avg::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn avg_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn avg_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1724,7 +1724,7 @@
+ ///
+ /// Must be called by [`w_avg::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn w_avg_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn w_avg_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1747,7 +1747,7 @@
+ ///
+ /// Must be called by [`mask::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn mask_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn mask_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1772,7 +1772,7 @@
+ ///
+ /// Must be called by [`w_mask::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn w_mask_c_erased<const SS_HOR: bool, const SS_VER: bool, BD: BitDepth>(
++unsafe extern "C-unwind" fn w_mask_c_erased<const SS_HOR: bool, const SS_VER: bool, BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     tmp1: &[i16; COMPINTER_LEN],
+@@ -1798,7 +1798,7 @@
+ ///
+ /// Must be called by [`blend::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn blend_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn blend_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     tmp: *const [DynPixel; SCRATCH_INTER_INTRA_BUF_LEN],
+@@ -1822,7 +1822,7 @@
+ ///
+ /// Must be called by [`blend_dir::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn blend_v_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn blend_v_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     tmp: *const [DynPixel; SCRATCH_LAP_LEN],
+@@ -1843,7 +1843,7 @@
+ ///
+ /// Must be called by [`blend_dir::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn blend_h_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn blend_h_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     tmp: *const [DynPixel; SCRATCH_LAP_LEN],
+@@ -1864,7 +1864,7 @@
+ ///
+ /// Must be called by [`warp8x8::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn warp_affine_8x8_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn warp_affine_8x8_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     _src_ptr: *const DynPixel,
+@@ -1888,7 +1888,7 @@
+ ///
+ /// Must be called by [`warp8x8t::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn warp_affine_8x8t_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn warp_affine_8x8t_c_erased<BD: BitDepth>(
+     tmp: *mut i16,
+     tmp_stride: usize,
+     _src_ptr: *const DynPixel,
+@@ -1909,7 +1909,7 @@
+ }
+ 
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn emu_edge_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn emu_edge_c_erased<BD: BitDepth>(
+     bw: isize,
+     bh: isize,
+     iw: isize,
+@@ -1931,7 +1931,7 @@
+     emu_edge_rust::<BD>(bw, bh, iw, ih, x, y, dst, dst_stride, r#ref)
+ }
+ 
+-unsafe extern "C" fn resize_c_erased<BD: BitDepth>(
++unsafe extern "C-unwind" fn resize_c_erased<BD: BitDepth>(
+     _dst_ptr: *mut DynPixel,
+     _dst_stride: isize,
+     _src_ptr: *const DynPixel,
+diff -ru rav1d-1.1.0/src/msac.rs rav1d/src/msac.rs
+--- rav1d-1.1.0/src/msac.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/msac.rs	2026-11-15 15:16:04.881160851 +0000
+@@ -16,7 +16,7 @@
+ use std::slice;
+ 
+ #[cfg(all(feature = "asm", target_feature = "sse2"))]
+-extern "C" {
++extern "C-unwind" {
+     fn dav1d_msac_decode_hi_tok_sse2(s: *mut MsacAsmContext, cdf: *mut u16) -> c_uint;
+     fn dav1d_msac_decode_bool_sse2(s: *mut MsacAsmContext, f: c_uint) -> c_uint;
+     fn dav1d_msac_decode_bool_equi_sse2(s: *mut MsacAsmContext) -> c_uint;
+@@ -40,7 +40,7 @@
+ }
+ 
+ #[cfg(all(feature = "asm", target_arch = "x86_64"))]
+-extern "C" {
++extern "C-unwind" {
+     fn dav1d_msac_decode_symbol_adapt16_avx2(
+         s: &mut MsacAsmContext,
+         cdf: *mut u16,
+@@ -50,7 +50,7 @@
+ }
+ 
+ #[cfg(all(feature = "asm", target_feature = "neon"))]
+-extern "C" {
++extern "C-unwind" {
+     fn dav1d_msac_decode_hi_tok_neon(s: *mut MsacAsmContext, cdf: *mut u16) -> c_uint;
+     fn dav1d_msac_decode_bool_neon(s: *mut MsacAsmContext, f: c_uint) -> c_uint;
+     fn dav1d_msac_decode_bool_equi_neon(s: *mut MsacAsmContext) -> c_uint;
+@@ -73,7 +73,7 @@
+ }
+ 
+ pub struct Rav1dMsacDSPContext {
+-    symbol_adapt16: unsafe extern "C" fn(
++    symbol_adapt16: unsafe extern "C-unwind" fn(
+         s: &mut MsacAsmContext,
+         cdf: *mut u16,
+         n_symbols: usize,
+@@ -200,7 +200,7 @@
+     pub cnt: c_int,
+     allow_update_cdf: c_int,
+     #[cfg(all(feature = "asm", target_arch = "x86_64"))]
+-    symbol_adapt16: unsafe extern "C" fn(
++    symbol_adapt16: unsafe extern "C-unwind" fn(
+         s: &mut MsacAsmContext,
+         cdf: *mut u16,
+         n_symbols: usize,
+@@ -438,7 +438,7 @@
+ /// in [`rav1d_msac_decode_symbol_adapt16`].
+ #[cfg_attr(not(all(feature = "asm", target_arch = "x86_64")), allow(dead_code))]
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn rav1d_msac_decode_symbol_adapt_c(
++unsafe extern "C-unwind" fn rav1d_msac_decode_symbol_adapt_c(
+     s: &mut MsacAsmContext,
+     cdf: *mut u16,
+     n_symbols: usize,
+diff -ru rav1d-1.1.0/src/pal.rs rav1d/src/pal.rs
+--- rav1d-1.1.0/src/pal.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/pal.rs	2026-11-15 15:16:04.894332278 +0000
+@@ -5,7 +5,7 @@
+ use std::ffi::c_int;
+ use std::slice;
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn pal_idx_finish(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn pal_idx_finish(
+     dst: *mut u8,
+     src: *const u8,
+     bw: c_int,
+@@ -54,7 +54,7 @@
+ ///
+ /// Must be called by [`pal_idx_finish::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn pal_idx_finish_c(
++unsafe extern "C-unwind" fn pal_idx_finish_c(
+     dst: *mut u8,
+     src: *const u8,
+     bw: c_int,
+diff -ru rav1d-1.1.0/src/picture.rs rav1d/src/picture.rs
+--- rav1d-1.1.0/src/picture.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/picture.rs	2026-11-15 15:16:04.895653150 +0000
+@@ -100,7 +100,7 @@
+ ///
+ /// * `p_c` must be from a `&mut Dav1dPicture`.
+ /// * `cookie` must be from a `&Arc<MemPool<u8>>`.
+-unsafe extern "C" fn dav1d_default_picture_alloc(
++unsafe extern "C-unwind" fn dav1d_default_picture_alloc(
+     p_c: *mut Dav1dPicture,
+     cookie: Option<SendSyncNonNull<c_void>>,
+ ) -> Dav1dResult {
+@@ -164,7 +164,7 @@
+ /// # Safety
+ ///
+ /// * `p` is from a `&mut Dav1dPicture` initialized by [`dav1d_default_picture_alloc`].
+-unsafe extern "C" fn dav1d_default_picture_release(
++unsafe extern "C-unwind" fn dav1d_default_picture_release(
+     p: *mut Dav1dPicture,
+     _cookie: Option<SendSyncNonNull<c_void>>,
+ ) {
+@@ -200,7 +200,7 @@
+         let alloc = fn_addr_eq(
+             self.alloc_picture_callback,
+             dav1d_default_picture_alloc
+-                as unsafe extern "C" fn(
++                as unsafe extern "C-unwind" fn(
+                     *mut Dav1dPicture,
+                     Option<SendSyncNonNull<c_void>>,
+                 ) -> Dav1dResult,
+@@ -208,7 +208,7 @@
+         let release = fn_addr_eq(
+             self.release_picture_callback,
+             dav1d_default_picture_release
+-                as unsafe extern "C" fn(*mut Dav1dPicture, Option<SendSyncNonNull<c_void>>),
++                as unsafe extern "C-unwind" fn(*mut Dav1dPicture, Option<SendSyncNonNull<c_void>>),
+         );
+         assert!(alloc == release); // This should be impossible since these `fn`s are private.
+         alloc && release
+diff -ru rav1d-1.1.0/src/refmvs.rs rav1d/src/refmvs.rs
+--- rav1d-1.1.0/src/refmvs.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/refmvs.rs	2026-11-15 15:16:04.893880258 +0000
+@@ -174,7 +174,7 @@
+     pub weight: i32,
+ }
+ 
+-wrap_fn_ptr!(pub(crate) unsafe extern "C" fn load_tmvs(
++wrap_fn_ptr!(pub(crate) unsafe extern "C-unwind" fn load_tmvs(
+     rf: &AsmRefMvsFrame,
+     tile_row_idx: i32,
+     col_start8: i32,
+@@ -273,7 +273,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn save_tmvs(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn save_tmvs(
+     rp_ptr: *mut RefMvsTemporalBlock,
+     stride: isize,
+     rr: &[*const RefMvsBlock; 31],
+@@ -355,7 +355,7 @@
+     }
+ }
+ 
+-wrap_fn_ptr!(pub unsafe extern "C" fn splat_mv(
++wrap_fn_ptr!(pub unsafe extern "C-unwind" fn splat_mv(
+     rr: *mut *mut RefMvsBlock,
+     rmv: &Align16<RefMvsBlock>,
+     bx4: i32,
+@@ -1380,7 +1380,7 @@
+ ///
+ /// Must be called by [`load_tmvs::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn load_tmvs_c(
++unsafe extern "C-unwind" fn load_tmvs_c(
+     rf: &AsmRefMvsFrame,
+     tile_row_idx: i32,
+     col_start8: i32,
+@@ -1513,7 +1513,7 @@
+ ///
+ /// Must be called by [`save_tmvs::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn save_tmvs_c(
++unsafe extern "C-unwind" fn save_tmvs_c(
+     _rp: *mut RefMvsTemporalBlock,
+     stride: isize,
+     _rr: &[*const RefMvsBlock; 31],
+@@ -1699,7 +1699,7 @@
+ ///
+ /// Must be called by [`splat_mv::Fn::call`].
+ #[deny(unsafe_op_in_unsafe_fn)]
+-unsafe extern "C" fn splat_mv_c(
++unsafe extern "C-unwind" fn splat_mv_c(
+     rr: *mut *mut RefMvsBlock,
+     rmv: &Align16<RefMvsBlock>,
+     bx4: i32,
+diff -ru rav1d-1.1.0/src/wrap_fn_ptr.rs rav1d/src/wrap_fn_ptr.rs
+--- rav1d-1.1.0/src/wrap_fn_ptr.rs	2006-07-24 01:21:28.000000000 +0000
++++ rav1d/src/wrap_fn_ptr.rs	2026-11-15 15:16:04.892937976 +0000
+@@ -39,14 +39,14 @@
+ /// [`enum_map!`]: crate::src::enum_map::enum_map
+ /// [`bd_fn!`]: crate::include::common::bitdepth::bd_fn
+ macro_rules! wrap_fn_ptr {
+-    ($vis:vis unsafe extern "C" fn $name:ident(
++    ($vis:vis unsafe extern "C-unwind" fn $name:ident(
+             $($arg_name:ident: $arg_ty:ty),*$(,)?
+     ) -> $return_ty:ty) => {
+         $vis mod $name {
+             use $crate::src::enum_map::DefaultValue;
+             use super::*;
+ 
+-            pub type FnPtr = unsafe extern "C" fn($($arg_name: $arg_ty),*) -> $return_ty;
++            pub type FnPtr = unsafe extern "C-unwind" fn($($arg_name: $arg_ty),*) -> $return_ty;
+ 
+             /// A newtype wrapped [`FnPtr`].
+             ///
+@@ -69,7 +69,7 @@
+ 
+             impl DefaultValue for Fn {
+                 const DEFAULT: Self = {
+-                    extern "C" fn default_unimplemented(
++                    extern "C-unwind" fn default_unimplemented(
+                         $($arg_name: $arg_ty,)*
+                     ) -> $return_ty {
+                         $(let _ = $arg_name;)*
+@@ -83,7 +83,7 @@
+             #[allow(unused_macros)]
+             macro_rules! decl_fn {
+                 (fn $fn_name:ident) => {{
+-                    extern "C" {
++                    extern "C-unwind" {
+                         fn $fn_name($($arg_name: $arg_ty,)*) -> $return_ty;
+                     }
+ 

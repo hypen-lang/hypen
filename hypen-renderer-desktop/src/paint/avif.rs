@@ -23,16 +23,15 @@
 //!
 //! Crash isolation: image bytes come from remote servers, and rav1d
 //! panics on some malformed bitstreams (e.g. an `unwrap` on its error
-//! path; it has hundreds of such sites). Its only public entry points
-//! are `extern "C"` (`dav1d_*`; the Rust-level `rav1d_*` functions are
-//! `pub(crate)`), so such a panic can't unwind to a `catch_unwind`: it
-//! aborts the process. Every decode therefore runs in a helper process,
-//! on every platform: the current executable, re-executed (spawn +
-//! exec, no bare `fork` of the multi-threaded host) and diverted into
-//! the decoder before `main` (see [`helper`]). It hands the pixels back
-//! over a pipe; a helper that crashes, runs out of memory or exceeds
-//! [`DECODE_TIMEOUT`] is killed and only that decode fails. rav1d runs
-//! single-threaded (see [`decoder_settings`]).
+//! path; it has hundreds of such sites). Upstream, its only public entry
+//! points are `extern "C"` (`dav1d_*`), through which a panic aborts the
+//! process; the workspace therefore uses a vendored rav1d whose `extern`
+//! functions and function pointers are `extern "C-unwind"`
+//! (`third_party/rav1d/PATCHES.md`), and each decode runs on its own
+//! thread inside `catch_unwind` with a fresh decoder, single-threaded
+//! (see [`decoder_settings`]), within [`DECODE_TIMEOUT`] (see
+//! [`run_with_deadline`]). This needs `panic = "unwind"`, the default:
+//! with `panic = "abort"` any of these panics ends the process.
 
 use rav1d::include::dav1d::data::Dav1dData;
 use rav1d::include::dav1d::dav1d::{Dav1dContext, Dav1dSettings};
@@ -48,6 +47,7 @@ use rav1d::src::lib::{
 };
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
+use std::time::Duration;
 
 /// Allocation budget for decoding one AVIF: the ceiling `image`'s
 /// default `Limits::max_alloc` puts on PNG / JPEG / WebP (512 MiB). A
@@ -118,10 +118,23 @@ pub(crate) fn looks_like_avif(bytes: &[u8]) -> bool {
     avif_kind(bytes).is_some()
 }
 
-/// Longest a decode may take before it is abandoned (the helper process
-/// is killed). Generous: a debug build decodes a 4K frame on one thread
-/// in a few seconds.
-const DECODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+/// Longest a decode may take before the caller stops waiting for it
+/// (see [`run_with_deadline`]). Generous: a debug build decodes a 4K
+/// frame on one thread in a few seconds.
+const DECODE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Stack for the decode thread (the image worker's own stack, or a
+/// host's main thread, can be as small as 1 MiB on Windows).
+const DECODE_STACK: usize = 16 * 1024 * 1024;
+
+/// Most frame headers (`OBU_FRAME` / `OBU_FRAME_HEADER`, including
+/// `show_existing_frame` repeats) one AVIF item may hold. A still item
+/// is one temporal unit: one frame, or one per layer of a layered
+/// image (at most 4). Without a cap a few bytes per frame header buy a
+/// full-size frame decode (rav1d reads past the end of tile data as
+/// padding) or a full-size film-grain pass per output picture, so a
+/// 20 MB item could keep a core busy for days.
+const MAX_FRAMES_PER_ITEM: usize = 8;
 
 type Rgba8 = (u32, u32, Vec<u8>);
 
@@ -129,338 +142,120 @@ type Rgba8 = (u32, u32, Vec<u8>);
 /// straight-alpha RGBA8. Returns `(width, height, pixels)`.
 ///
 /// A malformed file fails its own decode; it can't take the image
-/// worker (or, through rav1d's non-unwinding entry points, the whole
-/// process) down with it: the decode runs in a helper process (see
-/// [`helper`]).
+/// worker or the process down with it: a panic in avif-parse or rav1d
+/// is caught (rav1d is vendored with unwinding entry points, see
+/// `third_party/rav1d/PATCHES.md`), and a decode that overruns
+/// [`DECODE_TIMEOUT`] is abandoned (see [`run_with_deadline`]).
 pub(crate) fn decode_rgba8(bytes: &[u8]) -> Result<Rgba8, String> {
-    // Refuse what isn't an AVIF file before paying for a process.
     avif_kind(bytes).ok_or("not an AVIF file")?;
-    helper::decode(bytes, DECODE_TIMEOUT)
+    let bytes = bytes.to_vec();
+    run_with_deadline(move || decode_unguarded(&bytes), DECODE_TIMEOUT)
 }
 
-/// The decode itself, in whatever process runs it (the helper, or a
-/// test). avif-parse asserts on some inconsistent box layouts, which
-/// `catch_unwind` turns into an error; a panic inside rav1d can't be
-/// caught (see the module docs) and ends the process.
-fn decode_in_process(bytes: &[u8]) -> Result<Rgba8, String> {
-    std::panic::catch_unwind(|| decode_unguarded(bytes))
-        .unwrap_or_else(|_| Err("malformed AVIF (decoder panicked)".into()))
-}
-
-/// Out-of-process AVIF decoding: the current executable re-executed
-/// (spawn + exec, never a bare `fork`) as a decode helper.
+/// Run `decode` on a fresh thread inside `catch_unwind` and wait at most
+/// `timeout` for it.
 ///
-/// The library doesn't own `main`, so the helper is entered from a
-/// pre-`main` initializer this module registers in the platform's
-/// static-constructor section (`.init_array` on ELF, `__mod_init_func`
-/// on Mach-O, `.CRT$XCU` on Windows). In every process it only reads
-/// one environment variable; in a process started with [`HELPER_ENV`]
-/// it runs [`serve`] and exits before the host's `main` (so the host's
-/// windowing, threads and arguments never come into it).
+/// A panic (avif-parse asserts on some box layouts; rav1d has hundreds
+/// of `unwrap` / `assert!` sites reachable from malformed bitstreams)
+/// becomes an error naming it. Every decode opens its own rav1d context
+/// ([`Decoder`]), so nothing a panicking decode leaves half-updated is
+/// seen by the next one; the context is closed afterwards, and any
+/// picture buffer the unwound frames held is leaked (bounded by the
+/// decode budget, once per malformed file, which the image worker then
+/// caches as failed and never decodes again).
 ///
-/// Protocol on the helper's stdin / stdout:
-/// 1. helper → parent: [`HANDSHAKE`]. Nothing is sent to a process that
-///    hasn't said it (e.g. an executable this library isn't linked
-///    into, when the library is loaded some other way): it is killed
-///    after [`HANDSHAKE_TIMEOUT`] and the decode fails.
-/// 2. parent → helper: the encoded file, then EOF.
-/// 3. helper → parent: `TAG_OK, w: u32 le, h: u32 le, w*h*4 RGBA8 bytes`
-///    or `TAG_ERR, utf-8 message`; then it exits.
-///
-/// A helper that crashes (rav1d's panics abort it), runs out of memory,
-/// overflows its stack, or overruns the deadline is killed and reaped,
-/// and only that decode fails. The parent never allocates more than the
-/// RGBA8 result, whose size it checks against [`MAX_FRAME_PIXELS`]
-/// before reading it.
-pub(crate) mod helper {
-    use super::Rgba8;
-    use std::io::{Read, Write};
-    use std::process::{Child, Command, Stdio};
-    use std::sync::mpsc;
-    use std::time::{Duration, Instant};
-
-    /// Set (to `"1"`) only in a helper's environment.
-    pub(crate) const HELPER_ENV: &str = "__HYPEN_AVIF_DECODE_HELPER";
-    const HANDSHAKE: &[u8; 16] = b"hypen-avif-dec1\n";
-    const TAG_OK: u8 = 0;
-    const TAG_ERR: u8 = 1;
-    /// From spawn to [`HANDSHAKE`]: loading the executable (a debug
-    /// build of a host is a few hundred MB) on a busy machine.
-    const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
-    /// Largest encoded file a helper accepts (the HTTP fetch caps
-    /// bodies at 20 MB; `data:` URIs and local files are not capped).
-    const MAX_INPUT_BYTES: u64 = 256 * 1024 * 1024;
-    /// The helper decodes on a thread with this much stack (a host's
-    /// main thread can have as little as 1 MiB, on Windows).
-    const DECODE_STACK: usize = 16 * 1024 * 1024;
-
-    // The pre-`main` hook. `#[used]` keeps the static in its object
-    // file; `decode` names it so that object file is linked into any
-    // executable that can spawn a helper.
-    #[used]
-    #[cfg_attr(
-        any(
-            target_os = "linux",
-            target_os = "android",
-            target_os = "freebsd",
-            target_os = "netbsd",
-            target_os = "openbsd",
-            target_os = "dragonfly",
-            target_os = "illumos",
-            target_os = "solaris",
-        ),
-        link_section = ".init_array"
-    )]
-    #[cfg_attr(target_vendor = "apple", link_section = "__DATA,__mod_init_func")]
-    #[cfg_attr(windows, link_section = ".CRT$XCU")]
-    static HELPER_HOOK: extern "C" fn() = helper_hook;
-
-    extern "C" fn helper_hook() {
-        // Every process this library is linked into passes through
-        // here once, before `main`: one getenv, nothing else.
-        if std::env::var_os(HELPER_ENV).is_some_and(|v| v == "1") {
-            // `serve` never returns; a panic escaping it aborts the
-            // helper (and only the helper), which the parent reports.
-            serve()
-        }
-    }
-
-    /// The helper side: handshake, read the file, decode on a thread
-    /// with a known stack, reply, exit.
-    fn serve() -> ! {
-        let mut out = std::io::stdout().lock();
-        if out.write_all(HANDSHAKE).and_then(|_| out.flush()).is_err() {
-            std::process::exit(2);
-        }
-        let mut input = Vec::new();
-        if std::io::stdin()
-            .lock()
-            .take(MAX_INPUT_BYTES + 1)
-            .read_to_end(&mut input)
-            .is_err()
-        {
-            std::process::exit(2);
-        }
-        let result = if input.len() as u64 > MAX_INPUT_BYTES {
-            Err("AVIF file too large".to_string())
-        } else {
-            std::thread::Builder::new()
-                .name("hypen-avif-helper".into())
-                .stack_size(DECODE_STACK)
-                .spawn(move || decode_for_helper(&input))
-                .map_err(|e| format!("AVIF helper thread: {e}"))
-                .and_then(|t| t.join().unwrap_or_else(|_| Err("malformed AVIF (decoder panicked)".into())))
-        };
-        let written = match result {
-            Ok((w, h, pixels)) => {
-                let mut head = [TAG_OK, 0, 0, 0, 0, 0, 0, 0, 0];
-                head[1..5].copy_from_slice(&w.to_le_bytes());
-                head[5..].copy_from_slice(&h.to_le_bytes());
-                out.write_all(&head).and_then(|_| out.write_all(&pixels))
-            }
-            Err(e) => out
-                .write_all(&[TAG_ERR])
-                .and_then(|_| out.write_all(e.as_bytes())),
-        };
-        let ok = written.and_then(|_| out.flush()).is_ok();
-        std::process::exit(if ok { 0 } else { 2 })
-    }
-
-    #[cfg(not(test))]
-    fn decode_for_helper(input: &[u8]) -> Result<Rgba8, String> {
-        super::decode_in_process(input)
-    }
-
-    /// Tests stand in for a decoder that crashes or hangs with inputs
-    /// no real file starts with (only in test builds).
-    #[cfg(test)]
-    fn decode_for_helper(input: &[u8]) -> Result<Rgba8, String> {
-        match input {
-            b"test:abort" => std::process::abort(),
-            b"test:panic-in-extern-c" => {
-                extern "C" fn boom() {
-                    panic!("what a panic inside rav1d's entry points does")
-                }
-                boom();
-                unreachable!()
-            }
-            b"test:hang" => loop {
-                std::thread::sleep(Duration::from_secs(1));
-            },
-            b"test:ok" => Ok((2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8])),
-            b"test:err" => Err("nope".into()),
-            _ => super::decode_in_process(input),
-        }
-    }
-
-    /// Decode `bytes` in a helper spawned from the current executable,
-    /// within `timeout` (from spawn to result).
-    pub(crate) fn decode(bytes: &[u8], timeout: Duration) -> Result<Rgba8, String> {
-        // Keep the hook's object file (and so the hook) linked in.
-        std::hint::black_box(&HELPER_HOOK);
-        let exe = std::env::current_exe()
-            .map_err(|e| format!("AVIF decode: can't locate the executable ({e})"))?;
-        decode_with(Command::new(exe), bytes, timeout)
-    }
-
-    /// [`decode`] with the helper started by `cmd` (tests point it at
-    /// programs that aren't helpers).
-    pub(crate) fn decode_with(
-        mut cmd: Command,
-        bytes: &[u8],
-        timeout: Duration,
-    ) -> Result<Rgba8, String> {
-        let deadline = Instant::now() + timeout;
-        cmd.env(HELPER_ENV, "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
-            cmd.creation_flags(CREATE_NO_WINDOW);
-        }
-        let mut child = cmd
-            .spawn()
-            .map_err(|e| format!("AVIF decode: can't start the decode helper ({e})"))?;
-        let (Some(stdin), Some(stdout)) = (child.stdin.take(), child.stdout.take()) else {
-            reap(&mut child, true);
-            return Err("AVIF decode: helper pipes missing".into());
-        };
-        // Blocking pipe IO runs on two short-lived threads so the
-        // deadline holds whatever the helper does; killing the helper
-        // closes its pipe ends, which ends both.
-        let (tx, rx) = mpsc::channel();
-        let reader = {
-            let tx = tx.clone();
-            std::thread::Builder::new()
-                .name("hypen-avif-read".into())
-                .spawn(move || read_reply(stdout, &tx))
-        };
-        if let Err(e) = reader {
-            reap(&mut child, true);
-            return Err(format!("AVIF decode: {e}"));
-        }
-        let handshake_by = deadline.min(Instant::now() + HANDSHAKE_TIMEOUT);
-        let result = match recv_until(&rx, handshake_by) {
-            Some(Event::Handshake) => {
-                let input = bytes.to_vec();
-                let writer = std::thread::Builder::new()
-                    .name("hypen-avif-write".into())
-                    .spawn(move || {
-                        let mut stdin = stdin;
-                        // A failed write (the helper died) shows up as a
-                        // missing reply.
-                        let _ = stdin.write_all(&input);
-                    });
-                match writer {
-                    Err(e) => Err(format!("AVIF decode: {e}")),
-                    Ok(_) => match recv_until(&rx, deadline) {
-                        Some(Event::Reply(reply)) => reply,
-                        Some(Event::Handshake) => unreachable!("one handshake per helper"),
-                        None => Err("AVIF decode timed out".into()),
-                    },
-                }
-            }
-            Some(Event::Reply(Err(e))) => Err(e),
-            Some(Event::Reply(Ok(_))) => unreachable!("a reply follows the handshake"),
-            None => Err("AVIF decode helper didn't start".into()),
-        };
-        let status = reap(&mut child, result.is_err());
-        result.map_err(|e| match status {
-            Some(status) if !status.success() && e.contains("without a result") => {
-                format!("malformed AVIF (decoder crashed: {}; {e})", describe(status))
-            }
-            _ => e,
+/// rav1d has no cancellation, so a decode past `timeout` can't be
+/// stopped: its thread is abandoned and runs to completion in the
+/// background (its result dropped), holding up to [`MAX_DECODE_BYTES`]
+/// until it ends. The input checks (frame size cap, at most
+/// [`MAX_FRAMES_PER_ITEM`] frames per item) bound how long that is.
+fn run_with_deadline(
+    decode: impl FnOnce() -> Result<Rgba8, String> + Send + 'static,
+    timeout: Duration,
+) -> Result<Rgba8, String> {
+    let (tx, rx) = std::sync::mpsc::sync_channel(1);
+    std::thread::Builder::new()
+        .name("hypen-avif-decode".into())
+        .stack_size(DECODE_STACK)
+        .spawn(move || {
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(decode))
+                .unwrap_or_else(|payload| {
+                    close_orphaned_decoders();
+                    Err(format!(
+                        "malformed AVIF (decoder panicked: {})",
+                        panic_message(&*payload)
+                    ))
+                });
+            // The caller may have stopped waiting; that's fine.
+            let _ = tx.send(result);
         })
-    }
-
-    enum Event {
-        Handshake,
-        Reply(Result<Rgba8, String>),
-    }
-
-    fn recv_until(rx: &mpsc::Receiver<Event>, deadline: Instant) -> Option<Event> {
-        rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-            .ok()
-    }
-
-    /// Reader thread: the handshake, then the reply (each sent as it
-    /// arrives; the receiver may have given up, which is fine).
-    fn read_reply(mut out: impl Read, tx: &mpsc::Sender<Event>) {
-        let mut hello = [0u8; HANDSHAKE.len()];
-        if out.read_exact(&mut hello).is_err() || &hello != HANDSHAKE {
-            let _ = tx.send(Event::Reply(Err(
-                "AVIF decode helper didn't start (no handshake)".into(),
-            )));
-            return;
+        .map_err(|e| format!("AVIF decode thread: {e}"))?;
+    match rx.recv_timeout(timeout) {
+        Ok(result) => result,
+        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+            Err(format!("AVIF decode timed out after {} s (abandoned)", timeout.as_secs()))
         }
-        let _ = tx.send(Event::Handshake);
-        let _ = tx.send(Event::Reply(parse_reply(&mut out)));
-    }
-
-    fn parse_reply(out: &mut impl Read) -> Result<Rgba8, String> {
-        let missing = |_| "malformed AVIF (decoder exited without a result)".to_string();
-        let mut tag = [0u8; 1];
-        out.read_exact(&mut tag).map_err(missing)?;
-        match tag[0] {
-            TAG_ERR => {
-                let mut msg = Vec::new();
-                out.take(4096).read_to_end(&mut msg).map_err(missing)?;
-                Err(String::from_utf8_lossy(&msg).into_owned())
-            }
-            TAG_OK => {
-                let mut size = [0u8; 8];
-                out.read_exact(&mut size).map_err(missing)?;
-                let w = u32::from_le_bytes([size[0], size[1], size[2], size[3]]);
-                let h = u32::from_le_bytes([size[4], size[5], size[6], size[7]]);
-                if u64::from(w) * u64::from(h) > u64::from(super::MAX_FRAME_PIXELS) {
-                    return Err("AVIF decode returned an oversized frame".into());
-                }
-                let len = w as usize * h as usize * 4;
-                let mut pixels = Vec::new();
-                pixels
-                    .try_reserve_exact(len)
-                    .map_err(|_| "AVIF too large to decode".to_string())?;
-                pixels.resize(len, 0);
-                out.read_exact(&mut pixels).map_err(missing)?;
-                Ok((w, h, pixels))
-            }
-            _ => Err("AVIF decode helper sent a bad reply".into()),
+        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+            Err("malformed AVIF (decoder thread died)".into())
         }
     }
+}
 
-    /// Wait for the helper (killing it first when `kill` is set or it
-    /// outlives a short grace period after replying).
-    fn reap(child: &mut Child, kill: bool) -> Option<std::process::ExitStatus> {
-        if !kill {
-            let grace = Instant::now() + Duration::from_millis(500);
-            while Instant::now() < grace {
-                match child.try_wait() {
-                    Ok(Some(status)) => return Some(status),
-                    Ok(None) => std::thread::sleep(Duration::from_millis(1)),
-                    Err(_) => break,
-                }
-            }
-        }
-        let _ = child.kill();
-        child.wait().ok()
-    }
+fn panic_message(payload: &(dyn std::any::Any + Send)) -> &str {
+    payload
+        .downcast_ref::<&str>()
+        .copied()
+        .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
+        .unwrap_or("non-string panic payload")
+}
 
-    fn describe(status: std::process::ExitStatus) -> String {
-        #[cfg(unix)]
-        {
-            use std::os::unix::process::ExitStatusExt;
-            if let Some(signal) = status.signal() {
-                return format!("signal {signal}");
-            }
-        }
-        match status.code() {
-            Some(code) => format!("exit status {code:#x}"),
-            None => status.to_string(),
+/// How many frame headers (`OBU_FRAME_HEADER` = 3, `OBU_FRAME` = 6) the
+/// AV1 OBU stream `av1` holds, as far as its OBU headers can be walked.
+/// A stream that stops parsing is counted up to there; rav1d reports
+/// the rest.
+fn count_frame_headers(av1: &[u8]) -> usize {
+    let mut rest = av1;
+    let mut frames = 0;
+    while let Some((&header, after)) = rest.split_first() {
+        let obu_type = header >> 3 & 0xf;
+        let extension = header & 0b100 != 0;
+        let has_size = header & 0b10 != 0;
+        frames += usize::from(matches!(obu_type, 3 | 6));
+        let Some(payload) = after.get(usize::from(extension)..) else { break };
+        let size = if has_size {
+            let Some((size, len)) = leb128(payload) else { break };
+            rest = &payload[len..];
+            size
+        } else {
+            rest = payload;
+            payload.len() as u64
+        };
+        rest = rest.get(usize::try_from(size).unwrap_or(usize::MAX)..).unwrap_or(&[]);
+    }
+    frames
+}
+
+/// An AV1 `leb128()` value (at most 8 bytes) and its length in bytes.
+fn leb128(bytes: &[u8]) -> Option<(u64, usize)> {
+    let mut value = 0u64;
+    for (i, &b) in bytes.iter().take(8).enumerate() {
+        value |= u64::from(b & 0x7f) << (7 * i);
+        if b & 0x80 == 0 || i == 7 {
+            return Some((value, i + 1));
         }
     }
+    None
+}
+
+/// Refuse an item with more than [`MAX_FRAMES_PER_ITEM`] frame headers.
+fn check_frame_count(av1: &[u8]) -> Result<(), String> {
+    let frames = count_frame_headers(av1);
+    if frames > MAX_FRAMES_PER_ITEM {
+        return Err(format!(
+            "AVIF item has {frames} AV1 frame headers (limit {MAX_FRAMES_PER_ITEM})"
+        ));
+    }
+    Ok(())
 }
 
 /// Parse the container, steering avif-parse (which requires major brand
@@ -493,6 +288,10 @@ fn decode_unguarded(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         .primary_item_metadata()
         .map_err(|e| format!("AV1 sequence header: {e}"))?;
     check_frame_budget(&color_meta)?;
+    check_frame_count(&avif.primary_item)?;
+    if let Some(alpha_item) = avif.alpha_item.as_deref() {
+        check_frame_count(alpha_item)?;
+    }
     if let Some(alpha_meta) = avif
         .alpha_item_metadata()
         .map_err(|e| format!("AV1 alpha sequence header: {e}"))?
@@ -543,13 +342,12 @@ struct Decoder {
 /// rav1d settings for one still image.
 ///
 /// One thread: rav1d then spawns no worker threads and decodes on the
-/// calling thread, so a panic on a malformed bitstream can't kill a
-/// rav1d worker that the caller then waits on forever, and a helper
-/// process (see [`helper`]) holds one decode's memory. Still images
-/// have one frame, so there is no frame pipelining to lose either; the
-/// cost is tile parallelism, in a process that is already off the
-/// paint path. Film grain is part of the picture (browsers
-/// synthesise it too).
+/// calling thread, so a panic on a malformed bitstream unwinds to that
+/// thread's `catch_unwind` (see [`run_with_deadline`]) instead of
+/// killing a rav1d worker the caller then waits on forever. Still
+/// images have one frame, so there is no frame pipelining to lose
+/// either; the cost is tile parallelism, off the paint path. Film
+/// grain is part of the picture (browsers synthesise it too).
 fn decoder_settings() -> Dav1dSettings {
     let mut settings = MaybeUninit::<Dav1dSettings>::uninit();
     // SAFETY: `dav1d_default_settings` initialises every field of the
@@ -647,9 +445,39 @@ impl Decoder {
 
 impl Drop for Decoder {
     fn drop(&mut self) {
+        if std::thread::panicking() {
+            // Unwinding from a panic in rav1d: a second panic here (in
+            // code that just failed an invariant) would abort, so the
+            // context is handed to [`close_orphaned_decoders`], which the
+            // decode thread calls once the unwind has been caught.
+            let (ctx, picture) = (self.ctx.take(), self.picture.take());
+            ORPHANED.with(|o| o.borrow_mut().push((ctx, picture)));
+            return;
+        }
         self.release_picture();
         // SAFETY: closes the context opened in `new` (no-op when `None`).
         unsafe { dav1d_close(Some(NonNull::from(&mut self.ctx))) };
+    }
+}
+
+thread_local! {
+    /// Contexts (and their held picture) dropped while unwinding.
+    static ORPHANED: std::cell::RefCell<Vec<(Option<Dav1dContext>, Option<Dav1dPicture>)>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Close the decoders a caught panic unwound past. Each is closed
+/// under `catch_unwind`; one whose close panics too is leaked.
+fn close_orphaned_decoders() {
+    for (mut ctx, picture) in ORPHANED.with(|o| std::mem::take(&mut *o.borrow_mut())) {
+        let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            if let Some(mut pic) = picture {
+                // SAFETY: owned picture from `dav1d_get_picture`, released once.
+                unsafe { dav1d_picture_unref(Some(NonNull::from(&mut pic))) };
+            }
+            // SAFETY: a context opened in `Decoder::new`, closed once.
+            unsafe { dav1d_close(Some(NonNull::from(&mut ctx))) };
+        }));
     }
 }
 
@@ -1039,81 +867,33 @@ mod tests {
 
     #[test]
     fn decoder_runs_on_the_calling_thread_only() {
-        // No rav1d worker threads: a helper holds one decode's memory.
+        // No rav1d worker threads: a panic unwinds on the decode thread,
+        // to its `catch_unwind`.
         let settings = decoder_settings();
         assert_eq!(settings.n_threads, 1);
         assert_eq!(settings.max_frame_delay, 1);
     }
 
-    /// The helper itself: a decode that aborts (what a panic inside
-    /// rav1d's `extern "C"` entry points does), panics through an
-    /// `extern "C"` frame, or never returns costs only that decode.
-    #[test]
-    fn helper_process_survives_abort_panic_and_hang() {
-        use std::time::{Duration, Instant};
-        let run = |input: &[u8], timeout| helper::decode(input, timeout);
-        assert_eq!(
-            run(b"test:ok", DECODE_TIMEOUT),
-            Ok((2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]))
-        );
-        assert_eq!(run(b"test:err", DECODE_TIMEOUT), Err("nope".to_string()));
-        for input in [&b"test:abort"[..], b"test:panic-in-extern-c"] {
-            let err = run(input, DECODE_TIMEOUT).unwrap_err();
-            assert!(err.contains("crashed"), "{err}");
-        }
-        // A decoder that never returns is killed at the deadline.
-        let start = Instant::now();
-        let err = run(b"test:hang", Duration::from_secs(3)).unwrap_err();
-        assert!(err.contains("timed out"), "{err}");
-        assert!(start.elapsed() < Duration::from_secs(10));
-        // This process is still here, and so is the decoder.
-        assert!(decode_rgba8(SWATCH).is_ok());
+    /// The swatch's AV1 item (all of its `mdat`).
+    fn swatch_item() -> Vec<u8> {
+        let mdat = SWATCH.windows(4).position(|w| w == b"mdat").unwrap() - 4;
+        SWATCH[mdat + 8..].to_vec()
     }
 
-    /// A program that isn't a helper (it never says the handshake) is
-    /// sent nothing and is killed at the deadline.
-    #[cfg(unix)]
-    #[test]
-    fn non_helper_executable_is_killed_unfed() {
-        use std::time::{Duration, Instant};
-        let start = Instant::now();
-        let err = helper::decode_with(
-            std::process::Command::new("cat"),
-            SWATCH,
-            Duration::from_millis(500),
-        )
-        .unwrap_err();
-        assert!(err.contains("didn't start"), "{err}");
-        assert!(start.elapsed() < Duration::from_secs(5));
-        // One that exits at once without it fails the same way.
-        let err =
-            helper::decode_with(std::process::Command::new("true"), SWATCH, DECODE_TIMEOUT)
-                .unwrap_err();
-        assert!(err.contains("didn't start"), "{err}");
-    }
-
-    #[test]
-    fn malformed_bitstreams_never_stall_the_caller() {
-        // Corrupt the swatch's AV1 payload (bit flips, garbage runs,
-        // truncation) and decode each variant; every one must come back
-        // (decoded or an error), never panic out or hang. Run on a
-        // separate thread with a deadline so a hang fails the test
-        // instead of stalling the suite.
-        let item = {
-            let mdat = SWATCH.windows(4).position(|w| w == b"mdat").unwrap() - 4;
-            SWATCH[mdat + 8..].to_vec()
+    /// 160 corruptions of the swatch's AV1 payload (bit flips, garbage
+    /// runs, truncation, a scrambled frame after an intact sequence
+    /// header), each wrapped back into the swatch's container.
+    fn malformed_corpus() -> Vec<Vec<u8>> {
+        let item = swatch_item();
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
         };
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut seed = 0x2545_f491_4f6c_dd1du64;
-            let mut next = move || {
-                seed ^= seed << 13;
-                seed ^= seed >> 7;
-                seed ^= seed << 17;
-                seed
-            };
-            let mut outcomes = (0usize, 0usize);
-            for round in 0..160 {
+        (0..160)
+            .map(|round| {
                 let mut bad = item.clone();
                 match round % 4 {
                     0 => {
@@ -1138,18 +918,103 @@ mod tests {
                         }
                     }
                 }
-                match decode_rgba8(&swatch_with_item(&bad)) {
-                    Ok(_) => outcomes.0 += 1,
-                    Err(_) => outcomes.1 += 1,
+                swatch_with_item(&bad)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn malformed_bitstreams_fail_in_process() {
+        // Every corrupted variant comes back (decoded or an error) in
+        // this process: rav1d's panics on some of them (an `unwrap` in
+        // its frame decode, among others) unwind through its
+        // `extern "C-unwind"` entry points to the decode's
+        // `catch_unwind` instead of aborting the test binary.
+        let (mut ok, mut err, mut panicked) = (0, 0, 0);
+        for file in malformed_corpus() {
+            match decode_rgba8(&file) {
+                Ok(_) => ok += 1,
+                Err(e) => {
+                    err += 1;
+                    panicked += usize::from(e.contains("decoder panicked"));
+                    assert!(!e.contains("timed out"), "{e}");
                 }
             }
-            let _ = tx.send(outcomes);
-        });
-        let (ok, err) = rx
-            .recv_timeout(std::time::Duration::from_secs(120))
-            .expect("a malformed AVIF stalled the decoder");
+        }
         assert_eq!(ok + err, 160);
         assert!(err > 0, "corruption is noticed at least sometimes");
+        assert!(panicked > 0, "the corpus reaches rav1d panics ({err} errors)");
+        // The decoder is unharmed.
+        assert!(decode_rgba8(SWATCH).is_ok());
+    }
+
+    /// A corpus entry on which rav1d panics: `f.frame_hdr.as_ref().unwrap()`
+    /// in the frame-error handler of `rav1d_submit_frame` (`src/decode.rs`,
+    /// line 4997 in 1.1.0), as 76 of the 160 entries do.
+    const PANICKING_VARIANT: usize = 3;
+
+    #[test]
+    fn rav1d_panic_is_an_error_naming_the_panic() {
+        let file = &malformed_corpus()[PANICKING_VARIANT];
+        for _ in 0..3 {
+            let err = decode_rgba8(file).unwrap_err();
+            assert!(err.contains("decoder panicked"), "{err}");
+            assert!(err.contains("unwrap"), "{err}");
+            // A fresh context per decode: the panic leaves nothing behind.
+            assert!(decode_rgba8(SWATCH).is_ok());
+        }
+    }
+
+    #[test]
+    fn deadline_catches_panics_and_abandons_hangs() {
+        use std::time::Instant;
+        let ok = run_with_deadline(|| Ok((1, 1, vec![1, 2, 3, 4])), DECODE_TIMEOUT);
+        assert_eq!(ok, Ok((1, 1, vec![1, 2, 3, 4])));
+        let err = run_with_deadline(|| panic!("boom"), DECODE_TIMEOUT).unwrap_err();
+        assert!(err.contains("decoder panicked: boom"), "{err}");
+        // What the vendored rav1d's entry points are: a panic crosses an
+        // `extern "C-unwind"` frame (through `extern "C"` it would abort).
+        extern "C-unwind" fn entry_point(n: u32) -> u32 {
+            if n > 0 {
+                panic!("panic {n} through C-unwind");
+            }
+            n
+        }
+        let err = run_with_deadline(|| Ok((entry_point(7), 0, vec![])), DECODE_TIMEOUT).unwrap_err();
+        assert!(err.contains("panic 7 through C-unwind"), "{err}");
+        // A decode that never returns is abandoned at the deadline (its
+        // thread sleeps on, leaked, until the test binary exits).
+        let start = Instant::now();
+        let err = run_with_deadline(
+            || loop {
+                std::thread::sleep(Duration::from_secs(1));
+            },
+            Duration::from_millis(200),
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn items_with_many_frames_are_refused() {
+        let item = swatch_item();
+        assert_eq!(count_frame_headers(&item), 1);
+        // Temporal delimiter, then frame-header OBUs (`show_existing_frame`
+        // sized, two bytes each, with size fields).
+        let mut many = vec![0x12, 0x00];
+        many.extend_from_slice(&item);
+        for _ in 0..MAX_FRAMES_PER_ITEM {
+            many.extend_from_slice(&[0x1a, 0x01, 0x80]);
+        }
+        assert_eq!(count_frame_headers(&many), MAX_FRAMES_PER_ITEM + 1);
+        let err = decode_rgba8(&swatch_with_item(&many)).unwrap_err();
+        assert!(err.contains("frame headers"), "{err}");
+        // Walking stops at a truncated size field; no size field means
+        // the rest of the item.
+        assert_eq!(count_frame_headers(&[0x32, 0x80]), 1);
+        assert_eq!(count_frame_headers(&[0x30, 0x32, 0x00]), 1);
+        assert_eq!(count_frame_headers(&[]), 0);
     }
 
     #[test]

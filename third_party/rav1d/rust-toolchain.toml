@@ -1,0 +1,15 @@
+[toolchain]
+channel = "nightly-2025-05-01"
+
+# Commented out targets to avoid downloading or caching all these during CI
+# runs. See discussion on rav1d PR #1174. Uncomment to cross-compile locally.
+# targets = [
+#     "aarch64-unknown-linux-gnu",
+#     "aarch64-apple-darwin",
+#     "aarch64-linux-android",
+#     "armv7-unknown-linux-gnueabihf",
+#     "i686-unknown-linux-gnu",
+#     "riscv64gc-unknown-linux-gnu",
+#     "x86_64-unknown-linux-gnu",
+# ]
+components = ["rustfmt"]

@@ -109,7 +109,11 @@ image = { version = "0.25", default-features = false, features = ["png", "jpeg",
 
 # Feature `avif`: pure-Rust AVIF (see the feature comment above). rav1d's
 # default features include its assembly, which needs `nasm`; the
-# `avif-asm` feature opts back in.
+# `avif-asm` feature opts back in. The workspace `[patch.crates-io]`s
+# rav1d to `third_party/rav1d` (entry points `extern "C-unwind"`, so a
+# rav1d panic is caught per decode); [patch] only applies inside this
+# workspace, so a build that pulls this crate in from elsewhere must
+# apply the same patch, or a malformed AVIF can abort the process.
 rav1d = { version = "1.1", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
 avif-parse = { version = "2.1", optional = true }
 

@@ -1,0 +1,151 @@
+name: build and test on x86-64
+on:
+  push:
+    branches:
+      - 'main'
+  pull_request:
+jobs:
+  test-on-ubuntu-latest:
+    strategy:
+      matrix:
+        target: [
+          "x86_64-unknown-linux-gnu",
+          "i686-unknown-linux-gnu"
+        ]
+        build: [
+          # release build without optimized assembly routines
+          {name: "release", flags: "--release --no-default-features --features=bitdepth_8,bitdepth_16", timeout_multiplier: 1},
+          # debug build with optimizations to catch overflows with optimized assembly routines
+          {name: "opt-dev", flags: "--profile opt-dev", timeout_multiplier: 3}
+        ]
+        # Test with negative strides, threads and framedelay
+        variant: [
+          "",
+          "-n",
+          "-f 1",
+          "-f 2"
+        ]
+    runs-on: ubuntu-latest
+    steps:
+      - name: install prerequisites
+        uses: awalsh128/cache-apt-pkgs-action@latest
+        with:
+          packages: meson nasm gcc-multilib
+          version: 1.0 # version of cache to load
+      - name: git checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: cache rust toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.rustup/settings.toml
+          key: ${{ runner.os }}-${{ matrix.target }}-rust-toolchain-${{ hashFiles('rust-toolchain', 'rust-toolchain.toml') }}
+      - name: cache rust crates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: cargo build for ${{ matrix.target }} ${{ matrix.build.name }}
+        run: |
+          cargo clean
+          rustup target add --toolchain stable ${{ matrix.target }}
+          cargo +stable build --target ${{ matrix.target }} ${{ matrix.build.flags }}
+      - name: meson test for ${{ matrix.target }} ${{ matrix.build.name }}
+        run: |
+          .github/workflows/test.sh \
+              -r target/${{ matrix.target }}/${{ matrix.build.name }}/dav1d \
+              -s target/${{ matrix.target }}/${{ matrix.build.name }}/seek_stress \
+              -t ${{ matrix.build.timeout_multiplier }} \
+              ${{ matrix.variant }}
+      - name: copy log files
+        if: ${{ !cancelled() }}
+        run: |
+          cp ${{ github.workspace }}/build/meson-logs/testlog.txt \
+             ${{ github.workspace }}/build/meson-logs/testlog-${{ matrix.target }}-${{ matrix.build.name }}.txt
+      - name: upload build artifacts
+        # don't upload artifacts for all the test variants to keep names unique
+        if: ${{ !cancelled() && matrix.variant == '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-test-logs-${{ matrix.target }}-${{ matrix.build.name }}
+          path: |
+             ${{ github.workspace }}/build/meson-logs/testlog-*.txt
+  test-on-macos-13:
+    runs-on: macos-13 # select an x86_64 image
+    steps:
+      - name: install prerequisites
+        env:
+          HOMEBREW_NO_AUTO_UPDATE: 1
+        run: brew install meson nasm
+      - name: git checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: cache rust toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains
+            ~/.rustup/update-hashes
+            ~/.rustup/settings.toml
+          key: ${{ runner.os }}-rust-toolchain-${{ hashFiles('rust-toolchain', 'rust-toolchain.toml') }}
+      - name: cache rust crates
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: cargo build for x86_64-apple-darwin
+        run: |
+          cargo +stable build --release
+      - name: meson test for x86_64-apple-darwin
+        run: |
+          .github/workflows/test.sh \
+              -r target/release/dav1d \
+              -s target/release/seek_stress
+      - name: copy log files
+        if: ${{ !cancelled() }}
+        run: |
+          cp ${{ github.workspace }}/build/meson-logs/testlog.txt \
+              ${{ github.workspace }}/build/meson-logs/testlog-x86_64-apple-darwin.txt
+      - name: upload build artifacts
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: meson-test-logs-x86_64-apple-darwin
+          path: |
+              ${{ github.workspace }}/build/meson-logs/testlog-*.txt
+  test-on-windows-2022:
+    runs-on: windows-2022
+    steps:
+      - name: install prerequisites
+        run: |
+          choco install nasm
+        shell: pwsh
+      - name: add nasm to path
+        run: |
+          $nasmPath = "$($env:SystemDrive)\Program Files\NASM"
+          echo $nasmPath
+          dir $nasmPath
+          echo "$nasmPath" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: check nasm installation
+        run: nasm -v
+      - name: git checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+      - name: cargo build
+        run: cargo build --release

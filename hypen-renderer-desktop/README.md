@@ -37,12 +37,13 @@ rav1d's assembly (needs `nasm`). Still images decode (major brand `avif`,
 or e.g. `mif1` listing `avif`), with alpha; an animated AVIF that also lists
 `avif` shows its still primary image, unanimated. Grid (tiled) primary
 images and `avis`-only sequences are not supported: the source fails once
-(logged) and keeps its placeholder, like any undecodable image. Each AVIF
-decodes in a short-lived helper process — the host executable started again
-with `__HYPEN_AVIF_DECODE_HELPER=1` and diverted into the decoder before its
-`main` runs — because rav1d aborts the process on some malformed bitstreams;
-a helper that crashes or takes over 30 s only fails that image. A host
-sandbox must therefore let the app execute its own binary. With
+(logged) and keeps its placeholder, like any undecodable image. rav1d panics on
+some malformed bitstreams; the workspace patches it to a vendored copy with
+`extern "C-unwind"` entry points (`third_party/rav1d/PATCHES.md`), so each
+AVIF decodes in-process on its own thread under `catch_unwind` and a panic
+only fails that image (keep `panic = "unwind"`, the default: with
+`panic = "abort"` such a panic ends the app). A decode still running after
+30 s is abandoned (its thread finishes in the background). With
 `default-features = false` and no `avif`, an AVIF source keeps its
 placeholder or background colour.
 
