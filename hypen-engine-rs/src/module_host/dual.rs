@@ -13,10 +13,9 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Arc, Mutex};
 
 use super::kv::KvBackend;
-use super::wasmtime_host::HostCore;
+use super::wasmtime::{IdTag, Shared};
 use super::{
     ExecStrategy, HostAction, HostError, ModuleHost, ModuleInstanceId, ModuleLimits,
     ModuleManifest, ReducerOutput, SiblingState, WasmtimeHost, WasmtimeHostAsync,
@@ -53,17 +52,14 @@ pub fn detect_abi(bytes: &[u8]) -> ModuleAbi {
     }
 }
 
-/// Instance ids handed out for the async host carry this tag bit so calls
-/// route back without a lookup table. Safe: slotmap's ffi encoding keeps the
-/// top bit clear for any realistic instance count.
-const ASYNC_ID_TAG: u64 = 1 << 63;
-
 /// [`ModuleHost`] mux over both native hosts. `register` sniffs each
 /// component's ABI; re-registering the same name re-sniffs (so hot reload
-/// can change a module's ABI across a rebuild).
+/// can change a module's ABI across a rebuild). Instance ids carry a tag
+/// saying which host issued them, so calls route without a lookup.
 pub struct DualHost {
     v1: WasmtimeHost,
     v2: WasmtimeHostAsync,
+    /// Which host holds the current registration of each name.
     routing: HashMap<String, ModuleAbi>,
 }
 
@@ -89,16 +85,15 @@ impl DualHost {
         strategy: ExecStrategy,
         data_dir: Option<&Path>,
     ) -> Result<Self, HostError> {
-        let core = HostCore::new(strategy)?;
         let backend = match data_dir {
             Some(dir) => KvBackend::file_backed(dir.join("storage.json"))
                 .map_err(|e| HostError::Runtime(e.to_string()))?,
             None => KvBackend::default(),
         };
-        let storage = Arc::new(Mutex::new(backend));
+        let shared = Shared::new(strategy, backend)?;
         Ok(Self {
-            v1: WasmtimeHost::with_core(limits, Arc::clone(&core), Arc::clone(&storage)),
-            v2: WasmtimeHostAsync::with_core(limits, core, storage),
+            v1: WasmtimeHost::on(shared.clone(), limits, IdTag::Plain),
+            v2: WasmtimeHostAsync::on(shared, limits, IdTag::Async),
             routing: HashMap::new(),
         })
     }
@@ -109,16 +104,36 @@ impl DualHost {
         (&mut self.v1, &mut self.v2)
     }
 
-    fn host_for_id(&mut self, id: ModuleInstanceId) -> (&mut dyn ModuleHost, ModuleInstanceId) {
-        if id.0 & ASYNC_ID_TAG != 0 {
-            (&mut self.v2, ModuleInstanceId(id.0 & !ASYNC_ID_TAG))
-        } else {
-            (&mut self.v1, id)
+    /// Persist pending storage changes now (see
+    /// [`WasmtimeHost::flush_storage`]). One backend serves both hosts.
+    pub fn flush_storage(&mut self) -> Result<(), HostError> {
+        self.v1.flush_storage()
+    }
+
+    /// Why the instance behind `id` is dead (see
+    /// [`WasmtimeHost::death_reason`]).
+    pub fn death_reason(&self, id: ModuleInstanceId) -> Option<String> {
+        match IdTag::of(id) {
+            IdTag::Plain => self.v1.death_reason(id),
+            IdTag::Async => self.v2.death_reason(id),
+        }
+    }
+
+    /// The host that issued `id`. An id from neither simply misses there.
+    fn host_of(&mut self, id: ModuleInstanceId) -> &mut dyn ModuleHost {
+        match IdTag::of(id) {
+            IdTag::Plain => &mut self.v1,
+            IdTag::Async => &mut self.v2,
         }
     }
 }
 
 impl ModuleHost for DualHost {
+    /// Register with the host for the component's ABI. If the name was
+    /// registered under the other ABI, that registration is dropped so the
+    /// name resolves to exactly one module; instances already created from
+    /// it keep running until destroyed. A failed registration changes
+    /// nothing.
     fn register(
         &mut self,
         name: &str,
@@ -126,32 +141,34 @@ impl ModuleHost for DualHost {
         manifest: ModuleManifest,
     ) -> Result<(), HostError> {
         let abi = detect_abi(component_bytes);
-        self.routing.insert(name.to_string(), abi);
         match abi {
-            ModuleAbi::V1Sync => self.v1.register(name, component_bytes, manifest),
-            ModuleAbi::V2Async => self.v2.register(name, component_bytes, manifest),
+            ModuleAbi::V1Sync => {
+                self.v1.register(name, component_bytes, manifest)?;
+                self.v2.unregister(name);
+            }
+            ModuleAbi::V2Async => {
+                self.v2.register(name, component_bytes, manifest)?;
+                self.v1.unregister(name);
+            }
         }
+        self.routing.insert(name.to_string(), abi);
+        Ok(())
     }
 
     fn instantiate(&mut self, name: &str) -> Result<ModuleInstanceId, HostError> {
         match self.routing.get(name) {
             Some(ModuleAbi::V1Sync) => self.v1.instantiate(name),
-            Some(ModuleAbi::V2Async) => self
-                .v2
-                .instantiate(name)
-                .map(|id| ModuleInstanceId(id.0 | ASYNC_ID_TAG)),
+            Some(ModuleAbi::V2Async) => self.v2.instantiate(name),
             None => Err(HostError::UnknownModule(name.to_string())),
         }
     }
 
     fn destroy(&mut self, id: ModuleInstanceId) -> Result<(), HostError> {
-        let (host, id) = self.host_for_id(id);
-        host.destroy(id)
+        self.host_of(id).destroy(id)
     }
 
     fn init(&mut self, id: ModuleInstanceId, config: &[u8]) -> Result<Vec<u8>, HostError> {
-        let (host, id) = self.host_for_id(id);
-        host.init(id, config)
+        self.host_of(id).init(id, config)
     }
 
     fn dispatch(
@@ -161,8 +178,7 @@ impl ModuleHost for DualHost {
         action: HostAction,
         siblings: &[SiblingState],
     ) -> Result<ReducerOutput, HostError> {
-        let (host, id) = self.host_for_id(id);
-        host.dispatch(id, state, action, siblings)
+        self.host_of(id).dispatch(id, state, action, siblings)
     }
 
     fn on_activated(
@@ -171,8 +187,7 @@ impl ModuleHost for DualHost {
         state: &[u8],
         siblings: &[SiblingState],
     ) -> Result<ReducerOutput, HostError> {
-        let (host, id) = self.host_for_id(id);
-        host.on_activated(id, state, siblings)
+        self.host_of(id).on_activated(id, state, siblings)
     }
 
     fn on_deactivated(
@@ -180,17 +195,14 @@ impl ModuleHost for DualHost {
         id: ModuleInstanceId,
         state: &[u8],
     ) -> Result<ReducerOutput, HostError> {
-        let (host, id) = self.host_for_id(id);
-        host.on_deactivated(id, state)
+        self.host_of(id).on_deactivated(id, state)
     }
 
     fn on_destroyed(&mut self, id: ModuleInstanceId, state: &[u8]) -> Result<(), HostError> {
-        let (host, id) = self.host_for_id(id);
-        host.on_destroyed(id, state)
+        self.host_of(id).on_destroyed(id, state)
     }
 
     fn actions(&mut self, id: ModuleInstanceId) -> Result<Vec<String>, HostError> {
-        let (host, id) = self.host_for_id(id);
-        host.actions(id)
+        self.host_of(id).actions(id)
     }
 }

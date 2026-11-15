@@ -15,15 +15,19 @@
 //!   carry no heavy dependencies, so `Engine` can hold an
 //!   `Option<Box<dyn ModuleHost>>` and the reducer→reactive wiring is
 //!   testable with a mock host.
-//! - [`WasmtimeHost`] — the concrete native runtime — lives behind the
-//!   `module-loader` feature (it pulls in `wasmtime`) and is native-only
-//!   (`wasmtime` cannot run inside a wasm32 guest).
+//! - The native runtime — `WasmtimeHost` (v0.1 ABI), `WasmtimeHostAsync`
+//!   (v0.2 ABI) and `DualHost` (both) — lives in the `wasmtime` submodule
+//!   behind the `module-loader` feature (it pulls in `wasmtime`) and is
+//!   native-only (`wasmtime` cannot run inside a wasm32 guest). Its module
+//!   docs state the sandbox model.
+//! - `BridgedHost` delegates to a JS host when the engine itself runs in
+//!   wasm32 (`module-loader-bridged`).
 //!
 //! See `/wit/ENGINE_INTEGRATION.md` for the full design.
 
 use std::fmt;
 
-// Storage backend shared by the two wasmtime hosts (the bridged host keeps
+// Storage backend shared by the wasmtime hosts (the bridged host keeps
 // storage on the JS side).
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
 mod kv;
@@ -31,19 +35,14 @@ mod registry;
 pub use registry::{BundledRegistry, ModuleRegistry, RegistryError};
 
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
-mod wasmtime_host;
+mod wasmtime;
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
-pub use wasmtime_host::{ExecStrategy, ModuleLimits, WasmtimeHost};
+pub use wasmtime::{ExecStrategy, Host, ModuleLimits, WasmtimeHost, WasmtimeHostAsync};
 
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
 mod dual;
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
 pub use dual::{detect_abi, DualHost, ModuleAbi};
-
-#[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
-mod wasmtime_host_async;
-#[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
-pub use wasmtime_host_async::WasmtimeHostAsync;
 
 #[cfg(all(feature = "module-loader-bridged", target_arch = "wasm32"))]
 mod bridged_host;
@@ -69,7 +68,10 @@ pub struct HostAction {
 
 impl HostAction {
     pub fn new(name: impl Into<String>, payload: Vec<u8>) -> Self {
-        Self { name: name.into(), payload }
+        Self {
+            name: name.into(),
+            payload,
+        }
     }
 }
 
@@ -135,7 +137,9 @@ pub type SiblingState = (String, Vec<u8>);
 
 /// Storage visibility scope a module may be granted (mirrors the three
 /// sister interfaces in `hypen:storage`). `Local` is always granted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "lowercase")]
 pub enum StorageScope {
     Local,
@@ -208,13 +212,18 @@ impl ModuleManifest {
 pub enum HostError {
     /// No module registered under this name.
     UnknownModule(String),
-    /// Instance id is dead or never existed.
+    /// The instance was killed by a trap or timeout, was destroyed, or the
+    /// id was never issued by this host.
     DeadInstance,
     /// The module's export returned `Err(string)`.
     ModuleError(String),
-    /// The component trapped (panic, OOM, fuel/epoch limit).
+    /// The call did not run to completion: the component trapped, overran
+    /// its CPU or wall-clock budget, or hit its memory limit (the message
+    /// says which). The instance is dead afterwards.
     Trap(String),
-    /// Instantiation/linking failed (often: ungranted capability import).
+    /// Registration or instantiation failed: the bytes are not a component
+    /// of the host's world, an import is not granted by the manifest (the
+    /// message names it), or component start failed.
     Instantiate(String),
     /// State/payload (de)serialization failed.
     Codec(String),
@@ -240,9 +249,9 @@ impl std::error::Error for HostError {}
 
 /// Hosts WASM Component modules and drives their reducer + lifecycle exports.
 ///
-/// Two implementations are planned: [`WasmtimeHost`] (native) and a
-/// JS-bridged host for when the engine itself runs in the browser. The engine
-/// is agnostic to which it holds.
+/// Implemented by the native wasmtime hosts and by a JS-bridged host for when
+/// the engine itself runs in the browser. The engine is agnostic to which it
+/// holds.
 pub trait ModuleHost: Send {
     /// Register a module type from component bytes + its manifest. Idempotent;
     /// re-registering the same name replaces the bytes (hot reload).
@@ -291,7 +300,11 @@ pub trait ModuleHost: Send {
     ) -> Result<ReducerOutput, HostError>;
 
     /// Lifecycle: module left the screen.
-    fn on_deactivated(&mut self, id: ModuleInstanceId, state: &[u8]) -> Result<ReducerOutput, HostError>;
+    fn on_deactivated(
+        &mut self,
+        id: ModuleInstanceId,
+        state: &[u8],
+    ) -> Result<ReducerOutput, HostError>;
 
     /// Lifecycle: instance about to be destroyed.
     fn on_destroyed(&mut self, id: ModuleInstanceId, state: &[u8]) -> Result<(), HostError>;

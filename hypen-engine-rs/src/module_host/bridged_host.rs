@@ -73,11 +73,7 @@ extern "C" {
     ) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(structural, method, js_name = "onDeactivated", catch)]
-    fn js_on_deactivated(
-        this: &JsModuleHost,
-        id: f64,
-        state: Vec<u8>,
-    ) -> Result<JsValue, JsValue>;
+    fn js_on_deactivated(this: &JsModuleHost, id: f64, state: Vec<u8>) -> Result<JsValue, JsValue>;
 
     #[wasm_bindgen(structural, method, js_name = "onDestroyed", catch)]
     fn js_on_destroyed(this: &JsModuleHost, id: f64, state: Vec<u8>) -> Result<(), JsValue>;
@@ -247,12 +243,23 @@ fn decode_output(raw: JsValue) -> Result<ReducerOutput, HostError> {
         emit: wire
             .emit
             .into_iter()
-            .map(|a| HostAction { name: a.name, payload: a.payload })
+            .map(|a| HostAction {
+                name: a.name,
+                payload: a.payload,
+            })
             .collect(),
         cross_dispatch: wire
             .cross_dispatch
             .into_iter()
-            .map(|c| (c.module, HostAction { name: c.action.name, payload: c.action.payload }))
+            .map(|c| {
+                (
+                    c.module,
+                    HostAction {
+                        name: c.action.name,
+                        payload: c.action.payload,
+                    },
+                )
+            })
             .collect(),
         subscribe_requests: wire
             .subscribe_requests
@@ -300,7 +307,9 @@ impl ModuleHost for BridgedHost {
             http: manifest.grants_http(),
         };
         let manifest_js = to_js(&wire)?;
-        self.js.js_register(name, bytes, manifest_js).map_err(js_err)
+        self.js
+            .js_register(name, bytes, manifest_js)
+            .map_err(js_err)
     }
 
     fn instantiate(&mut self, name: &str) -> Result<ModuleInstanceId, HostError> {
@@ -331,7 +340,10 @@ impl ModuleHost for BridgedHost {
         })?;
         let siblings_vec: Vec<SiblingWire<'_>> = siblings
             .iter()
-            .map(|(m, s)| SiblingWire { module: m, state: s })
+            .map(|(m, s)| SiblingWire {
+                module: m,
+                state: s,
+            })
             .collect();
         let siblings_js = to_js(&siblings_vec)?;
         let raw = self
@@ -349,7 +361,10 @@ impl ModuleHost for BridgedHost {
     ) -> Result<ReducerOutput, HostError> {
         let siblings_vec: Vec<SiblingWire<'_>> = siblings
             .iter()
-            .map(|(m, s)| SiblingWire { module: m, state: s })
+            .map(|(m, s)| SiblingWire {
+                module: m,
+                state: s,
+            })
             .collect();
         let siblings_js = to_js(&siblings_vec)?;
         let raw = self

@@ -59,7 +59,12 @@ impl BundledRegistry {
         self.modules.insert((name.into(), version.into()), bytes);
     }
 
-    pub fn with(mut self, name: impl Into<String>, version: impl Into<String>, bytes: Vec<u8>) -> Self {
+    pub fn with(
+        mut self,
+        name: impl Into<String>,
+        version: impl Into<String>,
+        bytes: Vec<u8>,
+    ) -> Self {
         self.insert(name, version, bytes);
         self
     }
