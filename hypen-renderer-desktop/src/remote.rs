@@ -1096,15 +1096,20 @@ mod tests {
         deliver_patches(&inner, vec![early]);
         let seen: Arc<Mutex<Vec<usize>>> = Arc::default();
         let sink = Arc::clone(&seen);
-        module.on_owned_patches(Arc::new(move |batch: Vec<Patch>| {
-            for p in batch {
-                if let Patch::SetProp { value, .. } = p {
-                    sink.lock()
-                        .unwrap()
-                        .push(value.as_str().unwrap().as_ptr() as usize);
+        // Through the TRAIT, as the window wires it (its override
+        // forwards to the inherent owned path; the default would copy).
+        crate::module::HypenModule::on_owned_patches(
+            &module,
+            Arc::new(move |batch: Vec<Patch>| {
+                for p in batch {
+                    if let Patch::SetProp { value, .. } = p {
+                        sink.lock()
+                            .unwrap()
+                            .push(value.as_str().unwrap().as_ptr() as usize);
+                    }
                 }
-            }
-        }));
+            }),
+        );
         let (late, late_ptr) = set("b");
         deliver_patches(&inner, vec![late]);
         assert_eq!(*seen.lock().unwrap(), vec![early_ptr, late_ptr]);

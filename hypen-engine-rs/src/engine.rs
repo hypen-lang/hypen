@@ -490,6 +490,32 @@ mod owned_render_callback_tests {
         engine.update_state(None, json!({"title": "b".repeat(256)}));
     }
 
+    /// The owned callback gets the engine's batch ITSELF, not a copy: each
+    /// `Create`'s props map is shared by exactly two owners while the
+    /// callback runs — the engine's instance tree and the patch handed
+    /// over. A copied batch would show a third (a `clone` of the `Vec`
+    /// alongside the engine's) or a fresh map with one (a deep copy).
+    #[test]
+    fn owned_render_callback_gets_the_engine_batch_itself() {
+        let counts: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&counts);
+        let mut engine = Engine::new();
+        engine.set_owned_render_callback(move |patches| {
+            for p in &patches {
+                if let Patch::Create { props, .. } = p {
+                    sink.lock().unwrap().push(Arc::strong_count(props));
+                }
+            }
+        });
+        render(&mut engine);
+        let counts = counts.lock().unwrap();
+        assert!(!counts.is_empty(), "no Create reached the callback");
+        assert!(
+            counts.iter().all(|&c| c == 2),
+            "props owners per Create: {counts:?}"
+        );
+    }
+
     /// The owned callback receives exactly the batches the borrowed one
     /// does — moved to it, so a consumer that queues them copies nothing.
     #[test]

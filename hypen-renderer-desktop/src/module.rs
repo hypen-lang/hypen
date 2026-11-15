@@ -164,6 +164,32 @@ mod tests {
         );
     }
 
+    /// A local module's batches reach an owned consumer (the window's
+    /// patch queue) as the ENGINE's own `Vec` — through the trait object,
+    /// as the window wires it: while the callback runs, each `Create`'s
+    /// props map has exactly two owners (the engine's instance tree and
+    /// the patch). The trait's copying default would show a third.
+    #[test]
+    fn hypen_module_owned_patches_are_the_engines_own() {
+        let module = make_counter_module();
+        let counts: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&counts);
+        module.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
+            for p in &patches {
+                if let Patch::Create { props, .. } = p {
+                    sink.lock().unwrap().push(Arc::strong_count(props));
+                }
+            }
+        }));
+        module.mount();
+        let counts = counts.lock().unwrap();
+        assert!(!counts.is_empty(), "no Create reached the owned callback");
+        assert!(
+            counts.iter().all(|&c| c == 2),
+            "props owners per Create: {counts:?}"
+        );
+    }
+
     #[test]
     fn hypen_module_dispatch_state_updates_observed_via_concrete_handle() {
         // The trait API is intentionally write-only (no get_state) so we
