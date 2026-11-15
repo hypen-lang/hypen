@@ -265,6 +265,42 @@ describe("__virt.window layout", () => {
     expect(trail(list)).toBe("400px");
   });
 
+  test("an empty spacer is not generated: an unscrolled Grid gets no blank leading row", () => {
+    // Social's user profile: a windowed 3-up Grid of 6 posts in a
+    // `flex-1` box. Unscrolled, the window covers every row, so both
+    // spacers are 0px — and a 0px `::before` / `::after` is still a grid
+    // item with its own implicit row, which the grid's stretched auto
+    // rows grew into a blank band above (and below) the photos in Chrome.
+    const s = setup({ elementType: "Grid", listProps: { columns: 3 } });
+    s.layout.cols = 3;
+    s.layout.rowHeight = () => 100;
+    s.renderer.applyPatches([...rowPatches(0, 6), win(6, 0, 6)]);
+    const list = s.list();
+    expect(lead(list)).toBe("0px");
+    expect(trail(list)).toBe("0px");
+    expect(list.attributes["data-hypen-virt-empty"]).toBe("lead trail");
+    const sheet = (document as any).getElementById("hypen-virt-styles");
+    expect(sheet?.textContent).toContain(
+      '[data-hypen-virt-empty~="lead"]::before,[data-hypen-virt-empty~="trail"]::after{display:none}',
+    );
+    // Scrolled into a longer list: only the empty side is suppressed.
+    s.renderer.applyPatches([
+      ...Array.from({ length: 6 }, (_, i) => ({ type: "remove", id: `r${i}` }) as Patch),
+      ...rowPatches(9, 18),
+      win(18, 9, 18),
+    ]);
+    expect(lead(list)).toBe("300px");
+    expect(list.attributes["data-hypen-virt-empty"]).toBe("trail");
+    s.renderer.applyPatches([
+      ...Array.from({ length: 9 }, (_, i) => ({ type: "remove", id: `r${i + 9}` }) as Patch),
+      ...rowPatches(6, 15),
+      win(30, 6, 15),
+    ]);
+    expect(list.attributes["data-hypen-virt-empty"]).toBeUndefined();
+    s.renderer.applyPatches([{ type: "removeProp", id: "list", name: "__virt.window" } as Patch]);
+    expect(list.attributes["data-hypen-virt-empty"]).toBeUndefined();
+  });
+
   test("grid columns from the applicator spelling", () => {
     const s = setup({ elementType: "Grid", listProps: { "columns.0": 2 } });
     s.layout.cols = 2;

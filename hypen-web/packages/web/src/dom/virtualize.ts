@@ -67,6 +67,16 @@ function claimRole(el: HTMLElement, role: string): void {
 function releaseRole(el: HTMLElement): void {
   if (ownedRoles.delete(el)) el.removeAttribute?.("role");
 }
+/**
+ * Which spacers are empty (`"lead"`, `"trail"`, both, or none): an empty
+ * spacer is not generated at all. A zero-height `::before` is still an
+ * item — in a grid it is a whole implicit row, and a grid (or flex) list
+ * with free space stretches its auto rows, so an unscrolled windowed Grid
+ * that fills a `flex-1` box grew a band of blank space above its first row
+ * (and below its last), shared with the real rows.
+ */
+export const VIRT_EMPTY_ATTR = "data-hypen-virt-empty";
+
 /** Custom properties the spacers read (px lengths). */
 export const VIRT_LEAD_VAR = "--hypen-virt-lead";
 export const VIRT_TRAIL_VAR = "--hypen-virt-trail";
@@ -88,6 +98,7 @@ export const VIRT_CSS = `
 [${VIRT_ATTR}="y"]::after{height:var(${VIRT_TRAIL_VAR},0px);margin:calc(-1 * var(${VIRT_GAP_VAR},0px)) 0 0 0}
 [${VIRT_ATTR}="x"]::before{width:var(${VIRT_LEAD_VAR},0px);margin:0;margin-inline-end:calc(-1 * var(${VIRT_GAP_VAR},0px))}
 [${VIRT_ATTR}="x"]::after{width:var(${VIRT_TRAIL_VAR},0px);margin:0;margin-inline-start:calc(-1 * var(${VIRT_GAP_VAR},0px))}
+[${VIRT_EMPTY_ATTR}~="lead"]::before,[${VIRT_EMPTY_ATTR}~="trail"]::after{display:none}
 `;
 
 /** Inject the spacer stylesheet once (no-op without a DOM). */
@@ -469,6 +480,12 @@ export class DomVirtualizer {
     const el = state.element;
     const next = { axis: state.axis, lead: `${lead}px`, trail: `${trail}px`, gap: `${gap}px` };
     if (el.getAttribute?.(VIRT_ATTR) !== next.axis) el.setAttribute(VIRT_ATTR, next.axis);
+    const empty = [lead <= 0 ? "lead" : "", trail <= 0 ? "trail" : ""].filter(Boolean).join(" ");
+    if (empty) {
+      if (el.getAttribute?.(VIRT_EMPTY_ATTR) !== empty) el.setAttribute(VIRT_EMPTY_ATTR, empty);
+    } else if (el.getAttribute?.(VIRT_EMPTY_ATTR) != null) {
+      el.removeAttribute?.(VIRT_EMPTY_ATTR);
+    }
     setVar(el, VIRT_LEAD_VAR, next.lead);
     setVar(el, VIRT_TRAIL_VAR, next.trail);
     setVar(el, VIRT_GAP_VAR, next.gap);
@@ -724,6 +741,7 @@ export class DomVirtualizer {
     const el = state.element;
     if (state.written) {
       el.removeAttribute?.(VIRT_ATTR);
+      el.removeAttribute?.(VIRT_EMPTY_ATTR);
       clearVar(el, VIRT_LEAD_VAR);
       clearVar(el, VIRT_TRAIL_VAR);
       clearVar(el, VIRT_GAP_VAR);
