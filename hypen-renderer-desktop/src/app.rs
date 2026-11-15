@@ -34,7 +34,14 @@ pub struct DesktopApp {
     dev_overlay_top: f32,
     screenshot_path: Option<PathBuf>,
     screenshot_delay: Option<std::time::Duration>,
+    startup_actions: Vec<(String, serde_json::Value)>,
+    startup_action_settle: std::time::Duration,
 }
+
+/// Default pause before the first [`DesktopApp::startup_actions`] entry
+/// and between consecutive entries.
+pub const DEFAULT_STARTUP_ACTION_SETTLE: std::time::Duration =
+    std::time::Duration::from_millis(1500);
 
 impl DesktopApp {
     pub fn new() -> Self {
@@ -51,6 +58,8 @@ impl DesktopApp {
             dev_overlay_top: 8.0,
             screenshot_path: None,
             screenshot_delay: None,
+            startup_actions: Vec::new(),
+            startup_action_settle: DEFAULT_STARTUP_ACTION_SETTLE,
         }
     }
 
@@ -217,6 +226,34 @@ impl DesktopApp {
         self.screenshot_delay = Some(delay);
         self
     }
+
+    /// Actions to dispatch against the module once its first patch batch
+    /// has arrived, in order, waiting [`Self::startup_action_settle`]
+    /// before the first and between each. Used by screenshot tooling to
+    /// reach a screen other than the initial one (e.g. `router.replace`
+    /// with `{"to": "/settings"}`). With [`Self::screenshot`], the capture
+    /// delay is extended by the total settle time so the shot is taken
+    /// after the last action has had its settle plus the configured delay.
+    pub fn startup_actions(mut self, actions: Vec<(String, serde_json::Value)>) -> Self {
+        self.startup_actions = actions;
+        self
+    }
+
+    /// Pause before / between [`Self::startup_actions`]. Default
+    /// [`DEFAULT_STARTUP_ACTION_SETTLE`].
+    pub fn startup_action_settle(mut self, settle: std::time::Duration) -> Self {
+        self.startup_action_settle = settle;
+        self
+    }
+
+    /// Total time the startup actions take after the first patch batch.
+    fn startup_actions_span(&self) -> std::time::Duration {
+        if self.startup_actions.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+        self.startup_action_settle * (self.startup_actions.len() as u32 + 1)
+    }
+
     /// Drive the window with a fully-built SDK module instance.
     ///
     /// ```rust,ignore
@@ -310,7 +347,8 @@ impl DesktopApp {
 
     /// Open the window, mount the module (firing the initial render), and
     /// block until the user closes the window.
-    pub fn run(self) {
+    pub fn run(mut self) {
+        let startup_span = self.startup_actions_span();
         let queue = PatchQueue::new();
         let module = self
             .module
@@ -349,9 +387,32 @@ impl DesktopApp {
         // reflects the dispatched action.
         let q_for_cb = Arc::clone(&queue);
         let proxy_for_cb = proxy.clone();
+        // Startup actions wait for the first patch batch (the session is
+        // live and the initial screen exists) before dispatching.
+        let (first_batch_tx, first_batch_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        if !self.startup_actions.is_empty() {
+            let actions = std::mem::take(&mut self.startup_actions);
+            let settle = self.startup_action_settle;
+            let target = Arc::clone(&module);
+            std::thread::Builder::new()
+                .name("hypen-startup-actions".into())
+                .spawn(move || {
+                    if first_batch_rx.recv().is_err() {
+                        return;
+                    }
+                    for (name, payload) in actions {
+                        std::thread::sleep(settle);
+                        log::info!("startup action {name} {payload}");
+                        let payload = (!payload.is_null()).then_some(payload);
+                        target.dispatch_action(&name, payload);
+                    }
+                })
+                .expect("spawn startup action thread");
+        }
         // Owned delivery: each batch moves into the queue untouched (no
         // per-batch copy of patches, values or props).
         module.on_owned_patches(Arc::new(move |patches| {
+            let _ = first_batch_tx.try_send(());
             // `push` returns true only on the empty → non-empty
             // transition. Without this gate, an engine that fires a
             // patch batch per frame (or worse, mid-frame) floods
@@ -392,8 +453,11 @@ impl DesktopApp {
             app.set_reduced_motion(on);
         }
         app.set_screenshot_path(self.screenshot_path.clone());
-        if let Some(delay) = self.screenshot_delay {
-            app.set_screenshot_delay(delay);
+        if self.screenshot_delay.is_some() || !startup_span.is_zero() {
+            let base = self
+                .screenshot_delay
+                .unwrap_or(crate::window::DEFAULT_SCREENSHOT_DELAY);
+            app.set_screenshot_delay(base + startup_span);
         }
         event_loop.run_app(&mut app).expect("event loop run");
         if let Some(error) = app.take_screenshot_error() {
@@ -436,5 +500,18 @@ mod tests {
         );
         let app = app.screenshot_delay(Duration::from_secs(4));
         assert_eq!(app.screenshot_delay, Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn startup_actions_span_covers_a_settle_before_and_after_each_action() {
+        let app = DesktopApp::new();
+        assert_eq!(app.startup_actions_span(), Duration::ZERO);
+        let app = app
+            .startup_actions(vec![
+                ("router.replace".into(), serde_json::json!({"to": "/a"})),
+                ("tap".into(), serde_json::Value::Null),
+            ])
+            .startup_action_settle(Duration::from_millis(500));
+        assert_eq!(app.startup_actions_span(), Duration::from_millis(1500));
     }
 }
