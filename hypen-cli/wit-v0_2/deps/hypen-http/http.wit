@@ -1,0 +1,35 @@
+// Hypen deferred HTTP capability — v0.2.0 (component-model async)
+//
+// Same contract, grant model (`http` + optional `httpHosts`), bounds and
+// completion payload as v0.1 — see /wit/deps/hypen-http/http.wit, which
+// applies unchanged and is the normative text for the payload.
+//
+// `send` deliberately stays a plain (sync) func in v0.2: it only queues, so
+// there is nothing to await. An async module that wants the response inline
+// awaits `wasi:http` instead (native hosts only); a module that must also run
+// in a browser host, or must not hold the engine while the exchange is in
+// flight, queues it here and handles the completion action.
+
+package hypen:http@0.2.0;
+
+interface deferred {
+    /// An HTTP request for the host to perform. Field rules as in v0.1.
+    record request {
+        method: string,
+        url: string,
+        headers: list<tuple<string, string>>,
+        body: option<list<u8>>,
+        timeout-ms: option<u32>,
+    }
+
+    variant error {
+        permission-denied(string),
+        invalid-request(string),
+        limit-exceeded(string),
+    }
+
+    /// Queue `req`; when it completes or fails the host dispatches the action
+    /// `then` to THIS module with the completion payload (`tag` echoed back).
+    /// Returns as soon as the request is queued.
+    send: func(req: request, then: string, tag: option<string>) -> result<_, error>;
+}

@@ -65,10 +65,11 @@ interface types {
     /// Side effects the host performs on the module's behalf.
     ///
     /// In v0.1 these are the only non-storage effects. HTTP is not on this
-    /// list — modules import `wasi:http/outgoing-handler` directly through
-    /// the `module-x` world below, so they can use idiomatic per-language
-    /// HTTP clients (Rust `reqwest`/`waki`, Go `net/http`, etc.) instead of
-    /// going through a Hypen-shaped descriptor.
+    /// list: a module either queues a request through the
+    /// `hypen:http/deferred` import of the `module-x` world below (the
+    /// response comes back as an action), or imports
+    /// `wasi:http/outgoing-handler` directly and blocks, using an idiomatic
+    /// per-language client (Rust `reqwest`/`waki`, Go `net/http`, etc.).
     variant effect {
         /// Sleep for N ms, then dispatch an action. Used for debounce,
         /// retry backoff, animation timing.
@@ -181,13 +182,25 @@ world module {
 /// can still instantiate a plain `module` component, since the extra import
 /// is simply unused.
 ///
-/// HTTP is *not* declared in this WIT. Modules use `wasi:http/outgoing-handler`
-/// directly (via their per-language wit-bindgen), the same way they use
-/// `wasi:io` for streams — the standard WASI surface is between the module
-/// and the runtime, not part of the Hypen contract. Hosts implementing
-/// `module-x` are expected to link `wasi:http`. (`WasmtimeHost` does so
-/// via `wasmtime-wasi-http`.)
+/// HTTP comes in two forms, both behind the manifest's `http` grant:
+///
+/// - **Deferred** (`hypen:http/deferred`, declared below): the reducer queues
+///   a request and names an action; the host performs it after the reducer
+///   returns and dispatches that action with the response. Works on every
+///   host, including browsers, and never holds the engine while waiting.
+/// - **Blocking** (`wasi:http/outgoing-handler`): *not* declared in this WIT.
+///   Modules import it directly (via their per-language wit-bindgen), the
+///   same way they use `wasi:io` for streams — the standard WASI surface is
+///   between the module and the runtime, not part of the Hypen contract.
+///   Hosts that can suspend a synchronous guest link it (`WasmtimeHost` does,
+///   via `wasmtime-wasi-http`); a browser host cannot, and the call traps.
+///
+/// See `wit/AUTHORING_MODEL.md` "HTTP: blocking vs deferred".
 world module-x {
     include module;
     import hypen:engine/state@0.1.0;
+    // Deferred HTTP: queue a request, get the response as an action. Needs
+    // the manifest's `http` grant. Like every import here it is optional for
+    // the guest: a component that does not import it is unaffected.
+    import hypen:http/deferred@0.1.0;
 }

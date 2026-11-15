@@ -1,0 +1,126 @@
+// Hypen deferred HTTP capability — v0.1.0
+//
+// Outbound HTTP for a *synchronous* reducer. The module does not wait for the
+// response: `send` QUEUES a request and names one of the module's own actions;
+// the reducer returns; the host performs the request asynchronously and
+// dispatches that action back to the module with the outcome as its payload.
+// The same shape as the `delay` effect ("do X, then dispatch Y") and as
+// `hypen:engine/state.subscribe` (an action named by string is the callback).
+//
+// Why this exists next to `wasi:http` (which a module may still import
+// directly, see `hypen:module`'s `module-x` world):
+//   - a blocking `wasi:http` call only works on hosts that can suspend a
+//     synchronous guest (native wasmtime). A browser host cannot: the reducer
+//     traps. Deferred requests work on every host and need no async ABI.
+//   - a blocking call holds the engine for the duration of the exchange; a
+//     deferred one holds it only for the two reducer runs.
+//
+// Grant: the manifest's `http: true`, the same master grant as `wasi:http`.
+// A module that imports this interface without the grant is refused at
+// instantiation (link-time denial). `httpHosts` in the manifest optionally
+// narrows the grant to an allowlist of hosts; it is checked when a request is
+// queued (`permission-denied` names the host) and again by the performing
+// host on every redirect hop.
+//
+// Completion contract. Exactly one completion is dispatched for every request
+// `send` accepted, as the action `then` of the module that queued it. Its
+// payload is a JSON object (action payloads are JSON):
+//
+//   success — the exchange completed and a response was read:
+//     {
+//       "ok": true,
+//       "status": 200,                       // u16; ANY status, see below
+//       "headers": { "content-type": "…" },  // names lowercased; a header
+//                                            // sent more than once is joined
+//                                            // with ", " in arrival order
+//       "body": "…",                         // see bodyEncoding
+//       "bodyEncoding": "utf8" | "base64",   // "utf8": the body bytes are
+//                                            // valid UTF-8 and `body` is that
+//                                            // text; "base64": they are not,
+//                                            // and `body` is standard base64
+//                                            // (RFC 4648, padded)
+//       "tag": "…" | null                    // the `tag` given to `send`
+//     }
+//
+//   failure — no response was obtained:
+//     {
+//       "ok": false,
+//       "error": {
+//         "kind": "network"            // DNS, connect, TLS, I/O
+//               | "timeout"            // the request's time budget ran out
+//               | "denied"             // refused by policy after it was
+//                                      // queued: a redirect to a host outside
+//                                      // `httpHosts`, the in-flight limit, …
+//               | "too-large"          // the response body exceeds the host's
+//                                      // limit
+//               | "invalid-response",  // not HTTP, or a malformed response
+//         "message": "…"               // human-readable; not for matching
+//       },
+//       "tag": "…" | null
+//     }
+//
+// A non-2xx status is NOT a failure: `404` or `500` arrive as `ok: true` with
+// that `status` — the HTTP exchange completed, and what the status means is
+// the module's business. `ok: false` means there is no response at all.
+//
+// A module that is destroyed or reloaded while requests are in flight does
+// not receive their completions.
+//
+// Like `hypen:engine`, this package is a leaf: it declares its own types
+// instead of using `hypen:module/types`.
+
+package hypen:http@0.1.0;
+
+interface deferred {
+    /// An HTTP request for the host to perform.
+    record request {
+        /// The request method: an HTTP token (`GET`, `POST`, …). Sent as
+        /// given; methods are case-sensitive.
+        method: string,
+        /// Absolute `http://` or `https://` URL, ASCII only (percent-encode
+        /// anything else; internationalized hosts in punycode). No userinfo
+        /// (`user:pass@`); a fragment is not sent.
+        url: string,
+        /// Request headers, in order. Names are case-insensitive. Headers the
+        /// host owns are refused: `host`, `content-length`, `connection`,
+        /// `transfer-encoding`, `keep-alive`, `upgrade`, `te`, `trailer`,
+        /// `expect`, `proxy-*`.
+        headers: list<tuple<string, string>>,
+        /// Request body; `none` sends no body.
+        body: option<list<u8>>,
+        /// Time budget for the whole exchange, redirects included, in
+        /// milliseconds. `none` is the host's default (30 s); hosts cap it
+        /// (120 s). `0` is refused.
+        timeout-ms: option<u32>,
+    }
+
+    variant error {
+        /// The request may not be made. Payload says why and names what to
+        /// change: the URL's host when it is outside the manifest's
+        /// `httpHosts`, or `http` when called where requests cannot be queued
+        /// (outside `dispatch` / `on-activated`).
+        permission-denied(string),
+        /// The request is malformed: bad method, URL, header or timeout, or
+        /// `then` is not an action name. Payload says which part and why.
+        invalid-request(string),
+        /// A bound was exceeded: too many requests in one call, or a URL,
+        /// header block or body over the size limit. Payload names the limit.
+        limit-exceeded(string),
+    }
+
+    /// Queue `req`. Returns as soon as it is queued — nothing has been sent
+    /// yet, and `ok` says only that the request was accepted. When it
+    /// completes or fails the host dispatches the action `then` to THIS
+    /// module, with the completion payload documented at the top of this
+    /// file; `tag` is echoed back in it so one handler can tell requests
+    /// apart.
+    ///
+    /// `then` must be one of the module's own actions (its `actions` export);
+    /// a request naming any other action is refused when the reducer returns.
+    /// Requests queued by a reducer that then returns an error are discarded.
+    ///
+    /// Bounds (per call unless noted): 16 requests; URL 8 KiB; 64 headers and
+    /// 16 KiB of header names + values; body 1 MiB; `then` and `tag` 256 bytes
+    /// each. Across calls, a module may have 32 requests in flight.
+    send: func(req: request, then: string, tag: option<string>) -> result<_, error>;
+}

@@ -20,12 +20,15 @@
 //    reducer-output), plus `delay`/`log` kept for determinism and
 //    zero-import portability.
 //
-// 3. HTTP is still *not* declared in this WIT — same stance as v0.1: the
-//    standard WASI surface is between the module and the runtime, not part
-//    of the Hypen contract. Async modules import `wasi:http/client@0.3.0`
-//    (`client.send` is the p3 outgoing path) via their per-language
-//    toolchain; hosts link `wasmtime-wasi-http`'s p3 support when it
-//    stabilizes (experimental/semver-exempt in wasmtime 46).
+// 3. Awaited HTTP is still *not* declared in this WIT — same stance as
+//    v0.1: the standard WASI surface is between the module and the runtime,
+//    not part of the Hypen contract. Async modules import
+//    `wasi:http/client@0.3.0` (`client.send` is the p3 outgoing path) via
+//    their per-language toolchain; hosts link `wasmtime-wasi-http`'s p3
+//    support when it stabilizes (experimental/semver-exempt in wasmtime 46).
+//    The portable alternative is `hypen:http/deferred` (`module-x` below):
+//    queue a request, receive the response as an action — it also works on
+//    hosts that cannot suspend a guest.
 //
 // 4. `@0.1.0` remains the DEFAULT world. This package ships so Rust (the
 //    happy path) can prove the ABI; the TS cutover stays gated on
@@ -130,4 +133,7 @@ world module {
 world module-x {
     include module;
     import hypen:engine/state@0.2.0;
+    // Deferred HTTP (`send` stays sync: it only queues). Needs the
+    // manifest's `http` grant; optional for the guest.
+    import hypen:http/deferred@0.2.0;
 }
