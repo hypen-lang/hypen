@@ -1,7 +1,7 @@
 import { app } from "@hypen-space/core";
 import { searchStations, type Station } from "../radio-browser";
 import { back, openStation, play } from "../screen-actions";
-import { C, errorCard, screen, skeletonRows, stationRows } from "../ui";
+import { C, MONO, errorCard, kicker, notice, screen, skeletonRows, stationRows } from "../ui";
 
 // /search — station name search against Radio Browser, debounced on input.
 
@@ -12,6 +12,12 @@ interface SearchState {
   failed: boolean;
   error: string;
   hint: string;
+  hintTitle: string;
+  /** Nothing typed yet: show the suggestions. */
+  idle: boolean;
+  /** "12 STATIONS" over the results. */
+  count: string;
+  suggestions: { id: string; name: string }[];
   /** Debounce generation (never rendered). */
   seq: number;
   lastQuery: string;
@@ -28,10 +34,13 @@ async function run(state: SearchState, immediate: boolean) {
   if (q === state.lastQuery && !state.failed) return;
   state.lastQuery = q;
   state.failed = false;
+  state.idle = q === "";
+  state.count = "";
   if (q.length < 2) {
     state.results = [];
     state.searching = false;
-    state.hint = "Type at least two letters of a station name.";
+    state.hintTitle = "Keep typing";
+    state.hint = q ? "A station name needs at least two letters." : "";
     return;
   }
   state.searching = true;
@@ -40,7 +49,9 @@ async function run(state: SearchState, immediate: boolean) {
     const results = await searchStations({ kind: "top", name: q }, 40);
     if (my !== state.seq) return;
     state.results = results;
-    state.hint = results.length ? "" : `No playable stations match “${q}”.`;
+    state.count = results.length ? `${results.length} ${results.length === 1 ? "STATION" : "STATIONS"}` : "";
+    state.hintTitle = "No match";
+    state.hint = results.length ? "" : `No playable station is called “${q}”. Check the spelling, or try part of the name.`;
   } catch (err) {
     if (my !== state.seq) return;
     state.failed = true;
@@ -58,7 +69,11 @@ export default app
     searching: false,
     failed: false,
     error: "",
-    hint: "Search by station name — e.g. “jazz”, “BBC”, “lofi”.",
+    hint: "",
+    hintTitle: "",
+    idle: true,
+    count: "",
+    suggestions: ["Jazz", "BBC", "Lofi", "Classic rock", "News", "Reggae", "KEXP", "Deep house"].map((name) => ({ id: name, name })),
     seq: 0,
     lastQuery: "",
   })
@@ -71,7 +86,15 @@ export default app
     state.lastQuery = "";
     state.results = [];
     state.searching = false;
-    state.hint = "Search by station name — e.g. “jazz”, “BBC”, “lofi”.";
+    state.hint = "";
+    state.idle = true;
+    state.count = "";
+  })
+  // A suggestion chip: fill the box and search straight away.
+  .onAction<{ q?: string }>("suggest", async ({ action, state }) => {
+    if (!action.payload?.q) return;
+    state.query = action.payload.q;
+    await run(state, true);
   })
   .onAction("play", play)
   .onAction("openStation", openStation)
@@ -81,53 +104,93 @@ export default app
       "Search",
       `
           Heading("Search", level: 1)
-            .tw("text-[26px] font-bold text-left pt-6 pb-4")
+            .tw("text-[44px] font-black text-left leading-none tracking-tight pt-6 mb-5 w-full")
             .color("${C.text}")
 
           Row {
             Icon(@resources.search)
-              .size(16)
-              .color("${C.muted}")
+              .size(18)
+              .color("${C.text}")
             Input(placeholder: "Station name")
               .bind(@state.query)
               .onInput(@actions.typed)
               .onKey(@actions.submit)
               .label("Search stations")
-              .tw("flex-1 min-w-0 h-11 ml-2.5 text-sm bg-transparent border-0")
+              .tw("flex-1 min-w-0 h-[52px] ml-3 text-base bg-transparent border-0")
               .color("${C.text}")
             If(condition: "@{state.query != ''}") {
               Button {
                 Icon(@resources.x)
                   .size(16)
-                  .color("${C.muted}")
+                  .color("${C.text}")
               }
-              .tw("w-8 h-8 rounded-full border-0 items-center justify-center bg-transparent")
+              .tw("w-8 h-8 rounded-full border-0 items-center justify-center shrink-0 p-0")
+              .backgroundColor("${C.raised}")
               .onClick(@actions.clear)
               .label("Clear search")
             }
           }
-          .tw("w-full px-4 rounded-xl items-center")
+          .tw("w-full pl-5 pr-3 rounded-full items-center")
           .backgroundColor("${C.surface}")
-          .border("1px solid ${C.line}")
+          .border("1px solid ${C.lineStrong}")
+
+          If(condition: "@{state.idle}") {
+            Column {
+${kicker("TRY ONE OF THESE", C.faint, "mb-3")}
+              Grid(@state.suggestions, key: "id") {
+                Button {
+                  Row {
+                    Text("@{item.name}")
+                      .tw("flex-1 min-w-0 text-[15px] font-bold text-left")
+                      .color("${C.text}")
+                      .maxLines(1)
+                      .textOverflow("ellipsis")
+                    Icon(@resources.arrow-right)
+                      .size(16)
+                      .color("${C.faint}")
+                  }
+                  .tw("items-center w-full")
+                }
+                .tw("h-[52px] px-4 rounded-[16px] items-stretch justify-center min-w-0")
+                .border("1px solid ${C.line}")
+                .backgroundColor({ default: "${C.surface}", hover: "${C.raised}" })
+                .opacity({ default: 1, active: 0.6 })
+                .onClick(@actions.suggest, q: "@{item.name}")
+              }
+              .gridColumns({ default: 2, md: 4 })
+              .tw("gap-2.5 w-full")
+              Text("Search looks at station names in the Radio Browser directory. For a whole genre, country or language, browse from Discover.")
+                .tw("text-[13px] mt-6 text-left leading-5")
+                .color("${C.muted}")
+            }
+            .tw("w-full mt-7 items-start")
+          }
 
           If(condition: "@{state.searching}") {
             Column {
 ${skeletonRows(6)}
             }
-            .tw("w-full mt-2")
+            .tw("w-full mt-4")
           }
           If(condition: "@{state.failed}") {
 ${errorCard("@{state.error}")}
           }
           If(condition: "@{state.hint != ''}") {
-            Text("@{state.hint}")
-              .tw("text-sm py-10 text-center")
-              .color("${C.muted}")
+            Column {
+${notice("search", "@{state.hintTitle}", "@{state.hint}")}
+            }
+            .tw("w-full mt-3")
+          }
+          If(condition: "@{state.count != ''}") {
+            Text("@{state.count}")
+              .tw("text-[11px] font-bold tracking-widest text-left mt-6 mb-1 w-full")
+              ${MONO}
+              .color("${C.faint}")
           }
           Column {
-${stationRows("results")}
+${stationRows("results", false, "state.count != ''")}
           }
-          .tw("w-full mt-2")
+          .tw("w-full mt-1")
 `,
     ),
   );

@@ -5,29 +5,111 @@
 // HTML error pages. Clients can't fall back on their own (Image has no error
 // slot), so the worker resolves the favicon by station id, validates that
 // it's a reasonably sized image, and otherwise answers with a generated
-// monogram tile. The route only ever fetches the favicon URL Radio Browser
+// monogram tile (drawn below). The route only ever fetches the favicon URL Radio Browser
 // lists for that station — it is not an open proxy.
 
 import { faviconFor, USER_AGENT } from "./radio-browser";
+import { tintFor } from "./tint";
 
 const TTL_S = 7 * 86400;
 const FAIL_TTL_S = 3600;
 const MAX_BYTES = 512 * 1024;
-const PALETTE = ["#FF5A36", "#F59E0B", "#10B981", "#3B82F6", "#8B5CF6", "#EC4899", "#14B8A6", "#EF4444"];
+// ---------------------------------------------------------------------------
+// Monogram tile
+//
+// A station without a usable logo gets a generated one: its initials on a
+// dot-matrix tuner display, over the station's own colour (tint.ts) and a set
+// of broadcast rings. The letters are drawn as circles, not SVG <text>, so
+// the tile looks the same in every renderer (the canvas and desktop
+// rasterisers have no fonts for SVG text).
+// ---------------------------------------------------------------------------
 
-function hash(s: string): number {
-  let h = 0;
-  for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
-  return h;
+/** 5x7 dot-matrix glyphs, one string per row, "#" = lit. */
+const GLYPHS: Record<string, string[]> = {
+  A: [".###.", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  B: ["####.", "#...#", "#...#", "####.", "#...#", "#...#", "####."],
+  C: [".###.", "#...#", "#....", "#....", "#....", "#...#", ".###."],
+  D: ["####.", "#...#", "#...#", "#...#", "#...#", "#...#", "####."],
+  E: ["#####", "#....", "#....", "####.", "#....", "#....", "#####"],
+  F: ["#####", "#....", "#....", "####.", "#....", "#....", "#...."],
+  G: [".###.", "#...#", "#....", "#.###", "#...#", "#...#", ".###."],
+  H: ["#...#", "#...#", "#...#", "#####", "#...#", "#...#", "#...#"],
+  I: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "#####"],
+  J: ["..###", "...#.", "...#.", "...#.", "...#.", "#..#.", ".##.."],
+  K: ["#...#", "#..#.", "#.#..", "##...", "#.#..", "#..#.", "#...#"],
+  L: ["#....", "#....", "#....", "#....", "#....", "#....", "#####"],
+  M: ["#...#", "##.##", "#.#.#", "#.#.#", "#...#", "#...#", "#...#"],
+  N: ["#...#", "##..#", "#.#.#", "#..##", "#...#", "#...#", "#...#"],
+  O: [".###.", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  P: ["####.", "#...#", "#...#", "####.", "#....", "#....", "#...."],
+  Q: [".###.", "#...#", "#...#", "#...#", "#.#.#", "#..#.", ".##.#"],
+  R: ["####.", "#...#", "#...#", "####.", "#.#..", "#..#.", "#...#"],
+  S: [".####", "#....", "#....", ".###.", "....#", "....#", "####."],
+  T: ["#####", "..#..", "..#..", "..#..", "..#..", "..#..", "..#.."],
+  U: ["#...#", "#...#", "#...#", "#...#", "#...#", "#...#", ".###."],
+  V: ["#...#", "#...#", "#...#", "#...#", "#...#", ".#.#.", "..#.."],
+  W: ["#...#", "#...#", "#...#", "#.#.#", "#.#.#", "##.##", "#...#"],
+  X: ["#...#", "#...#", ".#.#.", "..#..", ".#.#.", "#...#", "#...#"],
+  Y: ["#...#", "#...#", ".#.#.", "..#..", "..#..", "..#..", "..#.."],
+  Z: ["#####", "....#", "...#.", "..#..", ".#...", "#....", "#####"],
+  "0": [".###.", "#...#", "#..##", "#.#.#", "##..#", "#...#", ".###."],
+  "1": ["..#..", ".##..", "..#..", "..#..", "..#..", "..#..", ".###."],
+  "2": [".###.", "#...#", "....#", "...#.", "..#..", ".#...", "#####"],
+  "3": ["####.", "....#", "....#", ".###.", "....#", "....#", "####."],
+  "4": ["...#.", "..##.", ".#.#.", "#..#.", "#####", "...#.", "...#."],
+  "5": ["#####", "#....", "####.", "....#", "....#", "#...#", ".###."],
+  "6": [".###.", "#....", "#....", "####.", "#...#", "#...#", ".###."],
+  "7": ["#####", "....#", "...#.", "..#..", "..#..", "..#..", "..#.."],
+  "8": [".###.", "#...#", "#...#", ".###.", "#...#", "#...#", ".###."],
+  "9": [".###.", "#...#", "#...#", ".####", "....#", "....#", ".###."],
+};
+
+/**
+ * Up to two display letters: the initials of the first two words, or the
+ * first letter of a one-word name. Accents fold to their base letter;
+ * scripts the matrix has no glyphs for yield "" (the tile shows rings only).
+ */
+export function initials(name: string): string {
+  const words = name
+    .normalize("NFD")
+    .replace(/[̀-ͯ]/g, "")
+    .toUpperCase()
+    .split(/[^A-Z0-9]+/)
+    .filter(Boolean);
+  return words
+    .slice(0, 2)
+    .map((w) => w[0])
+    .join("");
 }
 
 export function monogram(id: string, name = ""): string {
-  const color = PALETTE[hash(id) % PALETTE.length];
-  const letter = (name.trim()[0] ?? "").toUpperCase().replace(/[<&>"']/g, "");
-  const glyph = letter
-    ? `<text x="64" y="84" text-anchor="middle" font-family="system-ui,-apple-system,Segoe UI,sans-serif" font-size="58" font-weight="700" fill="#fff">${letter}</text>`
-    : `<g fill="none" stroke="#fff" stroke-width="7" stroke-linecap="round"><path d="M84 44a28 28 0 0 1 0 40"/><path d="M44 84a28 28 0 0 1 0-40"/><circle cx="64" cy="64" r="8" fill="#fff"/></g>`;
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${color}"/><stop offset="1" stop-color="#1F2235"/></linearGradient></defs><rect width="128" height="128" fill="url(#g)"/>${glyph}</svg>`;
+  const { glow, tint } = tintFor(id);
+  const letters = initials(name);
+  // Broadcast rings from the bottom-right corner (the tiles' play button sits there).
+  const rings = [30, 52, 74, 96, 118]
+    .map((r, i) => `<circle cx="128" cy="128" r="${r}" fill="none" stroke="#FFF4E0" stroke-opacity="${(0.34 - i * 0.055).toFixed(3)}" stroke-width="2"/>`)
+    .join("");
+  let display: string;
+  if (letters) {
+    const cols = letters.length * 5 + (letters.length - 1);
+    const cell = letters.length === 1 ? 10 : 8;
+    const x0 = 16 + cell / 2;
+    const y0 = 16 + cell / 2;
+    const dots: string[] = [];
+    for (let row = 0; row < 7; row++) {
+      for (let col = 0; col < cols; col++) {
+        const glyph = col % 6 === 5 ? null : GLYPHS[letters[Math.floor(col / 6)]];
+        const lit = glyph?.[row][col % 6] === "#";
+        dots.push(
+          `<circle cx="${x0 + col * cell}" cy="${y0 + row * cell}" r="${(cell * (lit ? 0.42 : 0.16)).toFixed(1)}" fill="#FFF4E0"${lit ? "" : ' fill-opacity="0.22"'}/>`,
+        );
+      }
+    }
+    display = dots.join("");
+  } else {
+    display = `<g fill="none" stroke="#FFF4E0" stroke-width="6" stroke-linecap="round"><path d="M38 60a22 22 0 0 1 0-32"/><path d="M26 72a38 38 0 0 1 0-56"/></g><circle cx="54" cy="44" r="8" fill="#FFF4E0"/>`;
+  }
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="${glow}"/><stop offset="1" stop-color="${tint}"/></linearGradient></defs><rect width="128" height="128" fill="url(#g)"/>${rings}${display}</svg>`;
 }
 
 function fallback(id: string, name: string): Response {
@@ -42,7 +124,8 @@ export async function serveArt(request: Request): Promise<Response> {
   if (!/^[0-9a-f-]{36}$/i.test(id)) return new Response("bad station id", { status: 400 });
 
   const cache = (caches as unknown as { default: Cache }).default;
-  const cacheKey = new Request(`${url.origin}/art/${id}`, { method: "GET" });
+  // "v3" = the dot-matrix monogram; bump when the generated tile changes.
+  const cacheKey = new Request(`${url.origin}/art/v3/${id}`, { method: "GET" });
   const hit = await cache.match(cacheKey);
   if (hit) return hit;
 

@@ -1,7 +1,7 @@
 import { app } from "@hypen-space/core";
 import { countryName, flagEmoji, searchStations, type ListKind, type Station } from "../radio-browser";
 import { back, openStation, play, routeParam } from "../screen-actions";
-import { C, errorCard, screen, skeletonRows, stationRows, subHeader } from "../ui";
+import { errorCard, notice, screen, skeletonRows, stationRows, subHeader } from "../ui";
 
 // /list/:kind/:value — top | trending | country/<CC> | tag/<tag> | language/<name>
 
@@ -9,7 +9,9 @@ interface StationListState {
   key: string;
   title: string;
   subtitle: string;
-  stations: Station[];
+  /** Kicker over the title: "GENRE", "COUNTRY", "THE CHART"… */
+  label: string;
+  stations: (Station & { rank: string })[];
   loading: boolean;
   failed: boolean;
   empty: boolean;
@@ -17,6 +19,14 @@ interface StationListState {
 }
 
 const KINDS: ListKind[] = ["top", "trending", "country", "tag", "language"];
+
+const LABELS: Record<ListKind, string> = {
+  top: "THE CHART",
+  trending: "CLIMBING",
+  country: "COUNTRY",
+  language: "LANGUAGE",
+  tag: "GENRE",
+};
 
 function describe(kind: ListKind, value: string): { title: string; subtitle: string } {
   switch (kind) {
@@ -37,12 +47,14 @@ async function load(state: StationListState, kind: ListKind, value: string) {
   const { title, subtitle } = describe(kind, value);
   state.title = title;
   state.subtitle = subtitle;
+  state.label = LABELS[kind];
   state.stations = [];
   state.loading = true;
   state.failed = false;
   state.empty = false;
   try {
-    state.stations = await searchStations({ kind, value }, 50);
+    const stations = await searchStations({ kind, value }, 50);
+    state.stations = stations.map((s, i) => ({ ...s, rank: String(i + 1).padStart(2, "0") }));
     state.empty = state.stations.length === 0;
   } catch (err) {
     state.failed = true;
@@ -58,6 +70,7 @@ export default app
     key: "",
     title: "",
     subtitle: "",
+    label: "",
     stations: [],
     loading: true,
     failed: false,
@@ -82,11 +95,14 @@ export default app
   .onAction("play", play)
   .onAction("openStation", openStation)
   .onAction("back", back)
+  .onAction("home", ({ context }) => {
+    context?.router?.push("/");
+  })
   .ui(
     screen(
       "StationList",
       `
-${subHeader("@{state.title}", "@{state.subtitle}")}
+${subHeader("@{state.title}", "@{state.subtitle}", "@{state.label}")}
 
           If(condition: "@{state.loading}") {
             Column {
@@ -98,11 +114,9 @@ ${skeletonRows(8)}
 ${errorCard("@{state.error}")}
           }
           If(condition: "@{state.empty}") {
-            Text("No stations here stream over HTTPS in a format every platform can play.")
-              .tw("text-sm py-10 text-center")
-              .color("${C.muted}")
+${notice("radio", "Nothing we can tune", "No station here streams over HTTPS in a format every platform can play.", ["Back to Discover", ".onClick(@actions.home)"])}
           }
-${stationRows("stations")}
+${stationRows("stations", true, "!state.loading && !state.failed && !state.empty")}
 `,
     ),
   );
