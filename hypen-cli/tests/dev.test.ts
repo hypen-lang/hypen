@@ -9,6 +9,21 @@ import { dev as bunDev, build as bunBuild, DevServerError } from "../src/dev-bun
 // and through the CLI integration tests. For the utility functions that are
 // internal, we test their behavior through the dev/build outputs.
 
+/** A UI action the way a renderer sends it: an envelope addressed to the
+ *  node that carries the binding (bare action names are refused from the wire). */
+function uiAction(patches: any[], module: string, action: string): string {
+  const node = patches.find(
+    (p) => p.type === "create" && JSON.stringify(p.props ?? {}).includes(action),
+  );
+  if (!node) throw new Error(`no node carries the action ${action}`);
+  return JSON.stringify({
+    type: "dispatchAction",
+    module,
+    action: "__hypen_dispatch",
+    payload: { node: node.id, action, payload: {} },
+  });
+}
+
 describe("Dev Server Utilities", () => {
   const testDir = `/tmp/hypen-dev-test-${Date.now()}`;
 
@@ -165,7 +180,7 @@ export default app
   .build();
 `
     );
-    writeFileSync(join(dir, "component.hypen"), `module App { Text("@{state.count}") }`);
+    writeFileSync(join(dir, "component.hypen"), `module App { Column { Text("@{state.count}") Button("@actions.increment") { Text("+") } } }`);
     return join(apiTestDir, "components");
   }
 
@@ -239,7 +254,8 @@ export default app
     const a = await connect();
     const b = await connect();
 
-    a.ws.send(JSON.stringify({ type: "dispatchAction", module: "App", action: "increment" }));
+    const tree = a.messages.find((m) => m.type === "initialTree");
+    a.ws.send(uiAction(tree.patches, "App", "increment"));
     await new Promise((r) => setTimeout(r, 400));
 
     // A's own engine re-rendered, and the action was replayed on B's.

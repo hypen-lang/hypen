@@ -58,6 +58,21 @@ export default app
   );
 }
 
+/** A UI action the way a renderer sends it: an envelope addressed to the
+ *  node that carries the binding (bare action names are refused from the wire). */
+function uiAction(patches: any[], module: string, action: string): string {
+  const node = patches.find(
+    (p) => p.type === "create" && JSON.stringify(p.props ?? {}).includes(action),
+  );
+  if (!node) throw new Error(`no node carries the action ${action}`);
+  return JSON.stringify({
+    type: "dispatchAction",
+    module,
+    action: "__hypen_dispatch",
+    payload: { node: node.id, action, payload: {} },
+  });
+}
+
 /** hello -> initialTree, then dispatch Home.tap and wait for its patch. */
 async function exerciseSession(port: number): Promise<{ initial: string; patch: string }> {
   return new Promise((resolvePromise, reject) => {
@@ -70,7 +85,7 @@ async function exerciseSession(port: number): Promise<{ initial: string; patch: 
       const m = JSON.parse(String(e.data));
       if (m.type === "initialTree") {
         initial = JSON.stringify(m.patches);
-        ws.send(JSON.stringify({ type: "dispatchAction", module: "Home", action: "tap" }));
+        ws.send(uiAction(m.patches, "Home", "tap"));
       } else if (m.type === "patch") {
         clearTimeout(timer);
         ws.close();
