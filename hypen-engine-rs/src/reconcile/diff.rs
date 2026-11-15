@@ -216,14 +216,30 @@ fn create_element_node(
                 );
             }
             Value::SchemeSwitch { .. } => {
-                // Depends on the theme's active scheme (`appearance.scheme`):
-                // a scheme change dirties the node like any data-source
-                // binding and the new value flows out as SetProp/RemoveProp.
+                // Depends on the theme's active scheme (`appearance.scheme`)
+                // — a scheme change dirties the node like any data-source
+                // binding and the new value flows out as SetProp/RemoveProp —
+                // and on whatever its entries bind to.
                 ctx.dependencies.add_dependency(
                     node_id,
                     &crate::ir::node::scheme_switch_binding(),
                     module_scope_ref,
                 );
+                for entry in value.scheme_entries() {
+                    match entry {
+                        Value::Binding(binding) => {
+                            ctx.dependencies
+                                .add_dependency(node_id, binding, module_scope_ref);
+                        }
+                        Value::TemplateString { bindings, .. } => {
+                            for binding in bindings {
+                                ctx.dependencies
+                                    .add_dependency(node_id, binding, module_scope_ref);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             _ => {}
         }
@@ -596,14 +612,30 @@ fn reconcile_element_node(ctx: &mut ReconcileCtx, node_id: NodeId, element: &Ele
                 );
             }
             Value::SchemeSwitch { .. } => {
-                // Depends on the theme's active scheme (`appearance.scheme`):
-                // a scheme change dirties the node like any data-source
-                // binding and the new value flows out as SetProp/RemoveProp.
+                // Depends on the theme's active scheme (`appearance.scheme`)
+                // — a scheme change dirties the node like any data-source
+                // binding and the new value flows out as SetProp/RemoveProp —
+                // and on whatever its entries bind to.
                 ctx.dependencies.add_dependency(
                     node_id,
                     &crate::ir::node::scheme_switch_binding(),
                     module_scope_ref,
                 );
+                for entry in value.scheme_entries() {
+                    match entry {
+                        Value::Binding(binding) => {
+                            ctx.dependencies
+                                .add_dependency(node_id, binding, module_scope_ref);
+                        }
+                        Value::TemplateString { bindings, .. } => {
+                            for binding in bindings {
+                                ctx.dependencies
+                                    .add_dependency(node_id, binding, module_scope_ref);
+                            }
+                        }
+                        _ => {}
+                    }
+                }
             }
             _ => {}
         }

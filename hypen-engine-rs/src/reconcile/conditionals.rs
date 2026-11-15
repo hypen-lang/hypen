@@ -106,7 +106,8 @@ pub(crate) fn evaluate_value(
         Value::SchemeSwitch { cases, default } => {
             // Only ever lowered onto applicator props; resolve consistently
             // if one reaches a conditional position.
-            crate::reconcile::resolve::resolve_scheme_switch(cases, default.as_ref(), data_sources)
+            crate::reconcile::resolve::pick_scheme_entry(cases, default.as_deref(), data_sources)
+                .map(|entry| evaluate_value(entry, state, data_sources))
                 .unwrap_or(serde_json::Value::Null)
         }
     }

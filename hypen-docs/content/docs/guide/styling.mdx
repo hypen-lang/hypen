@@ -640,7 +640,7 @@ Button { Text("Submit") }
 
 ### Color Scheme Variants
 
-Use `light` and `dark` keys for a value that differs by color scheme:
+Use scheme keys for a value that differs by color scheme:
 
 ```hypen
 Text("Beta")
@@ -649,19 +649,26 @@ Text("Beta")
 // Combined with breakpoints and states
 Button { Text("Save") }
     .backgroundColor({default: "#3B82F6", dark: "#1E40AF", hover: "#2563EB"})
+
+// A custom scheme from the theme, and values that are bindings
+Text("Note")
+    .color({default: @theme.color.ink, dark: @state.accent, sepia: "#5B4636"})
 ```
 
 | Key | Applies when |
 |-----|--------------|
 | `light` | The active scheme is `light` |
 | `dark` | The active scheme is `dark` |
+| any other name, beside a `default` | The active scheme has that name (a custom scheme such as `sepia`) |
 | `default` | Any other case, including an app with no theme |
 
-The active scheme comes from the app's [theme](/docs/guide/theming), so an app needs one (`createTheme()` with no tokens is enough) for `dark` to ever apply. The engine resolves these keys and sends the renderer an ordinary value, so they need no renderer support. `light` / `dark` set the base value; breakpoint and state keys still override it.
+The active scheme comes from the app's [theme](/docs/guide/theming), so an app needs one (`createTheme()` with no tokens is enough) for anything but `default` to apply. The engine resolves these keys and sends the renderer an ordinary value, so they need no renderer support. Scheme keys set the base value; breakpoint and state keys still override it.
 
-Tailwind's `dark:` prefix does the same thing: `.tw("bg-white dark:bg-black")` renders `bg-black` while the scheme is `dark`. Combining it with another prefix (`dark:md:…`, `dark:hover:…`) is not supported.
+A value can be a literal, a binding (`@theme.…`, `@state.…`, `@item.…` inside a list) or a template string; the one in effect updates like any other binding.
 
-The `light` / `dark` values and the `default` beside them must be literals. For a value that comes from state or from a token, use a [theme token](/docs/guide/theming#using-tokens-in-templates), which already follows the scheme.
+In a map with a `default`, every key that is not a breakpoint or a state is read as a scheme name, so a misspelt breakpoint (`mdd`) becomes a scheme that never matches and the `default` applies. Without a `default`, only `light` and `dark` are scheme keys, and a map with any other key is an ordinary object argument.
+
+Tailwind's `dark:` prefix does the same thing: `.tw("bg-white dark:bg-black")` renders `bg-black` while the scheme is `dark`. Combined with a breakpoint or a state (`dark:md:bg-gray-900`, `dark:hover:bg-black`), it applies to that variant.
 
 **Platform Support:** All renderers
 

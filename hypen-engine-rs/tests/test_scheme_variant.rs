@@ -211,27 +211,155 @@ fn rows_of_a_list_follow_the_scheme() {
 }
 
 #[test]
-fn a_non_literal_beside_scheme_keys_drops_the_scheme_form() {
-    let mut engine = engine_with(json!({ "ink": "#222222" }));
-    engine.set_context("appearance", appearance("dark"));
+fn entries_can_be_bindings_and_follow_what_they_bind_to() {
+    let mut engine = engine_with(json!({ "ink": "#222222", "glow": "#ffee00" }));
+    engine.set_context("appearance", appearance("light"));
+    engine.set_context("theme", json!({ "color": { "paper": "#fafafa" } }));
     let (patches, cb) = patch_capture();
     engine.set_render_callback(cb);
     render(
         &mut engine,
         r##"Column {
-            Text("a").color({ default: @state.ink, dark: "#ffffff" })
-            Text("b").backgroundColor({ default: "#eeeeee", dark: @state.ink })
+            Text("a").color({ default: @state.ink, dark: @state.glow })
+            Text("b").backgroundColor({ default: @theme.color.paper, dark: "#000000" })
+            Text("c").borderColor({ default: "#cccccc", dark: "@{state.glow}" })
         }"##,
     );
-    let got = patches.lock().unwrap();
-    // The light/dark values are ignored (with a warning); `default` lowers as before.
+    {
+        let got = patches.lock().unwrap();
+        assert_eq!(
+            created(&got, "color"),
+            [("color.0".to_string(), json!("#222222"))]
+        );
+        assert_eq!(
+            created(&got, "backgroundColor"),
+            [("backgroundColor.0".to_string(), json!("#fafafa"))]
+        );
+        assert_eq!(
+            created(&got, "borderColor"),
+            [("borderColor.0".to_string(), json!("#cccccc"))]
+        );
+    }
+
+    // The entry in effect is live: its state and token changes re-render.
+    patches.lock().unwrap().clear();
+    engine.update_state(None, json!({ "ink": "#333333" }));
+    assert_eq!(changes(&patches.lock().unwrap()), ["color.0=\"#333333\""]);
+    patches.lock().unwrap().clear();
+    engine.set_context("theme", json!({ "color": { "paper": "#f0f0f0" } }));
     assert_eq!(
-        created(&got, "color"),
-        [("color.0".to_string(), json!("#222222"))]
+        changes(&patches.lock().unwrap()),
+        ["backgroundColor.0=\"#f0f0f0\""]
+    );
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("dark"));
+    let mut dark = changes(&patches.lock().unwrap());
+    dark.sort();
+    assert_eq!(
+        dark,
+        [
+            "backgroundColor.0=\"#000000\"",
+            "borderColor.0=\"#ffee00\"",
+            "color.0=\"#ffee00\"",
+        ]
+    );
+
+    // …and the entry that is NOT in effect changing renders nothing new.
+    patches.lock().unwrap().clear();
+    engine.update_state(None, json!({ "ink": "#444444" }));
+    assert_eq!(changes(&patches.lock().unwrap()), Vec::<String>::new());
+    patches.lock().unwrap().clear();
+    engine.update_state(None, json!({ "glow": "#ffcc00" }));
+    let mut glow = changes(&patches.lock().unwrap());
+    glow.sort();
+    assert_eq!(glow, ["borderColor.0=\"#ffcc00\"", "color.0=\"#ffcc00\""]);
+}
+
+#[test]
+fn entries_can_read_the_row_of_a_list() {
+    let mut engine = engine_with(json!({ "items": [
+        { "id": 1, "day": "#111111", "night": "#eeeeee" },
+        { "id": 2, "day": "#222222", "night": "#dddddd" },
+    ] }));
+    engine.set_context("appearance", appearance("light"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r##"Column {
+            ForEach(items: @state.items, key: "id") {
+                Text("row").color({ default: @item.day, dark: @item.night })
+            }
+        }"##,
+    );
+    let light: Vec<Value> = created(&patches.lock().unwrap(), "color")
+        .into_iter()
+        .map(|(_, v)| v)
+        .collect();
+    assert_eq!(light, [json!("#111111"), json!("#222222")]);
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("dark"));
+    assert_eq!(
+        changes(&patches.lock().unwrap()),
+        ["color.0=\"#eeeeee\"", "color.0=\"#dddddd\""]
+    );
+
+    // An item edit while dark re-renders the dark entry of that row only.
+    patches.lock().unwrap().clear();
+    engine.update_state(
+        None,
+        json!({ "items": [
+            { "id": 1, "day": "#111111", "night": "#cccccc" },
+            { "id": 2, "day": "#222222", "night": "#dddddd" },
+        ] }),
+    );
+    assert_eq!(changes(&patches.lock().unwrap()), ["color.0=\"#cccccc\""]);
+}
+
+#[test]
+fn custom_schemes_are_keys_beside_a_default() {
+    let mut engine = engine_with(json!({}));
+    engine.set_context("appearance", appearance("light"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r##"Text("Hi").color({ default: "#111111", dark: "#ffffff", sepia: "#5b4636", md: "#00ff00" })"##,
     );
     assert_eq!(
-        created(&got, "backgroundColor"),
-        [("backgroundColor.0".to_string(), json!("#eeeeee"))]
+        created(&patches.lock().unwrap(), "color"),
+        [
+            ("color.0".to_string(), json!("#111111")),
+            ("color@md.0".to_string(), json!("#00ff00")),
+        ]
+    );
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("sepia"));
+    assert_eq!(changes(&patches.lock().unwrap()), ["color.0=\"#5b4636\""]);
+
+    // A scheme the map has no key for falls back to `default`.
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("highContrast"));
+    assert_eq!(changes(&patches.lock().unwrap()), ["color.0=\"#111111\""]);
+}
+
+#[test]
+fn an_action_or_resource_entry_drops_the_scheme_form() {
+    let mut engine = engine_with(json!({}));
+    engine.set_context("appearance", appearance("dark"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r##"Text("a").color({ default: "#111111", dark: @actions.nope })"##,
+    );
+    // The scheme values are ignored (with a warning); `default` lowers as before.
+    assert_eq!(
+        created(&patches.lock().unwrap(), "color"),
+        [("color.0".to_string(), json!("#111111"))]
     );
 }
 
@@ -241,6 +369,7 @@ fn a_map_with_other_keys_is_still_an_ordinary_argument() {
     engine.set_context("appearance", appearance("dark"));
     let (patches, cb) = patch_capture();
     engine.set_render_callback(cb);
+    // No `default`, so `blur` cannot be a scheme name: an ordinary object.
     render(&mut engine, r#"Text("Hi").shadow({ dark: 4, blur: 8 })"#);
     assert_eq!(
         created(&patches.lock().unwrap(), "shadow"),
@@ -292,4 +421,56 @@ fn tailwind_dark_utilities_switch_with_the_scheme() {
         "{light:?}"
     );
     assert!(light.contains(&"opacity.0-".to_string()), "{light:?}");
+}
+
+#[test]
+fn tailwind_dark_combined_with_a_breakpoint_or_state_switches_that_variant() {
+    let mut engine = engine_with(json!({}));
+    engine.set_context("appearance", appearance("light"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r#"Text("Hi").tw("bg-white md:bg-gray-100 dark:md:bg-gray-900 dark:hover:bg-black")"#,
+    );
+    let (base, md_light) = {
+        let got = patches.lock().unwrap();
+        let bg = created(&got, "backgroundColor");
+        let keys: Vec<&str> = bg.iter().map(|(k, _)| k.as_str()).collect();
+        // The dark-only hover variant is absent in light; no stray "dark" key.
+        assert_eq!(
+            keys,
+            ["backgroundColor.0", "backgroundColor@md.0"],
+            "{bg:?}"
+        );
+        (bg[0].1.clone(), bg[1].1.clone())
+    };
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("dark"));
+    let dark = changes(&patches.lock().unwrap());
+    assert_eq!(dark.len(), 2, "{dark:?}");
+    assert!(
+        dark.iter().any(|c| c.starts_with("backgroundColor@md.0=")
+            && *c != format!("backgroundColor@md.0={md_light}")),
+        "{dark:?}"
+    );
+    assert!(
+        dark.iter()
+            .any(|c| c.starts_with("backgroundColor:hover.0=")),
+        "{dark:?}"
+    );
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("light"));
+    let mut light = changes(&patches.lock().unwrap());
+    light.sort();
+    assert_eq!(
+        light,
+        [
+            "backgroundColor:hover.0-".to_string(),
+            format!("backgroundColor@md.0={md_light}"),
+        ]
+    );
+    let _ = base;
 }

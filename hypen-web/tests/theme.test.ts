@@ -324,6 +324,21 @@ describe("engine integration", () => {
     );
   });
 
+  test("custom schemes are keys beside a default, and entries can be tokens", async () => {
+    const { patches, theme } = await engineWith(
+      `Text("Hi").color({default: @theme.color.ink, dark: "#ffffff", sepia: "#5b4636"})`
+    );
+    expect(props(patches)).toContainEqual(["color.0", "#111111"]);
+    patches.length = 0;
+    theme.setScheme("sepia");
+    await flushMicrotasks();
+    expect(props(patches)).toEqual([["color.0", "#5b4636"]]);
+    patches.length = 0;
+    theme.setScheme("dark");
+    await flushMicrotasks();
+    expect(props(patches)).toEqual([["color.0", "#ffffff"]]);
+  });
+
   test("a one-off per-scheme value is an expression on appearance.scheme", async () => {
     const { patches, theme } = await engineWith(
       `Text("Hi").color("@{appearance.scheme == 'dark' ? '#ffffff' : theme.color.ink}")`

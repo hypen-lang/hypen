@@ -92,6 +92,10 @@ fn value_depends_on_item(value: &Value, item_name: &str) -> bool {
                 s.contains(dot) || s.contains(bare)
             })
         }
+        // A scheme switch reads the item when any of its entries does.
+        Value::SchemeSwitch { .. } => value
+            .scheme_entries()
+            .any(|entry| value_depends_on_item(entry, item_name)),
         _ => false,
     }
 }
@@ -674,6 +678,20 @@ pub(crate) fn build_row_prototype(
                 }
                 Value::SchemeSwitch { .. } => {
                     bindings.push(crate::ir::node::scheme_switch_binding());
+                    for entry in value.scheme_entries() {
+                        match entry {
+                            Value::Binding(b)
+                                if !b.is_item()
+                                    && !super::item_bindings::is_alias_binding(b, item_name) =>
+                            {
+                                bindings.push(b.clone())
+                            }
+                            Value::TemplateString { bindings: bs, .. } => {
+                                bindings.extend(bs.iter().filter(|b| !b.is_item()).cloned());
+                            }
+                            _ => {}
+                        }
+                    }
                 }
                 _ => {}
             }

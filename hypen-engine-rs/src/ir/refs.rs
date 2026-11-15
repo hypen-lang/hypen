@@ -609,9 +609,15 @@ impl Collector<'_> {
             // Lists/maps keep nested references as strings (`"@{item.id}"`,
             // `"@actions.x"`) — see `parser_value_to_ir`.
             Value::Static(json) => self.static_json(json, ctx, site),
-            // Literal-only, and its one dependency (`appearance.scheme`) is
-            // engine-chosen rather than something the template wrote.
-            Value::Resource(_) | Value::SchemeSwitch { .. } => {}
+            Value::Resource(_) => {}
+            // The switch itself reads `appearance.scheme`, which the engine
+            // chose rather than the template; its entries are what the
+            // template wrote.
+            Value::SchemeSwitch { .. } => {
+                for entry in value.scheme_entries() {
+                    self.value(entry, ctx, site);
+                }
+            }
         }
     }
 
