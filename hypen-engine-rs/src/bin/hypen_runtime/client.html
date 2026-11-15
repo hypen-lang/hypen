@@ -126,6 +126,16 @@
         if (el) el.remove();           // keep in `nodes` for a later attach
         break;
       }
+      case "clearChildren": {
+        // One patch standing in for a plain remove of every child.
+        const el = p.id === "root" ? appRoot : nodes.get(p.id);
+        if (!el) break;
+        for (const child of [...el.querySelectorAll("[data-node-id]")]) {
+          nodes.delete(child.dataset.nodeId);
+        }
+        el.replaceChildren();
+        break;
+      }
     }
   }
 
@@ -133,23 +143,44 @@
     for (const p of patches || []) applyPatch(p);
   }
 
-  // Event delegation: any rendered element carrying data-action dispatches it.
-  // The node id rides along as `sender` so the engine can resolve which
-  // module scope owns the action (several modules may share an action name).
+  // Event delegation: any rendered element carrying data-action dispatches it
+  // the way every Hypen renderer does — as the engine's `__hypen_dispatch`
+  // envelope `{ node, action, payload }`. The engine resolves the owning
+  // module scope from the node id, so several modules may share an action
+  // name and the client never names a scope itself.
   appRoot.addEventListener("click", (e) => {
     const target = e.target.closest("[data-action]");
-    if (target) dispatch(target.dataset.action, target.dataset.nodeId);
+    if (!target) return;
+    post("__hypen_dispatch", {
+      node: target.dataset.nodeId,
+      action: target.dataset.action,
+      payload: {},
+    });
   });
 
-  async function dispatch(name, sender) {
+  // Debug buttons have no node: they send the bare action name, which the
+  // engine routes only if exactly one module handles it.
+  const dispatch = (name) => post(name, {});
+
+  async function post(action, payload) {
     setErr("");
-    const r = await fetch("/dispatch", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ action: name, payload: {}, sender: sender || null }),
-    });
-    const body = await r.json();
-    if (body.error) setErr(body.error);
+    let body;
+    try {
+      const r = await fetch("/dispatch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action, payload }),
+      });
+      body = await r.json();
+    } catch (err) {
+      setErr("dispatch failed: " + err);
+      return;
+    }
+    // Errors are `{ error: { code, message, hint? } }` with a non-2xx status;
+    // a failed dispatch still reports state and any patches it rendered.
+    if (body.error) {
+      setErr(body.error.hint ? `${body.error.message} (${body.error.hint})` : body.error.message);
+    }
     applyPatches(body.patches);        // incremental DOM update
     refreshDebug(body.state);
   }
@@ -174,10 +205,10 @@
       actionsEl.appendChild(b);
     }
 
-    // Declarative UI, if a --ui template was loaded: apply the full patch log.
-    const patches = await (await fetch("/patches")).json();
-    if (Array.isArray(patches) && patches.length) {
-      applyPatches(patches);
+    // Declarative UI, if a --ui template was loaded: GET /patches is a
+    // snapshot — the patches that build the *current* tree from nothing.
+    const hasUi = await loadTree();
+    if (hasUi) {
       $("debug").open = false;
     } else {
       appRoot.innerHTML =
@@ -192,14 +223,32 @@
     // every frame here can't double-apply.
     try {
       const es = new EventSource("/events");
+      let dropped = false;
       es.onmessage = (e) => {
         try { applyPatches(JSON.parse(e.data)); }
         catch (err) { setErr("live update: " + err); }
       };
-      es.onerror = () => { /* browser auto-reconnects; nothing to do */ };
+      // The browser reconnects by itself; frames pushed while we were away
+      // are gone, so rebuild from a fresh snapshot once the stream is back.
+      es.onerror = () => { dropped = true; };
+      es.onopen = () => {
+        if (!dropped) return;
+        dropped = false;
+        if (hasUi) loadTree().catch((err) => setErr("resync: " + err));
+      };
     } catch (err) {
       // EventSource unavailable — polling via a refresh still works.
     }
+  }
+
+  // Replace the rendered tree with the server's current one.
+  async function loadTree() {
+    const patches = await (await fetch("/patches")).json();
+    if (!Array.isArray(patches) || !patches.length) return false;
+    nodes.clear();
+    appRoot.replaceChildren();
+    applyPatches(patches);
+    return true;
   }
 
   init().catch((e) => setErr(String(e)));

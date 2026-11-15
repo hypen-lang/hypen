@@ -28,11 +28,36 @@ fn runtime_path() -> PathBuf {
     }
 }
 
+/// The capability flags a fixture needs in single-module mode, where the
+/// runtime grants nothing by default (module-private `local` storage only).
+/// Each fixture gets exactly what its component imports — the same grants
+/// the `app*/app.json` manifests spell out for `--app`.
+fn grants_for(wasm: &str) -> &'static [&'static str] {
+    if wasm.contains("ts_counter") {
+        // componentize-js links every interface of the world it targets.
+        &["--grant-all"]
+    } else if wasm.contains("async_counter") {
+        &["--grant-storage", "app,cloud", "--grant-http"]
+    } else if wasm.contains("go_counter") {
+        &[]
+    } else if wasm.contains("counter_module") {
+        // `sync` pushes state to `hypen:storage/cloud`.
+        &["--grant-storage", "cloud"]
+    } else if wasm.contains("fetcher") {
+        &["--grant-http"]
+    } else if wasm.contains("limits") {
+        &["--grant-storage", "app"]
+    } else {
+        &[]
+    }
+}
+
 // NB: no `--actions` — the runtime discovers actions from the module's
 // `actions` export. Every test here therefore exercises that discovery path.
 fn run_runtime(wasm: &str, stdin: &str) -> (String, String, i32) {
     let mut child = Command::new(runtime_path())
         .arg(wasm)
+        .args(grants_for(wasm))
         .current_dir(env!("CARGO_MANIFEST_DIR"))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -162,6 +187,7 @@ impl Server {
         let port = free_port();
         let child = Command::new(runtime_path())
             .arg(wasm)
+            .args(grants_for(wasm))
             .arg("--serve")
             .arg(port.to_string())
             .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -311,10 +337,13 @@ fn server_unknown_action_returns_error_in_envelope() {
         Some(r#"{"action":"nonexistent"}"#),
     )
     .unwrap();
-    // 200 with an error field — engine errors aren't HTTP errors.
-    assert_eq!(status, 200);
+    // An unknown action is a 404 with a structured error; the envelope still
+    // carries the (unchanged) state.
+    assert_eq!(status, 404);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    assert!(v["error"].as_str().unwrap().contains("nonexistent"));
+    assert_eq!(v["error"]["code"], "action_not_found");
+    assert!(v["error"]["message"].as_str().unwrap().contains("nonexistent"));
+    assert_eq!(v["state"]["count"], 0);
 }
 
 #[test]
@@ -396,6 +425,7 @@ fn start_with_writable_wasm() -> (Server, tempfile::TempDir, PathBuf) {
     let port = free_port();
     let child = Command::new(runtime_path())
         .arg(&dest)
+        .args(grants_for(COUNTER))
         .arg("--serve")
         .arg(port.to_string())
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -536,6 +566,7 @@ fn actions_flag_overrides_discovery() {
     // override should keep `sync` unrouted.
     let mut child = Command::new(runtime_path())
         .arg(COUNTER)
+        .args(grants_for(COUNTER))
         .arg("--actions")
         .arg("increment")
         .current_dir(env!("CARGO_MANIFEST_DIR"))
@@ -575,6 +606,7 @@ const COUNTER_UI: &str = "tests/fixtures/counter_ui.hypen";
 fn ui_renders_declarative_template_against_wasm_module() {
     let mut child = Command::new(runtime_path())
         .arg(COUNTER)
+        .args(grants_for(COUNTER))
         .arg("--scope")
         .arg("counter")
         .arg("--ui")
@@ -635,6 +667,7 @@ fn start_serve_ui() -> Server {
     let port = free_port();
     let child = Command::new(runtime_path())
         .arg(COUNTER)
+        .args(grants_for(COUNTER))
         .arg("--scope")
         .arg("counter")
         .arg("--ui")
@@ -1201,10 +1234,12 @@ fn serve_app_denies_cross_module_read_without_grant() {
 
     let (status, body) =
         http_request("POST", &s.url("/dispatch"), Some(r#"{"action":"Mirror:pull"}"#)).unwrap();
-    // Engine errors are 200 with an `error` field, not HTTP errors.
-    assert_eq!(status, 200);
+    // A module failure is a 500 with a structured error; the envelope still
+    // carries every scope's state.
+    assert_eq!(status, 500);
     let v: serde_json::Value = serde_json::from_str(&body).unwrap();
-    let err = v["error"].as_str().unwrap_or("");
+    assert_eq!(v["error"]["code"], "module_error");
+    let err = v["error"]["message"].as_str().unwrap_or("");
     assert!(
         err.contains("PermissionDenied") || err.to_lowercase().contains("permission"),
         "ungranted cross-module read must be denied. body: {body}"
@@ -1523,8 +1558,11 @@ fn ui_hot_reload_pushes_rerender_over_sse() {
     // never returns for a long-lived event stream.
     let mut sse = std::net::TcpStream::connect(("127.0.0.1", server.port)).unwrap();
     sse.set_read_timeout(Some(std::time::Duration::from_secs(5))).unwrap();
-    sse.write_all(b"GET /events HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: keep-alive\r\n\r\n")
-        .unwrap();
+    let handshake = format!(
+        "GET /events HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nConnection: keep-alive\r\n\r\n",
+        server.port
+    );
+    sse.write_all(handshake.as_bytes()).unwrap();
 
     // Read the response headers + the `: connected` kickoff, which is written
     // only after the subscriber is registered — so once we see it, a subsequent
@@ -1793,6 +1831,7 @@ fn data_dir_persists_state_across_runtime_restarts() {
         let port = free_port();
         let child = Command::new(runtime_path())
             .arg(COUNTER)
+        .args(grants_for(COUNTER))
             .arg("--serve")
             .arg(port.to_string())
             .arg("--data-dir")

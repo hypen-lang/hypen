@@ -149,7 +149,7 @@ required-features = ["uniffi-cli"]
 # you ship "your whole app as a .wasm" and run it on the desktop/server.
 [[bin]]
 name = "hypen-runtime"
-path = "src/bin/hypen_runtime.rs"
+path = "src/bin/hypen_runtime/main.rs"
 required-features = ["runtime-bin"]
 
 # Integration tests for the WASM module loader — only built when the native
