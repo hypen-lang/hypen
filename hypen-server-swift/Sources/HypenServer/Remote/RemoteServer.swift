@@ -75,6 +75,7 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
     /// primary template. Flip off via `disableAutoRouter()` when the
     /// host wants bespoke wiring inside `onSessionCreate`.
     private var autoRouter: Bool = true
+    private var _clientActions: Set<String> = []
     public var resourceMaps: [[String: String]] = []
     /// Pre-loaded component sources, keyed by component name. Registered on
     /// each session's engine during `RemoteSession` construction.
@@ -272,6 +273,29 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
         defer { lock.unlock() }
         self.config = config
         return self
+    }
+
+    /// Name actions a client may dispatch by name **without a rendered
+    /// binding** — programmatic client calls such as a browser-back
+    /// `navigateBack`.
+    ///
+    /// The client is untrusted: by default it can only run an action that
+    /// is bound (`@actions.x`) on a node currently rendered for its
+    /// session, so an action is reachable only while its control is on
+    /// screen. List here only actions that are safe for any connected
+    /// client to call at any time. Framework names (`__*`) are ignored.
+    @discardableResult
+    public func allowClientActions(_ names: String...) -> RemoteServer {
+        lock.lock()
+        defer { lock.unlock() }
+        _clientActions.formUnion(names.filter { !$0.hasPrefix("__") })
+        return self
+    }
+
+    public var clientActions: Set<String> {
+        lock.lock()
+        defer { lock.unlock() }
+        return _clientActions
     }
 
     /// Turn off the per-session `ManagedRouter` that the server

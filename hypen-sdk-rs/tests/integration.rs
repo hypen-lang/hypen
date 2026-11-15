@@ -732,7 +732,10 @@ fn test_remote_session_dispatches_nested_module_action() {
     components.register(
         "Counter",
         r#"module Counter {
-            Text("Count: @{state.count}")
+            Column {
+                Text("Count: @{state.count}")
+                Button(@actions.bump) { Text("+") }
+            }
         }"#,
         None,
     );

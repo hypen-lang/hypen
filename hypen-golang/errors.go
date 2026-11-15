@@ -21,6 +21,11 @@ const (
 	ErrExpression
 	// ErrNotInitialized indicates the engine has not been initialized.
 	ErrNotInitialized
+	// ErrUIActionUnhandled indicates a renderer's UI action that the live
+	// tree authorised (a rendered binding exists) but for which the engine
+	// has no registered handler. A host that keeps its own handler table may
+	// run it; every other dispatch error is a refusal.
+	ErrUIActionUnhandled
 )
 
 // String returns the name of the error code.
@@ -40,6 +45,8 @@ func (c EngineErrorCode) String() string {
 		return "ExpressionError"
 	case ErrNotInitialized:
 		return "NotInitialized"
+	case ErrUIActionUnhandled:
+		return "UIActionUnhandled"
 	default:
 		return "Unknown"
 	}
@@ -126,6 +133,8 @@ func newWasmError(operation string, code uint64) *EngineError {
 			return &EngineError{Code: ErrActionNotFound, Message: "invalid action JSON"}
 		case 3:
 			return &EngineError{Code: ErrNotInitialized, Message: "engine not initialized"}
+		case 5:
+			return &EngineError{Code: ErrUIActionUnhandled, Message: "UI action has a rendered binding but no engine handler"}
 		default:
 			return &EngineError{Code: ErrActionNotFound, Message: fmt.Sprintf("dispatch_action failed with code: %d", code)}
 		}

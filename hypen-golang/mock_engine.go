@@ -145,6 +145,12 @@ func (e *MockEngine) TriggerAction(name string, payload any) {
 // looks up the registered handler and fires it synchronously. Returns
 // nil unconditionally — MockEngine doesn't surface ActionNotFound.
 func (e *MockEngine) DispatchAction(name string, payload any) error {
+	// The mock has no tree: a UI envelope resolves to the action it names.
+	if env, ok := payload.(map[string]any); ok && name == "__hypen_dispatch" {
+		if inner, _ := env["action"].(string); inner != "" {
+			name, payload = inner, env["payload"]
+		}
+	}
 	e.mu.RLock()
 	handler, exists := e.actionHandlers[name]
 	if !exists {

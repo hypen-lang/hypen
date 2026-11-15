@@ -168,7 +168,7 @@ final class NestedRouterAutoWireTests: XCTestCase {
 
         let dir = try writeComponents([
             "App": "module App { Router { Route(path: \"/\") { Home() } } }",
-            "Home": "module Home { Text(\"home-root\") }",
+            "Home": "module Home { Button(\"@actions.checkApp\") { Text(\"home-root\") } }",
         ])
         tmpDir = dir
 
@@ -335,9 +335,11 @@ final class NestedRouterAutoWireTests: XCTestCase {
             Thread.sleep(forTimeInterval: 0.02)
         }
 
-        session.receive("""
-        {"type":"dispatchAction","module":"Feed","action":"probe","payload":{}}
-        """)
+        // Host-side dispatch: this test is about Feed being MOUNTED (its
+        // handlers registered). Primary "/" does not match "/home/feed", so
+        // Feed is not on screen and a client could not reach it by name.
+        try session.nativeEngine?.dispatchAction("probe", payloadJson: "{}")
+        session.nativeEngine?.processPendingActions()
 
         let deadline = Date().addingTimeInterval(2.0)
         while Date() < deadline {

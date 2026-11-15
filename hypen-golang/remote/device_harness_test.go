@@ -40,7 +40,7 @@ func newDevServer(t *testing.T, cfg *DeviceConfig, def *core.ModuleDefinition, u
 	if components != nil {
 		dir = writeComponents(t, components)
 	}
-	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui)
+	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui).AllowClientActions(devClientActions...)
 	if cfg == nil {
 		srv.DisableDevice()
 	} else {

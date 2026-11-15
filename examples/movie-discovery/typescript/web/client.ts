@@ -32,7 +32,7 @@ const engine = new RemoteEngine(WS_URL, {
     props: { platform: "web" },
   },
   navigation: {
-    backAction: "navigateBack",
+    backAction: "router.back",
     viewStateKey: "location",
   },
 });

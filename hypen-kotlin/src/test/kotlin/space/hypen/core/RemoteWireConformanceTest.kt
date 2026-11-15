@@ -222,9 +222,10 @@ class RemoteWireConformanceTest {
             c.await { t -> t.any { it.contains("\"initialTree\"") } }
             val bad = listOf(
                 // Renderer UI-action envelopes the engine refuses (a stale or unknown node, a
-                // missing node / action, a nested envelope): the native engine throws.
+                // node-less envelope for an action nothing renders, a nested envelope): the
+                // native engine throws.
                 """{"type":"dispatchAction","action":"__hypen_dispatch","payload":{"node":"999999","action":"increment"}}""",
-                """{"type":"dispatchAction","action":"__hypen_dispatch","payload":{"action":"increment"}}""",
+                """{"type":"dispatchAction","action":"__hypen_dispatch","payload":{"action":"notRendered"}}""",
                 """{"type":"dispatchAction","action":"__hypen_dispatch","payload":"not an envelope"}""",
                 """{"type":"dispatchAction","action":"__hypen_dispatch","payload":{"node":"1","action":"__hypen_dispatch"}}""",
                 // A handler that throws.
@@ -372,7 +373,7 @@ class RemoteWireConformanceTest {
     private fun tree(texts: List<String>) = ClientTree().also { t -> texts.forEach(t::apply) }
 
     private fun screen(name: String, text: String) = AppBuilder(mutableMapOf<String, Any?>("n" to 0))
-        .ui("""module $name { Column { Text("$text") Text("n=@{state.n}") } }""")
+        .ui("""module $name { Column { Text("$text") Text("n=@{state.n}") Button("@actions.bump$name") } }""")
         .onAction("bump$name") { ctx -> ctx.state.set("n", ((ctx.state.get("n") as? Number)?.toInt() ?: 0) + 1) }
         .build()
         .copy(name = name)
@@ -493,7 +494,7 @@ class RemoteWireConformanceTest {
         requireNative()
         val calls = Collections.synchronizedList(mutableListOf<String>())
         val def = AppBuilder(mutableMapOf<String, Any?>("count" to 0))
-            .ui("""module Counter { Text("Count: @{state.count}") }""")
+            .ui("""module Counter { Column { Text("Count: @{state.count}") Button("@actions.increment") } }""")
             .onAction("increment") { ctx -> ctx.state.set("count", ((ctx.state.get("count") as? Number)?.toInt() ?: 0) + 1) }
             .onReconnect { ctx ->
                 calls += ctx.session.id
@@ -561,7 +562,7 @@ class RemoteWireConformanceTest {
         val badge = dir.resolve("Badge.hypen")
         java.nio.file.Files.writeString(badge, """Text("badge v1")""")
         val def = AppBuilder(mutableMapOf<String, Any?>("n" to 0))
-            .ui("""module Hot { Column { Badge() Text("n=@{state.n}") } }""")
+            .ui("""module Hot { Column { Badge() Text("n=@{state.n}") Button("@actions.bump") } }""")
             .onAction("bump") { ctx -> ctx.state.set("n", ((ctx.state.get("n") as? Number)?.toInt() ?: 0) + 1) }
             .build()
             .copy(name = "Hot")

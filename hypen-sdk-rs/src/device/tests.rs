@@ -68,6 +68,24 @@ fn hello_device(caps: &[&str]) -> Value {
     })
 }
 
+/// These tests drive the device plane with programmatic client calls — no
+/// control renders the actions — so the host names them callable.
+fn allow_test_actions(session: &RemoteSession) {
+    session.allow_client_actions([
+        "supports",
+        "pick",
+        "camera",
+        "save",
+        "scan",
+        "slow",
+        "wait",
+        "query",
+        "orphan",
+        "camPick",
+        "otherPick",
+    ]);
+}
+
 fn set(s: &mut S, r: String) {
     s.result = r;
 }
@@ -238,6 +256,7 @@ impl Rig {
             )
             .with_device_server(server),
         );
+        allow_test_actions(&session);
         let ui = Arc::clone(&wire.ui);
         Rig {
             session,
@@ -388,6 +407,7 @@ fn without_a_device_hello_every_call_is_device_disabled() {
 fn a_session_without_a_transport_is_ui_only() {
     // In-process / test form: no connection to carry device traffic.
     let session = RemoteSession::from_definition(module(), ComponentRegistry::new());
+    allow_test_actions(&session);
     let out = session.handle_message(
         &json!({"type":"hello","device": hello_device(&["core.capabilities","file.pick"])})
             .to_string(),
@@ -614,6 +634,7 @@ fn the_plane_needs_no_call_and_no_server_configuration() {
         ComponentRegistry::new(),
         Arc::new(WireTransport(Arc::clone(&wire))),
     );
+    allow_test_actions(&session);
     let out = session.handle_message(
         &json!({"type":"hello","device": hello_device(&["core.capabilities","file.pick"])})
             .to_string(),
@@ -934,6 +955,7 @@ fn routed_rig(log: Arc<Mutex<Vec<String>>>) -> Rig {
         )
         .with_device_server(&server()),
     );
+    allow_test_actions(&session);
     let ui = Arc::clone(&wire.ui);
     Rig {
         session,

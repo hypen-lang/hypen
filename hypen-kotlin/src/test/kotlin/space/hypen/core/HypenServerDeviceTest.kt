@@ -91,6 +91,8 @@ class HypenServerDeviceTest {
         val def = appModule()
         return HypenServer {
             module("App", def)
+            // Programmatic client calls: no control renders these.
+            allowClientActions("query", "pick", "slow")
             route("/", "App")
             disableAutoRouter()
             if (origins.isNotEmpty()) allowedOrigins(*origins.toTypedArray())
@@ -168,7 +170,9 @@ class HypenServerDeviceTest {
     @Test
     fun `device and compression are both on by default, independently`() {
         // No enable call and no allowlist / authenticator: the server starts.
-        val bare = HypenServer { module("App", appModule()) }
+        val bare = HypenServer { module("App", appModule())
+            // Programmatic client calls: no control renders these.
+            allowClientActions("query", "pick", "slow") }
         assertTrue(bare.deviceEnabled)
         assertTrue(bare.compression, "compression is on by default with the device plane on")
         val s = server()
@@ -191,6 +195,8 @@ class HypenServerDeviceTest {
 
     private fun compressingServer() = HypenServer {
         module("App", appModule())
+            // Programmatic client calls: no control renders these.
+            allowClientActions("query", "pick", "slow")
         route("/", "App")
         disableAutoRouter()
         compression = true
@@ -259,6 +265,8 @@ class HypenServerDeviceTest {
         val def = appModule()
         val s = HypenServer {
             module("App", def)
+            // Programmatic client calls: no control renders these.
+            allowClientActions("query", "pick", "slow")
             route("/", "App")
             disableAutoRouter()
         }

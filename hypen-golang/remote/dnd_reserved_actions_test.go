@@ -19,7 +19,11 @@ func normalizeJSON(v any) any { return core.DeepCloneAny(v) }
 // session route dispatches through the WASM engine's action handlers, the
 // path the reserved actions are registered on — the legacy no-sourceDir
 // shim forwards every action to ModuleConfig.OnAction instead).
-func newDndSession(t *testing.T) (*RemoteSession, *ChannelTransport) {
+//
+// The writes are node-addressed: a client may only send them as a
+// `__hypen_dispatch` envelope naming the sortable / pinboard that declares
+// the write, so the returned map holds those nodes' ids by element type.
+func newDndSession(t *testing.T) (*RemoteSession, map[string]string) {
 	t.Helper()
 	core.App.Clear()
 	t.Cleanup(func() { core.App.Clear() })
@@ -29,7 +33,12 @@ func newDndSession(t *testing.T) (*RemoteSession, *ChannelTransport) {
 			"notes": []any{map[string]any{"id": "n1", "x": 0, "y": 0}},
 		}).
 		Source(t.TempDir()).
-		UI(`module Board { Text("hi") }`)
+		UI(`module Board {
+			Column {
+				Row { Text("hi") }.sortable(axis: y).bind(@state.tasks)
+				Stack { Text("pins") }.pinboard(group: "board")
+			}
+		}`)
 	if err := s.Prepare(); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -44,13 +53,39 @@ func newDndSession(t *testing.T) (*RemoteSession, *ChannelTransport) {
 	if err := sess.Receive(hello); err != nil {
 		t.Fatalf("Receive hello: %v", err)
 	}
-	if msg := waitForMessage(t, transport, MessageTypeInitialTree, 5*time.Second); msg == nil {
+	msg := waitForMessage(t, transport, MessageTypeInitialTree, 5*time.Second)
+	if msg == nil {
 		t.Fatal("no initialTree")
+	}
+	raw, _ := json.Marshal(msg)
+	var tree struct {
+		Patches []map[string]any `json:"patches"`
+	}
+	if err := json.Unmarshal(raw, &tree); err != nil {
+		t.Fatalf("decode initialTree: %v", err)
+	}
+	nodes := map[string]string{}
+	for _, p := range tree.Patches {
+		if p["type"] == "create" {
+			kind, _ := p["elementType"].(string)
+			id, _ := p["id"].(string)
+			nodes[kind] = id
+		}
+	}
+	if nodes["Row"] == "" || nodes["Stack"] == "" {
+		t.Fatalf("sortable/pinboard nodes missing from the initial tree: %s", raw)
 	}
 	if sess.Engine() == nil {
 		t.Fatal("expected an engine-backed session")
 	}
-	return sess, transport
+	return sess, nodes
+}
+
+// dispatchFrom sends a reserved write the way a renderer does: as a UI
+// envelope addressed to the node that declares it.
+func dispatchFrom(t *testing.T, sess *RemoteSession, node, action string, payload map[string]any) {
+	t.Helper()
+	dispatch(t, sess, "__hypen_dispatch", map[string]any{"node": node, "action": action, "payload": payload})
 }
 
 func dispatch(t *testing.T, sess *RemoteSession, action string, payload map[string]any) {
@@ -77,14 +112,14 @@ func waitForState(t *testing.T, sess *RemoteSession, path string, want any) {
 }
 
 func TestRemoteSession_ReorderActionAppliesToState(t *testing.T) {
-	sess, _ := newDndSession(t)
-	dispatch(t, sess, core.ReorderActionName, map[string]any{"path": "tasks", "from": 0, "to": 2})
+	sess, nodes := newDndSession(t)
+	dispatchFrom(t, sess, nodes["Row"], core.ReorderActionName, map[string]any{"path": "tasks", "from": 0, "to": 2})
 	waitForState(t, sess, "tasks", []any{"b", "c", "a"})
 }
 
 func TestRemoteSession_PinActionAppliesBothFields(t *testing.T) {
-	sess, _ := newDndSession(t)
-	dispatch(t, sess, core.PinActionName, map[string]any{
+	sess, nodes := newDndSession(t)
+	dispatchFrom(t, sess, nodes["Stack"], core.PinActionName, map[string]any{
 		"path": "__dnd.board.n1", "x": 120, "y": 80, "xKey": "x", "yKey": "y",
 	})
 	waitForState(t, sess, "__dnd.board.n1", map[string]any{"x": 120, "y": 80})
@@ -93,9 +128,26 @@ func TestRemoteSession_PinActionAppliesBothFields(t *testing.T) {
 }
 
 func TestRemoteSession_MalformedReorderLeavesStateUntouched(t *testing.T) {
-	sess, _ := newDndSession(t)
-	dispatch(t, sess, core.ReorderActionName, map[string]any{"path": "tasks", "from": 9, "to": 0})
+	sess, nodes := newDndSession(t)
+	dispatchFrom(t, sess, nodes["Row"], core.ReorderActionName, map[string]any{"path": "tasks", "from": 9, "to": 0})
 	// Give the dispatch a moment, then assert nothing moved.
+	time.Sleep(50 * time.Millisecond)
+	waitForState(t, sess, "tasks", []any{"a", "b", "c"})
+}
+
+// The writes are not reachable by name: a client that sends the reserved
+// action bare (or in the engine's internal scoped form) writes nothing.
+func TestRemoteSession_ReservedWritesNeedTheirNode(t *testing.T) {
+	sess, _ := newDndSession(t)
+	for _, name := range []string{
+		core.ReorderActionName,
+		"__hypen_scoped::" + core.ReorderActionName,
+		"__hypen_scoped:board:" + core.ReorderActionName,
+	} {
+		dispatch(t, sess, name, map[string]any{"path": "tasks", "from": 0, "to": 2})
+	}
+	dispatch(t, sess, "__hypen_bind", map[string]any{"path": "tasks", "value": []any{}})
+	dispatch(t, sess, "__hypen_scoped::__hypen_bind", map[string]any{"path": "tasks", "value": []any{}})
 	time.Sleep(50 * time.Millisecond)
 	waitForState(t, sess, "tasks", []any{"a", "b", "c"})
 }

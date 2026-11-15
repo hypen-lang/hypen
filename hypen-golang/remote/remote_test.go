@@ -929,7 +929,7 @@ func compressionTestServer(t *testing.T, configure func(*RemoteServer)) (*Remote
 			}
 			return state
 		}).
-		UI("Text('Count: @{state.count}')")
+		UI("Column { Text('Count: @{state.count}') Button('@actions.increment') { Text('+') } }")
 
 	if configure != nil {
 		configure(server)

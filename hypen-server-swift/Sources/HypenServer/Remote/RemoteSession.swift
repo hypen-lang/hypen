@@ -340,6 +340,10 @@ public protocol SessionHost: AnyObject, Sendable {
     /// definition here.
     func makeModuleDefinition() -> ModuleDefinition
 
+    /// Actions a client may dispatch by name without a rendered binding
+    /// (`RemoteServer.allowClientActions`). Defaults to none.
+    var clientActions: Set<String> { get }
+
     /// Legacy untyped action handler shim (non-nil only when the host
     /// was configured via `withState(_:_:)` + `onAction(_:)` without a
     /// typed `ModuleDefinition`).
@@ -359,6 +363,10 @@ public protocol SessionHost: AnyObject, Sendable {
     /// The process-wide retained-bytes pool every connection's broker
     /// shares (nil = per-connection budgets only).
     var deviceRetainedBytesPool: DeviceRetainedBytesPool? { get }
+}
+
+public extension SessionHost {
+    var clientActions: Set<String> { [] }
 }
 
 extension SessionHost {
@@ -786,7 +794,8 @@ public final class RemoteSession: @unchecked Sendable {
             if !helloIsReceived { return }
             let name = (json["action"] as? String) ?? (json["name"] as? String) ?? ""
             let payload = json["payload"]
-            handleDispatchAction(actionName: name, payload: payload)
+            // From the client: untrusted.
+            handleDispatchAction(actionName: name, payload: payload, trusted: false)
 
         default:
             // Unknown — ignore for forward compatibility.
@@ -813,8 +822,9 @@ public final class RemoteSession: @unchecked Sendable {
     /// call they make fails `unavailable` — replay cannot initiate device
     /// work on this connection.
     public func dispatchReplayed(_ name: String, payload: Any? = nil) {
+        // Host-originated (a replay or `broadcastAction`): trusted.
         DeviceProvenance.$current.withValue(.replay) {
-            handleDispatchAction(actionName: name, payload: payload)
+            handleDispatchAction(actionName: name, payload: payload, trusted: true)
         }
     }
 
@@ -1367,7 +1377,10 @@ public final class RemoteSession: @unchecked Sendable {
     /// untyped shim. In either case, an explicit `stateUpdate` is sent
     /// for client-side inspection; patches flow through the onPatches
     /// callback installed in buildEngineAndModuleInstance.
-    private func handleDispatchAction(actionName: String, payload: Any?) {
+    ///
+    /// `trusted` is false for anything a client sent and true for the
+    /// host's own dispatches.
+    private func handleDispatchAction(actionName: String, payload: Any?, trusted: Bool) {
         // Strip the reserved transaction-animation stamp BEFORE either
         // dispatch path — the typed ModuleInstance route and the legacy
         // untyped shim both take their payload from here.
@@ -1383,16 +1396,72 @@ public final class RemoteSession: @unchecked Sendable {
         // `withState(_:_:)` + `onAction(_:)` without a typed
         // ModuleDefinition. In every other case the typed dispatch
         // through ModuleInstance wins.
+        //
+        // The client is untrusted: a handler's name is never authority to
+        // run it. Everything it sends is resolved by the engine as a UI
+        // envelope — a bare (or pre-scoped) name becomes a node-less one —
+        // and runs only through a live rendered binding. Host-named
+        // actions (`RemoteServer.allowClientActions`) take the trusted
+        // path. An engine predating node-less envelopes rejects them, so
+        // this fails closed.
+        let allowed = trusted
+            || (!actionName.hasPrefix("__") && host.clientActions.contains(actionName))
+        var wireName = actionName
+        var wirePayload = sanitizedPayload
+        if !allowed && actionName != Self.uiActionEnvelope {
+            var envelope: [String: Any] = ["action": actionName]
+            if let p = sanitizedPayload, !(p is NSNull) { envelope["payload"] = p }
+            wireName = Self.uiActionEnvelope
+            wirePayload = envelope
+        }
+
         if let shim = host.legacyActionHandler {
-            let currentState = mi.state.snapshot()
-            if let newState = shim(actionName, sanitizedPayload, currentState) {
-                mi.state.replace(newState)
+            // The shim keeps its own handler table, so the engine only
+            // authorises: an envelope the live tree binds but the engine
+            // has no handler for is the shim's to run; anything else the
+            // engine refused (or handled itself, e.g. `__hypen_bind`).
+            var shimName: String? = allowed ? actionName : nil
+            var shimPayload: Any? = sanitizedPayload
+            if !allowed {
+                guard let engine = engineRef() else { return }
+                do {
+                    try engine.dispatchAction(wireName, payloadJson: Self.jsonText(wirePayload))
+                    engine.processPendingActions()
+                } catch {
+                    if "\(error)".contains(Self.unhandledUIAction),
+                       let envelope = wirePayload as? [String: Any],
+                       let inner = envelope["action"] as? String,
+                       !inner.hasPrefix("__") {
+                        shimName = inner
+                        shimPayload = envelope["payload"]
+                    } else {
+                        HypenLoggers.server.debug("Engine refused client action '%@': %@", actionName, "\(error)")
+                    }
+                }
+            }
+            if let name = shimName {
+                let currentState = mi.state.snapshot()
+                if let newState = shim(name, shimPayload, currentState) {
+                    mi.state.replace(newState)
+                }
             }
         } else {
-            mi.dispatchAction(actionName, payload: sanitizedPayload)
+            mi.dispatchAction(wireName, payload: wirePayload)
         }
 
         emitStateUpdate(mi)
+    }
+
+    /// The engine's UI dispatch entry point (`action_routing::UI_ACTION`).
+    private static let uiActionEnvelope = "__hypen_dispatch"
+    /// The engine's error text for a UI action the live tree authorised but
+    /// that has no engine handler (`action_routing::UNHANDLED`).
+    private static let unhandledUIAction = "invalid scoped UI action: no handler registered"
+
+    private static func jsonText(_ value: Any?) -> String? {
+        guard let value, JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     /// The `stateUpdate` tail every dispatch ends with — the renderer's

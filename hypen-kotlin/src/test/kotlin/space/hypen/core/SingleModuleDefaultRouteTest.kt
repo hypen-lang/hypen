@@ -34,7 +34,7 @@ class SingleModuleDefaultRouteTest {
         val counter = app.module("Counter")
             .defineState(mapOf("count" to 0))
             .onAction("increment") { ctx -> ctx.state.set("count", ((ctx.state.get("count") as? Number)?.toInt() ?: 0) + 1) }
-            .ui("""module Counter { Column { Text("Count: @{state.count}") } }""")
+            .ui("""module Counter { Column { Text("Count: @{state.count}") Button("@actions.increment") { Text("+") } } }""")
             .build()
 
         val server = HypenServer { module("Counter", counter) }

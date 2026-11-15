@@ -96,6 +96,13 @@ class MockEngine : IEngine {
     }
 
     override fun triggerAction(name: String, payload: Any?) {
+        // The mock has no tree: a UI envelope resolves to the action it names.
+        val envelope = (payload?.toJsonElement() as? kotlinx.serialization.json.JsonObject)
+            ?.takeIf { name == "__hypen_dispatch" }
+        val inner = (envelope?.get("action") as? kotlinx.serialization.json.JsonPrimitive)?.content
+        if (envelope != null && inner != null) {
+            return triggerAction(inner, envelope["payload"])
+        }
         val action = Action(name, payload?.toJsonElement())
         val scoped = actionHandlers.keys.filter { it.startsWith("__hypen_scoped:") && it.endsWith(":$name") }
         (actionHandlers[name] ?: scoped.singleOrNull()?.let { actionHandlers[it] })?.invoke(action)

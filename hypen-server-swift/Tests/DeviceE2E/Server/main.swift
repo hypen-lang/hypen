@@ -226,6 +226,10 @@ let server = RemoteServer()
         }
     }
     """)
+    // The e2e client calls these programmatically; no control renders them.
+    .allowClientActions(
+        "caps", "perm", "pick", "pickCancel", "camera", "select", "save", "scan", "flood", "mic"
+    )
     .config(ServerConfig(
         port: port,
         hostname: "127.0.0.1",

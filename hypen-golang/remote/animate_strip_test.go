@@ -56,7 +56,7 @@ func TestDispatchAction_StripsReservedAnimateKeyBeforeHandler(t *testing.T) {
 			seen <- payload
 			return state
 		}).
-		UI(`Text("hi")`)
+		UI(`Button("@actions.doThing") { Text("hi") }`)
 	if err := s.Prepare(); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}

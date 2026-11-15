@@ -68,6 +68,8 @@ type RemoteServer struct {
 
 	// Resources: flat map of name → raw SVG string
 	resources map[string]string
+	// Actions a client may dispatch without a rendered binding.
+	clientActions []string
 	// When true (default), each new session auto-wires a ManagedRouter
 	// from the `Router {}` blocks found in the primary template. Flip
 	// off via DisableAutoRouter() when the host wants bespoke wiring
@@ -175,6 +177,12 @@ func (h serverSessionHost) Resources() map[string]string {
 		out[k] = v
 	}
 	return out
+}
+
+func (h serverSessionHost) ClientActions() []string {
+	h.s.mu.RLock()
+	defer h.s.mu.RUnlock()
+	return append([]string(nil), h.s.clientActions...)
 }
 
 func (h serverSessionHost) Definition() *core.ModuleDefinition {
@@ -634,6 +642,22 @@ func (s *RemoteServer) OnConnection(callback ServerConnectionCallback) *RemoteSe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onConnectionCallbacks = append(s.onConnectionCallbacks, callback)
+	return s
+}
+
+// AllowClientActions names actions a client may dispatch by name WITHOUT a
+// rendered binding — programmatic client calls such as a browser-back
+// `navigateBack`.
+//
+// The client is untrusted: by default it can only run an action that is
+// bound (`@actions.x`) on a node currently rendered for its session, so an
+// action is reachable only while its control is on screen. List here only
+// actions that are safe for any connected client to call at any time.
+// Framework names (`__*`) are ignored.
+func (s *RemoteServer) AllowClientActions(names ...string) *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.clientActions = append(s.clientActions, names...)
 	return s
 }
 

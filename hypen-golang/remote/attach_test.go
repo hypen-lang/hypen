@@ -25,8 +25,10 @@ type attachCartState struct {
 }
 
 const attachTestUI = `module App {
-	Text("total: @{state.total}")
-	Button("@actions.addToCart") { Text("Add") }
+	Column {
+		Text("total: @{state.total}")
+		Button("@actions.addToCart") { Text("Add") }
+	}
 }`
 
 // attachFixture is one prepared server plus one hello-completed user

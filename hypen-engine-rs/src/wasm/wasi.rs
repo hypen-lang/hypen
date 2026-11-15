@@ -796,6 +796,11 @@ pub extern "C" fn hypen_dispatch_action(action_ptr: *const u8, action_len: usize
             .route_ui_action(Action::new(action_payload.name).with_payload(action_payload.payload))
         {
             Ok(action) => action,
+            // 5: a UI envelope the live tree authorised, with no engine
+            // handler — a host with its own handler table may run it.
+            Err(e) if crate::action_routing::is_unhandled_ui_action(&e) => {
+                return fail(5, &e.to_string())
+            }
             Err(e) => return fail(4, &e.to_string()),
         };
         let action_payload = ActionPayload {

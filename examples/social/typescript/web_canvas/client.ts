@@ -28,7 +28,7 @@ const engine = new RemoteEngine(WS_URL, {
     props: { platform: "web_canvas" },
   },
   navigation: {
-    backAction: "navigateBack",
+    backAction: "router.back",
     viewStateKey: "location",
   },
 });

@@ -4,6 +4,16 @@ use crate::{dispatch::Action, engine_core::EngineCore, error::EngineError, ir::N
 use serde_json::Value;
 
 pub const UI_ACTION: &str = "__hypen_dispatch";
+/// Error text for an envelope the live tree authorised but no engine handler
+/// serves. Hosts that run their own handler table (the Go `OnAction` shim)
+/// tell this apart from a refusal — see [`is_unhandled_ui_action`].
+const UNHANDLED: &str = "invalid scoped UI action: no handler registered";
+
+/// Whether `error` means "the tree authorised this UI action, but the engine
+/// has no handler for it" rather than a refusal.
+pub fn is_unhandled_ui_action(error: &EngineError) -> bool {
+    matches!(error, EngineError::ActionNotFound(m) if m == UNHANDLED)
+}
 const SCOPED: &str = "__hypen_scoped:";
 
 pub fn scoped_action_name(scope: &str, name: &str) -> String {
@@ -264,7 +274,7 @@ impl EngineCore {
                 {
                     action.name = name.to_string();
                 } else {
-                    return Err(invalid());
+                    return Err(EngineError::ActionNotFound(UNHANDLED.into()));
                 }
             }
         } else if split_scoped_action(&action.name).is_some() {

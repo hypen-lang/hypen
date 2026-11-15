@@ -22,6 +22,7 @@ package remote
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strings"
@@ -1458,16 +1459,40 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 	// Framework actions (two-way binding, reorder, pin) still go through
 	// the engine, whose reserved handlers are registered for every module.
 	legacy := s.usesLegacyShim()
-	if legacy {
-		actionName, payload = unwrapUIAction(actionName, payload)
-	}
-	if engine != nil && (!legacy || strings.HasPrefix(actionName, "__hypen")) {
+
+	// The client is untrusted: a handler's name is never authority to run
+	// it. Everything it sends is resolved by the engine as a UI envelope —
+	// a bare (or pre-scoped) name becomes a node-less one — and runs only
+	// through a live rendered binding. The host can name actions callable
+	// without one (AllowClientActions); those take the trusted path.
+	allowed := s.clientActionAllowed(actionName)
+	if engine != nil && !allowed {
+		wireName, wirePayload := clientEnvelope(actionName, payload)
+		err := engine.DispatchAction(wireName, wirePayload)
+		var engineErr *core.EngineError
+		if legacy && errors.As(err, &engineErr) && engineErr.Code == core.ErrUIActionUnhandled {
+			// Authorised by the tree; the map-style shim owns the handler.
+			actionName, payload = unwrapUIAction(wireName, wirePayload)
+			if actionName == uiActionEnvelope {
+				return
+			}
+		} else {
+			if err != nil {
+				logServer.Error("Engine DispatchAction refused %q: %v", actionName, err)
+			}
+			s.sendStateUpdate(moduleName)
+			return
+		}
+	} else if engine != nil && !legacy {
 		if err := engine.DispatchAction(actionName, payload); err != nil {
 			logServer.Error("Engine DispatchAction failed: %v", err)
 		}
 		s.sendStateUpdate(moduleName)
 		return
 	}
+	// Reached with no engine (nothing is rendered, so there is no binding to
+	// check: the module is a plain RPC surface), with a host-allowed action,
+	// or with an action the engine authorised for the shim.
 
 	// Legacy path: the ModuleConfig.OnAction shim.
 	if module == nil || module.OnAction == nil {
@@ -1508,6 +1533,44 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 // `{node, action, payload}` under this name and the engine resolves the
 // owning module (hypen-engine-rs action_routing::UI_ACTION).
 const uiActionEnvelope = "__hypen_dispatch"
+
+// clientEnvelope wraps a client's non-envelope action as a node-less UI
+// envelope, the form the engine authorises against the live tree. An engine
+// that predates node-less envelopes rejects it, so this fails closed.
+func clientEnvelope(name string, payload any) (string, any) {
+	if name == uiActionEnvelope {
+		return name, payload
+	}
+	env := map[string]any{"action": name}
+	if payload != nil {
+		env["payload"] = payload
+	}
+	return uiActionEnvelope, env
+}
+
+// clientActionsHost is implemented by hosts that name actions a client may
+// dispatch without a rendered binding (RemoteServer.AllowClientActions).
+type clientActionsHost interface {
+	ClientActions() []string
+}
+
+// clientActionAllowed reports whether the host named this action callable
+// by a client without a rendered binding. Framework names never are.
+func (s *RemoteSession) clientActionAllowed(name string) bool {
+	if strings.HasPrefix(name, "__") {
+		return false
+	}
+	host, ok := s.host.(clientActionsHost)
+	if !ok {
+		return false
+	}
+	for _, allowed := range host.ClientActions() {
+		if allowed == name {
+			return true
+		}
+	}
+	return false
+}
 
 // unwrapUIAction turns a renderer's `__hypen_dispatch` envelope into the
 // plain action name + payload the legacy ModuleConfig.OnAction shim

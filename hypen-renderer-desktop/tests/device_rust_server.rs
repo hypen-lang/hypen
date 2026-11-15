@@ -265,6 +265,8 @@ async fn serve(stream: tokio::net::TcpStream, device_server: Arc<DeviceServer>) 
         )
         .with_device_server(&device_server),
     );
+    // The desktop client calls these programmatically; no control renders them.
+    session.allow_client_actions(["supports", "pick", "gallery", "save", "camera", "ping", "done"]);
     let writer = tokio::spawn(async move {
         while let Some(out) = rx.recv().await {
             let r = match out {

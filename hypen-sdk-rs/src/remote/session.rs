@@ -223,6 +223,9 @@ pub struct RemoteSession {
     state: Arc<Mutex<HashMap<String, Value>>>,
     /// Catch-all primary-module action handler set via [`set_action_handler`].
     primary_handler: Arc<Mutex<Option<ActionHandlerFn>>>,
+    /// Actions a client may dispatch by name without a rendered binding.
+    /// See [`Self::allow_client_actions`].
+    client_actions: Mutex<std::collections::HashSet<String>>,
     /// Route-entry hooks registered via [`Self::on_route_enter`]. Fired
     /// from the `router.*` engine action handlers after every nav so
     /// per-route modules can load route-param-dependent data (e.g.
@@ -635,6 +638,7 @@ impl RemoteSession {
             route_scopes,
             screen_scope,
             resume_token: Mutex::new(None),
+            client_actions: Mutex::new(Default::default()),
         }
     }
 
@@ -993,6 +997,27 @@ impl RemoteSession {
     ///
     /// Nested-module handlers are installed internally by
     /// [`from_definition_with_state`](Self::from_definition_with_state).
+    /// Name actions the client may dispatch **without a rendered binding** —
+    /// programmatic client calls such as a browser-back `navigateBack`.
+    ///
+    /// The client is untrusted: by default it can only run an action that is
+    /// bound (`@actions.x`) on a node currently rendered for this session, so
+    /// an action is reachable only while its control is on screen. List here
+    /// only actions that are safe for the client to call at any time.
+    /// Framework names (`__*`) are ignored.
+    pub fn allow_client_actions<I, S>(&self, names: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.client_actions.lock().unwrap().extend(
+            names
+                .into_iter()
+                .map(Into::into)
+                .filter(|n| !n.starts_with("__")),
+        );
+    }
+
     pub fn set_action_handler<F>(&self, handler: F)
     where
         F: Fn(&str, Option<&Value>, &Value) -> Value + Send + Sync + 'static,
@@ -1554,6 +1579,7 @@ impl RemoteSession {
             action_obj = action_obj.with_payload(p.clone());
         }
 
+        let client_allowed = !external && self.client_actions.lock().unwrap().contains(action);
         let state_arc = Arc::clone(&self.state);
         // Snapshot state before dispatch so we can detect which scopes
         // the handler (and any `router.*` route-enter hooks it triggers)
@@ -1575,8 +1601,13 @@ impl RemoteSession {
                     refusal = Some(SdkError::Engine(e));
                     return;
                 }
-            } else {
+            } else if client_allowed {
+                // Host-declared: callable by name (trusted routing).
                 let _ = engine.dispatch_action(action_obj);
+            } else {
+                // The client is untrusted: only an action with a live
+                // rendered binding runs, never a bare handler name.
+                let _ = engine.dispatch_ui_action(action_obj);
             }
             push_changed_scopes(engine, &state_arc, &pre);
         });
@@ -1904,7 +1935,7 @@ mod tests {
 
         SessionConfig {
             module_name: "App".to_string(),
-            ui_source: r#"Column { Text("Count: @{state.count}") }"#.to_string(),
+            ui_source: r#"Column { Text("Count: @{state.count}") Button(@actions.increment) { Text("+") } }"#.to_string(),
             components,
             initial_state: serde_json::json!({
                 "count": 0,
@@ -1929,18 +1960,113 @@ mod tests {
         let def = Arc::new(
             crate::module::ModuleBuilder::new("Board")
                 .state(Board { count: 0 })
-                .ui("Text(\"@{state.count}\")")
+                .ui(r#"Column {
+                    Stack { Text("@{state.count}") }.pinboard(group: "board")
+                    Button(@actions.increment) { Text("+") }
+                }"#)
                 .on_action::<()>("increment", |s, _, _| s.count += 1)
                 .build(),
         );
         let session = RemoteSession::from_definition(def, ComponentRegistry::new());
-        session.handle_hello(None);
-        session.handle_message(&json!({"type":"dispatchAction","module":"Board","action":"__hypen_pin","payload":{"path":"__dnd.board.a","x":0.5,"y":0.25,"xKey":"left","yKey":"top"}}).to_string());
+        let hello = session.handle_hello(None).join("\n");
+        // A pin is a write its node declares: a bare name is refused, the
+        // envelope addressed to the pinboard is accepted.
+        let pin = json!({"path":"__dnd.board.a","x":0.5,"y":0.25,"xKey":"left","yKey":"top"});
+        session.handle_message(
+            &json!({"type":"dispatchAction","module":"Board","action":"__hypen_pin","payload":pin})
+                .to_string(),
+        );
+        assert_eq!(session.get_state(), json!({"count":0}));
+        let board = hello
+            .split("\"elementType\":\"Stack\"")
+            .next()
+            .and_then(|before| before.rsplit("\"id\":\"").next())
+            .and_then(|rest| rest.split('"').next())
+            .expect("pinboard node id")
+            .to_string();
+        session.handle_message(&json!({"type":"dispatchAction","module":"Board","action":"__hypen_dispatch","payload":{"node":board,"action":"__hypen_pin","payload":pin}}).to_string());
         session
             .handle_message(r#"{"type":"dispatchAction","module":"Board","action":"increment"}"#);
         assert_eq!(
             session.get_state(),
             json!({"count":1,"__dnd":{"board":{"a":{"left":0.5,"top":0.25}}}})
+        );
+    }
+
+    /// The client is untrusted: it runs an action only while a control
+    /// bound to it is rendered, never by knowing the handler's name.
+    #[test]
+    fn a_client_cannot_run_an_action_it_has_no_rendered_binding_for() {
+        use serde::{Deserialize, Serialize};
+        use serde_json::json;
+        #[derive(Clone, Serialize, Deserialize)]
+        struct Admin {
+            saves: u32,
+            wipes: u32,
+            backs: u32,
+            show: bool,
+        }
+        let build = || {
+            let def = Arc::new(
+                crate::module::ModuleBuilder::new("Admin")
+                    .state(Admin {
+                        saves: 0,
+                        wipes: 0,
+                        backs: 0,
+                        show: false,
+                    })
+                    .ui(r#"Column {
+                        Button(@actions.save) { Text("Save") }
+                        If(@state.show) { Button(@actions.wipe) { Text("Wipe") } }
+                    }"#)
+                    .on_action::<()>("save", |s, _, _| s.saves += 1)
+                    .on_action::<()>("wipe", |s, _, _| s.wipes += 1)
+                    .on_action::<()>("navigateBack", |s, _, _| s.backs += 1)
+                    .build(),
+            );
+            let session = RemoteSession::from_definition(def, ComponentRegistry::new());
+            session.handle_hello(None);
+            session
+        };
+        let send = |session: &RemoteSession, action: &str, payload: Value| {
+            session.handle_message(
+                &json!({"type":"dispatchAction","module":"Admin","action":action,"payload":payload})
+                    .to_string(),
+            );
+        };
+
+        let session = build();
+        send(&session, "save", Value::Null); // rendered: a bare name resolves
+        for name in [
+            "wipe",
+            "__hypen_scoped::wipe",
+            "__hypen_scoped::save",
+            "navigateBack",
+        ] {
+            send(&session, name, Value::Null);
+        }
+        send(&session, "__hypen_dispatch", json!({"action": "wipe"}));
+        for name in ["__hypen_bind", "__hypen_scoped::__hypen_bind"] {
+            send(&session, name, json!({"path": "show", "value": true}));
+        }
+        assert_eq!(
+            session.get_state(),
+            json!({"saves": 1, "wipes": 0, "backs": 0, "show": false})
+        );
+
+        // The host can name actions callable without a binding — never `__*`.
+        let session = build();
+        session.allow_client_actions(["navigateBack", "__hypen_bind"]);
+        send(&session, "navigateBack", Value::Null);
+        send(&session, "wipe", Value::Null);
+        send(
+            &session,
+            "__hypen_bind",
+            json!({"path": "show", "value": true}),
+        );
+        assert_eq!(
+            session.get_state(),
+            json!({"saves": 0, "wipes": 0, "backs": 1, "show": false})
         );
     }
 

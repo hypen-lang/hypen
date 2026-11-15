@@ -73,6 +73,8 @@ final class DeviceSessionTests: XCTestCase {
         let server = RemoteServer(sessionConfig: sessionConfig)
             .module("App", def)
             .ui("Column { Text(\"device\") }")
+            // Dispatched programmatically by these tests; no control renders it.
+            .allowClientActions("perm")
         if let deviceOptions { server.configureDevice(deviceOptions) }
         configure(server)
         try server.prepare()

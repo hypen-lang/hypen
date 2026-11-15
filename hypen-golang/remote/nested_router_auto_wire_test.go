@@ -253,7 +253,7 @@ func TestAutoWire_PrimaryIsVisibleToRoutedModules(t *testing.T) {
 
 	dir := writeComponents(t, map[string]string{
 		"App":  `module App { Router { Route(path: "/") { Home() } } }`,
-		"Home": `module Home { Text("home-root") }`,
+		"Home": `module Home { Button("@actions.checkApp") { Text("home-root") } }`,
 	})
 
 	// The probe sits on Home's `checkApp` action. Its handler
@@ -392,7 +392,7 @@ func TestNestedRouterAutoWire_NestedRouterInChildTemplate(t *testing.T) {
 		    }
 		  }
 		}`,
-		"Feed": `module Feed { Text("feed-body") }`,
+		"Feed": `module Feed { Button("@actions.probe") { Text("feed-body") } }`,
 	})
 
 	type probeResult struct {
@@ -470,14 +470,11 @@ waitReady:
 	// Give ManagedRouter's async mount a beat to settle before probing.
 	time.Sleep(50 * time.Millisecond)
 
-	probe, _ := json.Marshal(map[string]any{
-		"type":    "dispatchAction",
-		"module":  "Feed",
-		"action":  "probe",
-		"payload": map[string]any{},
-	})
-	if err := sess.Receive(probe); err != nil {
-		t.Fatalf("Receive probe: %v", err)
+	// Host-side dispatch: this test is about the module being MOUNTED (its
+	// handlers registered). Primary "/" does not match "/home/feed", so Feed
+	// is not on screen and a client could not reach it by name.
+	if err := sess.Engine().DispatchAction("probe", map[string]any{}); err != nil {
+		t.Fatalf("dispatch probe: %v", err)
 	}
 
 	pollDeadline := time.Now().Add(10 * time.Second) // generous: CI under load

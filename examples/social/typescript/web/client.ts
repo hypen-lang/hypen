@@ -34,13 +34,15 @@ const engine = new RemoteEngine(WS_URL, {
     id: savedSessionId ?? undefined,
     props: { platform: "web" },
   },
-  // Browser back/forward integration: popstate dispatches the server-side
-  // `navigateBack` action, which updates `state.location`. The engine's
+  // Browser back/forward integration: popstate dispatches the router's own
+  // `router.back` (a client may always navigate; an app action here would
+  // need a rendered control or the server's `clientActions`), which
+  // updates `state.location`. The engine's
   // first-class Router IR node picks the matching route on the server and
   // emits patches that swap the rendered subtree — there is no client-side
   // route resolution.
   navigation: {
-    backAction: "navigateBack",
+    backAction: "router.back",
     viewStateKey: "location",
   },
 });

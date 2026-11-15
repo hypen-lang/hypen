@@ -118,6 +118,63 @@ final class AgentAttachTests: XCTestCase {
         return (session, transport, sid)
     }
 
+    // MARK: - Client actions need a rendered binding
+
+    /// The client is untrusted: it runs an action only while a control
+    /// bound to it is rendered, never by knowing the handler's name.
+    func testClientCannotRunAnActionWithNoRenderedBinding() throws {
+        func makeServer(allow: [String]) throws -> RemoteServer {
+            let testApp = HypenApp()
+            let cart = testApp.module("Cart")
+                .defineState(["total": 0, "wiped": 0, "backs": 0])
+                .onAction("addToCart") { ctx in
+                    ctx.state.set("total", (ctx.state.get("total") as? Int ?? 0) + 1)
+                }
+                .onAction("wipe") { ctx in
+                    ctx.state.set("wiped", (ctx.state.get("wiped") as? Int ?? 0) + 1)
+                }
+                .onAction("navigateBack") { ctx in
+                    ctx.state.set("backs", (ctx.state.get("backs") as? Int ?? 0) + 1)
+                }
+                .ui(Self.cartTemplate)
+            let server = RemoteServer().app(testApp).module("Cart", cart).ui(Self.cartTemplate)
+            for name in allow { server.allowClientActions(name) }
+            try server.prepare()
+            return server
+        }
+        func send(_ session: RemoteSession, _ action: String, payload: String = "null") {
+            session.receive("{\"type\":\"dispatchAction\",\"action\":\"\(action)\",\"payload\":\(payload)}")
+        }
+        func count(_ session: RemoteSession, _ key: String) -> Int {
+            session.currentState()[key] as? Int ?? -1
+        }
+
+        let server = try makeServer(allow: [])
+        defer { server.stop() }
+        let (session, _, _) = try readySession(on: server)
+        send(session, "addToCart") // rendered: a bare name resolves to its binding
+        for name in ["wipe", "__hypen_scoped::wipe", "__hypen_scoped:cart:wipe", "__hypen_scoped::addToCart", "navigateBack"] {
+            send(session, name)
+        }
+        send(session, "__hypen_dispatch", payload: "{\"action\":\"wipe\"}")
+        let write = "{\"path\":\"wiped\",\"value\":99}"
+        send(session, "__hypen_bind", payload: write)
+        send(session, "__hypen_scoped::__hypen_bind", payload: write)
+        XCTAssertEqual(count(session, "total"), 1)
+        XCTAssertEqual(count(session, "wiped"), 0)
+        XCTAssertEqual(count(session, "backs"), 0)
+
+        // The host can name actions callable without a binding — never `__*`.
+        let open = try makeServer(allow: ["navigateBack", "__hypen_bind"])
+        defer { open.stop() }
+        let (allowed, _, _) = try readySession(on: open)
+        send(allowed, "navigateBack")
+        send(allowed, "wipe")
+        send(allowed, "__hypen_bind", payload: write)
+        XCTAssertEqual(count(allowed, "backs"), 1)
+        XCTAssertEqual(count(allowed, "wiped"), 0)
+    }
+
     // MARK: - Attach lookup
 
     func testAttachReturnsHandleForReadySession() throws {

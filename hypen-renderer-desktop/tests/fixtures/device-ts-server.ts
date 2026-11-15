@@ -61,6 +61,8 @@ const module = app
 const server = new RemoteServer()
   .module("App", module)
   .ui(`Column { ${KEYS.map((k) => `Text("${k}:@{state.${k}}")`).join(" ")} }`)
+  // The desktop client calls these programmatically; no control renders them.
+  .clientActions("supports", "pick", "gallery", "save", "camera")
   .config({
     authenticate: (req: Request) => req.headers.get("authorization") === TOKEN,
     webClient: false,

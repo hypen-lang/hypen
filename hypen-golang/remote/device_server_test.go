@@ -33,6 +33,17 @@ const devUI = `module App {
 	Text("status: @{state.status} count: @{state.count}")
 }`
 
+// devClientActions are the actions these tests dispatch programmatically —
+// no control renders them — so the test servers name them callable.
+var devClientActions = []string{
+	"badParams", "bump", "cancelme", "pick", "pickLinger", "query", "record", "request",
+	"save", "scan", "supports", "timeout", "waitThenStatus",
+	"holdpick", "shoot", "staleShoot", "look", "alphaScan", "betaScan", "appScan",
+	"e2eCancelPick", "e2ePhoto", "e2ePick", "e2eQuery", "e2eQueryMic", "e2eRecord",
+	"e2eSave", "e2eSaveSized", "e2eSaveSizedReset", "e2eScan", "e2eSelect",
+	"e2eSlowPick", "e2eSlowRequest", "e2eSupports", "e2eVideo",
+}
+
 // devApp is the primary module used by these tests; every handler records
 // its outcome in rec.
 func devApp(rec *recorder, cancelCh <-chan struct{}) *core.ModuleDefinition {
@@ -285,7 +296,7 @@ func TestDeviceNegotiatedWithoutAnyEnableCall(t *testing.T) {
 	core.App.Clear()
 	t.Cleanup(func() { core.App.Clear() })
 	rec := newRecorder()
-	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI)
+	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI).AllowClientActions(devClientActions...)
 	if !srv.DeviceEnabled() || !srv.CompressionEnabled() {
 		t.Fatalf("defaults: DeviceEnabled %v CompressionEnabled %v", srv.DeviceEnabled(), srv.CompressionEnabled())
 	}
@@ -1257,7 +1268,7 @@ func TestDeviceLateHelloAfterGrace(t *testing.T) {
 	core.App.Clear()
 	t.Cleanup(func() { core.App.Clear() })
 	rec := newRecorder()
-	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI)
+	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI).AllowClientActions(devClientActions...)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		up := srv.Upgrader()
@@ -1301,7 +1312,7 @@ func newGraceDevServer(t *testing.T, def *core.ModuleDefinition, ui string, comp
 	if components != nil {
 		dir = writeComponents(t, components)
 	}
-	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui)
+	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui).AllowClientActions(devClientActions...)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		up := srv.Upgrader()

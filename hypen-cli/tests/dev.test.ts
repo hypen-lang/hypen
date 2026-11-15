@@ -165,7 +165,7 @@ export default app
   .build();
 `
     );
-    writeFileSync(join(dir, "component.hypen"), `module App { Text("@{state.count}") }`);
+    writeFileSync(join(dir, "component.hypen"), `module App { Column { Text("@{state.count}") Button { Text("+") }.onClick(@actions.increment) } }`);
     return join(apiTestDir, "components");
   }
 

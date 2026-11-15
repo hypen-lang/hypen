@@ -180,6 +180,9 @@ typealias ConnectionCallback = (RemoteClient) -> Unit
  * }
  * ```
  */
+/** The engine's UI dispatch entry point (`action_routing::UI_ACTION`). */
+private const val UI_ACTION_ENVELOPE = "__hypen_dispatch"
+
 class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
     private val modules = mutableMapOf<String, ModuleDefinition<*>>()
     private val routeDefinitions: List<RouteDefinition>
@@ -202,6 +205,8 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
      * via [HypenServerBuilder.disableAutoRouter].
      */
     private val autoRouterEnabled: Boolean
+    /** Actions a client may dispatch without a rendered binding. */
+    private val clientActions: Set<String>
     /**
      * Per-client [ManagedRouter] instances built by the auto-wire path.
      * Held so `handleDisconnect` can `stop()` them and release their
@@ -276,6 +281,7 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
         onDisconnectionCallback = builder.onDisconnectionCallback
         resourceJsonList.addAll(builder.resourceJsonList)
         autoRouterEnabled = builder.autoRouterEnabled
+        clientActions = builder.clientActions.toSet()
         // The device plane is on by default; it never stops the server from
         // starting. Compression is independent of it: permessage-deflate
         // with no context takeover in both directions is allowed on device
@@ -1060,8 +1066,25 @@ class HypenServer(block: HypenServerBuilder.() -> Unit = {}) {
 
                 val client = clients[connectionKey] ?: return
 
+                // The client is untrusted: a handler's name is never
+                // authority to run it. Everything it sends is resolved by
+                // the engine as a UI envelope — a bare (or pre-scoped) name
+                // becomes a node-less one — and runs only through a live
+                // rendered binding. Host-named actions ([HypenServerBuilder
+                // .allowClientActions]) take the trusted path. An engine
+                // predating node-less envelopes rejects them: fails closed.
                 dispatchAndSend(client, sendMessage) {
-                    client.engine.dispatchAction(actionName, payload)
+                    if (actionName == UI_ACTION_ENVELOPE || actionName in clientActions) {
+                        client.engine.dispatchAction(actionName, payload)
+                    } else {
+                        client.engine.dispatchAction(
+                            UI_ACTION_ENVELOPE,
+                            buildJsonObject {
+                                put("action", actionName)
+                                if (payload != null) put("payload", payload)
+                            },
+                        )
+                    }
                 }
 
                 events.emit(
@@ -1846,6 +1869,7 @@ class HypenServerBuilder {
     internal var watchConfig: ComponentWatchConfig? = null
     internal val resourceJsonList = mutableListOf<String>()
     internal var autoRouterEnabled: Boolean = true
+    internal val clientActions = mutableSetOf<String>()
     internal val allowedOrigins = mutableListOf<String>()
     internal var authenticator: (suspend (UpgradeRequest) -> Boolean)? = null
     internal val deviceConfig = DeviceServerConfig()
@@ -1941,6 +1965,21 @@ class HypenServerBuilder {
      */
     fun disableAutoRouter() {
         autoRouterEnabled = false
+    }
+
+    /**
+     * Name actions a client may dispatch by name **without a rendered
+     * binding** — programmatic client calls such as a browser-back
+     * `navigateBack`.
+     *
+     * The client is untrusted: by default it can only run an action that is
+     * bound (`@actions.x`) on a node currently rendered for its session, so
+     * an action is reachable only while its control is on screen. List here
+     * only actions that are safe for any connected client to call at any
+     * time. Framework names (`__*`) are ignored.
+     */
+    fun allowClientActions(vararg names: String) {
+        clientActions += names.filterNot { it.startsWith("__") }
     }
 
     /**
