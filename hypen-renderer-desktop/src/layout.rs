@@ -2120,6 +2120,17 @@ impl TaffyState {
             .unwrap_or("");
         let blocks_fill = parent_style
             .is_some_and(|parent_style| !grants_auto_cross_fill(parent_type, parent_style));
+        // The DOM's `[data-hypen-text-fill]` rule applies to ANY element with
+        // a non-start `textAlign` (`applyTextAlign`), not only Text leaves.
+        // Cancelled under a Row / Center / Badge: a fill an earlier settle
+        // (or the provisional `node_style_with` write) left is taken back
+        // BEFORE the type's own default placement runs, so a Row / Button
+        // falls back to exactly what it would have without the fill.
+        let fill_requested = text_fill_requested(node, self.style_viewport);
+        let fill_cancelled = cancels_text_fill(parent_type);
+        if fill_requested && fill_cancelled && style.align_self == Some(AlignSelf::Stretch) {
+            style.align_self = None;
+        }
         if node.element_type.eq_ignore_ascii_case("Row") {
             let children: Vec<NodeId> = self.tree.children(tid).unwrap_or_default();
             apply_row_width_demand(
@@ -2132,11 +2143,17 @@ impl TaffyState {
             );
         } else if is_actionable_type(&node.element_type) {
             apply_actionable_parent_alignment(node, &mut style, parent_align_items);
-        } else if text_fill_candidate(node) {
-            let requested = text_fill_requested(node, self.style_viewport);
-            settle_text_fill(&mut style, requested, cancels_text_fill(parent_type));
-        } else {
+        } else if !text_fill_candidate(node) {
             return;
+        }
+        // The fill wins over a type's default placement (a Row's / Button's
+        // provisional `Start`): in the DOM those are not `align-self`
+        // declarations, while the fill is.
+        settle_text_fill(&mut style, fill_requested, fill_cancelled);
+        // A Grid's stylesheet stretches every child (ahead of a Row's /
+        // Button's type default, which the DOM does not write inline).
+        if parent_type.eq_ignore_ascii_case("Grid") {
+            apply_grid_child_alignment(node, &mut style);
         }
         if self.tree.style(tid).is_ok_and(|current| *current == style) {
             return;
@@ -2199,6 +2216,10 @@ impl TaffyState {
                 continue;
             };
             apply_grid_image_stretch(node, &mut style);
+            apply_grid_child_alignment(node, &mut style);
+            if self.tree.style(child).is_ok_and(|current| *current == style) {
+                continue;
+            }
             let _ = self.tree.set_style(child, style);
         }
     }
@@ -2676,11 +2697,13 @@ impl TaffyState {
         let Self {
             tree: taffy,
             renderer_for_taffy,
+            style_viewport,
             ..
         } = self;
-        // The Text fill (`data-hypen-text-fill`) is NOT handled here: it is
-        // settled per node against its parent by `settle_text_fill`, and the
-        // demand walk below never counts a Text's stretch as demand.
+        let style_viewport = *style_viewport;
+        // The text-align fill (`data-hypen-text-fill`) is NOT handled here:
+        // it is settled per node against its parent by `settle_text_fill`,
+        // and the demand walk below never counts that stretch as demand.
         // Fixpoint: promoting one node to `Stretch` can make its parent
         // demand width too. Converges in a couple of rounds in practice;
         // the bound is a backstop, and the `changed` early-out is what
@@ -2740,15 +2763,22 @@ impl TaffyState {
                             // child that itself passes demand up. A Text leaf
                             // never does — its text-align fill (or an authored
                             // `alignSelf`) stretches the Text but none of its
-                            // ancestors.
-                            let text_leaf = renderer_for_taffy
-                                .get(child)
-                                .and_then(|crid| tree.get(crid))
-                                .is_some_and(is_text_leaf);
+                            // ancestors — and neither does any element's
+                            // text-align fill (`textAlign` is not a demand
+                            // prop in the DOM's `HORIZONTAL_DEMAND_PROP`).
+                            let fill_only = || {
+                                renderer_for_taffy
+                                    .get(child)
+                                    .and_then(|crid| tree.get(crid))
+                                    .is_some_and(|child_node| {
+                                        is_text_leaf(child_node)
+                                            || text_fill_requested(child_node, style_viewport)
+                                    })
+                            };
                             taffy.style(*child).is_ok_and(|child_style| {
                                 child_style.size.width.into_raw().uses_percentage()
-                                    || (!text_leaf
-                                        && child_style.align_self == Some(AlignSelf::Stretch))
+                                    || (child_style.align_self == Some(AlignSelf::Stretch)
+                                        && !fill_only())
                             })
                         });
                 if demands_width {
@@ -5201,7 +5231,9 @@ fn build_subtree(
                 grid_template_columns: (0..cols)
                     .map(|_| taffy::style_helpers::flex::<f32, _>(1.0))
                     .collect(),
-                grid_auto_rows: vec![taffy::style_helpers::min_content()],
+                // CSS `grid-auto-rows: auto` — see the comment in
+                // `node_style_with`'s Grid arm.
+                grid_auto_rows: vec![taffy::style_helpers::auto()],
                 padding: Rect_ {
                     left: length(pad.left * scale),
                     right: length(pad.right * scale),
@@ -5238,6 +5270,7 @@ fn build_subtree(
                         (tree.get(child_id), taffy.style(c).cloned())
                     {
                         apply_grid_image_stretch(child_node, &mut child_style);
+                        apply_grid_child_alignment(child_node, &mut child_style);
                         let child_vs = VariantState::paint(
                             viewport,
                             interaction.active_states_for(child_id, child_node),
@@ -5742,19 +5775,21 @@ pub(crate) fn node_style_with(
             grid_template_columns: (0..cols)
                 .map(|_| taffy::style_helpers::flex::<f32, _>(1.0))
                 .collect(),
-            // Same percent-resolution gotcha on the row axis: the
-            // default `auto` row track sizing asks each child for its
-            // max-content height. A child with `width: Percent(1.0)`
-            // + `aspect_ratio: 1` reports `max_content_h = 1 ×
-            // container_w` (because the percent isn't resolved
-            // against the column track yet during the row sizing
-            // pass), so each row ended up reserving `container_w`
-            // of height regardless of the actual rendered cell.
-            // `min_content` reduces each auto-row's intrinsic size
-            // to 0 + whatever the LAID-OUT child geometry pushes,
-            // which after column tracks are resolved is the correct
-            // aspect-ratio square height.
-            grid_auto_rows: vec![taffy::style_helpers::min_content()],
+            // CSS `grid-auto-rows: auto`, like the DOM Grid. Under the
+            // container's initial `align-content: normal` (Taffy:
+            // `Stretch`) auto rows share a DEFINITE grid height's free
+            // space ("stretch auto tracks"), so a `flex-1` Grid's rows
+            // fill it as in Chrome (Social user profile). Rows used to be
+            // `min-content` to dodge a Taffy bug: an `auto`-minimum row's
+            // MINIMUM contribution resolved a `w-full aspect-square`
+            // child's percent width against the grid CONTAINER, so one
+            // photo row asked to be as tall as the whole grid is wide.
+            // The vendored taffy (`third_party/taffy/PATCHES.md`, the
+            // upstream 0.11 fix backported) resolves it against the grid
+            // area, as CSS does; the stretched height an item's aspect
+            // ratio would otherwise override is handled per child by
+            // [`apply_grid_child_alignment`].
+            grid_auto_rows: vec![taffy::style_helpers::auto()],
             padding: Rect_ {
                 left: length(pad.left * scale),
                 right: length(pad.right * scale),
@@ -6081,6 +6116,8 @@ fn media_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style
         flex_shrink: 0.0,
         margin: margin_to_taffy(margin_with(node, vs), scale),
         border: border_to_taffy(border_with(node, vs), scale),
+        // A `<video>` is a compressible replaced element, like Image.
+        item_is_replaced: true,
         ..Default::default()
     }
 }
@@ -6746,6 +6783,12 @@ fn image_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style
         flex_shrink: 0.0,
         margin: margin_to_taffy(margin_with(node, vs), scale),
         border: border_to_taffy(border_with(node, vs), scale),
+        // An `<img>` is a compressible replaced element (css-sizing-3
+        // §5.2.2): in a grid's (a Stack's) `auto` row, an indefinite
+        // percentage size caps its content-based minimum at zero, so a
+        // `w-full h-full` photo fills its cell instead of forcing its
+        // natural height on the row.
+        item_is_replaced: true,
         ..Default::default()
     }
 }
@@ -7143,6 +7186,63 @@ fn apply_grid_image_stretch(node: &crate::tree::Node, style: &mut Style) {
     style.align_self = Some(AlignSelf::Stretch);
 }
 
+/// The DOM Grid's stylesheet, `[data-hypen-type="grid"] > * { justify-self:
+/// stretch; align-self: stretch; }` (`dom/components/grid.ts`): every child
+/// fills its cell on both axes unless it places itself (`alignSelf` /
+/// `justifySelf`, inline in the DOM). Taffy's grid default already
+/// stretches most items, but not one with an aspect ratio (CSS `normal`
+/// acts as `start` for those) nor a Button / Row carrying desktop's
+/// provisional `Start` — the DOM rule is an explicit `stretch`, so they
+/// stretch too.
+///
+/// An explicitly stretched item's used size is its grid area's even with
+/// an aspect ratio (Chrome: a `w-full aspect-square` photo in a stretched
+/// row is as tall as the row, not square). Taffy applies the aspect ratio
+/// BEFORE stretch alignment (`GridItem::known_dimensions`, grid
+/// `align_and_position_item`), so the stretch is written as a MINIMUM of
+/// `100%` of the area on the auto axis (and a zero minimum on the other,
+/// so the ratio does not transfer that minimum back across): during track
+/// sizing the percent is unresolvable and the item still contributes its
+/// aspect-ratio size through its preferred size, and at placement the
+/// minimum lifts it to the area — what the stretch does in CSS. The
+/// preferred size itself stays `auto`, so an item outside a stretched
+/// row (or moved out of the Grid) sizes exactly as before.
+fn apply_grid_child_alignment(node: &crate::tree::Node, style: &mut Style) {
+    if !declares_any_prop(node, &["alignself", "align-self"]) {
+        style.align_self = Some(AlignSelf::Stretch);
+    }
+    if !declares_any_prop(node, &["justifyself", "justify-self"]) {
+        style.justify_self = Some(AlignSelf::Stretch);
+    }
+    if style.aspect_ratio.is_none() || style.position == Position::Absolute {
+        return;
+    }
+    let (w_auto, h_auto) = (style.size.width.is_auto(), style.size.height.is_auto());
+    if style.align_self == Some(AlignSelf::Stretch)
+        && h_auto
+        && !w_auto
+        && style.min_size.height.is_auto()
+        && !style.margin.top.is_auto()
+        && !style.margin.bottom.is_auto()
+    {
+        style.min_size.height = Dimension::percent(1.0);
+        if style.min_size.width.is_auto() {
+            style.min_size.width = Dimension::length(0.0);
+        }
+    } else if style.justify_self == Some(AlignSelf::Stretch)
+        && w_auto
+        && !h_auto
+        && style.min_size.width.is_auto()
+        && !style.margin.left.is_auto()
+        && !style.margin.right.is_auto()
+    {
+        style.min_size.width = Dimension::percent(1.0);
+        if style.min_size.height.is_auto() {
+            style.min_size.height = Dimension::length(0.0);
+        }
+    }
+}
+
 fn is_actionable_type(element_type: &str) -> bool {
     ACTIONABLE_TYPES
         .iter()
@@ -7173,16 +7273,20 @@ fn prop_key_base(key: &str) -> String {
 }
 
 fn declares_any_prop(node: &crate::tree::Node, bases: &[&str]) -> bool {
-    node.props
-        .keys()
-        .any(|key| bases.contains(&prop_key_base(key).as_str()))
+    // Allocation-free: this runs per node in the settle / demand walks.
+    node.props.keys().any(|key| {
+        let base = key.split(['@', ':', '.']).next().unwrap_or(key);
+        bases.iter().any(|b| base.eq_ignore_ascii_case(b))
+    })
 }
 
-/// A Text leaf whose `textAlign` may ask for the DOM's cross-axis fill and
-/// that has no authored placement / width of its own to override it.
+/// An element whose `textAlign` may ask for the DOM's cross-axis fill and
+/// that has no authored placement / width of its own to override it. Any
+/// element type, like the DOM's `applyTextAlign` (a Column / Button / Row
+/// with `text-center` fills its parent's width there too); only Text
+/// leaves used to qualify on desktop.
 fn text_fill_candidate(node: &crate::tree::Node) -> bool {
-    is_text_leaf(node)
-        && declares_any_prop(node, &["textalign", "text-align"])
+    declares_any_prop(node, &["textalign", "text-align"])
         && !declares_any_prop(
             node,
             &[
@@ -7324,7 +7428,10 @@ fn settle_text_fill(style: &mut Style, requested: bool, cancelled: bool) {
         if style.align_self == Some(AlignSelf::Stretch) {
             style.align_self = None;
         }
-    } else if style.align_self.is_none() {
+    } else {
+        // `text_fill_candidate` excludes an authored `alignSelf`, so any
+        // value here is a desktop type default (a Row's / Button's `Start`)
+        // that the DOM rule overrides.
         style.align_self = Some(AlignSelf::Stretch);
     }
 }

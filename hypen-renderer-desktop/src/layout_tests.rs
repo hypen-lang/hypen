@@ -11734,3 +11734,240 @@ fn css_box_shadows_are_parsed_once_and_shared() {
     assert_eq!(a.len(), 2);
     assert!(std::sync::Arc::ptr_eq(&a, &b), "one parse, one shared list");
 }
+
+// ---------------------------------------------------------------------------
+// final-leftovers: text-align fill on non-Text elements (DOM `applyTextAlign`
+// marks ANY element with `data-hypen-text-fill`).
+// ---------------------------------------------------------------------------
+
+/// A Column / Button / Row with their own `text-center` fill a vertical
+/// parent's width, like the DOM's `:where([data-hypen-text-fill])` rule; the
+/// parent stays content-sized (the fill is not width demand); under a Row the
+/// rule is cancelled and the element keeps its intrinsic width.
+#[test]
+fn non_text_elements_with_center_alignment_fill_their_column() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "outer", "Column", &[]);
+    node(&mut tree, "outer", "col", "Column", &[]);
+    node(
+        &mut tree,
+        "col",
+        "body",
+        "Text",
+        &[("0", json!("A considerably longer line of plain body text"))],
+    );
+    for (id, ty) in [("box", "Column"), ("btn", "Button"), ("row", "Row")] {
+        node(&mut tree, "col", id, ty, &[("textAlign", json!("center"))]);
+        node(&mut tree, id, &format!("{id}-t"), "Text", &[("0", json!("Hi"))]);
+    }
+    node(&mut tree, "outer", "hrow", "Row", &[]);
+    node(&mut tree, "hrow", "hbox", "Column", &[("textAlign", json!("center"))]);
+    node(&mut tree, "hbox", "hbox-t", "Text", &[("0", json!("Hi"))]);
+    node(&mut tree, "hrow", "hbody", "Text", &[("0", json!("Some long sibling text"))]);
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let col = find_item(&pass, "col").rect;
+    let body = find_item(&pass, "body").rect;
+    assert!(col.w < 700.0, "the parent Column stays content-sized: {col:?}");
+    assert!((col.w - body.w).abs() < 0.5, "{col:?} vs {body:?}");
+    for id in ["box", "btn", "row"] {
+        let r = find_item(&pass, id).rect;
+        assert!(
+            (r.w - col.w).abs() < 0.5 && (r.x - col.x).abs() < 0.5,
+            "{id} with text-center fills its Column like the DOM: {r:?} vs {col:?}"
+        );
+    }
+    let (natural, _) = text.measure("Hi", 16.0, None);
+    let hbox = find_item(&pass, "hbox").rect;
+    assert!(
+        hbox.w <= natural + 1.0,
+        "under a Row the fill is cancelled (intrinsic width): {hbox:?}"
+    );
+}
+
+/// Moving a centred Column (no restyle) from a Row into a Column takes the
+/// fill back, and back into the Row loses it again — both directions.
+#[test]
+fn container_text_fill_follows_moves_between_row_and_column() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let build = vec![
+        create_patch("col", "Column", &[]),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch("c", "Column", &[("textAlign", json!("right"))]),
+        insert_patch("row", "c"),
+        create_patch("ct", "Text", &[("0", json!("Mon"))]),
+        insert_patch("c", "ct"),
+        create_patch(
+            "body",
+            "Text",
+            &[("0", json!("A considerably longer line of plain body text"))],
+        ),
+        insert_patch("col", "body"),
+    ];
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(800.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen| {
+        LayoutPass::compute_with_state(
+            state,
+            tree,
+            text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let pass = compute(&mut state, &tree, &mut text, 1);
+    let body_w = find_item(&pass, "body").rect.w;
+    assert!(find_item(&pass, "c").rect.w < body_w * 0.5);
+    let to_column = vec![Patch::Move {
+        parent_id: "col".into(),
+        id: "c".into(),
+        before_id: Some("body".into()),
+    }];
+    tree.apply_batch(&to_column);
+    assert!(state.apply_patches(&to_column, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 2);
+    let (c, col) = (find_item(&pass, "c").rect, find_item(&pass, "col").rect);
+    assert!(
+        (c.w - col.w).abs() < 0.5,
+        "moved into the Column it fills it: {c:?} vs {col:?}"
+    );
+    let back = vec![Patch::Move {
+        parent_id: "row".into(),
+        id: "c".into(),
+        before_id: None,
+    }];
+    tree.apply_batch(&back);
+    assert!(state.apply_patches(&back, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 3);
+    assert!(find_item(&pass, "c").rect.w < find_item(&pass, "body").rect.w * 0.5);
+}
+
+// ---------------------------------------------------------------------------
+// final-leftovers: Grid rows follow CSS `grid-auto-rows: auto` — they stretch
+// to fill a definite-height Grid (align-content: normal), and the DOM's
+// `[data-hypen-type="grid"] > * { align-self: stretch }` stretches every
+// child, aspect-ratio photos included.
+// ---------------------------------------------------------------------------
+
+fn grid_images(tree: &Tree, id: &str, out: &mut Vec<String>) {
+    if tree.get(id).is_some_and(|n| n.element_type == "Image") {
+        out.push(id.to_string());
+    }
+    for c in tree.children_of(id) {
+        grid_images(tree, c, out);
+    }
+}
+
+/// Social user profile (`UserProfile.hypen`): a `flex-1` 3-column Grid of
+/// `aspect-square w-full` photos under a fixed header. Chrome stretches the
+/// two auto rows to share the Grid's definite height and the photos (explicit
+/// `align-self: stretch`) to the row: 142 × 245 here, not 142 × 142.
+#[test]
+fn flex_one_grid_rows_stretch_to_fill_like_css() {
+    let src = "test://grid-stretch-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Column {{ Text("header") }}.height(100)
+            Grid(@state.posts, key: "id") {{
+                Image(src: "{src}")
+                    .objectFit("cover")
+                    .tw("aspect-square w-full")
+            }}
+            .gridColumns(3)
+            .gap(2)
+            .tw("flex-1 pt-2")
+        }}
+        .width(430)
+        .height(600)"#
+        ),
+        json!({ "posts": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6}] }),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let grid = first_of_type(&tree, "Grid");
+    let g = pass.item_by_id(&grid).expect("grid").rect;
+    assert!((g.h - 500.0).abs() < 1.0, "flex-1 grid takes the rest: {g:?}");
+    let track = (430.0 - 2.0 * 2.0) / 3.0;
+    // content 500 - pt 8 = 492; two rows + one 2px gap share it.
+    let row = (492.0 - 2.0) / 2.0;
+    let mut ids = Vec::new();
+    grid_images(&tree, &grid, &mut ids);
+    assert_eq!(ids.len(), 6);
+    for (i, id) in ids.iter().enumerate() {
+        let r = pass.item_by_id(id).expect("photo").rect;
+        assert!(
+            (r.w - track).abs() < 1.0 && (r.h - row).abs() < 1.0,
+            "photo {i} should fill its stretched {track}x{row} cell; got {r:?}"
+        );
+        let expect_y = g.y + 8.0 + (i / 3) as f32 * (row + 2.0);
+        assert!((r.y - expect_y).abs() < 1.0, "photo {i} row origin: {r:?}");
+    }
+}
+
+/// The DOM grid stylesheet stretches a Button (desktop's provisional
+/// `align-self: start`) to its row's height when a sibling is taller.
+#[test]
+fn grid_children_stretch_to_the_row_like_the_dom_stylesheet() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "grid",
+        "Grid",
+        &[("gridColumns", json!(3)), ("width", json!(300))],
+    );
+    node(&mut tree, "grid", "btn", "Button", &[]);
+    node(&mut tree, "btn", "btn-t", "Text", &[("0", json!("Go"))]);
+    node(&mut tree, "grid", "tall", "Column", &[("height", json!(120))]);
+    node(&mut tree, "grid", "self", "Column", &[("alignSelf", json!("start"))]);
+    node(&mut tree, "self", "self-t", "Text", &[("0", json!("x"))]);
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn").rect;
+    assert!(
+        (btn.h - 120.0).abs() < 0.5 && (btn.w - 100.0).abs() < 0.5,
+        "the Button fills its 100x120 cell: {btn:?}"
+    );
+    let own = find_item(&pass, "self").rect;
+    assert!(own.h < 60.0, "an authored alignSelf wins: {own:?}");
+}
+
+/// Review gap: the parsed-box-shadow cache must key viewport-unit shadows
+/// by the viewport (a `vw` / `vh` offset resolved at one width must not be
+/// served at another), while a plain px shadow is shared across them.
+#[test]
+fn cached_css_box_shadows_follow_viewport_units() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "card",
+        "Column",
+        &[("boxShadow", json!("0 1vw 2vh rgba(0,0,0,0.5)"))],
+    );
+    node(
+        &mut tree,
+        "root",
+        "plain",
+        "Column",
+        &[("boxShadow", json!("0 4px 8px rgba(0,0,0,0.5)"))],
+    );
+    let card = tree.get("card").unwrap();
+    let narrow = resolve_box_shadow(card, Viewport::new(400.0, 800.0)).expect("shadow");
+    let wide = resolve_box_shadow(card, Viewport::new(1000.0, 500.0)).expect("shadow");
+    assert!((narrow[0].y - 4.0).abs() < 0.01 && (narrow[0].blur - 16.0).abs() < 0.01);
+    assert!((wide[0].y - 10.0).abs() < 0.01 && (wide[0].blur - 10.0).abs() < 0.01);
+    let plain = tree.get("plain").unwrap();
+    let a = resolve_box_shadow(plain, Viewport::new(400.0, 800.0)).unwrap();
+    let b = resolve_box_shadow(plain, Viewport::new(1000.0, 500.0)).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "a px shadow is parsed once and shared");
+}

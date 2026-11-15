@@ -10,8 +10,9 @@ members = [
     "engine-compatibility-tests/runners/rust",
 ]
 exclude = [
-    # Vendored dependency (see third_party/rav1d/PATCHES.md), not a member.
+    # Vendored dependencies (see third_party/*/PATCHES.md), not members.
     "third_party/rav1d",
+    "third_party/taffy",
     "examples/social/rust",
     "examples/food-ordering/rust",
 ]
@@ -40,6 +41,9 @@ overflow-checks = false
 # aborting the process. See third_party/rav1d/PATCHES.md.
 [patch.crates-io]
 rav1d = { path = "third_party/rav1d" }
+# taffy 0.10.1 + a backported grid fix (percent sizes in an item's minimum
+# contribution resolve against its grid area). See third_party/taffy/PATCHES.md.
+taffy = { path = "third_party/taffy" }
 
 # No `panic = "abort"` in any profile: the AVIF decoder's panic isolation
 # (hypen-renderer-desktop/src/paint/avif.rs) relies on unwinding.

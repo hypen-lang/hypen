@@ -469,15 +469,33 @@ impl GridItem {
         let padding_border_size = (padding + border).sum_axes();
         let box_sizing_adjustment =
             if self.box_sizing == BoxSizing::ContentBox { padding_border_size } else { Size::ZERO };
-        let size = self
-            .size
-            .maybe_resolve(inner_node_size, |val, basis| tree.calc(val, basis))
-            .maybe_apply_aspect_ratio(self.aspect_ratio)
-            .maybe_add(box_sizing_adjustment)
-            .get(axis)
+        // HYPEN PATCH (third_party/taffy/PATCHES.md): percentages of the
+        // item's own size / min-size resolve against its GRID AREA (here the
+        // `known_dimensions` estimate the track sizing passes in), not the
+        // grid container — as `known_dimensions()` already does for the
+        // min-/max-content contributions, and as upstream does from taffy
+        // 0.11 (`grid_area_size`). Resolving against the container made a
+        // `width: 100%; aspect-ratio: 1` item's row minimum the CONTAINER's
+        // width (one 3-column photo grid row = the whole grid's width tall).
+        //
+        // HYPEN PATCH, second hunk: css-grid-1 §6.6 — "if the item's computed
+        // preferred size behaves as auto or DEPENDS ON THE SIZE OF ITS
+        // CONTAINING BLOCK in the relevant axis", the minimum contribution
+        // comes from the minimum size. A percentage that cannot resolve in
+        // this axis (the area is still indefinite) must therefore not be
+        // filled in from the other axis by aspect-ratio transfer: a
+        // `width: 100%; height: 100%` photo in a Stack cell would otherwise
+        // force its natural-ratio height on the row.
+        let resolved_size = self.size.maybe_resolve(known_dimensions, |val, basis| tree.calc(val, basis));
+        let size = if resolved_size.get(axis).is_none() && !self.size.get(axis).is_auto() {
+            None
+        } else {
+            resolved_size.maybe_apply_aspect_ratio(self.aspect_ratio).maybe_add(box_sizing_adjustment).get(axis)
+        };
+        let size = size
             .or_else(|| {
                 self.min_size
-                    .maybe_resolve(inner_node_size, |val, basis| tree.calc(val, basis))
+                    .maybe_resolve(known_dimensions, |val, basis| tree.calc(val, basis))
                     .maybe_apply_aspect_ratio(self.aspect_ratio)
                     .maybe_add(box_sizing_adjustment)
                     .get(axis)
