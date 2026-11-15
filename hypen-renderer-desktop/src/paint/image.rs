@@ -87,6 +87,13 @@ const GLOBAL_IMAGE_CACHE_CAP: usize = 256;
 /// (see `clear_decoded_cache`) so background memory still drops.
 const DECODED_CACHE_CAP: usize = 32;
 
+/// Byte ceiling on the decoded tier, alongside [`DECODED_CACHE_CAP`]:
+/// one decode may allocate up to 512 MiB (`image`'s default limit, and
+/// the AVIF budget), so 32 large images alone could pin gigabytes. The
+/// least recently used bitmaps go first; the newest entry always stays
+/// (the paint that asked for it is about to draw it).
+const DECODED_CACHE_MAX_BYTES: usize = 256 * 1024 * 1024;
+
 /// Bump `src` to the back of the LRU queue. No-op on an empty cache
 /// or when the entry is already last. Caller must already hold the
 /// cache lock. Generic over the value type so the same logic serves
@@ -184,11 +191,27 @@ struct DecodedEntry {
     natural: (f32, f32),
 }
 
+#[cfg(not(test))]
 fn decoded_cache() -> &'static DecodedCache {
     static CACHE: OnceLock<DecodedCache> = OnceLock::new();
     CACHE.get_or_init(|| DecodedCache {
         entries: Mutex::new(IndexMap::new()),
     })
+}
+
+/// Tests get one decoded tier per thread: the suite runs tests in
+/// parallel, and tests that clear the tier, fill it to its cap or count
+/// decodes would otherwise race each other's entries out of the one
+/// shared tier. Every test seeds and reads it on its own thread (each
+/// tier is leaked: a test thread's tier lives as long as the process).
+#[cfg(test)]
+fn decoded_cache() -> &'static DecodedCache {
+    thread_local! {
+        static CACHE: &'static DecodedCache = Box::leak(Box::new(DecodedCache {
+            entries: Mutex::new(IndexMap::new()),
+        }));
+    }
+    CACHE.with(|c| *c)
 }
 
 /// Drop every entry in the decoded-pixmap cache. Called by the
@@ -219,9 +242,23 @@ fn store_decoded(key: &str, entry: DecodedEntry) {
         .entries
         .lock()
         .expect("decoded cache poisoned");
+    // Re-storing a key moves it to the back (`insert` alone would keep
+    // its old, possibly least-recent, slot and evict it first).
+    entries.shift_remove(key);
     entries.insert(key.to_string(), entry);
-    while entries.len() > DECODED_CACHE_CAP {
-        entries.shift_remove_index(0);
+    evict_decoded(&mut entries, DECODED_CACHE_CAP, DECODED_CACHE_MAX_BYTES);
+}
+
+/// Drop least-recently-used decoded bitmaps (from the front) until at
+/// most `cap` remain and they total at most `max_bytes`, keeping the
+/// newest one whatever its size.
+fn evict_decoded(entries: &mut IndexMap<String, DecodedEntry>, cap: usize, max_bytes: usize) {
+    let mut bytes: usize = entries.values().map(|e| e.pixmap.data().len()).sum();
+    while entries.len() > cap || (bytes > max_bytes && entries.len() > 1) {
+        match entries.shift_remove_index(0) {
+            Some((_, gone)) => bytes -= gone.pixmap.data().len(),
+            None => break,
+        }
     }
 }
 
@@ -2493,6 +2530,36 @@ mod tests {
         // Cleanup so other tests aren't sensitive to leftovers.
         let mut decoded = decoded_cache().entries.lock().unwrap();
         decoded.clear();
+    }
+
+    /// The decoded tier is bounded in bytes as well as entries: big
+    /// bitmaps push the least recently used out, and the newest stays
+    /// even when it alone is over the ceiling.
+    #[test]
+    fn decoded_tier_evicts_by_bytes_and_count() {
+        let entry = |side: u32| DecodedEntry {
+            pixmap: Arc::new(Pixmap::new(side, side).unwrap()),
+            natural: (side as f32, side as f32),
+        };
+        let mut entries = IndexMap::new();
+        for (k, side) in [("a", 16), ("b", 16), ("c", 16)] {
+            entries.insert(k.to_string(), entry(side));
+        }
+        // 3 × 1 KiB under a 2.5 KiB ceiling: the oldest goes.
+        evict_decoded(&mut entries, 32, 2560);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["b", "c"]);
+        // An entry over the ceiling on its own evicts everything else
+        // but is kept.
+        entries.insert("big".into(), entry(64));
+        evict_decoded(&mut entries, 32, 2560);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["big"]);
+        // The count cap still applies under the byte ceiling.
+        for k in ["x", "y", "z"] {
+            entries.insert(k.into(), entry(1));
+        }
+        evict_decoded(&mut entries, 2, usize::MAX);
+        assert_eq!(entries.keys().collect::<Vec<_>>(), ["y", "z"]);
+        const { assert!(DECODED_CACHE_MAX_BYTES >= 4 * 3840 * 2160 * 4, "a few 4K bitmaps fit") };
     }
 
     #[test]

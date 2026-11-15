@@ -217,11 +217,6 @@ gstreamer-video = { version = "0.25", optional = true }
 # CATransaction commit instead of firing-and-forgetting, so the OS
 # never composites the previous swapchain image stretched to the new
 # window size. wgpu-hal-metal reads this flag but never sets it.
-[target.'cfg(unix)'.dependencies]
-# fork / pipe / poll / waitpid for the AVIF decoder's crash isolation
-# (`src/paint/avif.rs`). Already in the graph through std-adjacent crates.
-libc = "0.2"
-
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSGeometry"] }
