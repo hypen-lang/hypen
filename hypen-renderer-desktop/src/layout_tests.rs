@@ -10159,4 +10159,934 @@ fn text_with_its_own_center_alignment_fills_its_column() {
     let row_title = rect(&tree.children_of(&row)[0]);
     let (natural, _) = text.measure("Row title", 16.0, None);
     assert!(row_title.w <= natural + 1.0, "Row keeps the Text intrinsic: {row_title:?}");
+
+// ---------------------------------------------------------------------------
+// Chrome-parity layout & box styling (diff-layout).
+// ---------------------------------------------------------------------------
+
+fn node(tree: &mut Tree, parent: &str, id: &str, element_type: &str, props: &[(&str, Value)]) {
+    tree.apply(&create_patch(id, element_type, props));
+    tree.apply(&insert_patch(parent, id));
+}
+
+/// Calories meal card / Food search row: `Button { Row { …, Column.flex-1,
+/// chevron } }`. The DOM Button is `align-items: flex-start` and the Row is
+/// not auto-stretched outside a vertical carrier, so the Row (and the
+/// chevron) stay content-width instead of spanning the Button.
+#[test]
+fn growing_row_inside_full_width_button_stays_content_width() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "btn",
+        "Button",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "btn", "row", "Row", &[]);
+    node(
+        &mut tree,
+        "row",
+        "grow",
+        "Column",
+        &[("flexGrow", json!(1))],
+    );
+    add_text(&mut tree, "grow", "label", "Breakfast");
+    node(
+        &mut tree,
+        "row",
+        "chev",
+        "Column",
+        &[("width", json!(16)), ("height", json!(16))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    let row = find_item(&pass, "row");
+    let label = find_item(&pass, "label");
+    let chev = find_item(&pass, "chev");
+    assert!(
+        (btn.rect.w - 400.0).abs() < 1.0,
+        "button is full width: {:?}",
+        btn.rect
+    );
+    assert!(
+        row.rect.w < 200.0,
+        "row stays content-width: {:?}",
+        row.rect
+    );
+    assert!(
+        chev.rect.x <= label.rect.x + label.rect.w + 1.0,
+        "chevron follows the text: label={:?} chev={:?}",
+        label.rect,
+        chev.rect
+    );
+}
+
+/// Under a Column the same growing Row is still stretched (DOM vertical
+/// carrier) — the Food search field Row keeps filling its container.
+#[test]
+fn growing_row_inside_column_still_stretches() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "row", "Row", &[]);
+    node(
+        &mut tree,
+        "row",
+        "grow",
+        "Column",
+        &[("flexGrow", json!(1))],
+    );
+    add_text(&mut tree, "grow", "label", "x");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!((find_item(&pass, "row").rect.w - 400.0).abs() < 1.0);
+}
+
+/// Weather 7-day row: a Row with a percentage child nested in a centred
+/// Row must follow the parent's `verticalAlignment("center")` — a Row's
+/// `align-self` is the vertical axis there, so the automatic width stretch
+/// must not apply.
+#[test]
+fn demanding_row_inside_centered_row_is_vertically_centered() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "outer",
+        "Row",
+        &[
+            ("width", json!("100%")),
+            ("height", json!(50)),
+            ("verticalAlignment", json!("center")),
+        ],
+    );
+    node(
+        &mut tree,
+        "outer",
+        "track",
+        "Row",
+        &[("flex", json!(1)), ("height", json!(6))],
+    );
+    node(
+        &mut tree,
+        "track",
+        "fill",
+        "Box",
+        &[("width", json!("40%")), ("height", json!(6))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let outer = find_item(&pass, "outer");
+    let track = find_item(&pass, "track");
+    let centre = track.rect.y + track.rect.h / 2.0 - outer.rect.y;
+    assert!(
+        (centre - 25.0).abs() < 1.0,
+        "track centred: outer={:?} track={:?}",
+        outer.rect,
+        track.rect
+    );
+}
+
+/// `textAlign("center")` Text in a start-aligned Column fills the Column
+/// (DOM `[data-hypen-text-fill]`), so the centred glyphs sit in the middle.
+#[test]
+fn center_aligned_text_fills_start_aligned_column() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "title",
+        "Text",
+        &[("0", json!("Inception")), ("textAlign", json!("center"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "plain",
+        "Text",
+        &[("0", json!("Synopsis"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!((find_item(&pass, "title").rect.w - 400.0).abs() < 1.0);
+    assert!(
+        find_item(&pass, "plain").rect.w < 200.0,
+        "start text stays intrinsic"
+    );
+}
+
+/// ...but not inside a Row, where the DOM rule is cancelled.
+#[test]
+fn center_aligned_text_in_row_keeps_intrinsic_box() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "row",
+        "Row",
+        &[("width", json!("100%")), ("height", json!(40))],
+    );
+    node(
+        &mut tree,
+        "row",
+        "t",
+        "Text",
+        &[("0", json!("Mon")), ("textAlign", json!("center"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let t = find_item(&pass, "t");
+    assert!(
+        t.rect.h < 40.0,
+        "no vertical stretch in a Row: {:?}",
+        t.rect
+    );
+    assert!(
+        t.rect.w < 100.0,
+        "no horizontal fill in a Row: {:?}",
+        t.rect
+    );
+}
+
+/// Calories weekly chart card: a Box is not a DOM width-demand carrier, so
+/// a percentage-width child does not stretch it across its Column.
+#[test]
+fn box_around_percentage_child_stays_content_sized() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "card", "Box", &[("height", json!(100))]);
+    node(
+        &mut tree,
+        "card",
+        "inner",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    add_text(&mut tree, "inner", "label", "Mon");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(
+        find_item(&pass, "card").rect.w < 200.0,
+        "{:?}",
+        find_item(&pass, "card").rect
+    );
+}
+
+/// A List always asks for its Column's width (DOM intrinsic demand).
+#[test]
+fn list_inside_column_stretches_without_demanding_children() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "list", "List", &[]);
+    add_text(&mut tree, "list", "row", "Row 1");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!((find_item(&pass, "list").rect.w - 400.0).abs() < 1.0);
+}
+
+/// `width: calc(100% - 40px)` resolves against the parent's content box
+/// and `alignSelf("center")` places the resolved box (MovieDB search,
+/// News tab bar).
+#[test]
+fn calc_width_resolves_against_parent_and_centers() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "bar",
+        "Row",
+        &[
+            ("width", json!("calc(100% - 40px)")),
+            ("alignSelf", json!("center")),
+            ("height", json!(20)),
+        ],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let bar = find_item(&pass, "bar");
+    assert!((bar.rect.w - 360.0).abs() < 0.5, "{:?}", bar.rect);
+    assert!((bar.rect.x - 20.0).abs() < 0.5, "{:?}", bar.rect);
+}
+
+#[test]
+fn calc_width_honours_max_width() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "bar",
+        "Row",
+        &[
+            ("width", json!("calc(100% - 32px)")),
+            ("maxWidth", json!(300)),
+            ("alignSelf", json!("center")),
+            ("height", json!(20)),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let bar = find_item(&pass, "bar");
+    assert!((bar.rect.w - 300.0).abs() < 0.5, "{:?}", bar.rect);
+    assert!((bar.rect.x - 250.0).abs() < 0.5, "{:?}", bar.rect);
+}
+
+/// Lay out `Column(100%) > <carrier> > Row(calc(100% - 40px)) > Column(200)`
+/// once per viewport width on one `TaffyState` and return each pass's
+/// (carrier width, carrier content width, bar width).
+fn calc_in_content_sized_carrier(carrier: &str, viewports: &[u32]) -> Vec<(f32, f32, f32)> {
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("carrier", carrier, &[]),
+        insert_patch("col", "carrier"),
+        create_patch(
+            "bar",
+            "Row",
+            &[("width", json!("calc(100% - 40px)")), ("height", json!(20))],
+        ),
+        insert_patch("carrier", "bar"),
+        create_patch(
+            "inner",
+            "Column",
+            &[("width", json!(200)), ("height", json!(10))],
+        ),
+        insert_patch("bar", "inner"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(viewports[0] as f32));
+    let mut text = TextEngine::new();
+    viewports
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let pass = LayoutPass::compute_with_state(
+                &mut state,
+                &tree,
+                &mut text,
+                (w, 600),
+                1.0,
+                0.0,
+                &HashMap::new(),
+                i as u64 + 1,
+            );
+            let c = find_item(&pass, "carrier");
+            // None of these carriers has default padding (DOM parity).
+            (c.rect.w, c.rect.w, find_item(&pass, "bar").rect.w)
+        })
+        .collect()
+}
+
+/// CSS: inside a content-sized containing block the percentage behaves as
+/// `auto` for intrinsic sizing, so the carrier sizes from the bar's
+/// content (200) and the calc applies inside it — and stays put on every
+/// relayout. Writing the resolved definite length fed it back into the
+/// carrier's content size and the bar lost 40px per pass.
+#[test]
+fn calc_width_in_content_sized_carrier_is_stable_across_relayouts() {
+    for carrier in ["Button", "Stack"] {
+        let passes = calc_in_content_sized_carrier(carrier, &[400, 400, 400, 400]);
+        let (carrier_w, inner_w, bar_w) = passes[0];
+        assert!(
+            (inner_w - 200.0).abs() < 0.5,
+            "{carrier}: carrier sizes from the bar's content: {passes:?}"
+        );
+        assert!(
+            (bar_w - (inner_w - 40.0)).abs() < 0.5,
+            "{carrier}: calc applies inside the carrier: {passes:?}"
+        );
+        for p in &passes[1..] {
+            assert!(
+                (p.0 - carrier_w).abs() < 0.5 && (p.2 - bar_w).abs() < 0.5,
+                "{carrier}: relayout must not shrink the box: {passes:?}"
+            );
+        }
+    }
+}
+
+/// A resize re-derives the fraction against the new containing width,
+/// and repeated passes at each size stay put.
+#[test]
+fn calc_width_tracks_resize_without_drift() {
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch(
+            "bar",
+            "Row",
+            &[("width", json!("calc(100% - 40px)")), ("height", json!(20))],
+        ),
+        insert_patch("col", "bar"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(400.0));
+    let mut text = TextEngine::new();
+    let widths: Vec<f32> = [400, 400, 600, 600, 300, 300]
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let pass = LayoutPass::compute_with_state(
+                &mut state,
+                &tree,
+                &mut text,
+                (w, 600),
+                1.0,
+                0.0,
+                &HashMap::new(),
+                i as u64 + 1,
+            );
+            find_item(&pass, "bar").rect.w
+        })
+        .collect();
+    let expected = [360.0, 360.0, 560.0, 560.0, 260.0, 260.0];
+    for (got, want) in widths.iter().zip(expected) {
+        assert!((got - want).abs() < 0.5, "{widths:?}");
+    }
+}
+
+#[test]
+fn parse_calc_forms() {
+    use crate::style::{parse_calc, CalcLength};
+    assert_eq!(
+        parse_calc("calc(100% - 40px)", None),
+        Some(CalcLength {
+            percent: 1.0,
+            px: -40.0
+        })
+    );
+    assert_eq!(
+        parse_calc("calc(50% + 1rem - 4px)", None),
+        Some(CalcLength {
+            percent: 0.5,
+            px: 12.0
+        })
+    );
+    assert_eq!(parse_calc("calc(100% * 2)", None), None);
+    assert_eq!(parse_calc("100%", None), None);
+}
+
+/// `.display("none")` removes the node and its subtree from geometry and
+/// from the emitted items; its siblings close the gap.
+#[test]
+fn display_none_hides_subtree_and_takes_no_space() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "col", "Column", &[]);
+    node(
+        &mut tree,
+        "col",
+        "gone",
+        "Column",
+        &[("display", json!("none")), ("height", json!(50))],
+    );
+    add_text(&mut tree, "gone", "inner", "hidden");
+    add_text(&mut tree, "col", "after", "visible");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(pass
+        .items
+        .iter()
+        .all(|it| it.node_id != "gone" && it.node_id != "inner"));
+    assert!(
+        find_item(&pass, "after").rect.y < 1.0,
+        "{:?}",
+        find_item(&pass, "after").rect
+    );
+}
+
+/// Per-side CSS shorthand `.borderTop("1px solid …")` (Weather dividers).
+#[test]
+fn border_top_shorthand_draws_top_side_only() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "row",
+        "Row",
+        &[
+            ("borderTop", json!("1px solid rgba(255, 255, 255, 0.2)")),
+            ("height", json!(20)),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let b = find_item(&pass, "row").border;
+    assert_eq!(b.width, 1.0);
+    assert_eq!(b.sides, crate::style::BORDER_SIDE_TOP);
+    assert_eq!(b.color, Rgba(255, 255, 255, 51));
+}
+
+#[test]
+fn css_box_shadow_lists_parse_in_order() {
+    let layers = parse_css_box_shadow(
+        "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgba(236, 72, 153, 0.14)",
+        None,
+    );
+    assert_eq!(layers.len(), 2);
+    assert_eq!(
+        (layers[0].y, layers[0].blur, layers[0].spread),
+        (10.0, 15.0, -3.0)
+    );
+    assert_eq!(layers[1].color, Rgba(236, 72, 153, 36));
+    assert!(parse_css_box_shadow("none", None).is_empty());
+    assert!(parse_css_box_shadow("0 0 #0000", None).is_empty());
+    let ring = parse_css_box_shadow("inset 0 0 0 2px #fff", None);
+    assert!(ring[0].inset && ring[0].spread == 2.0);
+}
+
+#[test]
+fn box_shadow_string_prop_reaches_the_item() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "card",
+        "Column",
+        &[
+            ("boxShadow", json!("0 10px 30px rgba(236, 72, 153, 0.14)")),
+            ("height", json!(20)),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let shadow = find_item(&pass, "card").shadow.clone().expect("shadow");
+    assert_eq!(shadow.len(), 1);
+    assert_eq!(shadow[0].color, Rgba(236, 72, 153, 36));
+    assert_eq!(shadow[0].blur, 30.0);
+}
+
+#[test]
+fn dotted_box_shadow_on_button_reaches_the_item() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "fab",
+        "Button",
+        &[
+            ("boxShadow.0", json!("0 10px 24px rgba(236, 72, 153, 0.35)")),
+            ("width.0", json!("56px")),
+            ("height.0", json!("56px")),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let shadow = find_item(&pass, "fab").shadow.clone().expect("shadow");
+    assert_eq!(shadow[0].color, Rgba(236, 72, 153, 89));
+}
+
+/// Food restaurant hero: `Stack { Image.tw("w-full h-56") }` in a
+/// start-aligned Column. The Stack is content-sized (no width demand), so
+/// the image's percentage width is cyclic and its intrinsic width comes
+/// from `height × ratio` — 224 × 4/3 ≈ 299 in Chrome.
+#[test]
+fn percentage_width_image_sizes_content_sized_stack_from_its_ratio() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "stack", "Stack", &[]);
+    node(
+        &mut tree,
+        "stack",
+        "hero",
+        "Image",
+        &[
+            ("width", json!("100%")),
+            ("height", json!(224)),
+            ("aspectRatio", json!(4.0 / 3.0)),
+        ],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "bar",
+        "Row",
+        &[("width", json!("100%")), ("height", json!(40))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let stack = find_item(&pass, "stack");
+    let hero = find_item(&pass, "hero");
+    let bar = find_item(&pass, "bar");
+    assert!(
+        (stack.rect.w - 298.67).abs() < 1.5,
+        "stack={:?}",
+        stack.rect
+    );
+    assert!(
+        (hero.rect.w - stack.rect.w).abs() < 0.5,
+        "hero={:?}",
+        hero.rect
+    );
+    assert!(
+        (bar.rect.w - stack.rect.w).abs() < 0.5 && (bar.rect.y - hero.rect.y).abs() < 0.5,
+        "bar={:?}",
+        bar.rect
+    );
+}
+
+/// Calories weekly chart: the bars List is the Stack's SECOND child and
+/// still sizes the Stack (and the content-sized Box around it).
+#[test]
+fn every_stack_child_contributes_to_the_stack_size() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "stack", "Stack", &[]);
+    node(
+        &mut tree,
+        "stack",
+        "small",
+        "Column",
+        &[("width", json!(10)), ("height", json!(10))],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "big",
+        "Column",
+        &[("width", json!(150)), ("height", json!(60))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let stack = find_item(&pass, "stack");
+    assert!(
+        (stack.rect.w - 150.0).abs() < 0.5 && (stack.rect.h - 60.0).abs() < 0.5,
+        "{:?}",
+        stack.rect
+    );
+    assert!((find_item(&pass, "big").rect.y - stack.rect.y).abs() < 0.5);
+}
+
+/// Social "Your story": `Stack { ringed avatar, badge }` with
+/// `.horizontalAlignment("end").verticalAlignment("end")` puts the badge in
+/// the bottom-right corner (grid `justify-items` / `align-items: end`).
+#[test]
+fn stack_end_alignment_pins_badge_to_bottom_right() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "stack",
+        "Stack",
+        &[
+            ("horizontalAlignment", json!("end")),
+            ("verticalAlignment", json!("end")),
+        ],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "avatar",
+        "Column",
+        &[("width", json!(60)), ("height", json!(60))],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "badge",
+        "Column",
+        &[("width", json!(20)), ("height", json!(20))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let avatar = find_item(&pass, "avatar").rect;
+    let badge = find_item(&pass, "badge").rect;
+    assert!(
+        (badge.x + badge.w - (avatar.x + avatar.w)).abs() < 0.5,
+        "badge={badge:?} avatar={avatar:?}"
+    );
+    assert!(
+        (badge.y + badge.h - (avatar.y + avatar.h)).abs() < 0.5,
+        "badge={badge:?} avatar={avatar:?}"
+    );
+}
+
+/// The real Food hero: a decoded 800×600 photo, `h-56` (14rem) and
+/// `w-full`, plus a SafeArea overlay holding the back / favourite Row.
+/// The Food hero's box depends on its natural size. When that image
+/// lands AFTER the first layout, the state must report itself stale so
+/// the window recomputes instead of repainting the cached layout (the
+/// hero stayed as wide as its button bar, 112px, in the capture).
+#[test]
+fn late_image_load_marks_layout_stale_and_resizes_the_stack() {
+    let src = "/layout-tests/food-hero-late-800x600.png";
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("stack", "Stack", &[]),
+        insert_patch("col", "stack"),
+        create_patch(
+            "hero",
+            "Image",
+            &[
+                ("src", json!(src)),
+                ("width.0", json!("100%")),
+                ("height.0", json!("14rem")),
+            ],
+        ),
+        insert_patch("stack", "hero"),
+        create_patch(
+            "bar",
+            "Row",
+            &[
+                ("width.0", json!("100%")),
+                ("paddingLeft.0", json!("16px")),
+                ("paddingRight.0", json!("16px")),
+            ],
+        ),
+        insert_patch("stack", "bar"),
+        create_patch(
+            "b1",
+            "Button",
+            &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+        ),
+        insert_patch("bar", "b1"),
+        create_patch(
+            "b2",
+            "Button",
+            &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+        ),
+        insert_patch("bar", "b2"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(430.0));
+    let mut text = TextEngine::new();
+    let mut compute = |state: &mut TaffyState| {
+        LayoutPass::compute_with_state(
+            state,
+            &tree,
+            &mut text,
+            (430, 900),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            1,
+        )
+    };
+    let before = compute(&mut state);
+    assert!(
+        (find_item(&before, "stack").rect.w - 112.0).abs() < 1.0,
+        "before load the bar sizes the Stack: {:?}",
+        find_item(&before, "stack").rect
+    );
+    assert!(!state.media_intrinsics_stale(), "nothing landed yet");
+
+    crate::paint::image::test_seed_decoded(
+        src,
+        std::sync::Arc::new(tiny_skia::Pixmap::new(800, 600).unwrap()),
+    );
+    crate::paint::image::bump_image_load_generation_for_test();
+    assert!(
+        state.media_intrinsics_stale(),
+        "a landed natural size the hero's style waited on must invalidate the cached layout"
+    );
+    let after = compute(&mut state);
+    assert!(
+        (find_item(&after, "stack").rect.w - 298.67).abs() < 1.5,
+        "{:?}",
+        find_item(&after, "stack").rect
+    );
+    assert!(!state.media_intrinsics_stale(), "absorbed by the recompute");
+    // A fetch landing that no style here waited on does not invalidate.
+    crate::paint::image::bump_image_load_generation_for_test();
+    assert!(!state.media_intrinsics_stale(), "unrelated load");
+}
+
+#[test]
+fn decoded_hero_image_sizes_its_stack_like_chrome() {
+    let src = "/layout-tests/food-hero-800x600.png";
+    crate::paint::image::test_seed_decoded(
+        src,
+        std::sync::Arc::new(tiny_skia::Pixmap::new(800, 600).unwrap()),
+    );
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "stack", "Stack", &[]);
+    node(
+        &mut tree,
+        "stack",
+        "hero",
+        "Image",
+        &[
+            ("src", json!(src)),
+            ("width.0", json!("100%")),
+            ("height.0", json!("14rem")),
+            ("objectFit", json!("cover")),
+        ],
+    );
+    node(&mut tree, "stack", "safe", "SafeArea", &[]);
+    node(
+        &mut tree,
+        "safe",
+        "bar",
+        "Row",
+        &[
+            ("width.0", json!("100%")),
+            ("paddingLeft.0", json!("16px")),
+            ("paddingRight.0", json!("16px")),
+        ],
+    );
+    node(
+        &mut tree,
+        "bar",
+        "b1",
+        "Button",
+        &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+    );
+    node(
+        &mut tree,
+        "bar",
+        "b2",
+        "Button",
+        &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let stack = find_item(&pass, "stack");
+    assert!(
+        (stack.rect.w - 298.67).abs() < 1.5,
+        "stack={:?} hero={:?}",
+        stack.rect,
+        find_item(&pass, "hero").rect
+    );
+}
+
+/// Calories Breakfast card: a content-sized Row (inside a Button) whose
+/// growing text column is exactly as wide at min-content as at max-content
+/// (its label Row is the widest child). The fit-content probes must not
+/// leave the min-content layout (every word wrapped) cached for it.
+#[test]
+fn fit_content_probe_does_not_leak_min_content_heights() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "btn",
+        "Button",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "btn",
+        "row",
+        "Row",
+        &[("alignItems", json!("center"))],
+    );
+    node(
+        &mut tree,
+        "row",
+        "icon",
+        "Column",
+        &[("width", json!(48)), ("height", json!(48))],
+    );
+    node(&mut tree, "row", "body", "Column", &[("flex", json!(1))]);
+    // The label Row's min-content width equals its max-content width (one
+    // word + a fixed check icon) and exceeds the multi-word subtitle's.
+    node(&mut tree, "body", "label", "Row", &[("gap", json!(6))]);
+    add_text(&mut tree, "label", "name", "Breakfastbreakfast");
+    node(
+        &mut tree,
+        "label",
+        "check",
+        "Column",
+        &[("width", json!(14)), ("height", json!(14))],
+    );
+    add_text(&mut tree, "body", "sub", "25 / 50 kc");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let body = find_item(&pass, "body").rect;
+    let sub = find_item(&pass, "sub").rect;
+    assert!(
+        body.y + body.h <= sub.y + sub.h + 0.5,
+        "text column ends with its last line: body={body:?} sub={sub:?}"
+    );
 }

@@ -989,21 +989,80 @@ impl VelloPainter {
         }
 
         let radius = item.border.radius * scale_factor;
-        if let Some(shadow_style) = item.shadow {
-            let spread = shadow_style.spread * scale_factor;
-            let shadow = KRect::new(
-                (item.rect.x + shadow_style.x * scale_factor - spread) as f64,
-                (item.rect.y + shadow_style.y * scale_factor - spread) as f64,
-                (item.rect.x + item.rect.w + shadow_style.x * scale_factor + spread) as f64,
-                (item.rect.y + item.rect.h + shadow_style.y * scale_factor + spread) as f64,
+        if let Some(shadows) = item.shadow.as_deref() {
+            // An outer CSS shadow is clipped to OUTSIDE the border box: a
+            // translucent / transparent surface never shows its own shadow
+            // through, and a `0 0 0 2px` ring around a hollow chip stays a
+            // ring. Even-odd clip = the shadows' reach minus the box.
+            let mut reach = 0.0_f32;
+            for s in shadows.iter().filter(|s| !s.inset) {
+                reach = reach.max(s.x.abs().max(s.y.abs()) + s.spread.max(0.0) + s.blur * 1.5);
+            }
+            let reach = (reach + 1.0) * scale_factor;
+            let mut clip = BezPath::new();
+            clip.extend(
+                KRect::new(
+                    (item.rect.x - reach) as f64,
+                    (item.rect.y - reach) as f64,
+                    (item.rect.x + item.rect.w + reach) as f64,
+                    (item.rect.y + item.rect.h + reach) as f64,
+                )
+                .path_elements(0.1),
             );
-            self.scene.draw_blurred_rounded_rect(
+            clip.extend(rounded_rect_path(item.rect, radius).path_elements(0.1));
+            self.scene.push_layer(
+                Fill::EvenOdd,
+                vello::peniko::BlendMode::default(),
+                1.0,
                 Affine::IDENTITY,
-                shadow,
-                color_to_peniko(shadow_style.color),
-                (radius + spread).max(0.0) as f64,
-                (shadow_style.blur * scale_factor) as f64,
+                &clip,
             );
+            // CSS paints the first layer on top, so draw back to front.
+            // `inset` layers are not drawn (no inner-shadow primitive).
+            for shadow_style in shadows.iter().rev().filter(|s| !s.inset) {
+                let spread = shadow_style.spread * scale_factor;
+                let x0 = item.rect.x + shadow_style.x * scale_factor - spread;
+                let y0 = item.rect.y + shadow_style.y * scale_factor - spread;
+                let x1 = item.rect.x + item.rect.w + shadow_style.x * scale_factor + spread;
+                let y1 = item.rect.y + item.rect.h + shadow_style.y * scale_factor + spread;
+                if x1 <= x0 || y1 <= y0 {
+                    continue;
+                }
+                let shadow = KRect::new(x0 as f64, y0 as f64, x1 as f64, y1 as f64);
+                // Clamp to the shadow box: Vello's blurred-rect shader uses
+                // the raw radius in its normalisation term, so a
+                // `rounded-full` 9999 radius turned the coverage NEGATIVE
+                // and the "shadow" lightened the backdrop instead.
+                let corner = if radius > 0.0 {
+                    (radius + spread).max(0.0).min((x1 - x0).min(y1 - y0) * 0.5)
+                } else {
+                    0.0
+                };
+                // A CSS blur radius B is a Gaussian with σ = B / 2.
+                let sigma = shadow_style.blur * 0.5 * scale_factor;
+                if sigma <= 0.0 {
+                    fill_rect(
+                        &mut self.scene,
+                        LayoutRect {
+                            x: x0,
+                            y: y0,
+                            w: x1 - x0,
+                            h: y1 - y0,
+                        },
+                        shadow_style.color,
+                        corner,
+                    );
+                } else {
+                    self.scene.draw_blurred_rounded_rect(
+                        Affine::IDENTITY,
+                        shadow,
+                        color_to_peniko(shadow_style.color),
+                        corner as f64,
+                        sigma as f64,
+                    );
+                }
+            }
+            self.scene.pop_layer();
         } else if matches!(item.kind, ItemKind::Card) {
             let shadow = KRect::new(
                 item.rect.x as f64,
@@ -1015,7 +1074,7 @@ impl VelloPainter {
                 Affine::IDENTITY,
                 shadow,
                 Color::from_rgba8(0, 0, 0, 26),
-                radius as f64,
+                radius.min(item.rect.w.min(item.rect.h) * 0.5) as f64,
                 (2.0 * scale_factor) as f64,
             );
         }
@@ -1121,6 +1180,7 @@ impl VelloPainter {
                     border_color,
                     item.border.width * scale_factor,
                     item.border.sides,
+                    item.border.style,
                 );
             } else {
                 stroke_rect_styled(
@@ -2698,8 +2758,50 @@ fn stroke_rect_styled(
     }
 }
 
-fn stroke_partial_border(scene: &mut Scene, rect: LayoutRect, color: Rgba, width: f32, sides: u8) {
+fn stroke_partial_border(
+    scene: &mut Scene,
+    rect: LayoutRect,
+    color: Rgba,
+    width: f32,
+    sides: u8,
+    line_style: BorderLineStyle,
+) {
     if width <= 0.0 || color.3 == 0 {
+        return;
+    }
+    if line_style != BorderLineStyle::Solid {
+        // Dashed / dotted per-side borders (`border-t-2 border-dashed`,
+        // the Calories goal line): stroke each side's centre line with the
+        // same dash pattern as the full-rect path.
+        let brush = Brush::Solid(color_to_peniko(color));
+        let w = width as f64;
+        let stroke = match line_style {
+            BorderLineStyle::Dotted => Stroke::new(w)
+                .with_caps(Cap::Round)
+                .with_dashes(0.0, [w * 0.1, w * 2.0]),
+            _ => Stroke::new(w).with_dashes(0.0, [w * 3.0, w * 2.0]),
+        };
+        let (x0, y0) = (rect.x as f64, rect.y as f64);
+        let (x1, y1) = ((rect.x + rect.w) as f64, (rect.y + rect.h) as f64);
+        let half = w * 0.5;
+        let mut line = |a: (f64, f64), b: (f64, f64)| {
+            let mut path = BezPath::new();
+            path.move_to(a);
+            path.line_to(b);
+            scene.stroke(&stroke, Affine::IDENTITY, &brush, None, &path);
+        };
+        if sides & BORDER_SIDE_TOP != 0 {
+            line((x0, y0 + half), (x1, y0 + half));
+        }
+        if sides & BORDER_SIDE_BOTTOM != 0 {
+            line((x0, y1 - half), (x1, y1 - half));
+        }
+        if sides & BORDER_SIDE_LEFT != 0 {
+            line((x0 + half, y0), (x0 + half, y1));
+        }
+        if sides & BORDER_SIDE_RIGHT != 0 {
+            line((x1 - half, y0), (x1 - half, y1));
+        }
         return;
     }
     if sides & BORDER_SIDE_TOP != 0 {

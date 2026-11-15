@@ -2293,7 +2293,11 @@ impl App {
                     .fold(0.0f32, f32::max)
             })
             .unwrap_or(0.0);
-        let layout_inputs_changed = self.layout.is_none() || !key_match;
+        // An image whose natural size a style was waiting on has landed:
+        // the cached layout was built without it (see
+        // `TaffyState::media_intrinsics_stale`).
+        let layout_inputs_changed =
+            self.layout.is_none() || !key_match || self.taffy.media_intrinsics_stale();
         let scroll_window_stale = !layout_inputs_changed
             && page_emit_drift + max_chain_drift > scroll_recompute_threshold;
         let mut flips_played = false;

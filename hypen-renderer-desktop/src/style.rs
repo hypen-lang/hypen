@@ -1375,6 +1375,35 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
     let mut right = prop_f32_with(node, "borderRightWidth", vs);
     let mut bottom = prop_f32_with(node, "borderBottomWidth", vs);
     let mut left = prop_f32_with(node, "borderLeftWidth", vs);
+    // Per-side CSS shorthands: `.borderTop("1px solid #333")` (Weather's
+    // 7-day row dividers). A bare number is the side's width. CSS's
+    // initial width is `medium` (3px) when the shorthand omits it.
+    for (name, slot) in [
+        ("borderTop", &mut top),
+        ("borderRight", &mut right),
+        ("borderBottom", &mut bottom),
+        ("borderLeft", &mut left),
+    ] {
+        let raw = prop_str_with(node, name, vs);
+        let hidden = raw.is_some_and(|v| {
+            v.split_whitespace()
+                .any(|t| t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("hidden"))
+        });
+        if hidden {
+            *slot = Some(0.0);
+        } else if let Some(sh) = raw.and_then(parse_border_shorthand) {
+            let side_width = sh.0.unwrap_or(3.0);
+            *slot = Some(side_width);
+            if let Some(c) = sh.1 {
+                color = Some(c);
+            }
+            if side_width > 0.0 {
+                line_style = sh.2;
+            }
+        } else if let Some(w) = prop_f32_with(node, name, vs) {
+            *slot = Some(w);
+        }
+    }
 
     let any_side = top.is_some() || right.is_some() || bottom.is_some() || left.is_some();
     if uniform_set && any_side {
@@ -1462,7 +1491,7 @@ pub fn has_explicit_border(node: &Node) -> bool {
 /// site. Viewport units then read as *absent* rather than silently
 /// collapsing to zero — a dropped prop is recoverable, a confidently
 /// wrong `0` is not.
-fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32> {
+pub(crate) fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32> {
     match v {
         Value::Number(n) => n.as_f64().map(|f| f as f32),
         Value::String(s) => parse_length(s, viewport),
@@ -1489,6 +1518,12 @@ fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32> {
 /// lowers `h-screen` to `height: "100vh"`, so before these suffixes were
 /// understood the parse failed and the height prop was dropped in
 /// silence rather than erroring.
+/// Crate-visible [`parse_length`] for CSS value lists parsed outside this
+/// module (`box-shadow`).
+pub(crate) fn parse_css_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
+    parse_length(s, viewport)
+}
+
 fn parse_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
     let trimmed = s.trim();
     // Order matters: `vmin`/`vmax` must be tried before `vw`/`vh`, whose
@@ -1519,6 +1554,66 @@ fn parse_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
     }
     let stripped = trimmed.strip_suffix("px").unwrap_or(trimmed);
     stripped.trim().parse::<f32>().ok()
+}
+
+/// A CSS `calc()` length of the form `P% ± L` — the only shape the web
+/// examples author (`width: calc(100% - 40px)`). `percent` is a fraction
+/// (1.0 = 100%) of the containing block; `px` is in logical px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalcLength {
+    pub percent: f32,
+    pub px: f32,
+}
+
+impl CalcLength {
+    /// Resolve against a containing-block size, clamped at zero like a
+    /// CSS `width` (negative widths are invalid and floor at 0).
+    pub fn resolve(self, basis: f32) -> f32 {
+        (self.percent * basis + self.px).max(0.0)
+    }
+}
+
+/// Parse `calc(<term> (+|-) <term> ...)` where each term is a percentage
+/// or a length (`px`, `rem`, `em`, viewport units). Products, quotients and
+/// nested parentheses are not supported and yield `None`.
+pub fn parse_calc(s: &str, viewport: Option<Viewport>) -> Option<CalcLength> {
+    let inner = s.trim().strip_prefix("calc(")?.strip_suffix(')')?.trim();
+    if inner.is_empty() || inner.contains(['(', ')', '*', '/']) {
+        return None;
+    }
+    let mut out = CalcLength {
+        percent: 0.0,
+        px: 0.0,
+    };
+    let mut sign = 1.0_f32;
+    let mut expect_term = true;
+    for token in inner.split_whitespace() {
+        if expect_term {
+            if let Some(pct) = parse_percent(token) {
+                out.percent += sign * pct;
+            } else {
+                out.px += sign * parse_length(token, viewport)?;
+            }
+            expect_term = false;
+        } else {
+            sign = match token {
+                "+" => 1.0,
+                "-" => -1.0,
+                _ => return None,
+            };
+            expect_term = true;
+        }
+    }
+    (!expect_term).then_some(out)
+}
+
+/// Variant-aware read of a `calc()` dimension prop (`width`, `height`).
+pub fn prop_calc_with(node: &Node, name: &str, vs: &VariantState) -> Option<CalcLength> {
+    let raw = prop_str_with(node, name, vs)?;
+    if !raw.trim_start().starts_with("calc(") {
+        return None;
+    }
+    parse_calc(raw, Some(vs.viewport))
 }
 
 /// Parse a dimension prop that may carry a `%` unit. Returns the
@@ -2092,6 +2187,56 @@ fn parse_border_line_style(value: &str) -> BorderLineStyle {
 /// keyword is ignored. Returns `None` when nothing usable was found, so
 /// callers can distinguish "not a shorthand" from "shorthand with
 /// defaults".
+/// Split a CSS value on top-level whitespace, keeping functional notation
+/// (`rgba(0, 0, 0, 0.1)`, `rgb(0 0 0 / 0.1)`) in one token.
+pub(crate) fn split_css_tokens(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0_i32;
+    let mut start: Option<usize> = None;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => {
+                depth += 1;
+                start.get_or_insert(i);
+            }
+            ')' => depth -= 1,
+            c if c.is_whitespace() && depth <= 0 => {
+                if let Some(st) = start.take() {
+                    out.push(&s[st..i]);
+                }
+            }
+            _ => {
+                start.get_or_insert(i);
+            }
+        }
+    }
+    if let Some(st) = start {
+        out.push(&s[st..]);
+    }
+    out
+}
+
+/// Split a CSS list value on top-level commas (`a, b` but not inside
+/// `rgba(...)`).
+pub(crate) fn split_css_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0_i32;
+    let mut st = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth <= 0 => {
+                out.push(s[st..i].trim());
+                st = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(s[st..].trim());
+    out
+}
+
 fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>, BorderLineStyle)> {
     const STYLES: &[&str] = &[
         "none", "hidden", "solid", "dashed", "dotted", "double", "groove", "ridge", "inset",
@@ -2100,7 +2245,7 @@ fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>, BorderL
     let mut width = None;
     let mut color = None;
     let mut line_style = BorderLineStyle::Solid;
-    for tok in s.split_whitespace() {
+    for tok in split_css_tokens(s) {
         if STYLES.contains(&tok.to_ascii_lowercase().as_str()) {
             line_style = parse_border_line_style(tok);
             continue;
