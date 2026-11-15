@@ -119,7 +119,7 @@ else
     echo ""
     echo "Current versions:"
     echo "  Rust (parser, tailwind-parse, engine, server): $CURRENT_RUST_VERSION"
-    echo "  NPM (core, web, server, web-engine, cf, cli, hypen-engine): $CURRENT_NPM_VERSION"
+    echo "  NPM (core, web, server, web-engine, device-web, device-fake, agent, module-host, cf, cli, hypen-engine): $CURRENT_NPM_VERSION"
     echo "  NPM (lsp): $CURRENT_LSP_VERSION"
     echo "  Gradle (android, kotlin): $CURRENT_GRADLE_VERSION"
     echo "  Swift (hypen-server-swift): $CURRENT_SWIFT_SERVER_VERSION"

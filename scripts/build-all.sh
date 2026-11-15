@@ -7,7 +7,7 @@ set -e
 # Pipeline:
 #   1. Run tests (parser, engine, server, web SDK)
 #   2. Build WASM (+ auto-copy to SDK locations)
-#   3. Build npm packages (core, web, lsp, cli) with type declarations
+#   3. Build npm packages (core, web, server, web-engine, module-host, lsp, cli) with type declarations
 #   4. Build UniFFI native library (release, needed by hypen-kotlin)
 #   5. Build Gradle packages (hypen-renderer-android, hypen-kotlin)
 
@@ -128,6 +128,10 @@ echo -e "  Building @hypen-space/web-engine..."
 cd "$ROOT_DIR/hypen-web/packages/web-engine" && bun run build
 echo -e "  ${GREEN}✓ @hypen-space/web-engine built${NC}"
 
+echo -e "  Building @hypen-space/module-host..."
+cd "$ROOT_DIR/hypen-web/packages/module-host" && bun run build
+echo -e "  ${GREEN}✓ @hypen-space/module-host built${NC}"
+
 echo -e "  Building @hypen-space/lsp..."
 cd "$ROOT_DIR/hypen-lsp" && bun run compile
 echo -e "  ${GREEN}✓ @hypen-space/lsp built${NC}"
@@ -151,6 +155,10 @@ if [ ! -f "$ROOT_DIR/hypen-web/packages/server/dist/index.d.ts" ]; then
 fi
 if [ ! -f "$ROOT_DIR/hypen-web/packages/web-engine/dist/index.d.ts" ]; then
   echo -e "${RED}✗ Missing web-engine type declarations (dist/index.d.ts)${NC}"
+  exit 1
+fi
+if [ ! -f "$ROOT_DIR/hypen-web/packages/module-host/dist/index.d.ts" ]; then
+  echo -e "${RED}✗ Missing module-host type declarations (dist/index.d.ts)${NC}"
   exit 1
 fi
 echo -e "${GREEN}✓ All packages built with type declarations${NC}"

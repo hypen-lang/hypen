@@ -320,6 +320,12 @@ jobs:
       # device broker (Cloudflare imports it); the browser build ships
       # inside @hypen-space/web-engine. Already-published versions are
       # skipped so a failed run can be retried.
+      # @hypen-space/module-host has no @hypen-space/* dependencies; it goes
+      # before cf/lsp/cli so anything that comes to depend on it finds it on
+      # npm. Its dist/ is built by `bun run build` above (build:module-host).
+      # Trusted publishing (OIDC, no token) only works for a package that
+      # already exists on npm with this workflow registered as its trusted
+      # publisher: the first module-host release must be bootstrapped by hand.
       - name: Publish npm packages
         env:
           VERSION: ${{ needs.resolve.outputs.version }}
@@ -347,6 +353,7 @@ jobs:
           publish hypen-web/packages/device-web
           publish hypen-web/packages/device-fake
           publish hypen-web/packages/agent
+          publish hypen-web/packages/module-host
           publish hypen-web/packages/cf
           publish hypen-lsp
           publish hypen-cli

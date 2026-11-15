@@ -8,6 +8,10 @@ on:
       - "tailwind-parse/**"
       - "hypen-engine-rs/**"
       - "hypen-sdk-rs/**"
+      # `hypen:module` WIT contract: the engine's wasmtime host runs
+      # `bindgen!` over ../wit (v0.1) and ../wit-v0_2 (v0.2, CM-async).
+      - "wit/**"
+      - "wit-v0_2/**"
       - "engine-compatibility-tests/schema/device/**"
       - "engine-compatibility-tests/fixtures/device/**"
       - ".github/workflows/rust.yml"
@@ -18,6 +22,10 @@ on:
       - "tailwind-parse/**"
       - "hypen-engine-rs/**"
       - "hypen-sdk-rs/**"
+      # `hypen:module` WIT contract: the engine's wasmtime host runs
+      # `bindgen!` over ../wit (v0.1) and ../wit-v0_2 (v0.2, CM-async).
+      - "wit/**"
+      - "wit-v0_2/**"
       - "engine-compatibility-tests/schema/device/**"
       - "engine-compatibility-tests/fixtures/device/**"
       - ".github/workflows/rust.yml"
@@ -297,3 +305,70 @@ jobs:
             hypen-engine-rs/pkg/web/
             hypen-engine-rs/pkg/browser/
           retention-days: 7
+
+  module-host:
+    # WASM module hosting: the wasmtime-backed `module-loader` host, the
+    # `hypen-runtime` binary (`runtime-bin` = module-loader + the binary and
+    # its tests) and the wasm32 JS-bridged host (`module-loader-bridged`).
+    # None of these features is in the default build, so the jobs above never
+    # compile them. wasmtime is a large build: no debug info, and a cache key
+    # of its own so it does not evict (or bloat) the `test` job's cache.
+    name: Module host (wasmtime + bridged)
+    runs-on: ubuntu-latest
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+          targets: wasm32-unknown-unknown
+
+      # Default workspace (". -> target"): the crates share the root
+      # Cargo workspace, so the build output lives in ./target, not in
+      # hypen-engine-rs/target.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: module-host
+
+      # Cheap guard first: wasmtime must stay behind `module-loader`. The
+      # runtime builds (default, js, wasi, uniffi and the bridged browser
+      # host) must not pull it in. `--target all` also resolves the
+      # wasm32-only and per-OS dependency tables.
+      - name: Runtime feature sets do not depend on wasmtime
+        run: |
+          set -euo pipefail
+          for features in "" js js,device-broker wasi uniffi module-loader-bridged; do
+            cargo tree -p hypen-engine -e normal --target all ${features:+--features "$features"} > tree.txt
+            if grep -q wasmtime tree.txt; then
+              echo "::error::hypen-engine features '${features:-default}' depend on wasmtime"
+              grep -n wasmtime tree.txt | head -20
+              exit 1
+            fi
+          done
+          rm -f tree.txt
+        shell: bash
+        working-directory: hypen-engine-rs
+
+      - name: Test module host + hypen-runtime
+        run: >-
+          cargo test --features runtime-bin
+          --test test_module_host
+          --test test_module_host_async
+          --test test_module_host_routing
+          --test test_hypen_runtime
+        working-directory: hypen-engine-rs
+
+      - name: Clippy module host (warnings are errors)
+        run: cargo clippy --features runtime-bin --all-targets -- -D warnings
+        working-directory: hypen-engine-rs
+
+      - name: Check bridged host (wasm32)
+        run: cargo check --target wasm32-unknown-unknown --features module-loader-bridged
+        working-directory: hypen-engine-rs
+
+      - name: Disk usage after build
+        if: always()
+        run: df -h / && du -sh target 2>/dev/null || true

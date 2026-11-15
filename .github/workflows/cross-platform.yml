@@ -114,6 +114,20 @@ jobs:
         run: bun install
         working-directory: hypen-web
 
+      # The `tinygo` build tag swaps in the TinyGo file set (portable_tinygo.go
+      # in place of the wazero engine, agent, resolver). Plain Go type-checks
+      # and vets it without installing TinyGo. Vet takes the explicit
+      # non-test file list: the package's _test.go files are not tag-gated
+      # and do not compile under `-tags tinygo`.
+      - name: Type-check the TinyGo configuration
+        run: |
+          set -euo pipefail
+          go build -tags tinygo .
+          files=$(go list -tags tinygo -f '{{join .GoFiles " "}}' .)
+          go vet -tags tinygo $files
+        shell: bash
+        working-directory: hypen-golang
+
       - name: Run Go tests
         run: go test -race -v ./...
         working-directory: hypen-golang

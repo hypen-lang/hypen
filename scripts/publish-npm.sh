@@ -2,7 +2,7 @@
 set -e
 
 # Publish npm packages
-# Order matters: hypen-engine -> core -> web -> server -> web-engine -> cf -> lsp -> cli
+# Order matters: hypen-engine -> core -> web -> server -> web-engine -> module-host -> cf -> lsp -> cli
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(dirname "$SCRIPT_DIR")"
@@ -32,65 +32,73 @@ echo ""
 
 # 1. Publish hypen-engine (browser WASM build; the node WASM build ships
 #    inside @hypen-space/server and is not published standalone)
-echo -e "${GREEN}[1/9] Publishing hypen-engine...${NC}"
+echo -e "${GREEN}[1/10] Publishing hypen-engine...${NC}"
 cd "$ROOT_DIR/hypen-web/packages/web-engine/wasm-browser"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ hypen-engine published${NC}"
 echo ""
 
 # 2. Publish @hypen-space/core
-echo -e "${GREEN}[2/9] Publishing @hypen-space/core...${NC}"
+echo -e "${GREEN}[2/10] Publishing @hypen-space/core...${NC}"
 cd "$ROOT_DIR/hypen-web/packages/core"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ @hypen-space/core published${NC}"
 echo ""
 
 # 3. Publish @hypen-space/web
-echo -e "${GREEN}[3/9] Publishing @hypen-space/web...${NC}"
+echo -e "${GREEN}[3/10] Publishing @hypen-space/web...${NC}"
 cd "$ROOT_DIR/hypen-web/packages/web"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ @hypen-space/web published${NC}"
 echo ""
 
 # 4. Publish @hypen-space/server
-echo -e "${GREEN}[4/9] Publishing @hypen-space/server...${NC}"
+echo -e "${GREEN}[4/10] Publishing @hypen-space/server...${NC}"
 cd "$ROOT_DIR/hypen-web/packages/server"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ @hypen-space/server published${NC}"
 echo ""
 
 # 5. Publish @hypen-space/web-engine
-echo -e "${GREEN}[5/9] Publishing @hypen-space/web-engine...${NC}"
+echo -e "${GREEN}[5/10] Publishing @hypen-space/web-engine...${NC}"
 cd "$ROOT_DIR/hypen-web/packages/web-engine"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ @hypen-space/web-engine published${NC}"
 echo ""
 
-# 6. Publish @hypen-space/cf
-echo -e "${GREEN}[6/9] Publishing @hypen-space/cf...${NC}"
+# 6. Publish @hypen-space/module-host (no @hypen-space/* deps; before cf/lsp/cli
+#    so anything that comes to depend on it resolves from npm)
+echo -e "${GREEN}[6/10] Publishing @hypen-space/module-host...${NC}"
+cd "$ROOT_DIR/hypen-web/packages/module-host"
+npm publish --access public $OTP
+echo -e "${GREEN}✓ @hypen-space/module-host published${NC}"
+echo ""
+
+# 7. Publish @hypen-space/cf
+echo -e "${GREEN}[7/10] Publishing @hypen-space/cf...${NC}"
 cd "$ROOT_DIR/hypen-web/packages/cf"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ @hypen-space/cf published${NC}"
 echo ""
 
-# 7. Publish @hypen-space/lsp
-echo -e "${GREEN}[7/9] Publishing @hypen-space/lsp...${NC}"
+# 8. Publish @hypen-space/lsp
+echo -e "${GREEN}[8/10] Publishing @hypen-space/lsp...${NC}"
 cd "$ROOT_DIR/hypen-lsp"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ @hypen-space/lsp published${NC}"
 echo ""
 
-# 8. Publish @hypen-space/cli
-echo -e "${GREEN}[8/9] Publishing @hypen-space/cli...${NC}"
+# 9. Publish @hypen-space/cli
+echo -e "${GREEN}[9/10] Publishing @hypen-space/cli...${NC}"
 cd "$ROOT_DIR/hypen-cli"
 npm publish --access public $OTP
 echo -e "${GREEN}✓ @hypen-space/cli published${NC}"
 echo ""
 
-# 9. Publish @hypen-space/ios-streamer
+# 10. Publish @hypen-space/ios-streamer
 #    Versioned independently from the rest of the train; failures here are
 #    non-fatal (e.g. version already published, macOS-only publish host down).
-echo -e "${GREEN}[9/9] Publishing @hypen-space/ios-streamer...${NC}"
+echo -e "${GREEN}[10/10] Publishing @hypen-space/ios-streamer...${NC}"
 cd "$ROOT_DIR/hypen-ios-streamer"
 IOS_STREAMER_VERSION=$(node -p "require('./package.json').version")
 if npm publish --access public $OTP; then
@@ -109,6 +117,7 @@ echo "  https://www.npmjs.com/package/@hypen-space/core"
 echo "  https://www.npmjs.com/package/@hypen-space/web"
 echo "  https://www.npmjs.com/package/@hypen-space/server"
 echo "  https://www.npmjs.com/package/@hypen-space/web-engine"
+echo "  https://www.npmjs.com/package/@hypen-space/module-host"
 echo "  https://www.npmjs.com/package/@hypen-space/cf"
 echo "  https://www.npmjs.com/package/@hypen-space/lsp"
 echo "  https://www.npmjs.com/package/@hypen-space/cli"

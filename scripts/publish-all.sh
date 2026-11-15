@@ -13,9 +13,9 @@ set -e
 #   1. Bump versions (Rust + npm)
 #   2. Run tests (parser, engine, web SDK, CLI)
 #   3. Build WASM (+ auto-copy to SDK locations)
-#   4. Build npm packages (core, web, server, web-engine, cf, lsp, cli) with type declarations
+#   4. Build npm packages (core, web, server, web-engine, device-web, device-fake, agent, module-host, cf, lsp, cli) with type declarations
 #   5. Publish Rust crates (parser -> tailwind-parse -> engine)
-#   6. Publish npm packages (hypen-engine -> core -> web -> server -> web-engine -> cf -> lsp -> cli)
+#   6. Publish npm packages (hypen-engine -> core -> web -> server -> web-engine -> device-web -> device-fake -> agent -> module-host -> cf -> lsp -> cli)
 #
 # Flags:
 #   --skip-tests     Skip test step
@@ -234,6 +234,10 @@ echo -e "  Building @hypen-space/agent..."
 cd "$ROOT_DIR/hypen-web/packages/agent" && bun run build
 echo -e "  ${GREEN}✓ @hypen-space/agent built${NC}"
 
+echo -e "  Building @hypen-space/module-host..."
+cd "$ROOT_DIR/hypen-web/packages/module-host" && bun run build
+echo -e "  ${GREEN}✓ @hypen-space/module-host built${NC}"
+
 echo -e "  Building @hypen-space/cf..."
 cd "$ROOT_DIR/hypen-web/packages/cf" && bun run build
 echo -e "  ${GREEN}✓ @hypen-space/cf built${NC}"
@@ -263,6 +267,10 @@ if [ ! -f "$ROOT_DIR/hypen-web/packages/web-engine/dist/index.d.ts" ]; then
   echo -e "${RED}✗ Missing web-engine type declarations (dist/index.d.ts)${NC}"
   exit 1
 fi
+if [ ! -f "$ROOT_DIR/hypen-web/packages/module-host/dist/index.d.ts" ]; then
+  echo -e "${RED}✗ Missing module-host type declarations (dist/index.d.ts)${NC}"
+  exit 1
+fi
 if [ ! -f "$ROOT_DIR/hypen-web/packages/cf/dist/index.d.ts" ]; then
   echo -e "${RED}✗ Missing cf type declarations (dist/index.d.ts)${NC}"
   exit 1
@@ -285,7 +293,7 @@ fi
 echo ""
 
 # ============================================================================
-# Step 6: Publish npm packages (order: hypen-engine -> core -> web -> server -> web-engine -> cf -> lsp -> cli)
+# Step 6: Publish npm packages (order: hypen-engine -> core -> web -> server -> web-engine -> device-web -> device-fake -> agent -> module-host -> cf -> lsp -> cli)
 # ============================================================================
 
 if [ "$SKIP_NPM" = true ]; then
@@ -328,6 +336,12 @@ else
   echo -e "  Publishing @hypen-space/agent..."
   cd "$ROOT_DIR/hypen-web/packages/agent" && npm publish --access public
   echo -e "  ${GREEN}✓ @hypen-space/agent published${NC}"
+
+  # module-host has no @hypen-space/* deps; publish it before cf/lsp/cli so
+  # anything that comes to depend on it resolves from npm.
+  echo -e "  Publishing @hypen-space/module-host..."
+  cd "$ROOT_DIR/hypen-web/packages/module-host" && npm publish --access public
+  echo -e "  ${GREEN}✓ @hypen-space/module-host published${NC}"
 
   echo -e "  Publishing @hypen-space/cf..."
   cd "$ROOT_DIR/hypen-web/packages/cf" && npm publish --access public
@@ -406,6 +420,7 @@ if [ "$SKIP_NPM" = false ]; then
   echo "    - @hypen-space/web@${NEW_VERSION}"
   echo "    - @hypen-space/server@${NEW_VERSION}"
   echo "    - @hypen-space/web-engine@${NEW_VERSION}"
+  echo "    - @hypen-space/module-host@${NEW_VERSION}"
   echo "    - @hypen-space/cf@${NEW_VERSION}"
   echo "    - @hypen-space/lsp@${NEW_LSP_VERSION}"
   echo "    - @hypen-space/cli@${NEW_VERSION}"
@@ -423,6 +438,7 @@ if [ "$SKIP_NPM" = false ]; then
   echo "  https://www.npmjs.com/package/@hypen-space/web"
   echo "  https://www.npmjs.com/package/@hypen-space/server"
   echo "  https://www.npmjs.com/package/@hypen-space/web-engine"
+  echo "  https://www.npmjs.com/package/@hypen-space/module-host"
   echo "  https://www.npmjs.com/package/@hypen-space/cf"
   echo "  https://www.npmjs.com/package/@hypen-space/lsp"
 fi

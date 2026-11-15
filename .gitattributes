@@ -1,0 +1,3 @@
+# Compiled WebAssembly (engine builds, test fixtures such as
+# hypen-engine-rs/tests/fixtures/*.wasm): never text-convert, diff or merge.
+*.wasm binary

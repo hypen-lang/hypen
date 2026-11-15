@@ -44,6 +44,13 @@ subshell so you can paste them in order without ending up in the wrong directory
 # Engine
 (cd hypen-engine-rs && cargo test)
 
+# WASM module hosting (not in the default build; CI runs these in rust.yml's
+# `module-host` job). The wasmtime build is large: CARGO_PROFILE_DEV_DEBUG=0
+# and CARGO_PROFILE_TEST_DEBUG=0 keep the target dir manageable.
+(cd hypen-engine-rs && cargo test --features runtime-bin --test test_module_host \
+  --test test_module_host_async --test test_module_host_routing --test test_hypen_runtime)
+(cd hypen-engine-rs && cargo check --target wasm32-unknown-unknown --features module-loader-bridged)
+
 # Build the WASM targets (same as `bun run build:wasm` from the root)
 hypen-engine-rs/build-wasm.sh
 ```
@@ -82,6 +89,9 @@ For CLI work:
 (cd hypen-cli && bun install)
 (cd hypen-lsp && bun install)   # needed by hypen-cli's LSP integration tests
 (cd hypen-cli && bun test)
+# `hypen build --target wasm` end to end (needs `rustup target add wasm32-wasip2`;
+# the Go pipeline additionally needs tinygo + wit-bindgen-go and skips without them)
+(cd hypen-cli && HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts)
 ```
 
 The studio's LSP integration tests (`studio-ui/src/lib/lsp-server.test.ts`)
@@ -108,6 +118,10 @@ For docs work:
 # Prerequisites: Go 1.25+ (hypen-golang/go.mod declares `go 1.25.0`;
 # older toolchains refuse to build it unless GOTOOLCHAIN can download 1.25)
 (cd hypen-golang && go test ./...)
+
+# The TinyGo build configuration (`-tags tinygo`) type-checks with plain Go;
+# CI runs this, so check it when touching files with a `tinygo` build tag.
+(cd hypen-golang && go build -tags tinygo .)
 ```
 
 #### Mobile Renderers

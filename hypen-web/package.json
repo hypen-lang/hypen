@@ -45,7 +45,7 @@
     "publish:server": "cd packages/server && npm publish --access public",
     "publish:web-engine": "cd packages/web-engine && npm publish --access public",
     "publish:module-host": "cd packages/module-host && npm publish --access public",
-    "publish:all": "bun run build && bun run publish:core && bun run publish:web && bun run publish:server && bun run publish:web-engine",
+    "publish:all": "bun run build && bun run publish:core && bun run publish:web && bun run publish:server && bun run publish:web-engine && bun run publish:module-host",
     "build:agent": "cd packages/agent && bun run build.ts",
     "typecheck:agent": "cd packages/agent && bunx tsc --noEmit"
   },
