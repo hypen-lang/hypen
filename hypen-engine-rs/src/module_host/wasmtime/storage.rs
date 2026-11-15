@@ -67,7 +67,10 @@ impl From<KvWriteError> for StorageError {
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct EntryMeta {
     pub size: u64,
-    /// Not tracked by this backend: always 0.
+    /// When the entry was last written: ms since the Unix epoch by the
+    /// writing instance's host clock (`hypen:time`'s wall clock — virtual
+    /// when the host's is). 0 for an entry persisted before modification
+    /// times were tracked.
     pub modified_ms: u64,
     /// `Some` on `cloud` only (the scope with concurrent writers).
     pub version: Option<u64>,
@@ -202,12 +205,14 @@ impl HostState {
         value: Vec<u8>,
     ) -> Result<(), StorageError> {
         let bucket = self.bucket(handle)?;
+        let now_ms = self.clock.now_ms();
         let mut kv = self.storage.kv.lock();
         kv.set(
             &bucket.partition,
             bucket.prefix.key(key),
             value,
             self.storage.quota,
+            now_ms,
         )?;
         Ok(())
     }
@@ -221,6 +226,7 @@ impl HostState {
         value: Vec<u8>,
     ) -> Result<u64, StorageError> {
         let bucket = self.bucket(handle)?;
+        let now_ms = self.clock.now_ms();
         let mut kv = self.storage.kv.lock();
         let entry_key = bucket.prefix.key(key);
         Ok(kv.compare_and_set(
@@ -229,6 +235,7 @@ impl HostState {
             expected,
             value,
             self.storage.quota,
+            now_ms,
         )?)
     }
 
@@ -273,7 +280,7 @@ impl HostState {
             .get(&bucket.partition, &bucket.prefix.key(key))
             .map(|e| EntryMeta {
                 size: e.value.len() as u64,
-                modified_ms: 0,
+                modified_ms: e.modified_ms,
                 // Versions are a `cloud` concept (concurrent writers).
                 version: (bucket.partition.scope() == StorageScope::Cloud).then_some(e.version),
             }))
@@ -400,6 +407,9 @@ mod tests {
     fn info_reports_size_and_versions_only_on_cloud() {
         let kv = kv();
         let mut s = state("m", &kv);
+        // A virtual clock, so the write stamps are exact.
+        let now = Arc::new(std::sync::atomic::AtomicU64::new(1_000));
+        s.clock = HostClock::Virtual(Arc::clone(&now));
         let local = s
             .bucket_open(StorageScope::Local, Tier::Persistent, "n")
             .unwrap();
@@ -409,12 +419,13 @@ mod tests {
         assert_eq!(s.bucket_info(&local, "k").unwrap(), None);
         s.bucket_set(&local, "k", vec![0; 5]).unwrap();
         s.bucket_set(&cloud, "k", vec![0; 3]).unwrap();
+        now.store(2_500, std::sync::atomic::Ordering::Relaxed);
         s.bucket_set(&cloud, "k", vec![0; 4]).unwrap();
         assert_eq!(
             s.bucket_info(&local, "k").unwrap(),
             Some(EntryMeta {
                 size: 5,
-                modified_ms: 0,
+                modified_ms: 1_000,
                 version: None
             })
         );
@@ -422,10 +433,43 @@ mod tests {
             s.bucket_info(&cloud, "k").unwrap(),
             Some(EntryMeta {
                 size: 4,
-                modified_ms: 0,
+                modified_ms: 2_500,
                 version: Some(2)
             })
         );
+    }
+
+    /// `modified-ms` follows the writer's clock: a compare-and-set stamps
+    /// like a set, a refused write stamps nothing, and another instance
+    /// reading the shared scope sees the writer's stamp.
+    #[test]
+    fn modified_ms_is_the_writers_clock_at_the_last_successful_write() {
+        let kv = kv();
+        let mut writer = state("w", &kv);
+        let mut reader = state("r", &kv);
+        let now = Arc::new(std::sync::atomic::AtomicU64::new(10));
+        writer.clock = HostClock::Virtual(Arc::clone(&now));
+        let set_now = |ms| now.store(ms, std::sync::atomic::Ordering::Relaxed);
+
+        let w = writer
+            .bucket_open(StorageScope::Cloud, Tier::Persistent, "n")
+            .unwrap();
+        let r = reader
+            .bucket_open(StorageScope::Cloud, Tier::Persistent, "n")
+            .unwrap();
+        let modified = |s: &HostState, b| s.bucket_info(b, "k").unwrap().map(|i| i.modified_ms);
+
+        assert_eq!(writer.bucket_compare_and_set(&w, "k", None, vec![1]), Ok(1));
+        assert_eq!(modified(&reader, &r), Some(10));
+        set_now(20);
+        // Stale version and an over-quota value: refused, stamp unchanged.
+        assert!(writer.bucket_compare_and_set(&w, "k", Some(7), vec![2]).is_err());
+        assert!(writer.bucket_set(&w, "k", vec![0; 17]).is_err());
+        assert_eq!(modified(&reader, &r), Some(10));
+        assert_eq!(writer.bucket_compare_and_set(&w, "k", Some(1), vec![2]), Ok(2));
+        assert_eq!(modified(&reader, &r), Some(20));
+        assert!(writer.bucket_delete(&w, "k").unwrap());
+        assert_eq!(modified(&reader, &r), None);
     }
 
     #[test]

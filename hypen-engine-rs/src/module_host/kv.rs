@@ -42,6 +42,26 @@
 //! the store keeps serving from memory, stays dirty, and the next flush
 //! retries.
 //!
+//! ## Modification times
+//!
+//! Every entry records when it was last written (`modified-ms` of the WIT's
+//! `entry-info`), in milliseconds since the Unix epoch. The backend never
+//! reads a clock itself: each write is stamped with the `now_ms` its caller
+//! passes, which the hosts take from the instance's host clock — so under a
+//! virtual clock the stamps are deterministic. An entry loaded from a
+//! snapshot that predates the stamps reads `0` ("unknown") until it is
+//! written again.
+//!
+//! ## Snapshot format
+//!
+//! The file carries a `format` number. This host writes format
+//! [`FORMAT`] (entries are `{"v": <base64>, "m": <modified-ms>}`) and still
+//! reads format [`FORMAT_WITHOUT_TIMES`] (entries are bare base64 strings):
+//! such a file is migrated in memory — its entries get `modified-ms` 0 —
+//! and rewritten in the current format by the next flush. Any other format
+//! number, older or newer, is refused with an error naming the file, which
+//! is left untouched.
+//!
 //! `cloud` is intentionally NOT persisted: the in-process compare-and-set
 //! map is a dev-loop simulation of a sync service, and writing it to disk
 //! would only make it pretend harder. When a real sync backend exists it
@@ -175,6 +195,9 @@ pub(crate) struct Entry {
     pub value: Vec<u8>,
     /// Bumped on every successful write. Only surfaced to guests on `cloud`.
     pub version: u64,
+    /// When the entry was last written, in ms since the Unix epoch by the
+    /// writer's host clock; 0 if unknown (loaded from a pre-timestamp file).
+    pub modified_ms: u64,
 }
 
 #[derive(Default)]
@@ -238,10 +261,27 @@ struct PersistedPartition {
     scope: StorageScope,
     /// The owning module for `local`; empty for the shared `app` partition.
     owner: String,
-    entries: BTreeMap<String, String>,
+    entries: BTreeMap<String, PersistedEntry>,
 }
 
-const FORMAT: u32 = 2;
+/// One stored entry. Format 3 writes the object form; the bare string is
+/// how format 2 stored an entry (value only), accepted when migrating.
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+enum PersistedEntry {
+    Stamped {
+        /// The value, base64.
+        v: String,
+        /// `modified-ms`.
+        m: u64,
+    },
+    ValueOnly(String),
+}
+
+/// The snapshot format this host writes.
+const FORMAT: u32 = 3;
+/// The previous format (no modification times), still read and migrated.
+const FORMAT_WITHOUT_TIMES: u32 = 2;
 
 #[derive(Default)]
 pub(crate) struct KvBackend {
@@ -264,21 +304,27 @@ impl KvBackend {
     /// a silent wipe (the file is left untouched).
     pub fn file_backed(path: PathBuf) -> io::Result<Self> {
         let mut partitions = HashMap::new();
+        let mut migrated = false;
         match std::fs::read(&path) {
             Ok(bytes) => {
                 let raw: serde_json::Value =
                     serde_json::from_slice(&bytes).map_err(|e| invalid(&path, e))?;
                 let format = raw.get("format").and_then(|f| f.as_u64());
-                if format != Some(FORMAT as u64) {
+                let current = format == Some(u64::from(FORMAT));
+                if !current && format != Some(u64::from(FORMAT_WITHOUT_TIMES)) {
                     return Err(invalid(
                         &path,
                         format!(
-                            "storage format {} is not supported (this host reads format {FORMAT}); \
+                            "storage format {} is not supported (this host reads formats \
+                             {FORMAT_WITHOUT_TIMES} and {FORMAT}); \
                              move the file aside or delete it to start with empty storage",
                             format.map_or("<missing>".to_string(), |f| f.to_string()),
                         ),
                     ));
                 }
+                // An older file is rewritten in the current format by the
+                // next flush; until then it is left exactly as it was.
+                migrated = !current;
                 let persisted: PersistedKv =
                     serde_json::from_value(raw).map_err(|e| invalid(&path, e))?;
                 for p in persisted.partitions {
@@ -299,13 +345,36 @@ impl KvBackend {
                         }
                     };
                     let mut part = Partition::default();
-                    for (k, encoded) in p.entries {
+                    for (k, entry) in p.entries {
+                        // Each format has exactly one entry shape; the other
+                        // one in a file means it was not written by a host.
+                        let (encoded, modified_ms) = match entry {
+                            PersistedEntry::Stamped { v, m } if current => (v, m),
+                            PersistedEntry::ValueOnly(v) if !current => (v, 0),
+                            _ => {
+                                return Err(invalid(
+                                    &path,
+                                    format!(
+                                        "entry `{k}` does not have the shape of storage \
+                                         format {}",
+                                        if current { FORMAT } else { FORMAT_WITHOUT_TIMES }
+                                    ),
+                                ));
+                            }
+                        };
                         let value = base64::engine::general_purpose::STANDARD
                             .decode(&encoded)
                             .map_err(|e| invalid(&path, format!("entry `{k}`: {e}")))?;
                         let key = EntryKey(k);
                         part.bytes = part.bytes.saturating_add(cost(&key, &value));
-                        part.entries.insert(key, Entry { value, version: 1 });
+                        part.entries.insert(
+                            key,
+                            Entry {
+                                value,
+                                version: 1,
+                                modified_ms,
+                            },
+                        );
                     }
                     if partitions.insert(id, part).is_some() {
                         return Err(invalid(&path, "duplicate partition"));
@@ -323,7 +392,7 @@ impl KvBackend {
         Ok(Self {
             partitions,
             path: Some(path),
-            dirty: false,
+            dirty: migrated,
         })
     }
 
@@ -331,15 +400,17 @@ impl KvBackend {
         self.partitions.get(part)?.entries.get(entry_key)
     }
 
-    /// Unconditional write. Returns the entry's new version.
+    /// Unconditional write, stamped `now_ms`. Returns the entry's new
+    /// version.
     pub fn set(
         &mut self,
         part: &PartitionId,
         entry_key: EntryKey,
         value: Vec<u8>,
         quota: KvQuota,
+        now_ms: u64,
     ) -> Result<u64, KvWriteError> {
-        self.write(part, entry_key, value, quota, None)
+        self.write(part, entry_key, value, quota, None, now_ms)
     }
 
     /// Versioned write: succeeds only if the entry's current version equals
@@ -351,8 +422,9 @@ impl KvBackend {
         expected: Option<u64>,
         value: Vec<u8>,
         quota: KvQuota,
+        now_ms: u64,
     ) -> Result<u64, KvWriteError> {
-        self.write(part, entry_key, value, quota, Some(expected))
+        self.write(part, entry_key, value, quota, Some(expected), now_ms)
     }
 
     fn write(
@@ -362,6 +434,7 @@ impl KvBackend {
         value: Vec<u8>,
         quota: KvQuota,
         expected: Option<Option<u64>>,
+        now_ms: u64,
     ) -> Result<u64, KvWriteError> {
         let existing = self.partitions.get(part);
         let current = existing.and_then(|p| p.entries.get(&entry_key));
@@ -392,9 +465,14 @@ impl KvBackend {
         let version = current_version.unwrap_or(0) + 1;
         let partition = self.partitions.entry(part.clone()).or_default();
         partition.bytes = next_used;
-        partition
-            .entries
-            .insert(entry_key, Entry { value, version });
+        partition.entries.insert(
+            entry_key,
+            Entry {
+                value,
+                version,
+                modified_ms: now_ms,
+            },
+        );
         self.mark_dirty(part);
         Ok(version)
     }
@@ -498,10 +576,11 @@ impl KvBackend {
                         .entries
                         .iter()
                         .map(|(k, e)| {
-                            (
-                                k.0.clone(),
-                                base64::engine::general_purpose::STANDARD.encode(&e.value),
-                            )
+                            let entry = PersistedEntry::Stamped {
+                                v: base64::engine::general_purpose::STANDARD.encode(&e.value),
+                                m: e.modified_ms,
+                            };
+                            (k.0.clone(), entry)
                         })
                         .collect(),
                 })
@@ -542,6 +621,9 @@ mod tests {
         max_value_bytes: 64,
         max_partition_bytes: 200,
     };
+
+    /// The stamp the tests write with, when the time is not the point.
+    const NOW: u64 = 1_700_000_000_000;
 
     fn raw(key: &str) -> EntryKey {
         EntryKey(key.to_string())
@@ -591,24 +673,24 @@ mod tests {
         let mut kv = KvBackend::default();
         let p = local("m");
         assert_eq!(
-            kv.set(&p, raw("k"), vec![0; 65], QUOTA),
+            kv.set(&p, raw("k"), vec![0; 65], QUOTA, NOW),
             Err(KvWriteError::QuotaExceeded(1))
         );
         // 3 × (2 + 64) = 198 bytes fit; the fourth entry is 64 over.
         for i in 0..3 {
-            kv.set(&p, raw(&format!("k{i}")), vec![0; 64], QUOTA)
+            kv.set(&p, raw(&format!("k{i}")), vec![0; 64], QUOTA, NOW)
                 .unwrap();
         }
         assert_eq!(
-            kv.set(&p, raw("k3"), vec![0; 64], QUOTA),
+            kv.set(&p, raw("k3"), vec![0; 64], QUOTA, NOW),
             Err(KvWriteError::QuotaExceeded(64))
         );
         // Another module's budget is independent.
-        kv.set(&local("other"), raw("k3"), vec![0; 64], QUOTA)
+        kv.set(&local("other"), raw("k3"), vec![0; 64], QUOTA, NOW)
             .unwrap();
         // Overwriting in place and deleting free budget.
-        kv.set(&p, raw("k0"), vec![0; 1], QUOTA).unwrap();
-        kv.set(&p, raw("k3"), vec![0; 60], QUOTA).unwrap();
+        kv.set(&p, raw("k0"), vec![0; 1], QUOTA, NOW).unwrap();
+        kv.set(&p, raw("k3"), vec![0; 60], QUOTA, NOW).unwrap();
         assert!(kv.delete(&p, &raw("k1")));
         assert!(!kv.delete(&p, &raw("k1")));
     }
@@ -618,18 +700,18 @@ mod tests {
         let mut kv = KvBackend::default();
         let p = PartitionId::new(StorageScope::Cloud, &ModuleName::new("m"));
         assert_eq!(
-            kv.compare_and_set(&p, raw("k"), None, vec![1], QUOTA),
+            kv.compare_and_set(&p, raw("k"), None, vec![1], QUOTA, NOW),
             Ok(1)
         );
         assert_eq!(
-            kv.compare_and_set(&p, raw("k"), None, vec![2], QUOTA),
+            kv.compare_and_set(&p, raw("k"), None, vec![2], QUOTA, NOW),
             Err(KvWriteError::VersionMismatch)
         );
         assert_eq!(
-            kv.compare_and_set(&p, raw("k"), Some(1), vec![2], QUOTA),
+            kv.compare_and_set(&p, raw("k"), Some(1), vec![2], QUOTA, NOW),
             Ok(2)
         );
-        assert_eq!(kv.set(&p, raw("k"), vec![3], QUOTA), Ok(3));
+        assert_eq!(kv.set(&p, raw("k"), vec![3], QUOTA, NOW), Ok(3));
     }
 
     #[test]
@@ -643,6 +725,7 @@ mod tests {
                 EntryKey::new("persistent", "ns", "k"),
                 vec![0, 255, 7],
                 QUOTA,
+                NOW,
             )
             .unwrap();
             kv.set(
@@ -650,6 +733,7 @@ mod tests {
                 raw("c"),
                 vec![1],
                 QUOTA,
+                NOW,
             )
             .unwrap();
             // Writes only mark the store dirty; nothing hits disk until flush.
@@ -659,7 +743,7 @@ mod tests {
             assert!(text.contains("\"AP8H\""), "values are base64: {text}");
             assert!(!text.contains("cloud"), "cloud is not persisted: {text}");
             // Dropping flushes whatever is still pending.
-            kv.set(&local("m"), raw("late"), vec![9], QUOTA).unwrap();
+            kv.set(&local("m"), raw("late"), vec![9], QUOTA, NOW).unwrap();
         }
         let kv = KvBackend::file_backed(path).unwrap();
         assert_eq!(
@@ -703,6 +787,116 @@ mod tests {
         }
     }
 
+    /// Writes are stamped with the caller's clock, and the stamp survives a
+    /// flush and reload; an overwrite restamps, a failed write does not.
+    #[test]
+    fn writes_record_the_callers_time_and_it_persists() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.json");
+        let p = local("m");
+        {
+            let mut kv = KvBackend::file_backed(path.clone()).unwrap();
+            kv.set(&p, raw("a"), vec![1], QUOTA, 1_000).unwrap();
+            kv.set(&p, raw("b"), vec![1], QUOTA, 2_000).unwrap();
+            assert_eq!(kv.get(&p, &raw("a")).unwrap().modified_ms, 1_000);
+            kv.set(&p, raw("a"), vec![2], QUOTA, 3_000).unwrap();
+            assert_eq!(kv.get(&p, &raw("a")).unwrap().modified_ms, 3_000);
+            // Refused writes leave the entry — and its stamp — alone.
+            assert!(kv.set(&p, raw("a"), vec![0; 65], QUOTA, 9_000).is_err());
+            assert_eq!(
+                kv.compare_and_set(&p, raw("a"), Some(99), vec![3], QUOTA, 9_000),
+                Err(KvWriteError::VersionMismatch)
+            );
+            assert_eq!(kv.get(&p, &raw("a")).unwrap().modified_ms, 3_000);
+            assert_eq!(
+                kv.compare_and_set(&p, raw("b"), Some(1), vec![3], QUOTA, 4_000),
+                Ok(2)
+            );
+        }
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(r#"{"format":3,"#), "{text}");
+        let kv = KvBackend::file_backed(path).unwrap();
+        assert_eq!(kv.get(&p, &raw("a")).unwrap().modified_ms, 3_000);
+        assert_eq!(kv.get(&p, &raw("b")).unwrap().modified_ms, 4_000);
+    }
+
+    /// A format-2 file (values only) loads with unknown (0) modification
+    /// times, is left as it was until something flushes, and is then
+    /// rewritten in the current format without losing data.
+    #[test]
+    fn the_previous_format_is_migrated_in_memory_and_rewritten_on_flush() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.json");
+        let v2 = r#"{"format":2,"partitions":[{"scope":"app","owner":"","entries":{"s":"Bw=="}},{"scope":"local","owner":"m","entries":{"k":"AP8H","old":"AQ=="}}]}"#;
+        std::fs::write(&path, v2).unwrap();
+        let p = local("m");
+
+        let mut kv = KvBackend::file_backed(path.clone()).unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), v2, "loading does not write");
+        let entry = kv.get(&p, &raw("k")).unwrap();
+        assert_eq!((entry.value.as_slice(), entry.modified_ms), (&[0, 255, 7][..], 0));
+
+        kv.set(&p, raw("k"), vec![9], QUOTA, 5_000).unwrap();
+        kv.flush().unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(r#"{"format":3,"#), "{text}");
+
+        let reloaded = KvBackend::file_backed(path.clone()).unwrap();
+        assert_eq!(reloaded.get(&p, &raw("k")).unwrap().modified_ms, 5_000);
+        let untouched = reloaded.get(&p, &raw("old")).unwrap();
+        assert_eq!((untouched.value.as_slice(), untouched.modified_ms), (&[1][..], 0));
+        let app = PartitionId::new(StorageScope::App, &ModuleName::new("x"));
+        assert_eq!(reloaded.get(&app, &raw("s")).unwrap().value, vec![7]);
+
+        // With nothing written, the migration alone is flushed (here: on drop).
+        std::fs::write(&path, v2).unwrap();
+        drop(KvBackend::file_backed(path.clone()).unwrap());
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.starts_with(r#"{"format":3,"#), "{text}");
+        assert!(text.contains(r#""k":{"v":"AP8H","m":0}"#), "{text}");
+    }
+
+    /// Formats this host does not know — newer ones included — and entries
+    /// in the other format's shape are refused, naming the file and the
+    /// formats that are read.
+    #[test]
+    fn unknown_formats_and_mismatched_entry_shapes_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, body, expect) in [
+            (
+                "future.json",
+                r#"{"format":4,"partitions":[]}"#,
+                "storage format 4 is not supported (this host reads formats 2 and 3)",
+            ),
+            (
+                "v3-with-v2-entry.json",
+                r#"{"format":3,"partitions":[{"scope":"local","owner":"m","entries":{"k":"AQ=="}}]}"#,
+                "entry `k` does not have the shape of storage format 3",
+            ),
+            (
+                "v2-with-v3-entry.json",
+                r#"{"format":2,"partitions":[{"scope":"local","owner":"m","entries":{"k":{"v":"AQ==","m":1}}}]}"#,
+                "entry `k` does not have the shape of storage format 2",
+            ),
+            (
+                "badstamp.json",
+                r#"{"format":3,"partitions":[{"scope":"local","owner":"m","entries":{"k":{"v":"AQ==","m":-1}}}]}"#,
+                "badstamp.json",
+            ),
+        ] {
+            let path = dir.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            let err = match KvBackend::file_backed(path.clone()) {
+                Ok(_) => panic!("{name} should not load"),
+                Err(e) => e,
+            };
+            assert_eq!(err.kind(), io::ErrorKind::InvalidData, "{name}");
+            let text = err.to_string();
+            assert!(text.contains(name) && text.contains(expect), "{name}: {text}");
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), body, "{name} untouched");
+        }
+    }
+
     #[test]
     fn keys_and_clear_stay_inside_one_bucket() {
         let mut kv = KvBackend::default();
@@ -716,7 +910,7 @@ mod tests {
             (&a, "bx"),
             (&a, "b"),
         ] {
-            kv.set(&p, bucket.key(key), vec![1], QUOTA).unwrap();
+            kv.set(&p, bucket.key(key), vec![1], QUOTA, NOW).unwrap();
         }
         assert_eq!(kv.keys(&p, &ab, "", 10), ["x", "y/1", "y/2"]);
         assert_eq!(kv.keys(&p, &ab, "y/", 1), ["y/1"]);
@@ -729,7 +923,7 @@ mod tests {
         assert_eq!(kv.keys(&p, &a, "", 10), ["b", "bx"]);
         // The cleared bytes are back in the budget: 3 × 64 fits again.
         for i in 0..2 {
-            kv.set(&p, ab.key(&i.to_string()), vec![0; 64], QUOTA)
+            kv.set(&p, ab.key(&i.to_string()), vec![0; 64], QUOTA, NOW)
                 .unwrap();
         }
     }
@@ -742,7 +936,7 @@ mod tests {
         let sub = dir.path().join("sub");
         let path = sub.join("kv.json");
         let mut kv = KvBackend::file_backed(path.clone()).unwrap();
-        kv.set(&local("m"), raw("k"), vec![7], QUOTA).unwrap();
+        kv.set(&local("m"), raw("k"), vec![7], QUOTA, NOW).unwrap();
 
         std::fs::remove_dir_all(&sub).unwrap();
         let err = kv.flush().unwrap_err();

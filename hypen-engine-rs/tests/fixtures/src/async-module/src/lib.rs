@@ -10,6 +10,7 @@
 //   "increment"   -> count += 1, await storage set + read-back, return delta.
 //   "sync"        -> push state to cloud storage via awaited compare-and-set.
 //   "pull"        -> await a cross-module read of "counter", mirror its count.
+//   "modified"    -> await storage `info`: the persisted count's modified-ms.
 //   "spin"        -> infinite loop (host timeout proof).
 //
 // Functions declared `async func` in the WIT get async bindings by default —
@@ -181,6 +182,25 @@ impl Guest for Module {
                     emit: vec![],
                 })
             }
+            "modified" => {
+                // Awaited `info`: when the persisted count was last written,
+                // by the host's clock (`null` if it never was).
+                let bucket = local::Bucket::open(Tier::Persistent, "counter".to_string())
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                let info = bucket
+                    .info("count".to_string())
+                    .await
+                    .map_err(|e| format!("{e:?}"))?;
+                let mut s: serde_json::Value =
+                    serde_json::from_slice(&state).unwrap_or(serde_json::json!({}));
+                s["modified_ms"] = serde_json::json!(info.map(|i| i.modified_ms));
+                Ok(ReducerOutput {
+                    state: Some(serde_json::to_vec(&s).unwrap()),
+                    effects: vec![],
+                    emit: vec![],
+                })
+            }
             "spin" => loop {
                 std::hint::black_box(0);
             },
@@ -212,6 +232,7 @@ impl Guest for Module {
             "pull".into(),
             "tick".into(),
             "fetch".into(),
+            "modified".into(),
             "spin".into(),
         ]
     }

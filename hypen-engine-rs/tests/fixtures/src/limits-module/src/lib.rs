@@ -68,7 +68,8 @@ fn kv_get(scope: &str, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, St
 
 /// The rest of the KV surface, over one bucket. `op` is "keys" (args:
 /// prefix, limit → comma-joined keys), "info" (args: key → "none" or
-/// "size:<n>,version:<v|none>") or "clear" (→ "ok").
+/// "size:<n>,version:<v|none>"), "modified" (args: key → "none" or the
+/// entry's `modified-ms`) or "clear" (→ "ok").
 fn kv_op(scope: &str, namespace: &str, op: &str, args: &[String]) -> Result<String, String> {
     macro_rules! run {
         ($iface:ident) => {{
@@ -84,6 +85,10 @@ fn kv_op(scope: &str, namespace: &str, op: &str, args: &[String]) -> Result<Stri
                         i.size,
                         i.version.map_or("none".to_string(), |v| v.to_string())
                     ),
+                    None => "none".into(),
+                }),
+                ("modified", [key]) => bucket.info(key).map_err(describe).map(|info| match info {
+                    Some(i) => i.modified_ms.to_string(),
                     None => "none".into(),
                 }),
                 ("clear", []) => bucket.clear().map(|()| "ok".to_string()).map_err(describe),
@@ -191,6 +196,15 @@ impl Guest for Module {
                     return Err("kv-info: scope, namespace, key".into());
                 }
                 reply(kv_op(&f[0], &f[1], "info", &f[2..]).unwrap_or_else(|e| e))
+            }
+            // payload: scope ␟ namespace ␟ key. State becomes "none" or the
+            // entry's `modified-ms` in decimal.
+            "kv-modified" => {
+                let f = fields(&action.payload);
+                if f.len() != 3 {
+                    return Err("kv-modified: scope, namespace, key".into());
+                }
+                reply(kv_op(&f[0], &f[1], "modified", &f[2..]).unwrap_or_else(|e| e))
             }
             // payload: scope ␟ namespace. Clears that bucket; state "ok".
             "kv-clear" => {
@@ -314,6 +328,7 @@ impl Guest for Module {
             "kv-get",
             "kv-keys",
             "kv-info",
+            "kv-modified",
             "kv-clear",
             "kv-leak",
             "blob-open",
