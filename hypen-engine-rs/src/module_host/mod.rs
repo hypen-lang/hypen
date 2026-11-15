@@ -31,7 +31,17 @@ use std::fmt;
 // storage on the JS side).
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
 mod kv;
+mod http;
 mod registry;
+pub use http::{
+    base64_encode, is_host_owned_header, HostPattern, HttpDenial, HttpEffect, HttpFailure,
+    HttpFailureKind, HttpGrant, HttpOutcome, HttpRequest, HttpRequestError, HttpRequestId,
+    HttpResponse, HttpScheme, HttpUrl, InvalidHostPattern, InvalidUrl, QueuedHttpRequest,
+    DEFAULT_HTTP_IN_FLIGHT_PER_MODULE, DEFAULT_HTTP_TIMEOUT_MS, MAX_HTTP_BODY_BYTES,
+    MAX_HTTP_HEADERS, MAX_HTTP_HEADER_BYTES, MAX_HTTP_METHOD_BYTES, MAX_HTTP_NAME_BYTES,
+    MAX_HTTP_REDIRECTS, MAX_HTTP_REQUESTS_PER_CALL, MAX_HTTP_RESPONSE_BODY_BYTES,
+    MAX_HTTP_TIMEOUT_MS, MAX_HTTP_URL_BYTES,
+};
 pub use registry::{BundledRegistry, ModuleRegistry, RegistryError};
 
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
@@ -92,17 +102,24 @@ pub enum LogLevel {
 
 /// A side effect a module asked the host to perform.
 ///
-/// HTTP is deliberately *not* on this list: modules use `wasi:http`
-/// directly via their language's idiomatic client (Rust `waki`/`reqwest`,
-/// Go `net/http`, JS `fetch`), and the host supplies a `wasi:http`
-/// implementation through its WASM runtime (`wasmtime-wasi-http` on
-/// native, the platform `fetch`/`URLSession`/`OkHttp` on web/iOS/Android).
-/// See `wit/hypen-module.wit`'s `module-x` world for the rationale.
+/// `Delay`, `Navigate` and `Log` are what a reducer returns in its output
+/// (the WIT `effect` variant). `Http` is never returned by a reducer: the
+/// engine creates it when it admits a request the module queued through
+/// `hypen:http/deferred` ([`ReducerOutput::http_requests`]), so that deferred
+/// requests reach the embedder through the same handler as the other effects
+/// it has to perform.
+///
+/// *Blocking* HTTP is not an effect at all: a module that imports `wasi:http`
+/// calls it directly through its language's client and the host's WASM
+/// runtime performs it inside the call (`wasmtime-wasi-http` natively).
 #[derive(Debug, Clone)]
 pub enum Effect {
     Delay { ms: u32, then: String },
     Navigate(String),
     Log { level: LogLevel, message: String },
+    /// Perform this request, then report how it ended with
+    /// `Engine::complete_http_request(effect.id, outcome)` — exactly once.
+    Http(HttpEffect),
 }
 
 /// A cross-module subscription a reducer requested via
@@ -134,6 +151,11 @@ pub struct ReducerOutput {
     /// `hypen:engine/state.subscribe`. The engine registers these and fires the
     /// `on_change` action when the target's state changes at the watched path.
     pub subscribe_requests: Vec<SubscribeRequest>,
+    /// HTTP requests the reducer queued via `hypen:http/deferred.send`. The
+    /// engine admits each one (grant, allowlist, in-flight cap) and hands it
+    /// to the embedder as [`Effect::Http`]; the completion comes back as the
+    /// request's `then` action.
+    pub http_requests: Vec<QueuedHttpRequest>,
 }
 
 /// A sibling module's state snapshot passed into a module's `dispatch` so its
@@ -161,10 +183,11 @@ pub enum StorageScope {
 /// grant-everything constructor.
 ///
 /// The host enforces this at instantiation: storage scopes outside
-/// `storage` and (without `http`) `wasi:http` are not linked, so a module
-/// importing an ungranted capability fails to instantiate (link-time
-/// capability denial). `reads`/`dispatches` gate cross-module access at call
-/// time.
+/// `storage` and (without `http`) `wasi:http` and `hypen:http/deferred` are
+/// not linked, so a module importing an ungranted capability fails to
+/// instantiate (link-time capability denial). `reads`/`dispatches` gate
+/// cross-module access at call time, and `http_hosts` narrows `http` per
+/// request.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ModuleManifest {
@@ -179,11 +202,22 @@ pub struct ModuleManifest {
     /// Names of sibling modules this module may dispatch actions to.
     /// Omitted = none.
     pub dispatches: Vec<String>,
-    /// Whether `wasi:http` (outbound HTTP egress) is granted. Omitted =
-    /// denied; only an explicit `"http": true` links `wasi:http`. Enforced
-    /// at link time like storage: an ungranted module that imports
-    /// `wasi:http` fails to instantiate.
+    /// Whether outbound HTTP is granted: blocking `wasi:http` and deferred
+    /// `hypen:http/deferred` alike. Omitted = denied; only an explicit
+    /// `"http": true` links them. Enforced at link time like storage: an
+    /// ungranted module that imports either fails to instantiate.
     pub http: bool,
+    /// Hosts the `http` grant is limited to (`"httpHosts"` in JSON): exact
+    /// hosts, `*.domain` wildcards, optionally with `:port` — see
+    /// [`HostPattern`]. Empty/omitted = any host. Has no effect without
+    /// `http: true`. A malformed pattern fails deserialization.
+    ///
+    /// Checked for every deferred request when it is queued and again by the
+    /// engine before the embedder sees it, and by embedders on each redirect
+    /// hop. The native host also applies it to every blocking `wasi:http`
+    /// request.
+    #[serde(rename = "httpHosts", alias = "http_hosts")]
+    pub http_hosts: Vec<HostPattern>,
 }
 
 impl ModuleManifest {
@@ -199,12 +233,23 @@ impl ModuleManifest {
             reads: Vec::new(),
             dispatches: Vec::new(),
             http: true,
+            http_hosts: Vec::new(),
         }
     }
 
-    /// Whether outbound HTTP (`wasi:http`) is granted.
+    /// Whether outbound HTTP (`wasi:http`, `hypen:http/deferred`) is granted.
     pub fn grants_http(&self) -> bool {
         self.http
+    }
+
+    /// What the manifest lets the module reach over HTTP: `http` and
+    /// `http_hosts` as one value.
+    pub fn http_grant(&self) -> HttpGrant {
+        match (self.http, self.http_hosts.is_empty()) {
+            (false, _) => HttpGrant::Denied,
+            (true, true) => HttpGrant::AnyHost,
+            (true, false) => HttpGrant::Hosts(self.http_hosts.clone()),
+        }
     }
 
     pub fn grants_storage(&self, scope: StorageScope) -> bool {
@@ -243,7 +288,8 @@ impl InstanceStatus {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum ManifestGrant {
-    /// [`ModuleManifest::http`]: `wasi:http` (outbound HTTP).
+    /// [`ModuleManifest::http`]: outbound HTTP (`wasi:http`,
+    /// `hypen:http/deferred`).
     Http,
     /// An entry of [`ModuleManifest::storage`]: `hypen:storage/<scope>`.
     Storage(StorageScope),
@@ -255,7 +301,8 @@ pub enum ManifestGrant {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeniedCapability {
     /// The import as the component names it, e.g. `hypen:storage/cloud@0.1.0`
-    /// (for `wasi:http`, the first of its interfaces the component imports).
+    /// or `hypen:http/deferred@0.1.0` (for `wasi:http`, the first of its
+    /// interfaces the component imports).
     pub import: String,
     /// The manifest grant that would allow it.
     pub grant: ManifestGrant,
