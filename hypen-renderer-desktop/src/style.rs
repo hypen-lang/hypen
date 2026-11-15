@@ -3806,6 +3806,22 @@ mod tests {
     }
 
     #[test]
+    fn font_family_readers_accept_every_spelling() {
+        // The invalidation predicates (`is_layout_prop`,
+        // `is_inherited_text_measure_key`) accept `font-family`; the
+        // readers ask for `fontFamily` and reach the kebab and `.0`
+        // spellings through the lookup chain.
+        for key in ["fontFamily", "fontFamily.0", "font-family"] {
+            let node = node_with(&[(key, serde_json::json!("ui-monospace, monospace"))]);
+            assert_eq!(
+                prop_str_at(&node, "fontFamily", vp(1000.0)),
+                Some("ui-monospace, monospace"),
+                "{key}"
+            );
+        }
+    }
+
+    #[test]
     fn prop_f32_reads_kebab_font_size_from_tw() {
         // tw `text-lg` → `font-size: "1.125rem"`. The renderer reads
         // it through the kebab fallback and parse_length resolves rem.

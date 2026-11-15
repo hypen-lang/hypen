@@ -2,6 +2,10 @@
 name = "hypen-renderer-desktop"
 version.workspace = true
 edition.workspace = true
+# The default features' locked dependency graph needs 1.90 (avif-parse
+# 2.1; cosmic-text / wide 1.89; the crate itself uses `slice::as_chunks`,
+# 1.88). The `video` feature's gstreamer 0.25 bindings need 1.92.
+rust-version = "1.90"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -213,6 +217,11 @@ gstreamer-video = { version = "0.25", optional = true }
 # CATransaction commit instead of firing-and-forgetting, so the OS
 # never composites the previous swapchain image stretched to the new
 # window size. wgpu-hal-metal reads this flag but never sets it.
+[target.'cfg(unix)'.dependencies]
+# fork / pipe / poll / waitpid for the AVIF decoder's crash isolation
+# (`src/paint/avif.rs`). Already in the graph through std-adjacent crates.
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.5"
 objc2-foundation = { version = "0.2", features = ["NSString", "NSArray", "NSGeometry"] }

@@ -1410,6 +1410,28 @@ mod tests {
     }
 
     #[test]
+    fn tailwind_family_lists_resolve_to_their_generic() {
+        // `font-sans` / `font-serif` / `font-mono` as tailwind-parse
+        // expands them: the leading `ui-*` keyword decides on every host,
+        // installed fonts or not.
+        let empty = fontdb::Database::new();
+        for db in [&empty, system_font_db()] {
+            assert_eq!(
+                resolve_family_list("ui-serif, Georgia, serif", db),
+                ResolvedFamily::Generic(GenericFamily::Serif)
+            );
+            assert_eq!(
+                resolve_family_list("ui-monospace, monospace", db),
+                ResolvedFamily::Generic(GenericFamily::Monospace)
+            );
+            assert_eq!(
+                resolve_family_list("ui-sans-serif, system-ui, sans-serif", db),
+                ResolvedFamily::Generic(GenericFamily::SansSerif)
+            );
+        }
+    }
+
+    #[test]
     fn family_list_picks_the_first_installed_family() {
         let db = system_font_db();
         let Some(installed) = db.faces().next().map(|f| f.families[0].0.clone()) else {

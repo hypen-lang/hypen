@@ -315,6 +315,6 @@ cd hypen-engine-rs && ./build-wasm.sh && cd ../hypen-web && bun run playground
 
 ## Tooling Requirements
 
-- Rust 1.70+ (2021 edition)
+- Rust 1.90+ (2021 edition) for the desktop renderer (`rust-version` in `hypen-renderer-desktop/Cargo.toml`; 1.92+ with its `video` feature); with the locked dependencies the parser alone needs 1.71+ and the engine 1.82+
 - wasm-pack (for WASM builds)
 - Bun 1.0+ (for TypeScript SDK, CLI, docs)

@@ -2666,6 +2666,7 @@ dependencies = [
  "hypen-server",
  "image",
  "indexmap",
+ "libc",
  "log",
  "mimalloc",
  "nokhwa",

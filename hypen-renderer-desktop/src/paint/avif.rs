@@ -8,6 +8,29 @@
 //!
 //! The decoded YUV planes are converted to straight-alpha RGBA8 here; the
 //! caller premultiplies like every other raster format.
+//!
+//! Support status:
+//! - Still AVIF (major brand `avif`, or another major brand such as
+//!   `mif1` that lists `avif` as compatible): decoded, with alpha.
+//! - Animated AVIF (`avis`): a file that also lists `avif` carries a
+//!   still primary image and that is what is shown (no animation). One
+//!   that is `avis` only has no still image and fails to decode.
+//! - Grid (tiled) primary images: not supported (avif-parse refuses
+//!   them); the source fails to decode.
+//!
+//! A source that fails is logged once by the image worker and cached as
+//! failed, so it is never fetched or decoded again.
+//!
+//! Crash isolation: image bytes come from remote servers, and rav1d
+//! panics on some malformed bitstreams (e.g. an `unwrap` on its error
+//! path). Its entry points are `extern "C"`, so such a panic can't be
+//! caught: it aborts the process. On Unix every decode therefore runs in
+//! a forked child (see [`isolated`]) that hands the pixels back over a
+//! pipe; a child that crashes or exceeds [`DECODE_TIMEOUT`] is killed
+//! and the decode fails, and the image worker carries on. Elsewhere the
+//! decode runs in-process under `catch_unwind`, which only covers panics
+//! outside rav1d. rav1d runs single-threaded (see [`decoder_settings`]),
+//! so nothing is left waiting on a decoder thread that died.
 
 use rav1d::include::dav1d::data::Dav1dData;
 use rav1d::include::dav1d::dav1d::{Dav1dContext, Dav1dSettings};
@@ -45,39 +68,328 @@ const PEAK_BYTES_PER_PIXEL: u64 = 3 * 2 * 2 + 4;
 /// get past it either.
 const MAX_FRAME_PIXELS: u32 = (MAX_DECODE_BYTES / PEAK_BYTES_PER_PIXEL) as u32;
 
-/// Whether `bytes` is an AVIF file: an ISO-BMFF `ftyp` box whose major
-/// or compatible brands include `avif` (still) or `avis` (sequence).
-pub(crate) fn looks_like_avif(bytes: &[u8]) -> bool {
+/// The leading `ftyp` box's major brand and compatible brands, if
+/// `bytes` starts with one.
+fn ftyp_brands(bytes: &[u8]) -> Option<(&[u8; 4], &[[u8; 4]])> {
     if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
-        return false;
+        return None;
     }
     let size = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     let end = size.clamp(16, bytes.len());
     // Major brand at 8..12, minor version at 12..16, compatible brands after.
-    std::iter::once(&bytes[8..12])
-        .chain(
-            bytes[16..end]
-                .as_chunks::<4>()
-                .0
-                .iter()
-                .map(|brand| &brand[..]),
-        )
-        .any(|brand| brand == b"avif" || brand == b"avis")
+    let major = bytes[8..12].try_into().ok()?;
+    Some((major, bytes[16..end].as_chunks::<4>().0))
 }
+
+/// What the `ftyp` brands say an AVIF file holds.
+#[derive(Debug, PartialEq, Eq)]
+enum AvifKind {
+    /// A still image avif-parse reads as-is (major brand `avif`).
+    Still,
+    /// A still image under another major brand (`mif1`, `avis`, ...)
+    /// that lists `avif` as compatible. avif-parse insists on major
+    /// brand `avif`, so it is handed the file with that brand.
+    StillUnderOtherMajorBrand,
+    /// `avis` without `avif`: an image sequence with no still image.
+    SequenceOnly,
+}
+
+fn avif_kind(bytes: &[u8]) -> Option<AvifKind> {
+    let (major, compatible) = ftyp_brands(bytes)?;
+    let has = |brand: &[u8; 4]| major == brand || compatible.contains(brand);
+    if major == b"avif" {
+        Some(AvifKind::Still)
+    } else if has(b"avif") {
+        Some(AvifKind::StillUnderOtherMajorBrand)
+    } else if has(b"avis") {
+        Some(AvifKind::SequenceOnly)
+    } else {
+        None
+    }
+}
+
+/// Whether `bytes` is an AVIF file: an ISO-BMFF `ftyp` box whose major
+/// or compatible brands include `avif` (still) or `avis` (sequence).
+/// Every such file goes to [`decode_rgba8`], which either decodes it or
+/// fails with the reason (see the module docs for what is supported).
+pub(crate) fn looks_like_avif(bytes: &[u8]) -> bool {
+    avif_kind(bytes).is_some()
+}
+
+/// Longest a decode may take before it is abandoned (the forked child
+/// is killed). Generous: a debug build decodes a 4K frame on one thread
+/// in a few seconds.
+const DECODE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
+type Rgba8 = (u32, u32, Vec<u8>);
 
 /// Decode an AVIF file's primary image (and its alpha item, if any) to
 /// straight-alpha RGBA8. Returns `(width, height, pixels)`.
-pub(crate) fn decode_rgba8(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    // Image bytes come from remote servers; a malformed file must fail
-    // its own decode, not take the image worker thread down with it
-    // (avif-parse asserts on some inconsistent box layouts).
+///
+/// A malformed file fails its own decode; it can't take the image
+/// worker (or, through rav1d's non-unwinding entry points, the whole
+/// process) down with it. See the module docs.
+pub(crate) fn decode_rgba8(bytes: &[u8]) -> Result<Rgba8, String> {
+    // Refuse what isn't a decodable still before paying for a fork.
+    avif_kind(bytes).ok_or("not an AVIF file")?;
+    #[cfg(unix)]
+    {
+        isolated::run(|| decode_in_process(bytes), DECODE_TIMEOUT)
+    }
+    #[cfg(not(unix))]
+    {
+        decode_in_process(bytes)
+    }
+}
+
+fn decode_in_process(bytes: &[u8]) -> Result<Rgba8, String> {
+    // avif-parse asserts on some inconsistent box layouts.
     std::panic::catch_unwind(|| decode_unguarded(bytes))
         .unwrap_or_else(|_| Err("malformed AVIF (decoder panicked)".into()))
 }
 
+/// Run a decode in a forked child process.
+///
+/// The child runs only the calling thread's closure (no other thread
+/// of the parent exists there), writes the result to a pipe, and
+/// `_exit`s without running destructors or `atexit` handlers. The
+/// parent reads the result with a deadline. A child that aborts (a
+/// panic in rav1d), dies, or overruns the deadline is reaped (killed
+/// first if needed) and the decode fails with the reason.
+///
+/// The memory budget still holds: the child's peak is the decode's
+/// (see [`MAX_DECODE_BYTES`]); the parent only ever allocates the
+/// RGBA8 result, whose size it checks against the frame limit before
+/// reading it.
+#[cfg(unix)]
+pub(crate) mod isolated {
+    use super::Rgba8;
+    use std::time::{Duration, Instant};
+
+    const TAG_OK: u8 = 0;
+    const TAG_ERR: u8 = 1;
+
+    pub(crate) fn run(
+        decode: impl FnOnce() -> Result<Rgba8, String>,
+        timeout: Duration,
+    ) -> Result<Rgba8, String> {
+        let mut fds = [0; 2];
+        // SAFETY: `fds` is a two-element array, as `pipe` requires.
+        if unsafe { libc::pipe(fds.as_mut_ptr()) } != 0 {
+            return Err(format!("AVIF decode: pipe failed ({})", std::io::Error::last_os_error()));
+        }
+        let (rd, wr) = (fds[0], fds[1]);
+        for fd in fds {
+            // Keep the pipe out of processes other threads spawn meanwhile.
+            // SAFETY: `fd` is an open descriptor we own.
+            unsafe { libc::fcntl(fd, libc::F_SETFD, libc::FD_CLOEXEC) };
+        }
+        // SAFETY: the child only runs `child` below, which ends in
+        // `_exit`; the parent continues normally.
+        match unsafe { libc::fork() } {
+            -1 => {
+                let err = std::io::Error::last_os_error();
+                // SAFETY: both descriptors are open and ours.
+                unsafe {
+                    libc::close(rd);
+                    libc::close(wr);
+                }
+                Err(format!("AVIF decode: fork failed ({err})"))
+            }
+            0 => {
+                // SAFETY: the read end is ours; `child` never returns.
+                unsafe { libc::close(rd) };
+                child(wr, decode)
+            }
+            pid => {
+                // SAFETY: the write end belongs to the child now.
+                unsafe { libc::close(wr) };
+                let result = read_result(rd, Instant::now() + timeout);
+                // SAFETY: `rd` is open and ours.
+                unsafe { libc::close(rd) };
+                let status = reap(pid, result.is_err());
+                result.map_err(|e| match status {
+                    Some(status) if libc::WIFSIGNALED(status) => format!(
+                        "malformed AVIF (decoder crashed: signal {}; {e})",
+                        libc::WTERMSIG(status)
+                    ),
+                    _ => e,
+                })
+            }
+        }
+    }
+
+    fn child(wr: libc::c_int, decode: impl FnOnce() -> Result<Rgba8, String>) -> ! {
+        let mut msg = Vec::new();
+        match decode() {
+            Ok((w, h, pixels)) => {
+                msg.push(TAG_OK);
+                msg.extend_from_slice(&w.to_le_bytes());
+                msg.extend_from_slice(&h.to_le_bytes());
+                // The pixels follow the header in a second write, unbuffered.
+                write_all(wr, &msg);
+                write_all(wr, &pixels);
+            }
+            Err(e) => {
+                msg.push(TAG_ERR);
+                msg.extend_from_slice(e.as_bytes());
+                write_all(wr, &msg);
+            }
+        }
+        // SAFETY: ends the forked child without unwinding into (or
+        // running destructors of) state copied from the parent.
+        unsafe { libc::_exit(0) }
+    }
+
+    fn write_all(fd: libc::c_int, mut buf: &[u8]) {
+        while !buf.is_empty() {
+            // SAFETY: `buf` is a live slice of `buf.len()` bytes.
+            let n = unsafe { libc::write(fd, buf.as_ptr().cast(), buf.len()) };
+            if n < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return;
+            }
+            buf = &buf[n as usize..];
+        }
+    }
+
+    /// Fill `buf` from `fd` by `deadline`; returns the bytes read, short
+    /// only when the child closed the pipe (exited or died) first.
+    fn read_exact(fd: libc::c_int, buf: &mut [u8], deadline: Instant) -> Result<usize, String> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            let left = deadline.saturating_duration_since(Instant::now());
+            if left.is_zero() {
+                return Err("AVIF decode timed out".into());
+            }
+            let mut pfd = libc::pollfd { fd, events: libc::POLLIN, revents: 0 };
+            let ms = left.as_millis().clamp(1, i32::MAX as u128) as libc::c_int;
+            // SAFETY: one live `pollfd`.
+            let ready = unsafe { libc::poll(&mut pfd, 1, ms) };
+            if ready < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(format!("AVIF decode: poll failed ({})", std::io::Error::last_os_error()));
+            }
+            if ready == 0 {
+                continue; // deadline re-checked above
+            }
+            let rest = &mut buf[filled..];
+            // SAFETY: `rest` is a live, writable slice of `rest.len()` bytes.
+            let n = unsafe { libc::read(fd, rest.as_mut_ptr().cast(), rest.len()) };
+            if n < 0 {
+                if std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                    continue;
+                }
+                return Err(format!("AVIF decode: read failed ({})", std::io::Error::last_os_error()));
+            }
+            if n == 0 {
+                break; // EOF
+            }
+            filled += n as usize;
+        }
+        Ok(filled)
+    }
+
+    fn read_result(fd: libc::c_int, deadline: Instant) -> Result<Rgba8, String> {
+        let mut tag = [0u8; 1];
+        if read_exact(fd, &mut tag, deadline)? == 0 {
+            return Err("malformed AVIF (decoder exited without a result)".into());
+        }
+        if tag[0] == TAG_ERR {
+            let mut msg = Vec::new();
+            let mut chunk = [0u8; 256];
+            loop {
+                let n = read_exact(fd, &mut chunk, deadline)?;
+                msg.extend_from_slice(&chunk[..n]);
+                if n < chunk.len() || msg.len() > 4096 {
+                    break;
+                }
+            }
+            return Err(String::from_utf8_lossy(&msg).into_owned());
+        }
+        let mut size = [0u8; 8];
+        if read_exact(fd, &mut size, deadline)? != size.len() {
+            return Err("malformed AVIF (decoder died mid-result)".into());
+        }
+        let w = u32::from_le_bytes(size[..4].try_into().unwrap());
+        let h = u32::from_le_bytes(size[4..].try_into().unwrap());
+        if u64::from(w) * u64::from(h) > u64::from(super::MAX_FRAME_PIXELS) {
+            return Err("AVIF decode returned an oversized frame".into());
+        }
+        let len = w as usize * h as usize * 4;
+        let mut pixels = Vec::new();
+        pixels
+            .try_reserve_exact(len)
+            .map_err(|_| "AVIF too large to decode".to_string())?;
+        pixels.resize(len, 0);
+        if read_exact(fd, &mut pixels, deadline)? != len {
+            return Err("malformed AVIF (decoder died mid-result)".into());
+        }
+        Ok((w, h, pixels))
+    }
+
+    /// Wait for the child (killing it first when `kill` is set or it
+    /// outlives a short grace period) and return its wait status.
+    /// `None` when it can't be reaped (e.g. the host ignores SIGCHLD).
+    fn reap(pid: libc::pid_t, kill: bool) -> Option<libc::c_int> {
+        let mut status = 0;
+        if !kill {
+            // It has written its result and is exiting; give it a moment.
+            let grace = Instant::now() + Duration::from_millis(500);
+            while Instant::now() < grace {
+                // SAFETY: `pid` is our child; `status` is a live int.
+                match unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) } {
+                    0 => std::thread::sleep(Duration::from_millis(1)),
+                    r if r == pid => return Some(status),
+                    _ => return None,
+                }
+            }
+        }
+        // SAFETY: `pid` is our child, not yet reaped.
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        loop {
+            // SAFETY: as above.
+            let r = unsafe { libc::waitpid(pid, &mut status, 0) };
+            if r == pid {
+                return Some(status);
+            }
+            if r < 0 && std::io::Error::last_os_error().kind() == std::io::ErrorKind::Interrupted {
+                continue;
+            }
+            return None;
+        }
+    }
+}
+
+/// Parse the container, steering avif-parse (which requires major brand
+/// `avif`) to the still image of files that declare one under another
+/// major brand.
+fn read_container(bytes: &[u8]) -> Result<avif_parse::AvifData, String> {
+    use std::io::Read;
+    let kind = avif_kind(bytes).ok_or("not an AVIF file")?;
+    let parsed = match kind {
+        AvifKind::Still => avif_parse::read_avif(&mut &bytes[..]),
+        AvifKind::StillUnderOtherMajorBrand => {
+            // Same bytes with the major brand read as `avif`; the box
+            // size and everything after it are untouched.
+            let mut head = [0u8; 12];
+            head[..8].copy_from_slice(&bytes[..8]);
+            head[8..].copy_from_slice(b"avif");
+            avif_parse::read_avif(&mut (&head[..]).chain(&bytes[12..]))
+        }
+        AvifKind::SequenceOnly => {
+            return Err("animated AVIF without a still image (brand 'avis' only) is not supported".into())
+        }
+    };
+    parsed.map_err(|e| format!("AVIF container: {e}"))
+}
+
 fn decode_unguarded(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
-    let avif =
-        avif_parse::read_avif(&mut &bytes[..]).map_err(|e| format!("AVIF container: {e}"))?;
+    let avif = read_container(bytes)?;
     // Size every item from its sequence header before decoding anything.
     let color_meta = avif
         .primary_item_metadata()
@@ -130,24 +442,34 @@ struct Decoder {
     picture: Option<Dav1dPicture>,
 }
 
+/// rav1d settings for one still image.
+///
+/// One thread: rav1d then spawns no worker threads and decodes on the
+/// calling thread, so a panic on a malformed bitstream can't kill a
+/// rav1d worker that the caller then waits on forever (and in the
+/// forked child of [`isolated`], the decode is the only thread). Still
+/// images have one frame, so there is no frame pipelining to lose
+/// either; the cost is tile parallelism, on a thread that is already
+/// off the paint path. Film grain is part of the picture (browsers
+/// synthesise it too).
+fn decoder_settings() -> Dav1dSettings {
+    let mut settings = MaybeUninit::<Dav1dSettings>::uninit();
+    // SAFETY: `dav1d_default_settings` initialises every field of the
+    // struct it is handed.
+    let mut settings = unsafe {
+        dav1d_default_settings(NonNull::from(&mut settings).cast());
+        settings.assume_init()
+    };
+    settings.n_threads = 1;
+    settings.max_frame_delay = 1;
+    settings.apply_grain = 1;
+    settings.frame_size_limit = MAX_FRAME_PIXELS;
+    settings
+}
+
 impl Decoder {
     fn new() -> Result<Self, String> {
-        let mut settings = MaybeUninit::<Dav1dSettings>::uninit();
-        // SAFETY: `dav1d_default_settings` initialises every field of the
-        // struct it is handed.
-        let mut settings = unsafe {
-            dav1d_default_settings(NonNull::from(&mut settings).cast());
-            settings.assume_init()
-        };
-        // Still images: one frame, so no frame pipelining; tiles still
-        // decode in parallel. Film grain is part of the picture (browsers
-        // synthesise it too).
-        settings.n_threads = std::thread::available_parallelism()
-            .map_or(4, |n| n.get())
-            .min(8) as _;
-        settings.max_frame_delay = 1;
-        settings.apply_grain = 1;
-        settings.frame_size_limit = MAX_FRAME_PIXELS;
+        let mut settings = decoder_settings();
         let mut ctx = None;
         // SAFETY: both pointers are to live locals; on success `ctx` holds
         // a context we own and close in `Drop`.
@@ -562,6 +884,151 @@ mod tests {
         let small = swatch_with_item(&sequence_header_obu(96, 96));
         let err = decode_rgba8(&small).unwrap_err();
         assert!(!err.contains("too large"), "{err}");
+    }
+
+    /// The swatch with its `ftyp` replaced by `major` + `compatible`
+    /// brands (same box size, so every offset after it still holds).
+    fn swatch_with_brands(major: &[u8; 4], compatible: [&[u8; 4]; 4]) -> Vec<u8> {
+        let mut file = SWATCH.to_vec();
+        assert_eq!(&file[4..8], b"ftyp");
+        assert_eq!(u32::from_be_bytes(file[..4].try_into().unwrap()), 32, "4 compatible brands");
+        file[8..12].copy_from_slice(major);
+        for (i, brand) in compatible.iter().enumerate() {
+            file[16 + 4 * i..20 + 4 * i].copy_from_slice(*brand);
+        }
+        file
+    }
+
+    #[test]
+    fn sniffing_and_parsing_agree_on_brands() {
+        // `mif1` major brand with `avif` compatible: a still AVIF, sniffed
+        // and decoded.
+        let mif1 = swatch_with_brands(b"mif1", [b"mif1", b"miaf", b"avif", b"MA1B"]);
+        assert_eq!(avif_kind(&mif1), Some(AvifKind::StillUnderOtherMajorBrand));
+        assert!(looks_like_avif(&mif1));
+        assert_eq!(decode_rgba8(&mif1).unwrap(), decode_rgba8(SWATCH).unwrap());
+        // An animated file that also declares `avif` shows its still
+        // primary image.
+        let avis = swatch_with_brands(b"avis", [b"avif", b"avis", b"msf1", b"mif1"]);
+        assert!(looks_like_avif(&avis));
+        assert_eq!(decode_rgba8(&avis).unwrap(), decode_rgba8(SWATCH).unwrap());
+        // `avis` only: routed to the AVIF decoder (not `image`), which
+        // fails with the reason.
+        let seq = swatch_with_brands(b"avis", [b"avis", b"msf1", b"mif1", b"miaf"]);
+        assert_eq!(avif_kind(&seq), Some(AvifKind::SequenceOnly));
+        assert!(looks_like_avif(&seq));
+        let err = decode_rgba8(&seq).unwrap_err();
+        assert!(err.contains("animated AVIF"), "{err}");
+        // `avif` only as a compatible brand of something else entirely
+        // still counts; no AVIF brand anywhere does not.
+        let heic = swatch_with_brands(b"heic", [b"mif1", b"heic", b"miaf", b"MA1B"]);
+        assert_eq!(avif_kind(&heic), None);
+        assert!(!looks_like_avif(&heic));
+    }
+
+    #[test]
+    fn grid_primary_image_fails_with_a_reason() {
+        // The swatch's primary item retyped `grid`: avif-parse doesn't
+        // assemble tiled images, so the decode fails cleanly (and the
+        // worker caches the failure; see `image::resolve_source`).
+        let mut file = SWATCH.to_vec();
+        let at = file.windows(4).position(|w| w == b"av01").expect("infe item_type");
+        file[at..at + 4].copy_from_slice(b"grid");
+        assert!(looks_like_avif(&file));
+        let err = decode_rgba8(&file).unwrap_err();
+        assert!(err.to_ascii_lowercase().contains("grid"), "{err}");
+    }
+
+    #[test]
+    fn decoder_runs_on_the_calling_thread_only() {
+        // No rav1d worker threads: `catch_unwind` sees every panic.
+        let settings = decoder_settings();
+        assert_eq!(settings.n_threads, 1);
+        assert_eq!(settings.max_frame_delay, 1);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn isolated_decode_survives_abort_and_hang() {
+        use std::time::{Duration, Instant};
+        let ok = isolated::run(|| Ok((2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8])), DECODE_TIMEOUT);
+        assert_eq!(ok, Ok((2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8])));
+        let err = isolated::run(|| Err("nope".into()), DECODE_TIMEOUT);
+        assert_eq!(err, Err("nope".to_string()));
+        // What a panic inside rav1d's `extern "C"` entry points does.
+        let err = isolated::run(|| std::process::abort(), DECODE_TIMEOUT).unwrap_err();
+        assert!(err.contains("crashed"), "{err}");
+        // A decoder that never returns is killed at the deadline.
+        let start = Instant::now();
+        let err = isolated::run(
+            || loop {
+                std::thread::sleep(Duration::from_secs(1));
+            },
+            Duration::from_millis(300),
+        )
+        .unwrap_err();
+        assert!(err.contains("timed out"), "{err}");
+        assert!(start.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn malformed_bitstreams_never_stall_the_caller() {
+        // Corrupt the swatch's AV1 payload (bit flips, garbage runs,
+        // truncation) and decode each variant; every one must come back
+        // (decoded or an error), never panic out or hang. Run on a
+        // separate thread with a deadline so a hang fails the test
+        // instead of stalling the suite.
+        let item = {
+            let mdat = SWATCH.windows(4).position(|w| w == b"mdat").unwrap() - 4;
+            SWATCH[mdat + 8..].to_vec()
+        };
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut seed = 0x2545_f491_4f6c_dd1du64;
+            let mut next = move || {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                seed
+            };
+            let mut outcomes = (0usize, 0usize);
+            for round in 0..160 {
+                let mut bad = item.clone();
+                match round % 4 {
+                    0 => {
+                        for _ in 0..1 + round % 8 {
+                            let i = (next() as usize) % bad.len();
+                            bad[i] ^= 1 << (next() % 8);
+                        }
+                    }
+                    1 => {
+                        let start = 2 + (next() as usize) % (bad.len() - 2);
+                        let end = (start + 1 + (next() as usize) % 64).min(bad.len());
+                        for b in &mut bad[start..end] {
+                            *b = next() as u8;
+                        }
+                    }
+                    2 => bad.truncate(1 + (next() as usize) % (bad.len() - 1)),
+                    _ => {
+                        // Keep the sequence header; scramble the frame.
+                        let keep = 16.min(bad.len());
+                        for b in &mut bad[keep..] {
+                            *b = next() as u8;
+                        }
+                    }
+                }
+                match decode_rgba8(&swatch_with_item(&bad)) {
+                    Ok(_) => outcomes.0 += 1,
+                    Err(_) => outcomes.1 += 1,
+                }
+            }
+            let _ = tx.send(outcomes);
+        });
+        let (ok, err) = rx
+            .recv_timeout(std::time::Duration::from_secs(120))
+            .expect("a malformed AVIF stalled the decoder");
+        assert_eq!(ok + err, 160);
+        assert!(err > 0, "corruption is noticed at least sometimes");
     }
 
     #[test]

@@ -33,8 +33,13 @@ rasterised with resvg; their `<text>` uses the renderer's own system font
 index (generic `serif` / `sans-serif` / `monospace` and `font-weight` resolve
 as in the app's text). AVIF decodes through the default `avif` feature —
 pure Rust (`avif-parse` + `rav1d`), no system library; `avif-asm` enables
-rav1d's assembly (needs `nasm`). With `default-features = false` and no
-`avif`, an AVIF source keeps its placeholder or background colour.
+rav1d's assembly (needs `nasm`). Still images decode (major brand `avif`,
+or e.g. `mif1` listing `avif`), with alpha; an animated AVIF that also lists
+`avif` shows its still primary image, unanimated. Grid (tiled) primary
+images and `avis`-only sequences are not supported: the source fails once
+(logged) and keeps its placeholder, like any undecodable image. With
+`default-features = false` and no `avif`, an AVIF source keeps its
+placeholder or background colour.
 
 Text honours `fontFamily` lists the CSS way (`"Georgia, 'Times New Roman',
 serif"`: the first installed family wins; `serif`, `sans-serif`,

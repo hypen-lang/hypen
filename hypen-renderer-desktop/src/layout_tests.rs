@@ -9847,6 +9847,55 @@ fn natural_size_image_still_scales_down_under_max_height() {
     assert!((image.w - 225.0).abs() < 0.5, "keeps 1080:1920 → 225×400, got {image:?}");
 }
 
+/// `keep_authored_size_out_of_ratio_transfer` pins the authored axis's
+/// max to `f32::MAX` (Taffy has no "none" distinct from `auto`, and
+/// `auto` is exactly what invites the transfer). That sentinel can never
+/// be scaled through the ratio: Taffy's `maybe_apply_aspect_ratio` only
+/// fills an axis whose max is unset, and once pinned both are set. So
+/// even ratios whose product with `f32::MAX` overflows to ±inf / NaN
+/// leave every rect finite and the authored axis as authored.
+#[test]
+fn ratio_transfer_sentinel_stays_finite_under_extreme_ratios() {
+    let src = "test://extreme-ratio-1080x1920";
+    seed_tall_story_photo(src);
+    let mut text = TextEngine::new();
+    for ratio in [1e-30f64, 1e-6, 1e-3, 0.75, 1e3, 1e6, 1e30] {
+        for (sizing, authored_w) in [(".width(200).maxHeight(300)", true), (".height(200).maxWidth(300)", false)] {
+            let tree = tree_from_dsl(
+                &format!(
+                    r#"Column {{ Image(src: "{src}").objectFit("cover").aspectRatio("@{{state.r}}"){sizing} }}"#
+                ),
+                json!({ "r": ratio }),
+            );
+            for scale in [1.0f32, 2.0] {
+                let pass = LayoutPass::compute(
+                    &tree,
+                    &mut text,
+                    ((430.0 * scale) as u32, (934.0 * scale) as u32),
+                    scale,
+                );
+                let image = pass.item_by_id(&first_of_type(&tree, "Image")).unwrap().rect;
+                let column = pass.item_by_id(&first_of_type(&tree, "Column")).unwrap().rect;
+                for r in [image, column] {
+                    assert!(
+                        [r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite()),
+                        "ratio {ratio} {sizing} scale {scale}: non-finite rect {r:?}"
+                    );
+                }
+                let (authored, capped) = if authored_w { (image.w, image.h) } else { (image.h, image.w) };
+                assert!(
+                    (authored - 200.0 * scale).abs() < 0.5,
+                    "ratio {ratio} {sizing} scale {scale}: authored axis kept: {image:?}"
+                );
+                assert!(
+                    capped <= 300.0 * scale + 0.5,
+                    "ratio {ratio} {sizing} scale {scale}: the other axis is capped: {image:?}"
+                );
+            }
+        }
+    }
+}
+
 /// DOM Button resets `padding: 0`; Card sets `16px`. Todo's "Add" button
 /// (`Button { Text("Add").padding(10) }`) is the text box plus nothing.
 #[test]
@@ -9926,4 +9975,42 @@ fn font_family_inherits_to_text_items() {
     assert_eq!(family(&kids[0]), crate::text::FontFamily::from_css("Georgia, 'Times New Roman', serif"));
     assert_eq!(family(&kids[1]), crate::text::FontFamily::from_css("ui-monospace, monospace"));
     assert!(is_layout_prop("fontFamily") && is_inherited_text_measure_key("fontFamily.0"));
+}
+
+/// Tailwind `font-sans` / `font-serif` / `font-mono` (expanded by the
+/// engine to `fontFamily.0`, or `fontFamily@md.0` under a breakpoint)
+/// set the family on the Text itself and on its descendants, and every
+/// spelling the invalidation predicates accept is one the readers see.
+#[test]
+fn tailwind_font_family_classes_reach_text() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("Serif").tw("font-serif")
+            Text("Mono").tw("font-mono")
+            Text("Sans").tw("font-sans")
+            Column { Text("Inherited") }.tw("font-mono")
+            Text("Responsive").tw("font-sans md:font-serif")
+        }"#,
+        json!({}),
+    );
+    let serif = crate::text::FontFamily::from_css("ui-serif, Georgia, serif");
+    let mono = crate::text::FontFamily::from_css("ui-monospace, monospace");
+    let sans = crate::text::FontFamily::from_css("ui-sans-serif, system-ui, sans-serif");
+    let mut text = TextEngine::new();
+    for (width, responsive) in [(430u32, &sans), (1000, &serif)] {
+        let pass = LayoutPass::compute(&tree, &mut text, (width, 934), 1.0);
+        let family = |id: &str| match &pass.item_by_id(id).unwrap().kind {
+            ItemKind::Text { font_family, .. } => font_family.clone(),
+            other => panic!("expected Text, got {other:?}"),
+        };
+        let kids = tree.children_of(&first_of_type(&tree, "Column"));
+        assert_eq!(&family(&kids[0]), &serif);
+        assert_eq!(&family(&kids[1]), &mono);
+        assert_eq!(&family(&kids[2]), &sans);
+        assert_eq!(&family(&tree.children_of(&kids[3])[0]), &mono, "inherited from the Column");
+        assert_eq!(&family(&kids[4]), responsive, "md: variant at {width}px");
+    }
+    for key in ["fontFamily", "font-family", "fontFamily.0", "fontFamily@md.0"] {
+        assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
+    }
 }
