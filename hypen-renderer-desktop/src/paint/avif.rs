@@ -24,9 +24,26 @@ use rav1d::src::lib::{
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
-/// Largest frame (in pixels) the decoder accepts: a hostile file can't
-/// make it allocate more than a 16k×16k picture.
-const MAX_FRAME_PIXELS: u32 = 16384 * 16384;
+/// Allocation budget for decoding one AVIF: the ceiling `image`'s
+/// default `Limits::max_alloc` puts on PNG / JPEG / WebP (512 MiB). A
+/// flat AV1 frame of any size encodes to a few KB, so the byte cap on
+/// fetched files says nothing about how much a decode allocates.
+const MAX_DECODE_BYTES: u64 = 512 * 1024 * 1024;
+
+/// Bytes per pixel alive at the decode's peak, for the costliest picture
+/// a stream can produce whatever its header announces: three 16-bit
+/// planes (10/12-bit 4:4:4), a second copy when film grain is applied,
+/// and the RGBA8 output being written (the alpha item is decoded after
+/// the color picture is released, into that same RGBA buffer; the
+/// caller premultiplies it in place).
+const PEAK_BYTES_PER_PIXEL: u64 = 3 * 2 * 2 + 4;
+
+/// Largest frame (in pixels) a decode accepts: 32 Mi px, room for an 8K
+/// UHD (7680×4320) image. Checked against each item's sequence header
+/// before a decoder is opened, and given to rav1d as its frame size
+/// limit so a stream that changes its sequence header mid-item can't
+/// get past it either.
+const MAX_FRAME_PIXELS: u32 = (MAX_DECODE_BYTES / PEAK_BYTES_PER_PIXEL) as u32;
 
 /// Whether `bytes` is an AVIF file: an ISO-BMFF `ftyp` box whose major
 /// or compatible brands include `avif` (still) or `avis` (sequence).
@@ -61,6 +78,17 @@ pub(crate) fn decode_rgba8(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> 
 fn decode_unguarded(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let avif =
         avif_parse::read_avif(&mut &bytes[..]).map_err(|e| format!("AVIF container: {e}"))?;
+    // Size every item from its sequence header before decoding anything.
+    let color_meta = avif
+        .primary_item_metadata()
+        .map_err(|e| format!("AV1 sequence header: {e}"))?;
+    check_frame_budget(&color_meta)?;
+    if let Some(alpha_meta) = avif
+        .alpha_item_metadata()
+        .map_err(|e| format!("AV1 alpha sequence header: {e}"))?
+    {
+        check_frame_budget(&alpha_meta)?;
+    }
     let mut decoder = Decoder::new()?;
     let (w, h, mut rgba) = {
         let color = decoder.decode(&avif.primary_item)?;
@@ -81,6 +109,18 @@ fn decode_unguarded(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
         }
     }
     Ok((w, h, rgba))
+}
+
+/// Refuse an item whose announced frame would take the decode past
+/// [`MAX_DECODE_BYTES`].
+fn check_frame_budget(meta: &avif_parse::AV1Metadata) -> Result<(), String> {
+    let (w, h) = (meta.max_frame_width.get(), meta.max_frame_height.get());
+    if u64::from(w) * u64::from(h) > u64::from(MAX_FRAME_PIXELS) {
+        return Err(format!(
+            "AVIF {w}x{h} is too large to decode (limit {MAX_FRAME_PIXELS} pixels)"
+        ));
+    }
+    Ok(())
 }
 
 /// One rav1d context, closed on drop. Holds the last decoded picture so
@@ -425,6 +465,104 @@ mod tests {
     }
 
     const EXPECTED_MEAN_RGB: (u64, u64, u64) = (16, 30, 44);
+
+    /// A reduced still-picture AV1 sequence header OBU announcing a
+    /// `w`×`h`, 8-bit 4:2:0 frame.
+    fn sequence_header_obu(w: u32, h: u32) -> Vec<u8> {
+        let mut bits = Vec::new();
+        let mut put = |value: u32, n: u32| bits.extend((0..n).rev().map(|i| value >> i & 1));
+        put(0, 3); // seq_profile: 8/10-bit 4:2:0
+        put(1, 1); // still_picture
+        put(1, 1); // reduced_still_picture_header
+        put(31, 5); // seq_level_idx: unconstrained
+        put(15, 4); // frame_width_bits_minus_1
+        put(15, 4); // frame_height_bits_minus_1
+        put(w - 1, 16);
+        put(h - 1, 16);
+        put(0, 3); // 128x128 superblocks, filter intra, intra edge filter
+        put(0, 3); // superres, cdef, loop restoration
+        put(0, 1); // high_bitdepth
+        put(0, 1); // mono_chrome
+        put(0, 1); // color_description_present_flag
+        put(1, 1); // color_range: full
+        put(0, 2); // chroma_sample_position
+        put(0, 1); // separate_uv_delta_q
+        put(0, 1); // film_grain_params_present
+        put(1, 1); // trailing one bit (zero-padded below)
+        let payload: Vec<u8> = bits
+            .chunks(8)
+            .map(|byte| {
+                (0..8).fold(0, |acc, i| {
+                    acc << 1 | byte.get(i).copied().unwrap_or(0) as u8
+                })
+            })
+            .collect();
+        // OBU header: obu_type 1 (sequence header) in bits 6..3,
+        // obu_has_size_field in bit 1.
+        [&[0b0000_1010, payload.len() as u8][..], &payload].concat()
+    }
+
+    /// The swatch with its single item's AV1 payload replaced by `item`.
+    /// The swatch stores that item as the whole of its trailing `mdat`,
+    /// located by a version-0 `iloc` with 4-byte offset and length
+    /// fields, one item and one extent; asserted here so a re-encoded
+    /// fixture fails loudly instead of producing a broken file.
+    fn swatch_with_item(item: &[u8]) -> Vec<u8> {
+        let find = |tag: &[u8]| SWATCH.windows(4).position(|w| w == tag).unwrap() - 4;
+        let be32 = |at: usize| u32::from_be_bytes(SWATCH[at..at + 4].try_into().unwrap()) as usize;
+        let (iloc, mdat) = (find(b"iloc"), find(b"mdat"));
+        assert_eq!(mdat + be32(mdat), SWATCH.len(), "mdat is the last box");
+        let iloc_end = iloc + be32(iloc);
+        assert_eq!(&SWATCH[iloc + 8..iloc + 14], &[0, 0, 0, 0, 0x44, 0x00]);
+        assert_eq!(be32(iloc_end - 8), mdat + 8, "the item is all of mdat");
+        let mut file = SWATCH[..mdat + 8].to_vec();
+        file[iloc_end - 4..iloc_end].copy_from_slice(&(item.len() as u32).to_be_bytes());
+        file[mdat..mdat + 4].copy_from_slice(&(8 + item.len() as u32).to_be_bytes());
+        file.extend_from_slice(item);
+        file
+    }
+
+    #[test]
+    fn frame_budget_matches_the_other_formats_allocation_cap() {
+        // The worst-case peak of the largest accepted frame stays within
+        // `image`'s default allocation limit for PNG / JPEG / WebP.
+        assert!(u64::from(MAX_FRAME_PIXELS) * PEAK_BYTES_PER_PIXEL <= 512 * 1024 * 1024);
+        let meta = |w, h| {
+            avif_parse::AV1Metadata::parse_av1_bitstream(&sequence_header_obu(w, h)).unwrap()
+        };
+        assert!(
+            check_frame_budget(&meta(7680, 4320)).is_ok(),
+            "8K UHD decodes"
+        );
+        assert!(check_frame_budget(&meta(96, 96)).is_ok());
+        assert!(check_frame_budget(&meta(8192, 8192)).is_err());
+        assert!(check_frame_budget(&meta(65536, 2)).is_ok());
+        assert!(check_frame_budget(&meta(65536, 65536)).is_err());
+    }
+
+    #[test]
+    fn oversized_frame_is_refused_before_decoding() {
+        // A 3 KB file (mostly its ICC profile) announcing a 16k x 16k
+        // frame: unchecked, the decode would ask for 1 GiB of RGBA on
+        // top of the YUV planes.
+        let file = swatch_with_item(&sequence_header_obu(16384, 16384));
+        assert!(file.len() < 4096);
+        let meta = avif_parse::read_avif(&mut &file[..])
+            .unwrap()
+            .primary_item_metadata()
+            .unwrap();
+        assert_eq!(
+            (meta.max_frame_width.get(), meta.max_frame_height.get()),
+            (16384, 16384)
+        );
+        let err = decode_rgba8(&file).unwrap_err();
+        assert!(err.contains("too large"), "{err}");
+        // The same container with an in-budget header gets past the
+        // check (and then fails only for want of a frame).
+        let small = swatch_with_item(&sequence_header_obu(96, 96));
+        let err = decode_rgba8(&small).unwrap_err();
+        assert!(!err.contains("too large"), "{err}");
+    }
 
     #[test]
     fn truncated_files_fail_instead_of_panicking() {
