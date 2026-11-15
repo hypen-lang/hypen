@@ -702,4 +702,66 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn keys_and_clear_stay_inside_one_bucket() {
+        let mut kv = KvBackend::default();
+        let p = local("m");
+        let ab = BucketPrefix::new("persistent", "ab");
+        let a = BucketPrefix::new("persistent", "a");
+        for (bucket, key) in [
+            (&ab, "x"),
+            (&ab, "y/1"),
+            (&ab, "y/2"),
+            (&a, "bx"),
+            (&a, "b"),
+        ] {
+            kv.set(&p, bucket.key(key), vec![1], QUOTA).unwrap();
+        }
+        assert_eq!(kv.keys(&p, &ab, "", 10), ["x", "y/1", "y/2"]);
+        assert_eq!(kv.keys(&p, &ab, "y/", 1), ["y/1"]);
+        // Namespace "a" + key "bx" does not leak into namespace "ab".
+        assert_eq!(kv.keys(&p, &a, "", 10), ["b", "bx"]);
+        assert_eq!(kv.keys(&local("other"), &ab, "", 10), Vec::<String>::new());
+
+        assert_eq!(kv.clear(&p, &ab), 3);
+        assert_eq!(kv.clear(&p, &ab), 0);
+        assert_eq!(kv.keys(&p, &a, "", 10), ["b", "bx"]);
+        // The cleared bytes are back in the budget: 3 × 64 fits again.
+        for i in 0..2 {
+            kv.set(&p, ab.key(&i.to_string()), vec![0; 64], QUOTA)
+                .unwrap();
+        }
+    }
+
+    /// A flush that cannot write reports the file, keeps the data in memory
+    /// and dirty, and succeeds once the path is writable again.
+    #[test]
+    fn a_failed_flush_names_the_file_and_is_retried() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("sub");
+        let path = sub.join("kv.json");
+        let mut kv = KvBackend::file_backed(path.clone()).unwrap();
+        kv.set(&local("m"), raw("k"), vec![7], QUOTA).unwrap();
+
+        std::fs::remove_dir_all(&sub).unwrap();
+        let err = kv.flush().unwrap_err();
+        assert!(err.to_string().contains("kv.json"), "{err}");
+        assert_eq!(kv.get(&local("m"), &raw("k")).unwrap().value, vec![7]);
+        assert!(kv.flush().is_err(), "still dirty: the flush is retried");
+
+        std::fs::create_dir_all(&sub).unwrap();
+        kv.flush().unwrap();
+        let reloaded = KvBackend::file_backed(path).unwrap();
+        assert_eq!(reloaded.get(&local("m"), &raw("k")).unwrap().value, vec![7]);
+    }
+
+    #[test]
+    fn a_shared_partition_with_an_owner_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("kv.json");
+        let body = r#"{"format":2,"partitions":[{"scope":"app","owner":"m","entries":{}}]}"#;
+        std::fs::write(&path, body).unwrap();
+        assert!(KvBackend::file_backed(path).is_err());
+    }
 }

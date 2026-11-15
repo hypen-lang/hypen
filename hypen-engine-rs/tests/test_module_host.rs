@@ -1225,3 +1225,612 @@ fn dual_host_shares_storage_across_abis() {
     assert!(text.contains(r#""owner":"acounter""#), "{text}");
     assert!(text.contains(r#""scope":"app""#), "{text}");
 }
+
+// ── bad paths: registration ─────────────────────────────────────────────────
+
+const ASYNC_COUNTER_V02: &[u8] = include_bytes!("fixtures/async_counter_module.wasm");
+
+fn register_error(bytes: &[u8]) -> String {
+    let mut host = WasmtimeHost::new().unwrap();
+    let err = host
+        .register("m", bytes, ModuleManifest::all("m"))
+        .unwrap_err();
+    assert!(matches!(err, HostError::Instantiate(_)), "{err}");
+    // Nothing was registered under the name.
+    assert!(matches!(
+        host.instantiate("m"),
+        Err(HostError::UnknownModule(_))
+    ));
+    format!("{err}")
+}
+
+/// `register` says *what* is wrong with bytes it refuses, and names the
+/// module: not wasm at all, a core module, a truncated binary, a component
+/// of some other world, a component for the other ABI version.
+#[test]
+fn register_says_why_bytes_are_not_a_module() {
+    for garbage in [&b""[..], b"\0as", b"hello, not wasm", b"{\"json\": true}"] {
+        let msg = register_error(garbage);
+        assert!(
+            msg.contains("module 'm'") && msg.contains("not a WebAssembly binary"),
+            "{msg}"
+        );
+    }
+
+    // `(module)`: the 8-byte core-module header.
+    let msg = register_error(b"\0asm\x01\0\0\0");
+    assert!(
+        msg.contains("core WebAssembly module, not a component"),
+        "{msg}"
+    );
+
+    // A component header followed by garbage / a real component cut short.
+    let msg = register_error(b"\0asm\x0d\0\x01\0\xff\xff\xff\xff");
+    assert!(msg.contains("not a valid WebAssembly component"), "{msg}");
+    let msg = register_error(&COUNTER[..COUNTER.len() / 2]);
+    assert!(msg.contains("not a valid WebAssembly component"), "{msg}");
+
+    // `(component)`: valid, but exports nothing of the world.
+    let msg = register_error(b"\0asm\x0d\0\x01\0");
+    assert!(
+        msg.contains("does not export the hypen:module@0.1.0 world"),
+        "{msg}"
+    );
+
+    // A v0.2 component on the v0.1 host.
+    let msg = register_error(ASYNC_COUNTER_V02);
+    assert!(
+        msg.contains("@0.2.0") && msg.contains("this host serves hypen:module@0.1.0"),
+        "{msg}"
+    );
+}
+
+#[test]
+fn instantiating_an_unregistered_name_is_unknown_module() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let err = host.instantiate("ghost").unwrap_err();
+    assert!(
+        matches!(&err, HostError::UnknownModule(name) if name == "ghost"),
+        "{err}"
+    );
+}
+
+/// A capability denial names every ungranted import and the manifest grant
+/// that would allow it.
+#[test]
+fn capability_denial_names_the_import_and_the_grant() {
+    let mut host = WasmtimeHost::new().unwrap();
+    host.register("cart", COUNTER, ModuleManifest::default())
+        .unwrap();
+    let msg = format!("{}", host.instantiate("cart").unwrap_err());
+    assert_eq!(
+        msg,
+        "instantiation failed: module 'cart' imports hypen:storage/cloud@0.1.0 but its \
+         manifest does not grant storage scope `cloud`"
+    );
+
+    const FETCHER: &[u8] = include_bytes!("fixtures/fetcher_module.wasm");
+    host.register("net", FETCHER, ModuleManifest::default())
+        .unwrap();
+    let msg = format!("{}", host.instantiate("net").unwrap_err());
+    assert!(msg.contains("module 'net' imports wasi:http/"), "{msg}");
+    assert!(
+        msg.contains("but its manifest does not grant `http`"),
+        "{msg}"
+    );
+}
+
+/// Re-registering a name (hot reload) affects later `instantiate` calls
+/// only: a live instance keeps the code *and* the manifest it was created
+/// with. A failed re-registration leaves the previous one in place.
+#[test]
+fn reregistering_does_not_change_live_instances() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let granted = ModuleManifest {
+        dispatches: vec!["peer".into()],
+        ..ModuleManifest::all("m")
+    };
+    let old = probe_instance(&mut host, "m", granted);
+    assert_eq!(
+        probe_call(&mut host, old, "flood-dispatch", &["peer", "1", "1"]),
+        "1/1"
+    );
+
+    // Same name, different code, and a manifest without the `peer` grant.
+    host.register("m", COUNTER, ModuleManifest::all("m"))
+        .unwrap();
+    let new = host.instantiate("m").unwrap();
+    assert_eq!(host.actions(new).unwrap(), ["increment", "sync"]);
+
+    // The old instance still runs the old code under the old grants.
+    assert!(host
+        .actions(old)
+        .unwrap()
+        .contains(&"flood-dispatch".to_string()));
+    assert_eq!(
+        probe_call(&mut host, old, "flood-dispatch", &["peer", "1", "1"]),
+        "1/1"
+    );
+
+    // A rejected re-registration changes nothing.
+    assert!(host
+        .register("m", b"junk", ModuleManifest::all("m"))
+        .is_err());
+    let again = host.instantiate("m").unwrap();
+    assert_eq!(host.actions(again).unwrap(), ["increment", "sync"]);
+}
+
+/// `DualHost`: a name re-registered under the other ABI resolves to the new
+/// module only; the instance created from the old registration keeps
+/// running until destroyed.
+#[test]
+fn dual_host_reregistering_under_the_other_abi_replaces_the_name() {
+    use hypen_engine::module_host::DualHost;
+    let mut host = DualHost::new().unwrap();
+    host.register("m", COUNTER, ModuleManifest::all("m"))
+        .unwrap();
+    let v1 = host.instantiate("m").unwrap();
+    let state = host.init(v1, b"{}").unwrap();
+
+    host.register("m", ASYNC_COUNTER_V02, ModuleManifest::all("m"))
+        .unwrap();
+    let v2 = host.instantiate("m").unwrap();
+    assert!(
+        host.actions(v2).unwrap().contains(&"spin".to_string()),
+        "the v0.2 module"
+    );
+    // The v0.1 host no longer knows the name…
+    assert!(matches!(
+        host.hosts_mut().0.instantiate("m"),
+        Err(HostError::UnknownModule(_))
+    ));
+    // …but its live instance is unaffected.
+    let out = host
+        .dispatch(v1, &state, HostAction::new("increment", Vec::new()), &[])
+        .unwrap();
+    assert_eq!(count(&out.state.unwrap()), 1);
+
+    // A failed registration keeps the current one.
+    assert!(host
+        .register("m", b"junk", ModuleManifest::all("m"))
+        .is_err());
+    host.instantiate("m").unwrap();
+}
+
+// ── bad paths: instance ids ─────────────────────────────────────────────────
+
+fn assert_dead(host: &mut dyn ModuleHost, id: ModuleInstanceId) {
+    let action = || HostAction::new("noop", Vec::new());
+    assert!(matches!(host.init(id, b"{}"), Err(HostError::DeadInstance)));
+    assert!(matches!(
+        host.dispatch(id, b"{}", action(), &[]),
+        Err(HostError::DeadInstance)
+    ));
+    assert!(matches!(
+        host.on_activated(id, b"{}", &[]),
+        Err(HostError::DeadInstance)
+    ));
+    assert!(matches!(
+        host.on_deactivated(id, b"{}"),
+        Err(HostError::DeadInstance)
+    ));
+    assert!(matches!(
+        host.on_destroyed(id, b"{}"),
+        Err(HostError::DeadInstance)
+    ));
+    assert!(matches!(host.actions(id), Err(HostError::DeadInstance)));
+}
+
+/// Every method answers `DeadInstance` for an id that was destroyed, never
+/// issued, or issued by another host — an id never addresses someone else's
+/// instance.
+#[test]
+fn destroyed_unknown_and_foreign_ids_are_dead() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let id = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    let survivor = host.instantiate("m").unwrap();
+    host.destroy(id).unwrap();
+    assert_dead(&mut host, id);
+    assert!(matches!(host.destroy(id), Err(HostError::DeadInstance)));
+    assert_eq!(host.death_reason(id), None, "destroyed, not killed");
+
+    for bogus in [0, 1, u64::MAX, id.0 ^ (1 << 63), 1 << 63] {
+        let bogus = ModuleInstanceId(bogus);
+        assert_dead(&mut host, bogus);
+        assert!(matches!(host.destroy(bogus), Err(HostError::DeadInstance)));
+    }
+
+    // Another host's live id is not valid here, and vice versa.
+    let mut other = WasmtimeHost::new().unwrap();
+    let foreign = probe_instance(&mut other, "m", ModuleManifest::all("m"));
+    assert_dead(&mut host, foreign);
+    assert!(matches!(
+        host.destroy(foreign),
+        Err(HostError::DeadInstance)
+    ));
+    assert_dead(&mut other, survivor);
+    // Both are still alive where they belong.
+    host.actions(survivor).unwrap();
+    other.actions(foreign).unwrap();
+}
+
+/// `DualHost` routes an id to the host that issued it; ids of one ABI's
+/// host are not valid for the other.
+#[test]
+fn dual_host_ids_only_reach_their_own_host() {
+    use hypen_engine::module_host::DualHost;
+    let mut host = DualHost::new().unwrap();
+    let v1 = probe_instance(&mut host, "probe", ModuleManifest::all("probe"));
+    host.register("a", ASYNC_COUNTER_V02, ModuleManifest::all("a"))
+        .unwrap();
+    let v2 = host.instantiate("a").unwrap();
+    assert_ne!(v1, v2);
+    for flipped in [
+        ModuleInstanceId(v1.0 ^ (1 << 63)),
+        ModuleInstanceId(v2.0 ^ (1 << 63)),
+    ] {
+        assert_dead(&mut host, flipped);
+    }
+    host.destroy(v2).unwrap();
+    assert_dead(&mut host, v2);
+    host.actions(v1).unwrap();
+}
+
+// ── bad paths: what a failed call reports ───────────────────────────────────
+
+/// Each way a call can fail says which module and export it was and what
+/// happened — and the instance remembers what killed it.
+#[test]
+fn failures_name_the_module_the_export_and_the_cause() {
+    let mut host = WasmtimeHost::with_limits(ModuleLimits {
+        max_call: Duration::from_millis(300),
+        max_memory_bytes: 32 * 1024 * 1024,
+        ..ModuleLimits::default()
+    })
+    .unwrap();
+    host.register("m", LIMITS, ModuleManifest::all("m"))
+        .unwrap();
+    let mut kill = |action: &str| {
+        let id = host.instantiate("m").unwrap();
+        assert_eq!(host.death_reason(id), None);
+        let err = host
+            .dispatch(id, b"{}", HostAction::new(action, Vec::new()), &[])
+            .unwrap_err();
+        assert!(matches!(err, HostError::Trap(_)), "{action}: {err}");
+        let reason = host
+            .death_reason(id)
+            .expect("killed instances remember why");
+        assert_eq!(format!("{err}"), format!("module trapped: {reason}"));
+        assert!(matches!(host.actions(id), Err(HostError::DeadInstance)));
+        reason
+    };
+
+    assert_eq!(
+        kill("trap"),
+        "module 'm' export `dispatch` trapped: wasm `unreachable` instruction executed"
+    );
+    assert_eq!(
+        kill("hang"),
+        "module 'm' export `dispatch` exceeded its 300 ms CPU budget: guest code was still \
+         running at the deadline"
+    );
+    assert_eq!(
+        kill("block"),
+        "module 'm' export `dispatch` exceeded its 300 ms wall-clock budget while blocked in a \
+         host call"
+    );
+    let oom = kill("oom");
+    assert!(
+        oom.starts_with("module 'm' export `dispatch` hit its 33554432-byte memory limit"),
+        "{oom}"
+    );
+
+    // Other exports are named too.
+    let id = host.instantiate("m").unwrap();
+    let err = host.init(id, b"block").unwrap_err();
+    assert!(
+        format!("{err}").contains("module 'm' export `init` exceeded"),
+        "{err}"
+    );
+
+    // A module-level error is not a death.
+    let id = host.instantiate("m").unwrap();
+    let err = host
+        .dispatch(id, b"{}", HostAction::new("nope", Vec::new()), &[])
+        .unwrap_err();
+    assert_eq!(
+        format!("{err}"),
+        "module returned error: module 'm' export `dispatch`: unknown action: nope"
+    );
+    assert_eq!(host.death_reason(id), None);
+    host.actions(id).unwrap();
+}
+
+/// The host never parses module state: bytes that are not UTF-8 (let alone
+/// JSON) pass through in both directions untouched.
+#[test]
+fn state_bytes_pass_through_unparsed() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let id = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    let out = host
+        .dispatch(id, b"{}", HostAction::new("raw-state", Vec::new()), &[])
+        .unwrap();
+    assert_eq!(out.state.as_deref(), Some(&[0xff, 0x00, 0xfe, b'{'][..]));
+
+    // `noop` echoes the state it was given; so do the lifecycle hooks accept it.
+    let weird = [0u8, 0xff, 0xc0, 0x80, b'"'];
+    let out = host
+        .dispatch(id, &weird, HostAction::new("noop", vec![0xff]), &[])
+        .unwrap();
+    assert_eq!(out.state.as_deref(), Some(&weird[..]));
+    host.on_activated(id, &weird, &[("peer".into(), vec![0xff])])
+        .unwrap();
+    host.on_deactivated(id, &weird).unwrap();
+    host.on_destroyed(id, &weird).unwrap();
+    // A non-UTF-8 action name can't exist (`String`), and an empty one is
+    // just an unknown action.
+    let err = host
+        .dispatch(id, b"", HostAction::new("", Vec::new()), &[])
+        .unwrap_err();
+    assert!(matches!(err, HostError::ModuleError(_)), "{err}");
+}
+
+/// Dropping a host right after a call was cancelled in a host call — and
+/// with other instances still live — returns promptly.
+#[test]
+fn dropping_a_host_after_a_cancelled_call_does_not_hang() {
+    let mut host = deadline_host(Duration::from_millis(200));
+    host.register("m", LIMITS, ModuleManifest::all("m"))
+        .unwrap();
+    let blocked = host.instantiate("m").unwrap();
+    let _live = host.instantiate("m").unwrap();
+    assert!(host
+        .dispatch(blocked, b"{}", HostAction::new("block", Vec::new()), &[])
+        .is_err());
+    let started = Instant::now();
+    drop(host);
+    assert!(
+        started.elapsed() < DEADLINE_SLACK,
+        "drop took {:?}",
+        started.elapsed()
+    );
+}
+
+// ── bad paths: storage ──────────────────────────────────────────────────────
+
+/// `keys`, `info` and `clear` work over the real backend (they used to be
+/// stubs in the v0.1 host: `clear` reported success without clearing).
+#[test]
+fn bucket_keys_info_and_clear_are_real() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let a = probe_instance(&mut host, "a", ModuleManifest::all("a"));
+    let b = probe_instance(&mut host, "b", ModuleManifest::all("b"));
+    for key in ["user/2", "user/1", "theme"] {
+        assert_eq!(
+            probe_call(&mut host, a, "kv-set", &["local", "prefs", key, "v"]),
+            "ok"
+        );
+    }
+    assert_eq!(
+        probe_call(&mut host, a, "kv-set", &["local", "other", "user/9", "v"]),
+        "ok"
+    );
+    assert_eq!(
+        probe_call(&mut host, b, "kv-set", &["local", "prefs", "user/7", "v"]),
+        "ok"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-set", &["app", "prefs", "shared", "value"]),
+        "ok"
+    );
+
+    assert_eq!(
+        probe_call(&mut host, a, "kv-keys", &["local", "prefs", "", "10"]),
+        "theme,user/1,user/2"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-keys", &["local", "prefs", "user/", "10"]),
+        "user/1,user/2"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-keys", &["local", "prefs", "user/", "1"]),
+        "user/1"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-keys", &["local", "prefs", "nope", "10"]),
+        ""
+    );
+    assert_eq!(
+        probe_call(&mut host, b, "kv-keys", &["local", "prefs", "", "10"]),
+        "user/7"
+    );
+    assert_eq!(
+        probe_call(&mut host, b, "kv-keys", &["app", "prefs", "", "10"]),
+        "shared"
+    );
+
+    assert_eq!(
+        probe_call(&mut host, a, "kv-info", &["local", "prefs", "theme"]),
+        "size:1,version:none"
+    );
+    assert_eq!(
+        probe_call(&mut host, b, "kv-info", &["app", "prefs", "shared"]),
+        "size:5,version:none"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-info", &["local", "prefs", "missing"]),
+        "none"
+    );
+
+    // `clear` empties exactly that bucket.
+    assert_eq!(
+        probe_call(&mut host, a, "kv-clear", &["local", "prefs"]),
+        "ok"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-keys", &["local", "prefs", "", "10"]),
+        ""
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-get", &["local", "prefs", "theme"]),
+        "none"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-keys", &["local", "other", "", "10"]),
+        "user/9"
+    );
+    assert_eq!(
+        probe_call(&mut host, b, "kv-keys", &["local", "prefs", "", "10"]),
+        "user/7"
+    );
+    assert_eq!(
+        probe_call(&mut host, a, "kv-get", &["app", "prefs", "shared"]),
+        "some:value"
+    );
+}
+
+/// Clearing frees the bucket's quota.
+#[test]
+fn clear_frees_quota() {
+    let mut host = WasmtimeHost::with_limits(ModuleLimits {
+        max_storage_bytes: 300,
+        ..ModuleLimits::default()
+    })
+    .unwrap();
+    let id = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    assert_eq!(
+        probe_call(&mut host, id, "kv-fill", &["local", "ns", "a", "200"]),
+        "ok"
+    );
+    let refused = probe_call(&mut host, id, "kv-fill", &["local", "ns", "b", "200"]);
+    assert!(refused.starts_with("quota-exceeded:"), "{refused}");
+    assert_eq!(
+        probe_call(&mut host, id, "kv-clear", &["local", "ns"]),
+        "ok"
+    );
+    assert_eq!(
+        probe_call(&mut host, id, "kv-fill", &["local", "ns", "b", "200"]),
+        "ok"
+    );
+}
+
+/// Blob storage is not implemented and says so, instead of posing as an
+/// empty store.
+#[test]
+fn blob_storage_reports_unavailable() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let id = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    let reply = probe_call(&mut host, id, "blob-open", &[]);
+    assert!(
+        reply.contains("Unavailable") && reply.contains("not implemented"),
+        "{reply}"
+    );
+}
+
+/// A guest that opens bucket handles in a loop and never drops them is cut
+/// off at a fixed number (each handle pins host memory); the bound is per
+/// instance, and the instance itself keeps working.
+#[test]
+fn open_bucket_handles_are_bounded() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let id = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    let reply = probe_call(&mut host, id, "kv-leak", &["1000"]);
+    assert!(reply.starts_with("256/1000 "), "{reply}");
+    assert!(reply.contains("too many open buckets"), "{reply}");
+    // The leaked handles stay with the instance: it is now at its limit…
+    let reply = probe_call(&mut host, id, "kv-set", &["local", "ns", "k", "v"]);
+    assert!(reply.contains("too many open buckets"), "{reply}");
+    // …while a fresh instance of the same module is not.
+    let fresh = host.instantiate("m").unwrap();
+    assert_eq!(
+        probe_call(&mut host, fresh, "kv-set", &["local", "ns", "k", "v"]),
+        "ok"
+    );
+
+    // An absurd namespace is refused rather than pinned host-side.
+    let huge = "n".repeat(64 * 1024);
+    let reply = probe_call(&mut host, fresh, "kv-set", &["local", &huge, "k", "v"]);
+    assert!(
+        reply.contains("namespace") && reply.contains("limit"),
+        "{reply}"
+    );
+}
+
+/// If the snapshot can't be written when a call ends, the call's result is
+/// still returned and storage keeps serving from memory; the failure names
+/// the file, is observable through `flush_storage`, and the next flush
+/// retries once the path is writable again.
+#[test]
+fn a_failed_storage_flush_does_not_lose_the_call_result() {
+    let dir = tempfile::tempdir().unwrap();
+    let sub = dir.path().join("data");
+    let file = sub.join("kv.json");
+    let mut host = WasmtimeHost::new().unwrap();
+    host.set_storage_path(&file).unwrap();
+    let id = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    host.flush_storage().unwrap();
+
+    // Break the path: the directory becomes a plain file.
+    std::fs::remove_dir_all(&sub).unwrap();
+    std::fs::write(&sub, b"in the way").unwrap();
+
+    assert_eq!(
+        probe_call(&mut host, id, "kv-set", &["local", "ns", "k", "kept"]),
+        "ok"
+    );
+    assert_eq!(
+        probe_call(&mut host, id, "kv-get", &["local", "ns", "k"]),
+        "some:kept"
+    );
+    let err = host.flush_storage().unwrap_err();
+    assert!(matches!(err, HostError::Runtime(_)), "{err}");
+    assert!(
+        format!("{err}").contains("kv.json"),
+        "names the file: {err}"
+    );
+
+    // Repair it: the pending write lands.
+    std::fs::remove_file(&sub).unwrap();
+    std::fs::create_dir_all(&sub).unwrap();
+    host.flush_storage().unwrap();
+    assert!(
+        std::fs::read_to_string(&file).unwrap().contains("a2VwdA=="),
+        "\"kept\" persisted"
+    );
+}
+
+/// A storage file that is corrupt, or that a different format wrote, stops
+/// the host from starting on it — with the path in the error and the file
+/// left as it was.
+#[test]
+fn a_corrupt_storage_file_is_an_error_at_startup() {
+    use hypen_engine::module_host::DualHost;
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("storage.json");
+    for body in [
+        "",
+        "not json",
+        "{\"format\":2,\"partitions\":7}",
+        "{\"format\":99,\"partitions\":[]}",
+    ] {
+        std::fs::write(&file, body).unwrap();
+        let err = match DualHost::with_options(
+            Default::default(),
+            Default::default(),
+            Some(dir.path()),
+        ) {
+            Ok(_) => panic!("started on a corrupt storage file: {body:?}"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, HostError::Runtime(_)), "{err}");
+        assert!(format!("{err}").contains("storage.json"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(&file).unwrap(),
+            body,
+            "left untouched"
+        );
+
+        let mut host = WasmtimeHost::new().unwrap();
+        assert!(host.set_storage_path(&file).is_err(), "{body:?}");
+    }
+}

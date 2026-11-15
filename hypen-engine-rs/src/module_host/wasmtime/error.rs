@@ -81,13 +81,21 @@ impl Fault {
         limiter: &mut TotalMemoryLimiter,
     ) -> Self {
         let denied = limiter.take_denied();
+        // `Trap` displays as "wasm trap: <what>"; the messages built here
+        // already say "trapped".
+        let describe = |trap: &Trap| {
+            let text = trap.to_string();
+            text.strip_prefix("wasm trap: ")
+                .map(str::to_string)
+                .unwrap_or(text)
+        };
         match error.downcast_ref::<Trap>() {
             Some(Trap::Interrupt) => Fault::CpuTimeout(budget),
             Some(trap) if denied => Fault::MemoryLimit {
                 budget_bytes: limiter.budget(),
-                trap: trap.to_string(),
+                trap: describe(trap),
             },
-            Some(trap) => Fault::GuestTrap(trap.to_string()),
+            Some(trap) => Fault::GuestTrap(describe(trap)),
             // `{:#}` joins the context chain; a host-import failure has no
             // wasm backtrace worth more than its causes.
             None => Fault::HostCall(format!("{error:#}")),

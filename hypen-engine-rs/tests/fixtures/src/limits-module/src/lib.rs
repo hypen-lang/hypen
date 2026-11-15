@@ -1,7 +1,8 @@
 // A deliberately misbehaving Hypen module, used to verify the host's sandbox:
 // the per-call deadline (guest CPU *and* time blocked in host calls), the
-// memory cap, storage isolation + quotas, and the cross-module request
-// bounds. Never ship anything like this.
+// memory cap, storage isolation + quotas + handle bounds, the cross-module
+// request bounds, and how traps / odd return values surface. Never ship
+// anything like this.
 //
 // Probe actions take a payload of fields separated by the ASCII unit
 // separator (0x1F) so tests can pass arbitrary namespaces / keys verbatim.
@@ -61,6 +62,38 @@ fn kv_get(scope: &str, namespace: &str, key: &str) -> Result<Option<Vec<u8>>, St
         "app" => app::Bucket::open(Tier::Persistent, namespace)
             .and_then(|b| b.get(key))
             .map_err(describe),
+        other => Err(format!("unknown scope: {other}")),
+    }
+}
+
+/// The rest of the KV surface, over one bucket. `op` is "keys" (args:
+/// prefix, limit → comma-joined keys), "info" (args: key → "none" or
+/// "size:<n>,version:<v|none>") or "clear" (→ "ok").
+fn kv_op(scope: &str, namespace: &str, op: &str, args: &[String]) -> Result<String, String> {
+    macro_rules! run {
+        ($iface:ident) => {{
+            let bucket = $iface::Bucket::open(Tier::Persistent, namespace).map_err(describe)?;
+            match (op, args) {
+                ("keys", [prefix, limit]) => {
+                    let limit: u32 = limit.parse().map_err(|e| format!("limit: {e}"))?;
+                    bucket.keys(prefix, limit).map(|keys| keys.join(",")).map_err(describe)
+                }
+                ("info", [key]) => bucket.info(key).map_err(describe).map(|info| match info {
+                    Some(i) => format!(
+                        "size:{},version:{}",
+                        i.size,
+                        i.version.map_or("none".to_string(), |v| v.to_string())
+                    ),
+                    None => "none".into(),
+                }),
+                ("clear", []) => bucket.clear().map(|()| "ok".to_string()).map_err(describe),
+                _ => Err(format!("kv-{op}: bad arguments")),
+            }
+        }};
+    }
+    match scope {
+        "local" => run!(local),
+        "app" => run!(app),
         other => Err(format!("unknown scope: {other}")),
     }
 }
@@ -141,6 +174,70 @@ impl Guest for Module {
                     None => "none".into(),
                 })
             }
+            // payload: scope ␟ namespace ␟ prefix ␟ limit. State becomes the
+            // matching keys, comma-joined.
+            "kv-keys" => {
+                let f = fields(&action.payload);
+                if f.len() != 4 {
+                    return Err("kv-keys: scope, namespace, prefix, limit".into());
+                }
+                reply(kv_op(&f[0], &f[1], "keys", &f[2..]).unwrap_or_else(|e| e))
+            }
+            // payload: scope ␟ namespace ␟ key. State becomes "none" or
+            // "size:<n>,version:<v|none>".
+            "kv-info" => {
+                let f = fields(&action.payload);
+                if f.len() != 3 {
+                    return Err("kv-info: scope, namespace, key".into());
+                }
+                reply(kv_op(&f[0], &f[1], "info", &f[2..]).unwrap_or_else(|e| e))
+            }
+            // payload: scope ␟ namespace. Clears that bucket; state "ok".
+            "kv-clear" => {
+                let f = fields(&action.payload);
+                if f.len() != 2 {
+                    return Err("kv-clear: scope, namespace".into());
+                }
+                reply(kv_op(&f[0], &f[1], "clear", &[]).unwrap_or_else(|e| e))
+            }
+            // payload: count. Opens `count` local buckets and never drops
+            // the handles. State becomes "<opened>/<count>" plus the first
+            // refusal, if any — the host must bound open handles.
+            "kv-leak" => {
+                let f = fields(&action.payload);
+                let count: usize = f[0].parse().map_err(|e| format!("count: {e}"))?;
+                let mut opened = 0;
+                let mut refusal = String::new();
+                for i in 0..count {
+                    match local::Bucket::open(Tier::Persistent, &format!("leak{i}")) {
+                        Ok(bucket) => {
+                            std::mem::forget(bucket);
+                            opened += 1;
+                        }
+                        Err(e) => {
+                            if refusal.is_empty() {
+                                refusal = format!(" {e:?}");
+                            }
+                        }
+                    }
+                }
+                reply(format!("{opened}/{count}{refusal}"))
+            }
+            // Blobs are not implemented by the dev hosts: state becomes the
+            // error `blob-bucket.open` answered.
+            "blob-open" => reply(match local::BlobBucket::open(Tier::Persistent, "blobs") {
+                Ok(_) => "ok".into(),
+                Err(e) => format!("{e:?}"),
+            }),
+            // A plain guest trap (panic → `unreachable`), no limit involved.
+            "trap" => panic!("deliberate trap"),
+            // Returns state bytes that are neither UTF-8 nor JSON: the host
+            // must pass them through untouched.
+            "raw-state" => Ok(ReducerOutput {
+                state: Some(vec![0xff, 0x00, 0xfe, b'{']),
+                effects: vec![],
+                emit: vec![],
+            }),
             // payload: target ␟ count ␟ payload-size. Requests `count`
             // cross-module dispatches of `payload-size` bytes each. State
             // becomes "<accepted>/<count>" plus the first refusal, if any.
@@ -215,6 +312,13 @@ impl Guest for Module {
             "kv-set",
             "kv-fill",
             "kv-get",
+            "kv-keys",
+            "kv-info",
+            "kv-clear",
+            "kv-leak",
+            "blob-open",
+            "trap",
+            "raw-state",
             "flood-dispatch",
             "flood-subscribe",
             "noop",

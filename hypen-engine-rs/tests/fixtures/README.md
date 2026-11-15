@@ -81,8 +81,12 @@ What each module does:
 - **limits-module** — deliberately misbehaves to verify the sandbox
   (`module-x` world; imports `hypen:storage/app`, so it needs the `app`
   grant): spins / grows memory (epoch timeout, total-memory cap), `block`
-  and `init("block")` block in a host call (wall-clock deadline),
+  and `init("block")` block in a host call (wall-clock deadline), `trap`
+  panics, `raw-state` returns non-UTF-8 state bytes,
   `kv-set` / `kv-fill` / `kv-get` (storage quotas),
+  `kv-keys` / `kv-info` / `kv-clear` (the rest of the bucket surface),
+  `kv-leak` (opens bucket handles without dropping them — handle bound),
+  `blob-open` (blob storage is unavailable),
   `flood-dispatch` / `flood-subscribe` (cross-module request bounds).
 - **xmod-module** — cross-module fixture (`module-x` world): `pull` reads
   the sibling `counter`'s state, `bump` dispatches to it, `watch` /

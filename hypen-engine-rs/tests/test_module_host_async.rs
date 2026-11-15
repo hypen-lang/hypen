@@ -612,3 +612,169 @@ fn async_storage_writes_are_bounded_by_quota() {
     // A module error is not a trap: the instance is still callable.
     host.actions(id).unwrap();
 }
+
+// ── bad paths (the v0.2 host shares the v0.1 host's implementation; these
+//    pin that the shared behaviour holds through the CM-async bindings) ─────
+
+const SYNC_COUNTER_V01: &[u8] = include_bytes!("fixtures/counter_module.wasm");
+
+/// A component for the other ABI version is refused at `register`, naming
+/// the version it targets and the one this host serves.
+#[test]
+fn async_register_refuses_a_v01_component_and_garbage() {
+    let mut host = WasmtimeHostAsync::new().unwrap();
+    let err = host
+        .register("m", SYNC_COUNTER_V01, ModuleManifest::all("m"))
+        .unwrap_err();
+    assert!(matches!(err, HostError::Instantiate(_)), "{err}");
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("@0.1.0") && msg.contains("this host serves hypen:module@0.2.0"),
+        "{msg}"
+    );
+
+    let err = host
+        .register("m", b"nope", ModuleManifest::all("m"))
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("not a WebAssembly binary"),
+        "{err}"
+    );
+    let err = host
+        .register("m", b"\0asm\x0d\0\x01\0", ModuleManifest::all("m"))
+        .unwrap_err();
+    assert!(
+        format!("{err}").contains("does not export the hypen:module@0.2.0 world"),
+        "{err}"
+    );
+    assert!(matches!(
+        host.instantiate("m"),
+        Err(HostError::UnknownModule(_))
+    ));
+}
+
+#[test]
+fn async_capability_denial_names_the_import_and_the_grant() {
+    let mut host = WasmtimeHostAsync::new().unwrap();
+    let no_cloud = ModuleManifest {
+        storage: vec![],
+        ..ModuleManifest::all("cart")
+    };
+    host.register("cart", ASYNC_COUNTER, no_cloud).unwrap();
+    let msg = format!("{}", host.instantiate("cart").unwrap_err());
+    assert_eq!(
+        msg,
+        "instantiation failed: module 'cart' imports hypen:storage/cloud@0.2.0 but its \
+         manifest does not grant storage scope `cloud`"
+    );
+
+    // Several missing grants are all listed.
+    host.register("cart", ASYNC_COUNTER, ModuleManifest::default())
+        .unwrap();
+    let msg = format!("{}", host.instantiate("cart").unwrap_err());
+    assert!(
+        msg.contains("does not grant storage scope `cloud`; imports wasi:http/"),
+        "{msg}"
+    );
+    assert!(msg.ends_with("does not grant `http`"), "{msg}");
+}
+
+/// Failures name the module, the export and the cause; the instance
+/// remembers what killed it; destroyed and foreign ids are dead.
+#[test]
+fn async_failures_and_dead_ids_match_the_sync_host() {
+    let limits = ModuleLimits {
+        max_call: Duration::from_millis(300),
+        ..ModuleLimits::default()
+    };
+    let mut host = WasmtimeHostAsync::with_limits(limits).unwrap();
+    host.register("m", ASYNC_COUNTER, ModuleManifest::all("m"))
+        .unwrap();
+
+    let id = host.instantiate("m").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+    let err = host
+        .dispatch(id, &state, HostAction::new("spin", Vec::new()), &[])
+        .unwrap_err();
+    assert!(matches!(err, HostError::Trap(_)), "{err}");
+    assert_eq!(
+        host.death_reason(id).as_deref(),
+        Some(
+            "module 'm' export `dispatch` exceeded its 300 ms CPU budget: guest code was still \
+             running at the deadline"
+        )
+    );
+    host.destroy(id).unwrap();
+    assert_eq!(host.death_reason(id), None);
+    assert!(matches!(host.destroy(id), Err(HostError::DeadInstance)));
+
+    let id = host.instantiate("m").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+    let err = host
+        .dispatch(id, &state, HostAction::new("nope", Vec::new()), &[])
+        .unwrap_err();
+    assert_eq!(
+        format!("{err}"),
+        "module returned error: module 'm' export `dispatch`: unknown action: nope"
+    );
+    assert_eq!(host.death_reason(id), None);
+
+    // Ids of another host (either ABI) are dead here.
+    let mut other = WasmtimeHostAsync::new().unwrap();
+    other
+        .register("m", ASYNC_COUNTER, ModuleManifest::all("m"))
+        .unwrap();
+    let foreign = other.instantiate("m").unwrap();
+    assert!(matches!(
+        host.actions(foreign),
+        Err(HostError::DeadInstance)
+    ));
+    assert!(matches!(
+        host.destroy(foreign),
+        Err(HostError::DeadInstance)
+    ));
+    assert!(matches!(other.actions(id), Err(HostError::DeadInstance)));
+    other.actions(foreign).unwrap();
+
+    // State bytes are not parsed by the host on the way in: what the module
+    // makes of garbage is its business, and nothing traps.
+    let res = host.dispatch(
+        id,
+        &[0xff, 0x00],
+        HostAction::new("increment", Vec::new()),
+        &[],
+    );
+    assert!(
+        !matches!(res, Err(HostError::Trap(_) | HostError::DeadInstance)),
+        "{res:?}"
+    );
+    host.actions(id).unwrap();
+}
+
+/// Re-registering does not change a live instance (v0.2).
+#[test]
+fn async_reregistering_does_not_change_live_instances() {
+    let mut host = WasmtimeHostAsync::new().unwrap();
+    host.register("m", ASYNC_COUNTER, ModuleManifest::all("m"))
+        .unwrap();
+    let id = host.instantiate("m").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+
+    // Now the name needs a grant it doesn't have: new instances are refused…
+    host.register("m", ASYNC_COUNTER, ModuleManifest::default())
+        .unwrap();
+    assert!(matches!(
+        host.instantiate("m"),
+        Err(HostError::Instantiate(_))
+    ));
+    // …the live one carries on.
+    let out = host
+        .dispatch(
+            id,
+            &state,
+            HostAction::new("increment", b"{}".to_vec()),
+            &[],
+        )
+        .unwrap();
+    assert_eq!(count(&out.state.unwrap()), 1);
+}
