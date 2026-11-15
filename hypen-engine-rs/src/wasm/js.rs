@@ -15,7 +15,7 @@ static NULL_STATE: serde_json::Value = serde_json::Value::Null;
 /// Returns a JS object: `{ type: "<errorType>", message: "<humanReadable>" }`
 ///
 /// Error types: `"parseError"`, `"stateError"`, `"actionError"`, `"renderError"`, `"componentError"`
-fn structured_error(error_type: &str, message: &str) -> JsValue {
+pub(super) fn structured_error(error_type: &str, message: &str) -> JsValue {
     let obj = js_sys::Object::new();
     let _ = js_sys::Reflect::set(&obj, &"type".into(), &JsValue::from_str(error_type));
     let _ = js_sys::Reflect::set(&obj, &"message".into(), &JsValue::from_str(message));
@@ -109,22 +109,90 @@ fn convert_animation(animation: Option<JsValue>) -> Result<Option<serde_json::Va
 pub struct WasmEngine {
     /// Shared core: component registry, resource registry, module state,
     /// instance tree, dependency graph, scheduler, data sources, etc.
-    core: EngineCore,
+    pub(super) core: EngineCore,
 
-    patch_callback: Option<js_sys::Function>,
-    action_handlers: std::collections::HashMap<String, js_sys::Function>,
+    pub(super) patch_callback: Option<js_sys::Function>,
+    pub(super) action_handlers: std::collections::HashMap<String, js_sys::Function>,
     component_resolver: Option<js_sys::Function>,
     /// Tracks visited import paths to prevent circular imports during resolution
     import_visited: HashSet<String>,
     /// Index from compact node-ID strings back to their SlotMap keys,
     /// populated from emitted `Create` patches. Shared with the WASI
     /// binding (see `wasm::shared::NodeIdIndex`).
-    node_id_index: NodeIdIndex,
+    pub(super) node_id_index: NodeIdIndex,
 
     /// Callback for data source actions (e.g., @actions.spacetime.sendMessage).
     /// Receives `{ provider, method, payload }` when a data source action is dispatched
     /// and no explicit handler is registered for the full action name.
-    data_source_action_handler: Option<js_sys::Function>,
+    pub(super) data_source_action_handler: Option<js_sys::Function>,
+
+    /// Hosted (WASM-component) modules living next to the JS-handler modules
+    /// above. Server builds only; see `wasm::js_modules`.
+    #[cfg(feature = "module-loader-bridged")]
+    pub(super) hosted: crate::hosted::HostedModules,
+    /// Per hosted scope: its component and manifest in the JS module host.
+    #[cfg(feature = "module-loader-bridged")]
+    pub(super) hosted_records: std::collections::HashMap<String, super::js_modules::HostedRecord>,
+}
+
+/// Hand a batch of patches to the JS render callback: filter spurious
+/// removes, index newly created node ids, serialize.
+///
+/// The batch crosses the boundary as ONE JSON string, `JSON.parse`d by
+/// the SDK's `engine-base` shim before any consumer sees it. Building
+/// the equivalent object graph with `serde_wasm_bindgen` costs a
+/// wasm→JS call and a `TextDecoder` pass per string field — tens of
+/// thousands of them for a large first render — where a single string
+/// hand-off plus the browser's native JSON parser is one decode. The
+/// JSON itself is byte-compatible with what the old path produced.
+pub(super) fn emit_patches_to(
+    index: &mut NodeIdIndex,
+    callback: Option<&js_sys::Function>,
+    core: &EngineCore,
+    mut patches: Vec<Patch>,
+) {
+    EngineCore::filter_spurious_removes(&mut patches);
+    index.index_creates(&patches, core);
+
+    if let Some(callback) = callback {
+        if let Ok(json) = serde_json::to_string(&patches) {
+            let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(&json));
+        }
+    }
+}
+
+/// Deliver a renderer action `route_ui_action` resolved to the JS side: the
+/// handler registered under its name, else — for a data-source action — the
+/// data-source handler. An action nobody handles is dropped, and a throwing
+/// handler does not fail the dispatch.
+pub(super) fn deliver_routed_action(
+    handlers: &std::collections::HashMap<String, js_sys::Function>,
+    data_source_handler: Option<&js_sys::Function>,
+    core: &EngineCore,
+    routed: Action,
+) {
+    let name = routed.name;
+    let payload = routed.payload.unwrap_or(serde_json::Value::Null);
+
+    // 1. Try exact handler match first
+    if let Some(handler) = handlers.get(&name) {
+        let action = Action::new(name).with_payload(payload);
+        let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+        if let Ok(action_js) = serde::Serialize::serialize(&action, &serializer) {
+            let _ = handler.call1(&JsValue::NULL, &action_js);
+        }
+        return;
+    }
+
+    // 2. Fall through to the shared data-source classifier on EngineCore.
+    if let Some(ds_action) = core.build_data_source_action(&name, payload) {
+        if let Some(handler) = data_source_handler {
+            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
+            if let Ok(action_js) = serde::Serialize::serialize(&ds_action, &serializer) {
+                let _ = handler.call1(&JsValue::NULL, &action_js);
+            }
+        }
+    }
 }
 
 #[wasm_bindgen]
@@ -152,6 +220,10 @@ impl WasmEngine {
             import_visited: HashSet::new(),
             node_id_index: NodeIdIndex::new(),
             data_source_action_handler: None,
+            #[cfg(feature = "module-loader-bridged")]
+            hosted: crate::hosted::HostedModules::new(),
+            #[cfg(feature = "module-loader-bridged")]
+            hosted_records: std::collections::HashMap::new(),
         }
     }
 
@@ -691,26 +763,14 @@ impl WasmEngine {
         }
     }
 
-    /// Emit patches to the callback.
-    /// Filters spurious removes, indexes newly created node IDs, and
-    /// serializes patches to JS via the render callback.
-    ///
-    /// The batch crosses the boundary as ONE JSON string, `JSON.parse`d by
-    /// the SDK's `engine-base` shim before any consumer sees it. Building
-    /// the equivalent object graph with `serde_wasm_bindgen` costs a
-    /// wasm→JS call and a `TextDecoder` pass per string field — tens of
-    /// thousands of them for a large first render — where a single string
-    /// hand-off plus the browser's native JSON parser is one decode. The
-    /// JSON itself is byte-compatible with what the old path produced.
-    fn emit_patches(&mut self, mut patches: Vec<Patch>) {
-        EngineCore::filter_spurious_removes(&mut patches);
-        self.node_id_index.index_creates(&patches, &self.core);
-
-        if let Some(ref callback) = self.patch_callback {
-            if let Ok(json) = serde_json::to_string(&patches) {
-                let _ = callback.call1(&JsValue::NULL, &JsValue::from_str(&json));
-            }
-        }
+    /// Emit patches to the callback (see [`emit_patches_to`]).
+    fn emit_patches(&mut self, patches: Vec<Patch>) {
+        emit_patches_to(
+            &mut self.node_id_index,
+            self.patch_callback.as_ref(),
+            &self.core,
+            patches,
+        );
     }
 
     /// Apply a state patch and re-render affected nodes.
@@ -738,8 +798,25 @@ impl WasmEngine {
         let animation = convert_animation(animation)?;
 
         let normalized = scope.as_deref().filter(|s| !s.is_empty());
+        // Hosted subscribers of the written scope, matched against the
+        // pre-write state (as `Engine::update_state` does).
+        #[cfg(feature = "module-loader-bridged")]
+        let notice = self
+            .hosted
+            .host_write_notice(&self.core, normalized, |state, changed| {
+                crate::hosted::paths::collect_merge_changes(
+                    state,
+                    &patch,
+                    &mut String::new(),
+                    changed,
+                )
+            });
         if self.core.update_state(normalized, patch, animation) {
             self.render_dirty();
+            #[cfg(feature = "module-loader-bridged")]
+            if let Some(notice) = notice {
+                self.with_hosted(|hosted, ctx| hosted.notify_host_write(ctx, notice));
+            }
         }
         Ok(())
     }
@@ -764,12 +841,7 @@ impl WasmEngine {
         let animation = convert_animation(animation)?;
 
         let normalized = scope.as_deref().filter(|s| !s.is_empty());
-        if self
-            .core
-            .update_state_sparse(normalized, &paths, &values, animation)
-        {
-            self.render_dirty();
-        }
+        self.apply_sparse_update(normalized, &paths, &values, animation);
         Ok(())
     }
 
@@ -804,13 +876,43 @@ impl WasmEngine {
         let animation = convert_animation(animation)?;
 
         let normalized = scope.as_deref().filter(|s| !s.is_empty());
+        self.apply_sparse_update(normalized, &paths, &values, animation);
+        Ok(())
+    }
+
+    /// The shared tail of the sparse-update entry points: apply, re-render,
+    /// and (server builds) notify hosted subscribers of the written scope.
+    fn apply_sparse_update(
+        &mut self,
+        scope: Option<&str>,
+        paths: &[String],
+        values: &serde_json::Value,
+        animation: Option<serde_json::Value>,
+    ) {
+        #[cfg(feature = "module-loader-bridged")]
+        let notice = self
+            .hosted
+            .host_write_notice(&self.core, scope, |state, changed| {
+                if let serde_json::Value::Object(map) = values {
+                    for path in paths {
+                        if let Some(value) = map.get(path) {
+                            crate::hosted::paths::collect_sparse_changes(
+                                state, path, value, changed,
+                            );
+                        }
+                    }
+                }
+            });
         if self
             .core
-            .update_state_sparse(normalized, &paths, &values, animation)
+            .update_state_sparse(scope, paths, values, animation)
         {
             self.render_dirty();
+            #[cfg(feature = "module-loader-bridged")]
+            if let Some(notice) = notice {
+                self.with_hosted(|hosted, ctx| hosted.notify_host_write(ctx, notice));
+            }
         }
-        Ok(())
     }
 
     /// Render only dirty nodes (optimized for state changes).
@@ -900,35 +1002,25 @@ impl WasmEngine {
             })?)
         };
 
+        let action = Action::new(name).with_payload(payload.unwrap_or(serde_json::Value::Null));
+
+        // With a hosted module wired, a routed action it owns drives its
+        // reducer; everything else still reaches the JS handlers below.
+        #[cfg(feature = "module-loader-bridged")]
+        if !self.hosted.is_empty() {
+            return self.dispatch_ui_with_hosted(action);
+        }
+
         let routed = self
             .core
-            .route_ui_action(
-                Action::new(name).with_payload(payload.unwrap_or(serde_json::Value::Null)),
-            )
+            .route_ui_action(action)
             .map_err(|e| structured_error("actionError", &e.to_string()))?;
-        let name = routed.name.as_str();
-        let payload = routed.payload.unwrap_or(serde_json::Value::Null);
-
-        // 1. Try exact handler match first
-        if let Some(handler) = self.action_handlers.get(name) {
-            let action = Action::new(name).with_payload(payload);
-            let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-            if let Ok(action_js) = serde::Serialize::serialize(&action, &serializer) {
-                let _ = handler.call1(&JsValue::NULL, &action_js);
-            }
-            return Ok(());
-        }
-
-        // 2. Fall through to the shared data-source classifier on EngineCore.
-        if let Some(ds_action) = self.core.build_data_source_action(name, payload) {
-            if let Some(ref handler) = self.data_source_action_handler {
-                let serializer = serde_wasm_bindgen::Serializer::json_compatible();
-                if let Ok(action_js) = serde::Serialize::serialize(&ds_action, &serializer) {
-                    let _ = handler.call1(&JsValue::NULL, &action_js);
-                }
-            }
-        }
-
+        deliver_routed_action(
+            &self.action_handlers,
+            self.data_source_action_handler.as_ref(),
+            &self.core,
+            routed,
+        );
         Ok(())
     }
 
@@ -1062,6 +1154,14 @@ impl WasmEngine {
     /// call sites.
     #[wasm_bindgen(js_name = unregisterModule)]
     pub fn unregister_module(&mut self, name: &str) {
+        // A hosted scope has more to tear down than its state slot (the
+        // instance, its routing, grants and subscriptions).
+        #[cfg(feature = "module-loader-bridged")]
+        if self.hosted.instance_id(name).is_some() {
+            let _ = self.destroy_hosted(name);
+            return;
+        }
+
         // Snapshot every action name, then diff after eviction, rather than
         // capturing this scope's names up front. A scope-match misses the
         // PRIMARY module: its actions carry scope `None`, so once
@@ -1223,6 +1323,11 @@ impl WasmEngine {
     /// Fully reset the engine to its initial empty state.
     #[wasm_bindgen(js_name = reset)]
     pub fn reset(&mut self) {
+        // Hosted instances live in the JS module host: release them. The
+        // host itself and the effect handler stay installed, like the render
+        // callback and the component resolver.
+        #[cfg(feature = "module-loader-bridged")]
+        self.release_hosted_instances();
         self.core = EngineCore::new();
         self.action_handlers.clear();
         self.import_visited.clear();

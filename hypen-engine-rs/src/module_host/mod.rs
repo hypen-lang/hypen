@@ -48,6 +48,8 @@ pub use dual::{detect_abi, DualHost, ModuleAbi};
 mod bridged_host;
 #[cfg(all(feature = "module-loader-bridged", target_arch = "wasm32"))]
 pub use bridged_host::{BridgedHost, JsModuleHost};
+#[cfg(all(feature = "module-loader-bridged", target_arch = "wasm32"))]
+pub(crate) use bridged_host::describe_js_error;
 
 /// Opaque handle to a live module instance held by a [`ModuleHost`].
 ///

@@ -116,9 +116,14 @@ module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", 
 # file watcher that only `--serve` needs. Kept out of `module-loader` so
 # library embeds don't link them.
 runtime-bin = ["module-loader", "dep:tiny_http", "dep:notify-debouncer-mini"]
-# Browser-side module loader: the engine itself runs in wasm and delegates
-# module hosting to a JS shim (jco-based) via wasm-bindgen. Pairs with the
-# `js` feature; requires wasm32 target.
+# Hosted (WASM-component) modules for the JS build: the engine itself runs
+# in wasm and delegates module hosting to a JS module host (jco-based,
+# `@hypen-space/module-host`) via wasm-bindgen. Additive on top of `js`: it
+# adds methods to the one `WasmEngine` class (`setModuleHost`,
+# `registerHostedModule`, `dispatchModuleAction`, ...), so hosted modules and
+# ordinary JS-handler modules run in the same engine. Server builds only
+# (`js,device-broker,module-loader-bridged`); the browser bundle is built
+# without it. Requires the wasm32 target.
 module-loader-bridged = ["js", "dep:thiserror"]
 
 [dev-dependencies]

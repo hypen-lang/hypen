@@ -209,6 +209,7 @@ pub(crate) struct HostedModules {
     cascade_state: CascadeState,
     /// The report of the most recent cascade, if it had failures.
     last_report: Option<CascadeReport>,
+    cascades_concluded: u64,
 }
 
 impl Default for HostedModules {
@@ -228,6 +229,7 @@ impl HostedModules {
             dispatch_budget: DEFAULT_MODULE_DISPATCH_BUDGET,
             cascade_state: CascadeState::Idle,
             last_report: None,
+            cascades_concluded: 0,
         }
     }
 
@@ -243,6 +245,11 @@ impl HostedModules {
 
     pub(crate) fn set_effect_handler(&mut self, handler: EffectHandler) {
         self.on_effect = Some(handler);
+    }
+
+    #[cfg_attr(not(feature = "module-loader-bridged"), allow(dead_code))]
+    pub(crate) fn clear_effect_handler(&mut self) {
+        self.on_effect = None;
     }
 
     pub(crate) fn dispatch_budget(&self) -> usize {
@@ -274,6 +281,28 @@ impl HostedModules {
                 wildcard: module.actions.is_wildcard(),
             })
             .collect()
+    }
+
+    /// How many cascades have concluded so far. A caller that needs to know
+    /// whether an error it got back came out of a cascade (and so has a
+    /// [`last_report`](Self::last_report)) compares this before and after.
+    #[cfg_attr(not(feature = "module-loader-bridged"), allow(dead_code))]
+    pub(crate) fn cascades_concluded(&self) -> u64 {
+        self.cascades_concluded
+    }
+
+    /// Forget every wired instance, subscription and cached state — the
+    /// engine core they pointed into is being replaced. The host, the effect
+    /// handler and the budget stay. Returns the instance ids that were wired,
+    /// for the caller to destroy host-side.
+    #[cfg_attr(not(feature = "module-loader-bridged"), allow(dead_code))]
+    pub(crate) fn clear(&mut self) -> Vec<ModuleInstanceId> {
+        let ids = self.registry.iter().map(|(_, module)| module.id).collect();
+        self.registry = Registry::default();
+        self.subscriptions = Subscriptions::default();
+        self.snapshots = EncodedStates::default();
+        self.last_report = None;
+        ids
     }
 
     /// The failures of the most recent cascade (dispatch, lifecycle call or

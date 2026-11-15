@@ -408,6 +408,7 @@ impl HostedModules {
     /// [`last_report`](Self::last_report), and turn it into the caller's
     /// result.
     pub(super) fn conclude(&mut self, report: CascadeReport) -> Result<(), EngineError> {
+        self.cascades_concluded = self.cascades_concluded.wrapping_add(1);
         if report.is_clean() {
             self.last_report = None;
             return Ok(());

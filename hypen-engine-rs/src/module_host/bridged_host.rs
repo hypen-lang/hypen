@@ -180,35 +180,64 @@ fn level_from_str(s: &str) -> LogLevel {
     }
 }
 
-fn js_err(e: JsValue) -> HostError {
-    // Order: string -> Error.message -> Error.toString() -> JSON.stringify
-    // -> debug-display. Real JS errors fall out as readable messages instead
-    // of `{}` (which is what JSON.stringify gives for plain Error objects).
-    if let Some(s) = e.as_string() {
-        return HostError::Runtime(s);
+/// What wasm-bindgen throws at JS code that calls a method of an exported
+/// object while another call on that object is still running.
+const REENTRANCY_MARKER: &str = "recursive use of an object detected";
+
+/// A readable message for a value JS threw.
+///
+/// Order: string -> Error.message -> Error.toString() -> JSON.stringify
+/// -> debug-display. Real JS errors fall out as readable messages instead
+/// of `{}` (which is what JSON.stringify gives for plain Error objects).
+///
+/// The engine calls into JS (the module host, action handlers, the effect
+/// handler, the render callback) while it is mutably borrowed, so JS code that
+/// calls back into the engine from inside one of those callbacks is refused by
+/// wasm-bindgen with a message that says nothing about engines. When that
+/// refusal is what was thrown, say what happened and what to do.
+pub(crate) fn describe_js_error(e: &JsValue) -> String {
+    let message = raw_js_error_message(e);
+    if message.contains(REENTRANCY_MARKER) {
+        return format!(
+            "the engine was called re-entrantly from a callback it was running (module \
+             host, action handler, effect handler or render callback); defer the call \
+             until the engine call in progress returns, e.g. with queueMicrotask \
+             (wasm-bindgen: {message})"
+        );
     }
-    if let Ok(msg) = js_sys::Reflect::get(&e, &JsValue::from_str("message")) {
+    message
+}
+
+fn raw_js_error_message(e: &JsValue) -> String {
+    if let Some(s) = e.as_string() {
+        return s;
+    }
+    if let Ok(msg) = js_sys::Reflect::get(e, &JsValue::from_str("message")) {
         if let Some(s) = msg.as_string() {
             if !s.is_empty() {
-                return HostError::Runtime(s);
+                return s;
             }
         }
     }
-    if let Ok(to_string) = js_sys::Reflect::get(&e, &JsValue::from_str("toString")) {
+    if let Ok(to_string) = js_sys::Reflect::get(e, &JsValue::from_str("toString")) {
         if let Ok(func) = to_string.dyn_into::<js_sys::Function>() {
-            if let Ok(val) = func.call0(&e) {
+            if let Ok(val) = func.call0(e) {
                 if let Some(s) = val.as_string() {
-                    return HostError::Runtime(s);
+                    return s;
                 }
             }
         }
     }
-    if let Ok(json) = js_sys::JSON::stringify(&e) {
+    if let Ok(json) = js_sys::JSON::stringify(e) {
         if let Some(s) = json.as_string() {
-            return HostError::Runtime(s);
+            return s;
         }
     }
-    HostError::Runtime(format!("{:?}", e))
+    format!("{:?}", e)
+}
+
+fn js_err(e: JsValue) -> HostError {
+    HostError::Runtime(describe_js_error(&e))
 }
 
 fn to_js<T: Serialize>(v: &T) -> Result<JsValue, HostError> {
@@ -219,8 +248,18 @@ fn id_to_f64(id: ModuleInstanceId) -> f64 {
     id.0 as f64
 }
 
-fn id_from_f64(v: f64) -> ModuleInstanceId {
-    ModuleInstanceId(v as u64)
+/// The instance id a JS host issued. Ids cross the boundary as numbers, so
+/// only a non-negative integer JS can represent exactly is one.
+fn id_from_f64(v: f64) -> Result<ModuleInstanceId, HostError> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if v.is_finite() && v >= 0.0 && v.fract() == 0.0 && v <= MAX_SAFE_INTEGER {
+        Ok(ModuleInstanceId(v as u64))
+    } else {
+        Err(HostError::Runtime(format!(
+            "the JS module host's instantiate() returned {v}, not an instance id (a \
+             non-negative integer)"
+        )))
+    }
 }
 
 fn decode_output(raw: JsValue) -> Result<ReducerOutput, HostError> {
@@ -314,7 +353,7 @@ impl ModuleHost for BridgedHost {
 
     fn instantiate(&mut self, name: &str) -> Result<ModuleInstanceId, HostError> {
         let id = self.js.js_instantiate(name).map_err(js_err)?;
-        Ok(id_from_f64(id))
+        id_from_f64(id)
     }
 
     fn destroy(&mut self, id: ModuleInstanceId) -> Result<(), HostError> {
