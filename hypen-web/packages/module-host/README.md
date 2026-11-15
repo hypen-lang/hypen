@@ -9,7 +9,7 @@ their capability grants.
 
 ```
 JS app
-  └─► engine.wasm (WasmHostedEngine)
+  └─► engine.wasm (WasmEngine, server build)
           └─► BridgedHost (Rust, in engine.wasm)
                   └─► JsModuleHost (this package)
                           └─► jco-instantiated module component
@@ -26,8 +26,12 @@ await host.prepare("counter", componentBytes, {
   storage: ["cloud"],                        // local is implicit
   reads: [], dispatches: [], http: false,
 });
-engine.setModuleHost(host);                  // WasmHostedEngine (module-loader-bridged build)
-engine.registerAndInstantiate("counter", new Uint8Array(0), manifest, null, config);
+// `engine` is the server build's WasmEngine (`@hypen-space/server`'s wasm-node:
+// built with `module-loader-bridged`). Hosted modules run in the same engine
+// as ordinary in-process modules.
+engine.setModuleHost(host);
+engine.registerHostedModule("counter", "counter", manifest, config);
+// scope ─────────────────────┘          └── the name it was prepare()d under
 ```
 
 ### `new JsModuleHost(options?)`
@@ -309,10 +313,8 @@ workspace devDependency; it never downloads browsers) or a global
 the playwright-core version), and the fixtures. Without a browser it prints
 `SKIP test:browser — …` and exits 0; set `HYPEN_BROWSER_TEST_REQUIRED=1` to
 make that a failure. It is not part of `bun test`.
-`tests/e2e-bridged.test.ts` additionally needs a bridged engine build and
-skips without it:
-
-```bash
-cd hypen-engine-rs && wasm-pack build --target nodejs \
-  --out-dir pkg-bridged --features module-loader-bridged
-```
+`tests/e2e-engine.test.ts` drives this host from the engine itself: the server
+build of the engine that `@hypen-space/server` ships
+(`../server/wasm-node`, rebuilt by `hypen-engine-rs/build-wasm.sh` with
+`--features js,device-broker,module-loader-bridged`), hosted and in-process
+modules in one `WasmEngine`.
