@@ -359,9 +359,16 @@ public protocol SessionHost: AnyObject, Sendable {
     /// The process-wide retained-bytes pool every connection's broker
     /// shares (nil = per-connection budgets only).
     var deviceRetainedBytesPool: DeviceRetainedBytesPool? { get }
+
+    /// The app's theme (`createTheme`), or nil (the default) for none. Each
+    /// session forks it: its own color scheme preference over the shared
+    /// tokens, published to the session's engine as the `theme` /
+    /// `appearance` data sources.
+    var appTheme: Theme? { get }
 }
 
 extension SessionHost {
+    public var appTheme: Theme? { nil }
     public var deviceOptions: DeviceServerOptions? { DeviceServerOptions() }
     public var deviceRetainedBytesPool: DeviceRetainedBytesPool? { nil }
 }
@@ -522,6 +529,10 @@ public final class RemoteSession: @unchecked Sendable {
     private var devicePlane: DevicePlane? = nil
     /// The resume credential issued in this connection's `sessionAck`.
     private var issuedResumeToken: String? = nil
+    /// This session's theme: a fork of the host's (own scheme preference,
+    /// shared tokens), attached to this session's engine. Nil when the host
+    /// has no theme.
+    private var sessionTheme: Theme? = nil
 
     private static let counter = Counter()
     private final class Counter: @unchecked Sendable {
@@ -689,6 +700,14 @@ public final class RemoteSession: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }; return engine
     }
 
+    /// This session's theme — a fork of the one registered with
+    /// `RemoteServer.theme(_:)` (own scheme preference, shared tokens) — or
+    /// nil when the server has none. The same instance action handlers get
+    /// as `ctx.theme`.
+    public var theme: Theme? {
+        lock.lock(); defer { lock.unlock() }; return sessionTheme
+    }
+
     /// Whether this session has been torn down. After `true`, no
     /// further patches will stream and the engine is gone.
     public var isDestroyed: Bool {
@@ -766,6 +785,9 @@ public final class RemoteSession: @unchecked Sendable {
         case "hello":
             let requestedSessionId = json["sessionId"] as? String
             let props = (json["props"] as? [String: Any]) ?? [:]
+            // The client's own system color scheme; anything but "light" /
+            // "dark" is ignored.
+            let colorScheme = RemoteSession.parseColorScheme(json["colorScheme"])
             // The device advertisement is read from the hello's exact text
             // (the `device` member's raw span), never from the
             // JSONSerialization value, which collapses duplicate keys.
@@ -777,7 +799,8 @@ public final class RemoteSession: @unchecked Sendable {
                 requestedSessionId: (requestedSessionId?.isEmpty ?? true) ? nil : requestedSessionId,
                 props: props,
                 deviceHello: deviceHello,
-                resumeToken: json["resumeToken"] as? String
+                resumeToken: json["resumeToken"] as? String,
+                colorScheme: colorScheme
             )
 
         case "dispatchAction", "action":
@@ -795,6 +818,18 @@ public final class RemoteSession: @unchecked Sendable {
             if !helloIsReceived { return }
             guard let report = RemoteSession.parseViewport(json) else { return }
             handleViewport(listId: report.listId, start: report.start, end: report.end)
+
+        case "colorScheme":
+            // The client's system color scheme changed (the connect-time
+            // value travels in `hello.colorScheme`). Per client, like
+            // `viewport`: only THIS session's theme hears it — it is never
+            // an action and never replayed to other sessions. Accepted only
+            // after hello; ignored when malformed or when the server has no
+            // theme. A session with an explicit scheme preference remembers
+            // the value for when it follows the system again.
+            if !helloIsReceived { return }
+            guard let scheme = RemoteSession.parseColorScheme(json["scheme"]) else { return }
+            handleColorScheme(scheme)
 
         default:
             // Unknown — ignore for forward compatibility.
@@ -924,6 +959,22 @@ public final class RemoteSession: @unchecked Sendable {
     private func buildEngineAndModuleInstance() throws {
         let engine = try NativeEngine()
 
+        // Theme: a per-session scheme preference over the host's shared
+        // tokens, published to this session's engine as the `theme` /
+        // `appearance` data sources before anything renders. Later changes
+        // (a handler calling `ctx.theme?.setScheme(...)`, a client
+        // `colorScheme` message) re-publish; the patches come back through
+        // `onContextPatches` and stream out like those of a state update.
+        // The resumed preference and the client's system scheme are applied
+        // in `initializeSession`, once hello has said which session this is.
+        let theme = host.appTheme?.fork()
+        if let theme {
+            _ = theme.attach(engine)
+        }
+        engine.onContextPatches { [weak self] patches in
+            self?.forwardPatches(patches)
+        }
+
         // Resources.
         for map in host.resourceMaps {
             if let data = try? JSONSerialization.data(withJSONObject: map),
@@ -959,6 +1010,7 @@ public final class RemoteSession: @unchecked Sendable {
         // wires state.onChange → engine.updateState.
         let definition = host.makeModuleDefinition()
         let moduleInstance = ModuleInstance(definition: definition, engine: engine)
+        moduleInstance.attachTheme(theme)
 
         // Wire patches → transport. Fired every time engine.updateState
         // produces patches (which happens automatically inside the
@@ -980,7 +1032,45 @@ public final class RemoteSession: @unchecked Sendable {
         lock.lock()
         self.engine = engine
         self.moduleInstance = moduleInstance
+        self.sessionTheme = theme
         lock.unlock()
+    }
+
+    /// Ship engine patches that did not come from a module state change
+    /// (a data-source context such as the theme) as an ordinary `patch`
+    /// message at the next revision.
+    private func forwardPatches(_ patches: [[String: Any]]) {
+        if patches.isEmpty { return }
+        lock.lock()
+        if destroyed {
+            lock.unlock()
+            return
+        }
+        revision += 1
+        let rev = revision
+        let module = host.moduleName
+        lock.unlock()
+        send(.patch(module: module, patches: patches, revision: rev))
+    }
+
+    /// Report the client's system color scheme to THIS session's theme. The
+    /// theme publishes to this session's engine before the call returns and
+    /// the resulting patches stream out through `forwardPatches`; a report
+    /// that changes nothing on screen (no theme, the same scheme, an
+    /// explicit preference) sends nothing.
+    private func handleColorScheme(_ scheme: SystemColorScheme) {
+        lock.lock()
+        let theme = destroyed ? nil : sessionTheme
+        lock.unlock()
+        theme?.setSystemScheme(scheme)
+    }
+
+    /// A client-reported system color scheme: the string "light" or "dark"
+    /// (`hello.colorScheme`, or `scheme` of a `colorScheme` message). Nil
+    /// for anything else.
+    static func parseColorScheme(_ value: Any?) -> SystemColorScheme? {
+        guard let name = value as? String else { return nil }
+        return SystemColorScheme(rawValue: name)
     }
 
     /// Run hello → sessionAck → initialTree.
@@ -989,7 +1079,8 @@ public final class RemoteSession: @unchecked Sendable {
         requestedSessionId: String?,
         props: [String: Any],
         deviceHello: String? = nil,
-        resumeToken: String? = nil
+        resumeToken: String? = nil,
+        colorScheme: SystemColorScheme? = nil
     ) {
         lock.lock()
         if helloReceived || destroyed {
@@ -1000,6 +1091,7 @@ public final class RemoteSession: @unchecked Sendable {
         helloTimeoutWork?.cancel()
         helloTimeoutWork = nil
         let mi = moduleInstance
+        let theme = sessionTheme
         lock.unlock()
 
         // Device handshake selection (RFC 001 §2.2) is pure and computed
@@ -1053,6 +1145,29 @@ public final class RemoteSession: @unchecked Sendable {
             )
         } else {
             session = sm.createSession(props: props)
+        }
+
+        // Theme, before the first render: a resumed session keeps the scheme
+        // preference it had (kept on the `Session`, so it survives the
+        // suspend and goes away when the session expires), and the client's
+        // own system scheme (`hello.colorScheme`) applies from the first
+        // frame. The engine has no tree yet, so neither sends a patch.
+        if let theme {
+            if let saved = session.themePreference {
+                do {
+                    try theme.setScheme(saved)
+                } catch {
+                    HypenLoggers.server.debug(
+                        "Session %@: saved color scheme not restored: %@", id, "\(error)")
+                }
+            }
+            if let colorScheme {
+                theme.setSystemScheme(colorScheme)
+            }
+            let hypenSession = session
+            _ = theme.onChange { meta in
+                hypenSession.themePreference = meta.preference
+            }
         }
 
         // A fresh resume credential per acknowledged connection (rotated on
@@ -1197,6 +1312,10 @@ public final class RemoteSession: @unchecked Sendable {
             let primaryScope = host.moduleName.lowercased()
             ctx.registerModule(primaryScope, instance: primary)
         }
+        // Routed modules reach the session's theme through the context
+        // (`ctx.theme` in action handlers, `context?.theme` in lifecycle
+        // handlers).
+        ctx.setTheme(theme)
         // Patch forwarder — same shape as the primary moduleInstance's
         // onPatches (buildEngineAndModuleInstance) so every route's
         // state-change patches ship through the one code path. Without

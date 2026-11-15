@@ -77,19 +77,27 @@ public struct ActionHandlerContext: @unchecked Sendable {
     /// `unavailable`). Without a negotiated device plane every call returns
     /// `unavailable` ("device-disabled").
     public let device: DeviceContext
+    /// The theme in effect for this module (`createTheme`), or nil when
+    /// none is registered: `ctx.theme?.toggle()`,
+    /// `try ctx.theme?.setScheme("dark")`, `ctx.theme?.scheme`,
+    /// `ctx.theme?.token("color.primary")`. Under `RemoteServer` this is the
+    /// session's own fork, so a change reaches that client only.
+    public let theme: Theme?
 
     public init(
         action: Action,
         state: ObservableState,
         context: GlobalContext? = nil,
         router: HypenRouter? = nil,
-        device: DeviceContext = .unavailable()
+        device: DeviceContext = .unavailable(),
+        theme: Theme? = nil
     ) {
         self.action = action
         self.state = state
         self.context = context
         self.router = router
         self.device = device
+        self.theme = theme
     }
 }
 

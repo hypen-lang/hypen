@@ -19,6 +19,15 @@ public protocol GlobalContext: AnyObject, Sendable {
     func on(_ event: String, handler: @escaping (Any?) -> Void) -> () -> Void
     /// Get the router.
     func getRouter() -> HypenRouter?
+    /// The app's theme (`createTheme`), or nil when none is registered:
+    /// `context?.theme?.toggle()`, `context?.theme?.scheme`,
+    /// `context?.theme?.token("color.primary")`.
+    var theme: Theme? { get }
+}
+
+extension GlobalContext {
+    /// Contexts that do not carry a theme report none.
+    public var theme: Theme? { nil }
 }
 
 /// Reference to a module, used for cross-module communication.
@@ -68,6 +77,18 @@ public final class HypenGlobalContext: GlobalContext, @unchecked Sendable {
     private let events = TypedEventEmitter()
     private var stringListeners: [String: [(id: UUID, handler: (Any?) -> Void)]] = [:]
     private var _router: HypenRouter?
+    private var _theme: Theme?
+
+    /// The theme installed with `setTheme(_:)`, if any.
+    public var theme: Theme? {
+        lock.lock(); defer { lock.unlock() }; return _theme
+    }
+
+    /// Install the app's theme so handlers reach it as `context.theme`
+    /// (next to `theme.attach(engine)`); nil removes it.
+    public func setTheme(_ theme: Theme?) {
+        lock.lock(); defer { lock.unlock() }; _theme = theme
+    }
 
     public var router: HypenRouter? {
         get { lock.lock(); defer { lock.unlock() }; return _router }
