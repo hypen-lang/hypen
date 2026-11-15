@@ -34,6 +34,10 @@ pub enum ModuleAbi {
 /// verbatim in the binary, and only a v0.2 module can import the `@0.2.0`
 /// hypen capability interfaces, so a substring scan is a reliable
 /// discriminator without paying for a second compile.
+///
+/// One pass over the bytes: every marker starts with `hypen:`, so only the
+/// positions of an `h` are compared against them. (This runs on every
+/// `register`, on components of tens of megabytes.)
 pub fn detect_abi(bytes: &[u8]) -> ModuleAbi {
     const MARKERS: [&[u8]; 5] = [
         b"hypen:storage/local@0.2.0",
@@ -42,14 +46,17 @@ pub fn detect_abi(bytes: &[u8]) -> ModuleAbi {
         b"hypen:engine/state@0.2.0",
         b"hypen:time/clock@0.2.0",
     ];
-    let hit = MARKERS
-        .iter()
-        .any(|m| bytes.windows(m.len()).any(|w| w == *m));
-    if hit {
-        ModuleAbi::V2Async
-    } else {
-        ModuleAbi::V1Sync
+    let mut rest = bytes;
+    while let Some(at) = rest.iter().position(|&b| b == b'h') {
+        let Some(candidate) = rest.get(at..) else {
+            break;
+        };
+        if MARKERS.iter().any(|m| candidate.starts_with(m)) {
+            return ModuleAbi::V2Async;
+        }
+        rest = candidate.get(1..).unwrap_or_default();
     }
+    ModuleAbi::V1Sync
 }
 
 /// [`ModuleHost`] mux over both native hosts. `register` sniffs each

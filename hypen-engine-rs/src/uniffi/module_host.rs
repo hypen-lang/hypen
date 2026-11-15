@@ -17,8 +17,9 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::module_host::{
-    DualHost, Effect, ExecStrategy, HostAction, HostError, ModuleHost, ModuleInstanceId,
-    ModuleLimits, ModuleManifest, ReducerOutput, SiblingState,
+    DualHost, Effect, ExecStrategy, HostAction, HostConfig, HostError, InstanceStatus,
+    ManifestGrant, ModuleHost, ModuleInstanceId, ModuleManifest, ReducerOutput, SiblingState,
+    StorageScope,
 };
 
 use super::HypenError;
@@ -41,34 +42,35 @@ fn bad(msg: impl std::fmt::Display) -> HypenError {
 }
 
 /// `{"maxMemoryBytes"?: u64, "maxCallMs"?: u64, "maxStorageValueBytes"?: u64,
-///  "maxStorageBytes"?: u64, "interpreter"?: bool, "dataDir"?: string}` — all
-/// optional (see [`ModuleLimits`] for the defaults).
-fn parse_config(config_json: &str) -> Result<(ModuleLimits, ExecStrategy, Option<String>), HypenError> {
+///  "maxStorageBytes"?: u64, "interpreter"?: bool, "dataDir"?: string,
+///  "cacheDir"?: string}` — all optional (see [`HostConfig`] for the
+/// defaults). `cacheDir` turns on the on-disk compilation cache; it must be a
+/// directory private to the app (see [`HostConfig::cache_dir`]).
+fn parse_config(config_json: &str) -> Result<HostConfig, HypenError> {
     let v: serde_json::Value = if config_json.trim().is_empty() {
         serde_json::json!({})
     } else {
         serde_json::from_str(config_json).map_err(|e| bad(format!("config: {e}")))?
     };
-    let mut limits = ModuleLimits::default();
+    let mut config = HostConfig::default();
     if let Some(m) = v["maxMemoryBytes"].as_u64() {
-        limits.max_memory_bytes = m as usize;
+        config.limits.max_memory_bytes = m as usize;
     }
     if let Some(ms) = v["maxCallMs"].as_u64() {
-        limits.max_call = Duration::from_millis(ms);
+        config.limits.max_call = Duration::from_millis(ms);
     }
     if let Some(b) = v["maxStorageValueBytes"].as_u64() {
-        limits.max_storage_value_bytes = b as usize;
+        config.limits.max_storage_value_bytes = b as usize;
     }
     if let Some(b) = v["maxStorageBytes"].as_u64() {
-        limits.max_storage_bytes = b as usize;
+        config.limits.max_storage_bytes = b as usize;
     }
-    let strategy = if v["interpreter"].as_bool().unwrap_or(false) {
-        ExecStrategy::Interpreter
-    } else {
-        ExecStrategy::Jit
-    };
-    let data_dir = v["dataDir"].as_str().map(|s| s.to_string());
-    Ok((limits, strategy, data_dir))
+    if v["interpreter"].as_bool().unwrap_or(false) {
+        config.strategy = ExecStrategy::Interpreter;
+    }
+    config.data_dir = v["dataDir"].as_str().map(std::path::PathBuf::from);
+    config.cache_dir = v["cacheDir"].as_str().map(std::path::PathBuf::from);
+    Ok(config)
 }
 
 fn json_bytes_to_value(bytes: &[u8]) -> serde_json::Value {
@@ -141,13 +143,15 @@ impl HypenModuleHost {
     }
 
     /// Configured construction. `config_json`:
-    /// `{"maxMemoryBytes"?, "maxCallMs"?, "interpreter"?, "dataDir"?}`.
+    /// `{"maxMemoryBytes"?, "maxCallMs"?, "interpreter"?, "dataDir"?, "cacheDir"?}`.
     /// `interpreter: true` = Pulley (required on iOS); `dataDir` makes
-    /// local/app storage persistent (JSON snapshots, like `--data-dir`).
+    /// local/app storage persistent (JSON snapshots, like `--data-dir`);
+    /// `cacheDir` keeps compiled modules across launches (like `--cache-dir`:
+    /// opt-in, and the directory must be private to the app — its contents
+    /// are executed).
     #[uniffi::constructor]
     pub fn with_config(config_json: String) -> Result<std::sync::Arc<Self>, HypenError> {
-        let (limits, strategy, data_dir) = parse_config(&config_json)?;
-        let host = DualHost::with_options(limits, strategy, data_dir.as_deref().map(std::path::Path::new))?;
+        let host = DualHost::with_config(&parse_config(&config_json)?)?;
         Ok(std::sync::Arc::new(Self { inner: Mutex::new(host) }))
     }
 
@@ -251,5 +255,44 @@ impl HypenModuleHost {
 
     pub fn actions(&self, id: u64) -> Result<Vec<String>, HypenError> {
         Ok(self.inner.lock().unwrap().actions(ModuleInstanceId(id))?)
+    }
+
+    /// Whether the instance can still be called. `false` once a trap or
+    /// timeout killed it (see [`death_reason`](Self::death_reason)) or it
+    /// was destroyed. Answered from the host's bookkeeping — no module code
+    /// runs.
+    pub fn is_alive(&self, id: u64) -> bool {
+        self.inner.lock().unwrap().instance_status(ModuleInstanceId(id)) == InstanceStatus::Live
+    }
+
+    /// What killed the instance (module, export, cause), or `None` if it is
+    /// live, was destroyed, or never existed.
+    pub fn death_reason(&self, id: u64) -> Option<String> {
+        self.inner.lock().unwrap().death_reason(ModuleInstanceId(id))
+    }
+
+    /// The capabilities the module registered under `name` imports but was
+    /// not granted, as JSON: `[{"import": "wasi:http/types@0.2.6", "grant":
+    /// "http"}, {"import": "hypen:storage/cloud@0.1.0", "grant": "storage",
+    /// "scope": "cloud"}]`. Non-empty exactly when `instantiate(name)` fails
+    /// for missing grants; `[]` otherwise.
+    pub fn denied_capabilities(&self, name: String) -> String {
+        let denied = self.inner.lock().unwrap().denied_capabilities(&name);
+        let list: Vec<serde_json::Value> = denied
+            .iter()
+            .map(|d| match d.grant {
+                ManifestGrant::Storage(scope) => serde_json::json!({
+                    "import": d.import,
+                    "grant": "storage",
+                    "scope": match scope {
+                        StorageScope::Local => "local",
+                        StorageScope::App => "app",
+                        StorageScope::Cloud => "cloud",
+                    },
+                }),
+                ManifestGrant::Http => serde_json::json!({ "import": d.import, "grant": "http" }),
+            })
+            .collect();
+        serde_json::Value::Array(list).to_string()
     }
 }

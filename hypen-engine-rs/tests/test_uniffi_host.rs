@@ -142,3 +142,54 @@ fn ffi_manifest_denies_http() {
     let err = host.instantiate("fetcher".into()).unwrap_err();
     assert!(format!("{err}").contains("http"), "denial names the import: {err}");
 }
+
+/// Liveness and link denials over FFI: asked of the host, not inferred from
+/// error text; `cacheDir` is accepted and must be a usable directory.
+#[test]
+fn ffi_reports_liveness_denials_and_takes_a_cache_dir() {
+    let dir = tempfile::tempdir().unwrap();
+    let cache = dir.path().join("cache");
+    let config = serde_json::json!({ "maxCallMs": 300, "cacheDir": cache }).to_string();
+    let host = HypenModuleHost::with_config(config).unwrap();
+    assert!(cache.is_dir(), "the cache directory was created");
+
+    // A denied module: the missing grants as data.
+    host.register("net".into(), FETCHER.to_vec(), r#"{"storage": ["app", "cloud"]}"#.into()).unwrap();
+    assert!(host.instantiate("net".into()).is_err());
+    let denied: serde_json::Value =
+        serde_json::from_str(&host.denied_capabilities("net".into())).unwrap();
+    let denied = denied.as_array().unwrap();
+    assert_eq!(denied.len(), 1, "{denied:?}");
+    assert_eq!(denied[0]["grant"], "http");
+    assert!(denied[0]["import"].as_str().unwrap().starts_with("wasi:http/"));
+    host.register("counter".into(), COUNTER.to_vec(), "".into()).unwrap();
+    let denied: serde_json::Value =
+        serde_json::from_str(&host.denied_capabilities("counter".into())).unwrap();
+    assert_eq!(
+        denied,
+        serde_json::json!([{ "import": "hypen:storage/cloud@0.1.0", "grant": "storage", "scope": "cloud" }])
+    );
+    assert_eq!(host.denied_capabilities("nobody".into()), "[]");
+
+    // A live instance, then one killed by the call deadline.
+    host.register("acounter".into(), ASYNC_COUNTER.to_vec(), ASYNC_COUNTER_GRANTS.into()).unwrap();
+    assert_eq!(host.denied_capabilities("acounter".into()), "[]");
+    let id = host.instantiate("acounter".into()).unwrap();
+    let state = host.init(id, "{}".into()).unwrap();
+    assert!(host.is_alive(id));
+    assert_eq!(host.death_reason(id), None);
+    assert!(host.dispatch(id, state, "spin".into(), "{}".into(), "".into()).is_err());
+    assert!(!host.is_alive(id));
+    let reason = host.death_reason(id).expect("a killed instance has a reason");
+    assert!(reason.contains("module 'acounter' export `dispatch` exceeded its 300 ms"), "{reason}");
+    host.destroy(id).unwrap();
+    assert!(!host.is_alive(id));
+    assert_eq!(host.death_reason(id), None);
+
+    // A cache directory that is a file is a construction error.
+    let file = dir.path().join("file");
+    std::fs::write(&file, "x").unwrap();
+    let config = serde_json::json!({ "cacheDir": file }).to_string();
+    let err = HypenModuleHost::with_config(config).err().expect("refused").to_string();
+    assert!(err.contains("is not a directory"), "{err}");
+}
