@@ -122,9 +122,12 @@ impl fmt::Display for InvalidState {
 /// Why an action did not run, or a subscription was not registered.
 #[derive(Debug)]
 pub enum FailureCause {
-    /// No hosted module is wired under the addressed scope.
+    /// No hosted module is wired under the addressed scope (and, for a
+    /// cross-module dispatch, no in-process module is registered there).
     UnknownModule,
-    /// The addressed module does not accept that action name.
+    /// The addressed module does not accept that action name (a hosted
+    /// module's action set, or — for a cross-module dispatch to an in-process
+    /// scope — no handler registered for it).
     NotAccepted,
     /// A cross-module dispatch without the sender's `dispatches` grant.
     /// `missing_grant` is the scope to add to the sender's `dispatches` list.
@@ -143,6 +146,9 @@ pub enum FailureCause {
     BudgetExhausted { budget: usize, dropped: usize },
     /// The module host failed the call (trap, dead instance, module error, …).
     Host(HostError),
+    /// The in-process handler a cross-module dispatch was delivered to did
+    /// not complete (carries what it reported).
+    Handler(String),
     /// No module host is installed on the engine.
     NoHost,
     /// The scope has no state slot in the engine.
@@ -166,6 +172,7 @@ impl FailureCause {
             | FailureCause::PayloadNotJson(_) => "refused",
             FailureCause::DepthExceeded { .. } | FailureCause::BudgetExhausted { .. } => "dropped",
             FailureCause::Host(_)
+            | FailureCause::Handler(_)
             | FailureCause::NoHost
             | FailureCause::NoStateSlot
             | FailureCause::StateEncoding(_)
@@ -238,6 +245,7 @@ impl CascadeFailure {
                  action(s), this one first"
             ),
             FailureCause::Host(e) => write!(f, "{e}"),
+            FailureCause::Handler(e) => write!(f, "the in-process handler failed: {e}"),
             FailureCause::NoHost => f.write_str("no module host installed"),
             FailureCause::NoStateSlot => f.write_str("module has no state slot"),
             FailureCause::StateEncoding(e) => write!(f, "module state could not be encoded: {e}"),
@@ -345,6 +353,172 @@ impl CascadeReport {
             },
             None => EngineError::ModuleError(self.to_string()),
         }
+    }
+}
+
+// ── as data for a binding ────────────────────────────────────────────────────
+//
+// The same report as plain JSON, for surfaces that cannot hand out Rust types
+// (the JS binding's `lastModuleCascadeReport`). Field names are camelCase and
+// every `code` / `kind` string is stable API: add, never rename.
+
+impl LifecycleHook {
+    fn code(self) -> &'static str {
+        match self {
+            LifecycleHook::Activated => "activated",
+            LifecycleHook::Deactivated => "deactivated",
+        }
+    }
+}
+
+impl Origin {
+    /// `{ kind, ... }`: `root`, `lifecycle` (`hook`), `emit`, `crossDispatch`
+    /// (`from`), `subscriptionChange` / `subscribeRequest` (`target`, `path`).
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        match self {
+            Origin::Root => json!({ "kind": "root" }),
+            Origin::Lifecycle(hook) => json!({ "kind": "lifecycle", "hook": hook.code() }),
+            Origin::Emit => json!({ "kind": "emit" }),
+            Origin::CrossDispatch { from } => {
+                json!({ "kind": "crossDispatch", "from": from.as_str() })
+            }
+            Origin::SubscriptionChange { target, path } => {
+                json!({ "kind": "subscriptionChange", "target": &**target, "path": &**path })
+            }
+            Origin::SubscribeRequest { target, path } => {
+                json!({ "kind": "subscribeRequest", "target": target, "path": path })
+            }
+        }
+    }
+}
+
+impl HostError {
+    /// A stable code for the variant.
+    pub fn code(&self) -> &'static str {
+        match self {
+            HostError::UnknownModule(_) => "unknownModule",
+            HostError::DeadInstance => "deadInstance",
+            HostError::ModuleError(_) => "moduleError",
+            HostError::Trap(_) => "trap",
+            HostError::Instantiate(_) => "instantiate",
+            HostError::Codec(_) => "codec",
+            HostError::Runtime(_) => "runtime",
+        }
+    }
+}
+
+impl FailureCause {
+    /// A stable code for the variant.
+    pub fn code(&self) -> &'static str {
+        match self {
+            FailureCause::UnknownModule => "unknownModule",
+            FailureCause::NotAccepted => "notAccepted",
+            FailureCause::DispatchDenied { .. } => "dispatchDenied",
+            FailureCause::ReadDenied { .. } => "readDenied",
+            FailureCause::SubscriptionLimit { .. } => "subscriptionLimit",
+            FailureCause::PayloadNotJson(_) => "payloadNotJson",
+            FailureCause::DepthExceeded { .. } => "depthExceeded",
+            FailureCause::BudgetExhausted { .. } => "budgetExhausted",
+            FailureCause::Host(_) => "host",
+            FailureCause::Handler(_) => "handler",
+            FailureCause::NoHost => "noHost",
+            FailureCause::NoStateSlot => "noStateSlot",
+            FailureCause::StateEncoding(_) => "stateEncoding",
+            FailureCause::InvalidState(_) => "invalidState",
+        }
+    }
+
+    /// `{ code, ... }` with the variant's data: `missingGrant` and `grant`
+    /// (`"dispatches"` / `"reads"`) for the two denials, `limit`, `budget` +
+    /// `dropped`, `detail` (a decoder / handler message), `host`
+    /// (`{ code, message }`), `reason` (`notJson` / `notAnObject`).
+    pub fn to_json(&self) -> serde_json::Value {
+        use serde_json::json;
+        let code = self.code();
+        match self {
+            FailureCause::UnknownModule
+            | FailureCause::NotAccepted
+            | FailureCause::NoHost
+            | FailureCause::NoStateSlot => json!({ "code": code }),
+            FailureCause::DispatchDenied { missing_grant } => {
+                json!({ "code": code, "grant": "dispatches", "missingGrant": missing_grant })
+            }
+            FailureCause::ReadDenied { missing_grant } => {
+                json!({ "code": code, "grant": "reads", "missingGrant": missing_grant })
+            }
+            FailureCause::SubscriptionLimit { limit } => json!({ "code": code, "limit": limit }),
+            FailureCause::DepthExceeded { limit } => json!({ "code": code, "limit": limit }),
+            FailureCause::BudgetExhausted { budget, dropped } => {
+                json!({ "code": code, "budget": budget, "dropped": dropped })
+            }
+            FailureCause::PayloadNotJson(detail)
+            | FailureCause::Handler(detail)
+            | FailureCause::StateEncoding(detail) => json!({ "code": code, "detail": detail }),
+            FailureCause::Host(e) => json!({
+                "code": code,
+                "host": { "code": e.code(), "message": e.to_string() },
+            }),
+            FailureCause::InvalidState(InvalidState::NotJson(detail)) => {
+                json!({ "code": code, "reason": "notJson", "detail": detail })
+            }
+            FailureCause::InvalidState(InvalidState::NotAnObject) => {
+                json!({ "code": code, "reason": "notAnObject" })
+            }
+        }
+    }
+}
+
+impl CascadeFailure {
+    /// `{ scope, action, outcome, isRoot, origin, cause, message }` —
+    /// `outcome` is `refused` / `dropped` / `failed`, `message` the rendered
+    /// line.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "scope": self.scope,
+            "action": self.action,
+            "outcome": self.cause.verb(),
+            "isRoot": self.is_root(),
+            "origin": self.origin.to_json(),
+            "cause": self.cause.to_json(),
+            "message": self.to_string(),
+        })
+    }
+}
+
+impl CascadeRoot {
+    /// `{ kind, scope, action }` — `kind` is `dispatch`, `lifecycle` (plus
+    /// `hook`) or `hostWrite`; `action` is the [`action_label`](Self::action_label).
+    pub fn to_json(&self) -> serde_json::Value {
+        let mut root = serde_json::json!({
+            "kind": match self {
+                CascadeRoot::Dispatch { .. } => "dispatch",
+                CascadeRoot::Lifecycle { .. } => "lifecycle",
+                CascadeRoot::HostWrite { .. } => "hostWrite",
+            },
+            "scope": self.scope(),
+            "action": self.action_label(),
+        });
+        if let CascadeRoot::Lifecycle { hook, .. } = self {
+            root["hook"] = hook.code().into();
+        }
+        root
+    }
+}
+
+impl CascadeReport {
+    /// `{ root, rootFailed, failureCount, failures, message }`. `failures`
+    /// holds at most [`MAX_REPORTED_FAILURES`] entries, `failureCount` is
+    /// exact; `rootFailed` means the root call itself failed and nothing was
+    /// applied; `message` is what the `EngineError` of the call carried.
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "root": self.root.to_json(),
+            "rootFailed": self.root_failure().is_some(),
+            "failureCount": self.failure_count,
+            "failures": self.failures.iter().map(CascadeFailure::to_json).collect::<Vec<_>>(),
+            "message": self.to_engine_error().to_string(),
+        })
     }
 }
 

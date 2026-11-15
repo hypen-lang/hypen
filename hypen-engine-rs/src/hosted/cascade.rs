@@ -19,7 +19,10 @@ use super::report::{
     CascadeFailure, CascadeReport, CascadeRoot, FailureCause, LifecycleHook, Origin,
 };
 use super::snapshots::SnapshotError;
+use super::ClosureActions;
 use super::{CascadeState, EngineCtx, HostedModules, MAX_CASCADE_DEPTH};
+use crate::action_routing::{scoped_action_name, wildcard_covers};
+use crate::dispatch::Action;
 use crate::engine_core::EngineCore;
 use crate::error::EngineError;
 use crate::module_host::{HostAction, ReducerOutput, SiblingState};
@@ -31,13 +34,51 @@ pub(crate) enum Call {
     Lifecycle(LifecycleHook),
 }
 
-/// A queued follow-up: run `action` in `scope`'s reducer, because of `origin`.
+/// What a queued follow-up runs.
+enum Work {
+    /// `action` in the reducer of the hosted module `scope`.
+    Module {
+        scope: ScopeName,
+        action: HostAction,
+    },
+    /// The in-process handler of `name` in the non-hosted scope `scope`.
+    /// `action` is what the handler receives: the scoped wire name, the
+    /// decoded payload, the sending module as `sender`.
+    Closure {
+        scope: String,
+        name: String,
+        action: Action,
+    },
+}
+
+impl Work {
+    /// The addressed scope and the bare action name, for a failure record.
+    fn into_labels(self) -> (String, String) {
+        match self {
+            Work::Module { scope, action } => (scope.as_str().to_string(), action.name),
+            Work::Closure { scope, name, .. } => (scope, name),
+        }
+    }
+}
+
+/// A queued follow-up: run `work`, because of `origin`.
 struct WorkItem {
-    scope: ScopeName,
-    action: HostAction,
+    work: Work,
     origin: Origin,
     /// Length of the causal chain ending in this item (the root is depth 1).
     depth: u32,
+}
+
+/// Why a follow-up's payload cannot cross a module boundary, if it cannot.
+/// An empty payload means "no payload" and becomes `null`.
+fn normalize_payload(payload: &mut Vec<u8>) -> Result<(), FailureCause> {
+    if payload.is_empty() {
+        payload.extend_from_slice(b"null");
+        return Ok(());
+    }
+    serde_json::from_slice::<serde::de::IgnoredAny>(payload)
+        .map(|_| ())
+        .map_err(|e| FailureCause::PayloadNotJson(e.to_string()))
 }
 
 /// A follow-up asking to join the queue.
@@ -110,23 +151,88 @@ impl Cascade {
                 return;
             }
         };
-        if action.payload.is_empty() {
-            action.payload.extend_from_slice(b"null");
-        } else if let Err(e) = serde_json::from_slice::<serde::de::IgnoredAny>(&action.payload) {
+        if let Err(cause) = normalize_payload(&mut action.payload) {
             self.fail(CascadeFailure {
                 scope: target.to_string(),
                 action: action.name,
                 origin,
-                cause: FailureCause::PayloadNotJson(e.to_string()),
+                cause,
             });
             return;
         }
         self.queue.push_back(WorkItem {
-            scope,
-            action,
+            work: Work::Module { scope, action },
             origin,
             depth: caused_at_depth + 1,
         });
+    }
+
+    /// Queue a cross-module dispatch from the hosted module `from` (whose
+    /// `dispatches` grant on the target the caller has checked), or record
+    /// why it was refused.
+    ///
+    /// A hosted target is queued like any follow-up. Any other target is an
+    /// in-process scope: the action goes to the handler registered under the
+    /// scope's wire name for it, if there is one. The guest picks the name,
+    /// so the engine's reserved `__hypen_*` protocol actions (`__hypen_bind`
+    /// writes an arbitrary state path) are never deliverable this way, and a
+    /// target or name that could alias another scope's wire name is refused.
+    pub(crate) fn admit_cross_dispatch(
+        &mut self,
+        registry: &Registry,
+        closures: &dyn ClosureActions,
+        core: &EngineCore,
+        from: &ScopeName,
+        follow_up: FollowUp<'_>,
+    ) {
+        if registry.resolve(follow_up.target).is_some() {
+            return self.admit(registry, follow_up);
+        }
+        let FollowUp {
+            target,
+            mut action,
+            origin,
+            caused_at_depth,
+        } = follow_up;
+        let handler = ScopeName::parse(target)
+            .ok()
+            .filter(|_| wildcard_covers(&action.name) && !action.name.contains(':'))
+            .map(|scope| scoped_action_name(scope.as_str(), &action.name))
+            .filter(|handler| closures.has_handler(handler));
+        let admitted = match handler {
+            // No handler: say whether the scope exists at all.
+            None if core.modules.contains_key(target) => Err(FailureCause::NotAccepted),
+            None => Err(FailureCause::UnknownModule),
+            Some(_) if caused_at_depth >= MAX_CASCADE_DEPTH => Err(FailureCause::DepthExceeded {
+                limit: MAX_CASCADE_DEPTH,
+            }),
+            Some(handler) => normalize_payload(&mut action.payload).and_then(|()| {
+                serde_json::from_slice::<serde_json::Value>(&action.payload)
+                    .map(|payload| (handler, payload))
+                    .map_err(|e| FailureCause::PayloadNotJson(e.to_string()))
+            }),
+        };
+        match admitted {
+            Ok((handler, payload)) => self.queue.push_back(WorkItem {
+                work: Work::Closure {
+                    scope: target.to_string(),
+                    name: action.name,
+                    action: Action {
+                        name: handler,
+                        payload: Some(payload),
+                        sender: Some(from.as_str().to_string()),
+                    },
+                },
+                origin,
+                depth: caused_at_depth + 1,
+            }),
+            Err(cause) => self.fail(CascadeFailure {
+                scope: target.to_string(),
+                action: action.name,
+                origin,
+                cause,
+            }),
+        }
     }
 
     /// Take one reducer invocation out of the budget, if any is left.
@@ -149,9 +255,10 @@ impl Cascade {
         }
         let dropped = self.queue.len() + 1;
         self.queue.clear();
+        let (scope, action) = item.work.into_labels();
         self.fail(CascadeFailure {
-            scope: item.scope.as_str().to_string(),
-            action: item.action.name,
+            scope,
+            action,
             origin: item.origin,
             cause: FailureCause::BudgetExhausted {
                 budget: self.budget,
@@ -252,24 +359,46 @@ impl HostedModules {
         mut cascade: Cascade,
     ) -> CascadeReport {
         while let Some(WorkItem {
-            scope,
-            action,
+            work,
             origin,
             depth,
         }) = cascade.next()
         {
-            // The host call consumes the action; keep its name for a failure.
-            let name = action.name.clone();
-            let step = self
-                .invoke(ctx.core, &scope, Call::Dispatch(action))
-                .and_then(|output| self.fold_output(ctx, &scope, depth, output, &mut cascade));
-            if let Err(cause) = step {
-                cascade.fail(CascadeFailure {
-                    scope: scope.as_str().to_string(),
-                    action: name,
-                    origin,
-                    cause,
-                });
+            match work {
+                Work::Module { scope, action } => {
+                    // The host call consumes the action; keep its name for a
+                    // failure.
+                    let name = action.name.clone();
+                    let step = self
+                        .invoke(ctx.core, &scope, Call::Dispatch(action))
+                        .and_then(|output| {
+                            self.fold_output(ctx, &scope, depth, output, &mut cascade)
+                        });
+                    if let Err(cause) = step {
+                        cascade.fail(CascadeFailure {
+                            scope: scope.as_str().to_string(),
+                            action: name,
+                            origin,
+                            cause,
+                        });
+                    }
+                }
+                // An in-process handler returns nothing to fold: whatever it
+                // changes reaches the engine as a host write of its own.
+                Work::Closure {
+                    scope,
+                    name,
+                    action,
+                } => {
+                    if let Err(reason) = ctx.closures.deliver(&action) {
+                        cascade.fail(CascadeFailure {
+                            scope,
+                            action: name,
+                            origin,
+                            cause: FailureCause::Handler(reason),
+                        });
+                    }
+                }
             }
         }
         cascade.into_report()

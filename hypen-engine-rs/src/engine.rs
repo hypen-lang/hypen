@@ -4,7 +4,7 @@ use crate::{
     error::EngineError,
     hosted::{
         paths::{collect_merge_changes, collect_sparse_changes},
-        CascadeReport, EngineCtx, HostedModules, LifecycleHook,
+        CascadeReport, EngineCtx, HostedModules, LifecycleHook, PatchOutlet,
     },
     ir::{ComponentRegistry, IRNode, NodeId, ResourceRegistry},
     lifecycle::{ModuleInstance, ResourceCache},
@@ -18,38 +18,30 @@ use std::sync::{Arc, Weak};
 // The hosted-module subsystem lives in `crate::hosted`; these are its items
 // that have always been reachable through this module.
 pub use crate::hosted::{
-    EffectHandler, ModuleGrants, DEFAULT_MODULE_DISPATCH_BUDGET, MAX_CASCADE_DEPTH,
-    MAX_SUBSCRIPTIONS_PER_MODULE,
+    EffectHandler, HostedModuleInfo, ModuleGrants, DEFAULT_MODULE_DISPATCH_BUDGET,
+    MAX_CASCADE_DEPTH, MAX_SUBSCRIPTIONS_PER_MODULE,
 };
 
 /// Callback type for rendering patches to the platform
 pub type RenderCallback = Box<dyn Fn(&[Patch]) + Send + Sync>;
 
-/// Where a batch of patches goes: the installed render callback, if any.
-///
-/// A borrowed view of the engine's callback, so a subsystem that re-renders
-/// (see [`crate::hosted`]) can emit patches without holding the `Engine`.
-#[derive(Clone, Copy)]
-pub(crate) struct PatchSink<'a> {
-    callback: Option<&'a (dyn Fn(&[Patch]) + Send + Sync)>,
+/// Send patches to the renderer through the installed render callback, if
+/// any. Filters out Remove patches for elements that were Created in the same
+/// batch -- this happens when a conditional re-reconciles module-scoped
+/// children whose stored template doesn't carry module_scope.
+fn emit_to(callback: Option<&RenderCallback>, mut patches: Vec<Patch>) {
+    EngineCore::filter_spurious_removes(&mut patches);
+    if let Some(callback) = callback {
+        callback(&patches);
+    }
 }
 
-impl<'a> PatchSink<'a> {
-    pub(crate) fn new(callback: Option<&'a RenderCallback>) -> Self {
-        Self {
-            callback: callback.map(|callback| &**callback),
-        }
-    }
-
-    /// Send patches to the renderer.
-    /// Filters out Remove patches for elements that were Created in the same
-    /// batch -- this happens when a conditional re-reconciles module-scoped
-    /// children whose stored template doesn't carry module_scope.
-    pub(crate) fn emit(&self, mut patches: Vec<Patch>) {
-        EngineCore::filter_spurious_removes(&mut patches);
-        if let Some(callback) = self.callback {
-            callback(&patches);
-        }
+/// The engine's render callback is where a hosted-module re-render goes (see
+/// [`crate::hosted`]), so that subsystem emits patches without holding the
+/// `Engine`.
+impl PatchOutlet for Option<RenderCallback> {
+    fn emit(&mut self, _core: &EngineCore, patches: Vec<Patch>) {
+        emit_to(self.as_ref(), patches);
     }
 }
 
@@ -147,7 +139,7 @@ impl Engine {
         let ctx = EngineCtx {
             core: &mut self.core,
             closures: &self.actions,
-            patches: PatchSink::new(self.render_callback.as_ref()),
+            patches: &mut self.render_callback,
         };
         (&mut self.hosted, ctx)
     }
@@ -521,6 +513,11 @@ impl Engine {
         self.hosted.instance_id(scope)
     }
 
+    /// Every hosted module scope with the actions it accepts, in wiring order.
+    pub fn hosted_modules(&self) -> Vec<HostedModuleInfo> {
+        self.hosted.describe()
+    }
+
     /// Drive a module's `on_activated` lifecycle export for `scope` and fold
     /// the resulting [`ReducerOutput`] back into the engine — exactly as a
     /// `dispatch` output is folded (state -> reactive render, subscriptions,
@@ -687,9 +684,9 @@ impl Engine {
         }
     }
 
-    /// Send patches to the renderer (see [`PatchSink::emit`]).
+    /// Send patches to the renderer (see [`emit_to`]).
     fn emit_patches(&self, patches: Vec<Patch>) {
-        PatchSink::new(self.render_callback.as_ref()).emit(patches);
+        emit_to(self.render_callback.as_ref(), patches);
     }
 
     /// Get the current revision number

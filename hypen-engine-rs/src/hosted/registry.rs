@@ -7,8 +7,8 @@
 //! a reload can find the old instance.
 
 use super::names::{canonical_scope, ActionSet, ScopeName};
+use super::ClosureActions;
 use crate::action_routing::scoped_action_name;
-use crate::dispatch::ActionDispatcher;
 use crate::engine_core::EngineCore;
 use crate::module_host::{ModuleInstanceId, ModuleManifest};
 use indexmap::IndexMap;
@@ -126,6 +126,11 @@ impl Registry {
         self.modules.is_empty()
     }
 
+    /// Every wired scope, in wiring order.
+    pub(crate) fn iter(&self) -> impl Iterator<Item = (&ScopeName, &HostedModule)> {
+        self.modules.iter()
+    }
+
     /// The module wired under `scope`, which must already be canonical — a
     /// [`ScopeName`], or the scope part of a scoped wire name.
     pub(crate) fn get(&self, scope: &str) -> Option<&HostedModule> {
@@ -176,7 +181,7 @@ impl Registry {
     pub(crate) fn unwire(
         &mut self,
         core: &mut EngineCore,
-        closures: &ActionDispatcher,
+        closures: &dyn ClosureActions,
         scope: &str,
     ) -> Option<HostedModule> {
         core.wildcard_action_scopes.retain(|s| s != scope);
@@ -194,6 +199,7 @@ impl Registry {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::dispatch::ActionDispatcher;
 
     fn module(id: u64, actions: &[&str]) -> HostedModule {
         let scope = ScopeName::parse("any").unwrap();

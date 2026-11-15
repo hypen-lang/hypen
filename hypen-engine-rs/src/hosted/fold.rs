@@ -11,7 +11,8 @@
 //!    notify).
 //! 3. **Effects** (`Log` engine-side, `Navigate`/`Delay` via the embedder).
 //! 4. **Follow-ups**, queued in this order: `emit` (always the emitting scope),
-//!    cross-module dispatch (needs the `dispatches` grant), subscriber
+//!    cross-module dispatch (needs the `dispatches` grant; the target is a
+//!    hosted module or an in-process scope's handler), subscriber
 //!    notifications (run in the subscriber).
 //!
 //! Everything a guest supplies here — action names, targets, payloads, state
@@ -122,8 +123,11 @@ impl HostedModules {
                 });
                 continue;
             }
-            cascade.admit(
+            cascade.admit_cross_dispatch(
                 &self.registry,
+                ctx.closures,
+                ctx.core,
+                scope,
                 FollowUp {
                     target: &target,
                     action,

@@ -5,6 +5,7 @@
 //! `tests/test_module_host_routing.rs`.
 
 use super::*;
+use crate::engine::RenderCallback;
 use crate::module_host::{HostError, ModuleManifest, ReducerOutput, SiblingState};
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
@@ -21,6 +22,8 @@ struct Seen {
     action: String,
     payload: String,
     state: Value,
+    /// The sibling snapshots the call was handed, by scope.
+    siblings: Vec<(String, Value)>,
 }
 
 type Reducer = Box<dyn FnMut(&Seen) -> Result<ReducerOutput, HostError> + Send>;
@@ -45,6 +48,7 @@ impl ScriptHost {
         action: &str,
         payload: &[u8],
         state: &[u8],
+        siblings: &[SiblingState],
     ) -> Result<ReducerOutput, HostError> {
         let mut script = self.0.lock().unwrap();
         if script.dead.contains(&id.0) {
@@ -55,6 +59,13 @@ impl ScriptHost {
             action: action.to_string(),
             payload: String::from_utf8_lossy(payload).into_owned(),
             state: serde_json::from_slice(state).expect("the engine hands out JSON state"),
+            siblings: siblings
+                .iter()
+                .map(|(scope, bytes)| {
+                    let state = serde_json::from_slice(bytes).expect("sibling state is JSON");
+                    (scope.clone(), state)
+                })
+                .collect(),
         };
         script.seen.push(seen.clone());
         let result = match script.reducers.get_mut(&id.0) {
@@ -86,27 +97,27 @@ impl ModuleHost for ScriptHost {
         id: ModuleInstanceId,
         state: &[u8],
         action: HostAction,
-        _: &[SiblingState],
+        siblings: &[SiblingState],
     ) -> Result<ReducerOutput, HostError> {
-        self.call(id, &action.name, &action.payload, state)
+        self.call(id, &action.name, &action.payload, state, siblings)
     }
     fn on_activated(
         &mut self,
         id: ModuleInstanceId,
         state: &[u8],
-        _: &[SiblingState],
+        siblings: &[SiblingState],
     ) -> Result<ReducerOutput, HostError> {
-        self.call(id, ACTIVATED, b"", state)
+        self.call(id, ACTIVATED, b"", state, siblings)
     }
     fn on_deactivated(
         &mut self,
         id: ModuleInstanceId,
         state: &[u8],
     ) -> Result<ReducerOutput, HostError> {
-        self.call(id, DEACTIVATED, b"", state)
+        self.call(id, DEACTIVATED, b"", state, &[])
     }
     fn on_destroyed(&mut self, id: ModuleInstanceId, state: &[u8]) -> Result<(), HostError> {
-        self.call(id, DESTROYED, b"", state).map(|_| ())
+        self.call(id, DESTROYED, b"", state, &[]).map(|_| ())
     }
     fn actions(&mut self, _: ModuleInstanceId) -> Result<Vec<String>, HostError> {
         Ok(Vec::new())
@@ -118,6 +129,7 @@ struct Fixture {
     hosted: HostedModules,
     core: EngineCore,
     closures: ActionDispatcher,
+    patches: Option<RenderCallback>,
     script: Arc<Mutex<Script>>,
     next_id: u64,
 }
@@ -131,6 +143,7 @@ impl Fixture {
             hosted,
             core: EngineCore::new(),
             closures: ActionDispatcher::new(),
+            patches: None,
             script,
             next_id: 0,
         }
@@ -140,7 +153,7 @@ impl Fixture {
         let ctx = EngineCtx {
             core: &mut self.core,
             closures: &self.closures,
-            patches: PatchSink::new(None),
+            patches: &mut self.patches,
         };
         (&mut self.hosted, ctx)
     }
@@ -967,4 +980,412 @@ fn a_routed_action_no_hosted_module_takes_goes_to_the_closure_dispatcher() {
     assert_eq!(*hits.lock().unwrap(), 1);
     assert_eq!(fx.calls(), [(0, "x".to_string())]);
     assert_eq!(fx.state("a"), json!({ "ran": true }));
+}
+
+// ── in-process (closure) scopes next to hosted ones ─────────────────────────
+
+/// What an in-process handler was handed.
+type Delivered = Arc<Mutex<Vec<(String, Value, Option<String>)>>>;
+
+impl Fixture {
+    /// Register a closure-backed module `scope` with `state` and a handler
+    /// for each of `actions` under the scope's wire name, as an SDK does.
+    fn plain_module(&mut self, scope: &str, state: Value, actions: &[&str]) -> Delivered {
+        let delivered = Delivered::default();
+        self.core
+            .register_module(scope, ModuleInstance::new(Module::new(scope), state));
+        for action in actions {
+            let wire = crate::action_routing::scoped_action_name(scope, action);
+            self.core.note_handler(&wire);
+            let sink = Arc::clone(&delivered);
+            self.closures.on(wire, move |action: &Action| {
+                sink.lock().unwrap().push((
+                    action.name.clone(),
+                    action.payload.clone().unwrap_or(Value::Null),
+                    action.sender.clone(),
+                ));
+            });
+        }
+        delivered
+    }
+}
+
+fn cross_with(target: &str, name: &str, payload: &[u8]) -> ReducerOutput {
+    ReducerOutput {
+        cross_dispatch: vec![(target.to_string(), HostAction::new(name, payload.to_vec()))],
+        ..Default::default()
+    }
+}
+
+#[test]
+fn a_granted_cross_dispatch_reaches_an_in_process_handler() {
+    let mut fx = Fixture::new();
+    let delivered = fx.plain_module("Shell", json!({}), &["toast"]);
+    fx.module(
+        "cart",
+        &["checkout"],
+        ModuleGrants::new([""; 0], ["shell"]),
+        |_| Ok(cross_with("Shell", "toast", br#"{"text":"paid"}"#)),
+    );
+
+    fx.dispatch("cart", "checkout").unwrap();
+    assert!(fx.hosted.last_report().is_none());
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [(
+            "__hypen_scoped:shell:toast".to_string(),
+            json!({ "text": "paid" }),
+            Some("cart".to_string()),
+        )],
+        "the handler gets its wire name, the decoded payload and the sender"
+    );
+    assert_eq!(fx.calls(), [(0, "checkout".to_string())]);
+}
+
+#[test]
+fn a_cross_dispatch_to_an_in_process_scope_needs_the_dispatches_grant() {
+    let mut fx = Fixture::new();
+    let delivered = fx.plain_module("shell", json!({}), &["toast"]);
+    // `reads` is not `dispatches`.
+    fx.module(
+        "cart",
+        &["checkout"],
+        ModuleGrants::new(["shell"], [""; 0]),
+        |_| Ok(cross("shell", "toast")),
+    );
+
+    let summary = message(fx.dispatch("cart", "checkout"));
+    assert!(
+        summary.ends_with(
+            "[shell] 'toast' refused: 'cart' has no `dispatches` grant on 'shell' — add \
+             \"shell\" to `dispatches` in the manifest of 'cart' (dispatched by 'cart')"
+        ),
+        "{summary}"
+    );
+    assert!(delivered.lock().unwrap().is_empty());
+    assert!(matches!(
+        &fx.report().failures()[0].cause,
+        FailureCause::DispatchDenied { missing_grant } if missing_grant == "shell"
+    ));
+}
+
+#[test]
+fn a_cross_dispatch_to_an_in_process_scope_names_what_is_missing() {
+    let mut fx = Fixture::new();
+    let delivered = fx.plain_module("shell", json!({}), &["toast", "__hypen_bind"]);
+    fx.module(
+        "cart",
+        &["go"],
+        ModuleGrants::new([""; 0], ["shell", "ghost", "a:b"]),
+        |_| {
+            Ok(ReducerOutput {
+                cross_dispatch: vec![
+                    ("shell".into(), action("nope")),
+                    ("ghost".into(), action("toast")),
+                    // Reserved protocol actions are never deliverable, even
+                    // with a handler registered and the grant held.
+                    ("shell".into(), action("__hypen_bind")),
+                    // Neither a target nor a name may alias a wire name.
+                    ("shell".into(), action("x:toast")),
+                    ("a:b".into(), action("toast")),
+                    (
+                        "shell".into(),
+                        HostAction::new("toast", b"{not json".to_vec()),
+                    ),
+                    ("shell".into(), HostAction::new("toast", Vec::new())),
+                ],
+                ..Default::default()
+            })
+        },
+    );
+
+    let summary = message(fx.dispatch("cart", "go"));
+    assert!(
+        summary.contains("[shell] 'nope' refused: module 'shell' does not accept that action"),
+        "{summary}"
+    );
+    assert!(
+        summary.contains("[ghost] 'toast' refused: no hosted module under scope 'ghost'"),
+        "{summary}"
+    );
+    let causes: Vec<&FailureCause> = fx.report().failures().iter().map(|f| &f.cause).collect();
+    assert!(
+        matches!(
+            causes[..],
+            [
+                FailureCause::NotAccepted,
+                FailureCause::UnknownModule,
+                FailureCause::NotAccepted,
+                FailureCause::NotAccepted,
+                FailureCause::UnknownModule,
+                FailureCause::PayloadNotJson(_),
+            ]
+        ),
+        "{causes:?}"
+    );
+    assert_eq!(
+        *delivered.lock().unwrap(),
+        [(
+            "__hypen_scoped:shell:toast".to_string(),
+            Value::Null,
+            Some("cart".to_string())
+        )],
+        "only the well-formed one ran, its empty payload as null"
+    );
+}
+
+#[test]
+fn in_process_deliveries_spend_the_budget_and_keep_queue_order() {
+    let mut fx = Fixture::new();
+    let delivered = fx.plain_module("shell", json!({}), &["toast"]);
+    fx.module(
+        "cart",
+        &["go", "after"],
+        ModuleGrants::new([""; 0], ["shell"]),
+        |seen| match seen.action.as_str() {
+            "go" => Ok(ReducerOutput {
+                emit: vec![action("after")],
+                cross_dispatch: vec![
+                    ("shell".into(), action("toast")),
+                    ("shell".into(), action("toast")),
+                    ("shell".into(), action("toast")),
+                ],
+                ..Default::default()
+            }),
+            _ => Ok(ReducerOutput::default()),
+        },
+    );
+
+    // Root + `after` + one delivery fit; the other two are dropped.
+    fx.hosted.set_dispatch_budget(3);
+    let summary = message(fx.dispatch("cart", "go"));
+    assert!(
+        summary.ends_with(
+            "[shell] 'toast' dropped: reducer-invocation budget (3) exhausted; dropped 2 \
+             pending action(s), this one first (dispatched by 'cart')"
+        ),
+        "{summary}"
+    );
+    assert_eq!(delivered.lock().unwrap().len(), 1);
+    assert_eq!(
+        fx.calls(),
+        [(0, "go".to_string()), (0, "after".to_string())],
+        "emit is queued before cross-dispatch"
+    );
+
+    // With room for all of it nothing is reported.
+    fx.hosted.set_dispatch_budget(5);
+    fx.dispatch("cart", "go").unwrap();
+    assert_eq!(delivered.lock().unwrap().len(), 4);
+}
+
+#[test]
+fn a_failing_in_process_handler_is_reported_and_blocks_nothing() {
+    /// Handlers that refuse `boom`, as a binding whose handler threw would.
+    struct Flaky(ActionDispatcher);
+    impl ClosureActions for Flaky {
+        fn has_handler(&self, name: &str) -> bool {
+            ClosureActions::has_handler(&self.0, name)
+        }
+        fn dispatch_ui(&self, core: &EngineCore, action: Action) -> Result<(), EngineError> {
+            self.0.dispatch_ui(core, action)
+        }
+        fn deliver(&self, action: &Action) -> Result<(), String> {
+            if action.name.ends_with(":boom") {
+                return Err("TypeError: x is undefined".into());
+            }
+            self.0.deliver(action)
+        }
+    }
+
+    let mut fx = Fixture::new();
+    let delivered = fx.plain_module("shell", json!({}), &["boom", "toast"]);
+    fx.module(
+        "cart",
+        &["go"],
+        ModuleGrants::new([""; 0], ["shell"]),
+        |_| {
+            Ok(ReducerOutput {
+                state: Some(br#"{"done":true}"#.to_vec()),
+                cross_dispatch: vec![
+                    ("shell".into(), action("boom")),
+                    ("shell".into(), action("toast")),
+                ],
+                ..Default::default()
+            })
+        },
+    );
+
+    let flaky = Flaky(std::mem::take(&mut fx.closures));
+    let mut ctx = EngineCtx {
+        core: &mut fx.core,
+        closures: &flaky,
+        patches: &mut fx.patches,
+    };
+    let result = fx
+        .hosted
+        .dispatch_trusted(&mut ctx, "cart", "go", Value::Null);
+    assert_eq!(
+        message(result),
+        "module cascade from [cart] go finished with 1 failure(s):\n  \
+         - [shell] 'boom' failed: the in-process handler failed: TypeError: x is undefined \
+         (dispatched by 'cart')"
+    );
+    assert_eq!(delivered.lock().unwrap().len(), 1, "'toast' still ran");
+    assert_eq!(fx.state("cart"), json!({ "done": true }));
+    let failure = &fx.report().failures()[0];
+    assert!(matches!(failure.cause, FailureCause::Handler(_)));
+    assert_eq!(
+        failure.to_json(),
+        json!({
+            "scope": "shell",
+            "action": "boom",
+            "outcome": "failed",
+            "isRoot": false,
+            "origin": { "kind": "crossDispatch", "from": "cart" },
+            "cause": { "code": "handler", "detail": "TypeError: x is undefined" },
+            "message": "[shell] 'boom' failed: the in-process handler failed: TypeError: x is \
+                        undefined (dispatched by 'cart')",
+        })
+    );
+}
+
+#[test]
+fn a_reads_grant_hands_over_an_in_process_scopes_state() {
+    let mut fx = Fixture::new();
+    fx.plain_module("session", json!({ "user": "ada" }), &[]);
+    fx.plain_module("secrets", json!({ "token": "t0p" }), &[]);
+    fx.module(
+        "profile",
+        &["load"],
+        ModuleGrants::new(["Session"], [""; 0]),
+        |seen| {
+            let user = seen.siblings.iter().find(|(scope, _)| scope == "session");
+            Ok(with_state(json!({
+                "user": user.map(|(_, state)| state["user"].clone()),
+                "seen": seen.siblings.iter().map(|(scope, _)| scope.clone()).collect::<Vec<_>>(),
+            })))
+        },
+    );
+    fx.module("blind", &["load"], ModuleGrants::none(), |seen| {
+        Ok(with_state(json!({ "siblings": seen.siblings.len() })))
+    });
+
+    fx.dispatch("profile", "load").unwrap();
+    assert_eq!(
+        fx.state("profile"),
+        json!({ "user": "ada", "seen": ["session"] }),
+        "only the granted scope, never 'secrets'"
+    );
+    fx.dispatch("blind", "load").unwrap();
+    assert_eq!(fx.state("blind"), json!({ "siblings": 0 }));
+
+    // The snapshot follows host writes to the in-process scope.
+    fx.host_write("session", json!({ "user": "grace" }));
+    fx.dispatch("profile", "load").unwrap();
+    assert_eq!(fx.state("profile")["user"], "grace");
+}
+
+#[test]
+fn a_host_write_to_an_in_process_scope_notifies_its_hosted_subscribers() {
+    let mut fx = Fixture::new();
+    fx.plain_module("session", json!({ "user": "ada", "theme": "dark" }), &[]);
+    fx.module(
+        "profile",
+        &["watch", "userChanged"],
+        ModuleGrants::new(["session"], [""; 0]),
+        |seen| match seen.action.as_str() {
+            "watch" => Ok(subscribe("session", "user", "userChanged")),
+            _ => Ok(with_state(json!({ "user": seen.siblings[0].1["user"] }))),
+        },
+    );
+    fx.module("nosy", &["watch", "x"], ModuleGrants::none(), |_| {
+        Ok(subscribe("session", "user", "x"))
+    });
+    fx.dispatch("profile", "watch").unwrap();
+    let refused = message(fx.dispatch("nosy", "watch"));
+    assert!(
+        refused.contains("subscribe to 'session' at 'user' refused: no `reads` grant on 'session'"),
+        "{refused}"
+    );
+    fx.calls();
+
+    fx.host_write("session", json!({ "theme": "light" }));
+    assert!(fx.calls().is_empty(), "another path changed");
+
+    fx.host_write("session", json!({ "user": "grace" }));
+    assert_eq!(fx.calls(), [(0, "userChanged".to_string())]);
+    assert_eq!(
+        fx.state("profile"),
+        json!({ "user": "grace" }),
+        "the subscriber read the written state"
+    );
+    assert!(fx.hosted.last_report().is_none());
+}
+
+#[test]
+fn the_report_as_json_names_root_origin_and_cause() {
+    let mut fx = Fixture::new();
+    fx.module("cart", &["go"], ModuleGrants::none(), |_| {
+        Ok(cross("payments", "charge"))
+    });
+    fx.dispatch("cart", "go").unwrap_err();
+    assert_eq!(
+        fx.report().to_json(),
+        json!({
+            "root": { "kind": "dispatch", "scope": "cart", "action": "go" },
+            "rootFailed": false,
+            "failureCount": 1,
+            "failures": [{
+                "scope": "payments",
+                "action": "charge",
+                "outcome": "refused",
+                "isRoot": false,
+                "origin": { "kind": "crossDispatch", "from": "cart" },
+                "cause": {
+                    "code": "dispatchDenied",
+                    "grant": "dispatches",
+                    "missingGrant": "payments",
+                },
+                "message": "[payments] 'charge' refused: 'cart' has no `dispatches` grant on \
+                            'payments' — add \"payments\" to `dispatches` in the manifest of \
+                            'cart' (dispatched by 'cart')",
+            }],
+            "message": "Module error: module cascade from [cart] go finished with 1 \
+                        failure(s):\n  - [payments] 'charge' refused: 'cart' has no \
+                        `dispatches` grant on 'payments' — add \"payments\" to `dispatches` in \
+                        the manifest of 'cart' (dispatched by 'cart')",
+        })
+    );
+
+    // A failing root.
+    fx.module("dead", &["go"], ModuleGrants::none(), |_| {
+        Err(HostError::Trap("unreachable".into()))
+    });
+    fx.dispatch("dead", "go").unwrap_err();
+    let report = fx.report().to_json();
+    assert_eq!(report["rootFailed"], true);
+    assert_eq!(report["failures"][0]["origin"], json!({ "kind": "root" }));
+    assert_eq!(
+        report["failures"][0]["cause"],
+        json!({
+            "code": "host",
+            "host": { "code": "trap", "message": "module trapped: unreachable" },
+        })
+    );
+    assert_eq!(
+        fx.hosted.describe(),
+        [
+            HostedModuleInfo {
+                scope: "cart".into(),
+                actions: vec!["go".into()],
+                wildcard: false
+            },
+            HostedModuleInfo {
+                scope: "dead".into(),
+                actions: vec!["go".into()],
+                wildcard: false
+            },
+        ]
+    );
 }

@@ -18,6 +18,14 @@
 //! addresses a scope directly. Action names are opaque: never parsed for a
 //! qualifier, never re-routed.
 //!
+//! **In-process scopes.** Hosted modules share the engine with scopes whose
+//! actions are host-language closures (the SDK's own modules). The engine
+//! reaches those through [`ClosureActions`]; they are full citizens of the
+//! cross-module contract: a `reads` grant on one hands its state over as a
+//! sibling snapshot and allows subscribing to it (a host write notifies), and
+//! a `dispatches` grant lets a reducer cross-dispatch to its handler — queued,
+//! budgeted and reported exactly like a dispatch to a hosted module.
+//!
 //! **Fold order** (see `fold`). State (replaced wholesale; unusable state
 //! rejects the whole output) → requested subscriptions → effects → follow-ups
 //! (`emit`, then cross-dispatch, then subscriber notifications).
@@ -69,11 +77,11 @@ pub use report::{
 
 use crate::action_routing::{split_scoped_action, UI_ACTION};
 use crate::dispatch::{Action, ActionDispatcher};
-use crate::engine::PatchSink;
 use crate::engine_core::EngineCore;
 use crate::error::EngineError;
 use crate::lifecycle::{Module, ModuleInstance};
 use crate::module_host::{Effect, HostAction, ModuleHost, ModuleInstanceId};
+use crate::reconcile::Patch;
 use cascade::{Call, Cascade};
 use names::canonical_scope;
 use registry::{Grants, HostedModule, Registry};
@@ -95,17 +103,58 @@ pub const MAX_SUBSCRIPTIONS_PER_MODULE: usize = 256;
 /// Receives the originating module scope and the effect.
 pub type EffectHandler = Box<dyn Fn(&str, &Effect) + Send + Sync>;
 
+/// The engine's in-process action handlers — host-language closures (the
+/// native [`ActionDispatcher`], the JS handler map of `WasmEngine`) — as the
+/// hosted-module subsystem needs them. Keeps this subsystem free of any
+/// binding's types.
+pub(crate) trait ClosureActions {
+    /// Whether a handler is registered under exactly `name`.
+    fn has_handler(&self, name: &str) -> bool;
+
+    /// Deliver a renderer action that `route_ui_action` resolved and no
+    /// hosted module takes. This is the binding's own renderer dispatch, with
+    /// whatever fallbacks and error policy it always had.
+    fn dispatch_ui(&self, core: &EngineCore, action: Action) -> Result<(), EngineError>;
+
+    /// Run the handler registered under `action.name` on behalf of a hosted
+    /// module's cross-dispatch. `Err` says why the handler did not complete;
+    /// it is recorded as that follow-up's failure.
+    fn deliver(&self, action: &Action) -> Result<(), String>;
+}
+
+impl ClosureActions for ActionDispatcher {
+    fn has_handler(&self, name: &str) -> bool {
+        ActionDispatcher::has_handler(self, name)
+    }
+
+    fn dispatch_ui(&self, _core: &EngineCore, action: Action) -> Result<(), EngineError> {
+        self.dispatch(&action)
+    }
+
+    fn deliver(&self, action: &Action) -> Result<(), String> {
+        self.dispatch(action).map_err(|e| e.to_string())
+    }
+}
+
+/// Where the patches of a re-render go. `core` is the engine core the patches
+/// were just produced from, still in sync with them (a binding that indexes
+/// created nodes needs it).
+pub(crate) trait PatchOutlet {
+    fn emit(&mut self, core: &EngineCore, patches: Vec<Patch>);
+}
+
 /// The parts of the engine a hosted-module operation works on, besides the
-/// subsystem's own state. Built by `Engine` per call; a test can build one
-/// from a bare [`EngineCore`].
+/// subsystem's own state. Built by `Engine` (or `WasmEngine`) per call; a
+/// test can build one from a bare [`EngineCore`].
 pub(crate) struct EngineCtx<'a> {
     /// State slots, routing records, the reactive graph.
     pub(crate) core: &'a mut EngineCore,
-    /// Closure handlers: where a routed action goes when no hosted module
-    /// takes it, and whose scoped names an unwire must leave registered.
-    pub(crate) closures: &'a ActionDispatcher,
+    /// In-process handlers: where a routed action goes when no hosted module
+    /// takes it, where a cross-dispatch to a non-hosted scope is delivered,
+    /// and whose scoped names an unwire must leave registered.
+    pub(crate) closures: &'a dyn ClosureActions,
     /// Where patches of a re-render go.
-    pub(crate) patches: PatchSink<'a>,
+    pub(crate) patches: &'a mut dyn PatchOutlet,
 }
 
 impl EngineCtx<'_> {
@@ -113,9 +162,20 @@ impl EngineCtx<'_> {
     pub(crate) fn render_dirty(&mut self) {
         let patches = self.core.render_dirty();
         if !patches.is_empty() {
-            self.patches.emit(patches);
+            self.patches.emit(self.core, patches);
         }
     }
+}
+
+/// One hosted module scope, as an embedder sees it.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct HostedModuleInfo {
+    /// The scope the module is wired under (lowercase).
+    pub scope: String,
+    /// The actions it lists by name (never `"*"`).
+    pub actions: Vec<String>,
+    /// Whether it also accepts any other application action (it listed `"*"`).
+    pub wildcard: bool,
 }
 
 /// Whether a cascade is draining (the re-entrancy guard).
@@ -202,6 +262,18 @@ impl HostedModules {
 
     pub(crate) fn instance_id(&self, scope: &str) -> Option<ModuleInstanceId> {
         self.registry.resolve(scope).map(|(_, module)| module.id)
+    }
+
+    /// Every hosted scope, in wiring order.
+    pub(crate) fn describe(&self) -> Vec<HostedModuleInfo> {
+        self.registry
+            .iter()
+            .map(|(scope, module)| HostedModuleInfo {
+                scope: scope.as_str().to_string(),
+                actions: module.actions.named().iter().cloned().collect(),
+                wildcard: module.actions.is_wildcard(),
+            })
+            .collect()
     }
 
     /// The failures of the most recent cascade (dispatch, lifecycle call or
@@ -357,7 +429,7 @@ impl HostedModules {
                 let action = HostAction::new(name, encode_payload(action.payload));
                 self.run_cascade(ctx, scope, Call::Dispatch(action))
             }
-            None => ctx.closures.dispatch(&action),
+            None => ctx.closures.dispatch_ui(ctx.core, action),
         }
     }
 
