@@ -51,7 +51,7 @@ use hypen_engine::module_host::{
     DualHost, Effect, ModuleHost, ModuleManifest, StorageScope,
 };
 use hypen_engine::portable::TemplateExpander;
-use hypen_engine::{Engine, Patch};
+use hypen_engine::{Engine, EngineError, ModuleGrants, Patch};
 
 const CLIENT_HTML: &str = include_str!("hypen_runtime_client.html");
 
@@ -765,7 +765,15 @@ fn boot(args: &mut Args) -> Result<BootResult, String> {
     }
 
     engine.set_module_host(Box::new(host));
-    engine.register_module_instance(&args.scope, id, args.actions.clone(), init_state);
+    engine
+        .register_module_instance(
+            &args.scope,
+            id,
+            args.actions.clone(),
+            ModuleGrants::none(),
+            init_state,
+        )
+        .map_err(|e| format!("wiring module: {e}"))?;
 
     let live = LiveStream::new();
 
@@ -958,7 +966,7 @@ fn boot_app(args: &mut Args) -> Result<BootResult, String> {
     let mut all_actions: Vec<String> = Vec::new();
     // (scope, id, actions, init_state) to wire into the engine after the host
     // is installed.
-    let mut wirings: Vec<(String, _, Vec<String>, serde_json::Value)> = Vec::new();
+    let mut wirings: Vec<(String, _, Vec<String>, ModuleGrants, serde_json::Value)> = Vec::new();
     // One per stateful module, for the hot-reload watcher.
     let mut reload: Vec<ReloadTarget> = Vec::new();
 
@@ -1015,13 +1023,14 @@ fn boot_app(args: &mut Args) -> Result<BootResult, String> {
             .actions(id)
             .map_err(|e| format!("actions {}: {e}", inst.scope))?;
         all_actions.extend(actions.iter().cloned());
+        let grants = ModuleGrants::from(&acl);
         reload.push(ReloadTarget {
             scope: inst.scope.clone(),
             wasm: manifest_dir.join(wasm_rel),
             actions: actions.clone(),
             manifest: acl,
         });
-        wirings.push((inst.scope.clone(), id, actions, init_state));
+        wirings.push((inst.scope.clone(), id, actions, grants, init_state));
         instance_count += 1;
     }
 
@@ -1029,8 +1038,10 @@ fn boot_app(args: &mut Args) -> Result<BootResult, String> {
     // state slot + action routing into the engine.
     engine.set_module_host(Box::new(host));
     let mut scopes: Vec<String> = Vec::with_capacity(wirings.len());
-    for (scope, id, actions, init_state) in wirings {
-        engine.register_module_instance(&scope, id, actions, init_state);
+    for (scope, id, actions, grants, init_state) in wirings {
+        engine
+            .register_module_instance(&scope, id, actions, grants, init_state)
+            .map_err(|e| format!("wiring module `{scope}`: {e}"))?;
         scopes.push(scope);
     }
 
@@ -1176,7 +1187,7 @@ fn repl(
             .cloned()
             .unwrap_or(serde_json::Value::Null);
 
-        if let Err(e) = engine.dispatch_action(Action::new(name).with_payload(payload)) {
+        if let Err(e) = dispatch_host_action(&mut engine, name, payload, None) {
             writeln!(stdout, "error: {e}").ok();
             continue;
         }
@@ -1319,13 +1330,16 @@ fn drain_effects(
             Effect::Navigate(path) => navigations.push(path),
             Effect::Delay { ms, then } => {
                 // Route the follow-up back to the module that scheduled it.
-                let action = format!("{scope}:{then}");
                 let eng = Arc::clone(engine);
                 let outbox = Arc::clone(effects);
                 let plog = patches.clone();
                 std::thread::spawn(move || {
                     std::thread::sleep(std::time::Duration::from_millis(ms as u64));
-                    let _ = eng.lock().unwrap().dispatch_action(Action::new(action));
+                    let _ = eng.lock().unwrap().dispatch_module_action(
+                        &scope,
+                        &then,
+                        serde_json::Value::Null,
+                    );
                     // The delayed dispatch may itself emit effects (chained
                     // delays, navigation) — process them now.
                     drain_effects(&eng, &outbox, &plog);
@@ -1399,6 +1413,7 @@ fn mint_planned_instance(
 
     let mut eng = engine.lock().unwrap();
     let host = eng.module_host_mut().ok_or("no module host installed")?;
+    let grants = ModuleGrants::from(&acl);
     host.register(&inst.scope, &bytes, acl)
         .map_err(|e| format!("register: {e}"))?;
     let id = host.instantiate(&inst.scope).map_err(|e| format!("instantiate: {e}"))?;
@@ -1406,7 +1421,8 @@ fn mint_planned_instance(
     let actions = host.actions(id).unwrap_or_default();
     let state: serde_json::Value =
         serde_json::from_slice(&init_bytes).map_err(|e| format!("init state: {e}"))?;
-    eng.register_module_instance(&inst.scope, id, actions, state);
+    eng.register_module_instance(&inst.scope, id, actions, grants, state)
+        .map_err(|e| format!("wiring module: {e}"))?;
     // Same wake-up boot gives every wired instance.
     if let Err(e) = eng.activate_module(&inst.scope) {
         eprintln!("[reload] on_activated({}) failed: {e}", inst.scope);
@@ -1629,7 +1645,8 @@ fn reload_module(
     // Destroy the old instance after the new one is up — order matters,
     // in case the new instance needs to read something the old one wrote.
     let old_id = eng.module_instance_id(scope);
-    eng.rewire_module_instance(scope, new_id, fresh_actions);
+    eng.rewire_module_instance(scope, new_id, fresh_actions, ModuleGrants::from(manifest))
+        .map_err(|e| format!("rewire: {e}"))?;
     if let Some(old) = old_id {
         if old != new_id {
             if let Some(host) = eng.module_host_mut() {
@@ -1647,6 +1664,38 @@ fn reload_module(
     }
 
     Ok(())
+}
+
+/// Route an action arriving from the REPL or the dev HTTP endpoint.
+///
+/// `Engine::dispatch_action` is the renderer-facing entry and only accepts
+/// what the UI envelope rules allow. This reference runtime additionally
+/// offers two operator conveniences, mapped onto engine APIs here:
+/// - `sender` (the clicked node's id) becomes a `__hypen_dispatch` envelope,
+///   so the engine resolves the owning scope by node ownership;
+/// - `Scope:action` addresses a hosted module directly through the
+///   host-trusted `Engine::dispatch_module_action`.
+fn dispatch_host_action(
+    engine: &mut Engine,
+    name: &str,
+    payload: serde_json::Value,
+    sender: Option<&str>,
+) -> Result<(), EngineError> {
+    if let Some(node) = sender {
+        let envelope = serde_json::json!({ "node": node, "action": name, "payload": payload });
+        match engine.dispatch_action(Action::new("__hypen_dispatch").with_payload(envelope)) {
+            // The node is not owned by a scope that handles `name`: fall back
+            // to the sender-less forms below.
+            Err(EngineError::ActionNotFound(_)) => {}
+            other => return other,
+        }
+    }
+    if let Some((scope, action)) = name.split_once(':') {
+        if engine.module_instance_id(scope).is_some() {
+            return engine.dispatch_module_action(scope, action, payload);
+        }
+    }
+    engine.dispatch_action(Action::new(name).with_payload(payload))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1723,10 +1772,6 @@ fn handle_dispatch(
         .map(|l| l.lock().unwrap().len())
         .unwrap_or(0);
 
-    let mut action = Action::new(&req.action).with_payload(req.payload.clone());
-    if let Some(sender) = req.sender.clone() {
-        action = action.with_sender(sender);
-    }
     let mut eng = engine.lock().unwrap();
     // Suppress SSE broadcast for the reactive re-render this dispatch triggers —
     // the delta rides back in this HTTP response, so a live client that also
@@ -1734,7 +1779,12 @@ fn handle_dispatch(
     // dispatch (hot reload, a delayed timer) are not gated, so they still push.
     use std::sync::atomic::Ordering;
     live.in_dispatch.store(true, Ordering::SeqCst);
-    let dispatch_result = eng.dispatch_action(action);
+    let dispatch_result = dispatch_host_action(
+        &mut eng,
+        &req.action,
+        req.payload.clone(),
+        req.sender.as_deref(),
+    );
     live.in_dispatch.store(false, Ordering::SeqCst);
     let state = eng
         .get_module_state(&args.scope)

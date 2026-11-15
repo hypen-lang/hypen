@@ -244,6 +244,16 @@ impl ModuleInstance {
         changed
     }
 
+    /// Replace the whole state with `state`.
+    ///
+    /// Unlike [`update_state`](Self::update_state) this is not a merge: keys
+    /// absent from `state` are gone afterwards. Used where the caller owns the
+    /// complete next state (a hosted module reducer's return value) and has
+    /// already worked out which paths changed.
+    pub fn replace_state(&mut self, state: serde_json::Value) {
+        self.state = Arc::new(state);
+    }
+
     /// Get a reference to the current state
     ///
     /// For read-only access without cloning. Prefer this over `get_state_shared()`

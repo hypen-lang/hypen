@@ -17,7 +17,7 @@ use hypen_engine::module_host::{
 };
 use hypen_engine::reactive::Binding;
 use hypen_engine::reconcile::Patch;
-use hypen_engine::Engine;
+use hypen_engine::{Engine, ModuleGrants};
 use indexmap::indexmap;
 
 const COUNTER: &[u8] = include_bytes!("fixtures/counter_module.wasm");
@@ -198,7 +198,15 @@ fn ui_action_drives_wasm_module_and_rerenders() {
     let init_bytes = engine.module_host_mut().unwrap().init(id, b"{}").unwrap();
     let init_state: serde_json::Value = serde_json::from_slice(&init_bytes).unwrap();
 
-    engine.register_module_instance("counter", id, vec!["increment".to_string()], init_state);
+    engine
+        .register_module_instance(
+            "counter",
+            id,
+            vec!["increment".to_string()],
+            ModuleGrants::none(),
+            init_state,
+        )
+        .unwrap();
 
     let (patches, callback) = patch_capture();
     engine.set_render_callback(callback);
@@ -291,13 +299,24 @@ fn engine_with_counter_and_mirror() -> Engine {
     let mstate: serde_json::Value =
         serde_json::from_slice(&engine.module_host_mut().unwrap().init(mid, b"{}").unwrap()).unwrap();
 
-    engine.register_module_instance("counter", cid, vec!["increment".to_string()], cstate);
-    engine.register_module_instance(
-        "mirror",
-        mid,
-        vec!["pull".to_string(), "bump".to_string(), "watch".to_string()],
-        mstate,
-    );
+    engine
+        .register_module_instance(
+            "counter",
+            cid,
+            vec!["increment".to_string()],
+            ModuleGrants::none(),
+            cstate,
+        )
+        .unwrap();
+    engine
+        .register_module_instance(
+            "mirror",
+            mid,
+            vec!["pull".to_string(), "bump".to_string(), "watch".to_string()],
+            ModuleGrants::new(["counter"], ["counter"]),
+            mstate,
+        )
+        .unwrap();
     engine
 }
 
@@ -399,11 +418,14 @@ fn subscriptions_are_dropped_on_rewire() {
     // Re-wire mirror to a fresh instance (as hot reload does). Its old
     // subscription is cleared; it hasn't re-subscribed.
     let new_mid = engine.module_host_mut().unwrap().instantiate("mirror").unwrap();
-    engine.rewire_module_instance(
-        "mirror",
-        new_mid,
-        vec!["pull".into(), "bump".into(), "watch".into()],
-    );
+    engine
+        .rewire_module_instance(
+            "mirror",
+            new_mid,
+            vec!["pull".into(), "bump".into(), "watch".into()],
+            ModuleGrants::new(["counter"], ["counter"]),
+        )
+        .unwrap();
 
     // A further counter change no longer fires the dropped subscription.
     engine.dispatch_action(Action::new("increment")).unwrap();
@@ -444,8 +466,24 @@ fn cross_module_read_denied_without_grant() {
     let mid = engine.module_host_mut().unwrap().instantiate("mirror").unwrap();
     let mstate: serde_json::Value =
         serde_json::from_slice(&engine.module_host_mut().unwrap().init(mid, b"{}").unwrap()).unwrap();
-    engine.register_module_instance("counter", cid, vec!["increment".to_string()], cstate);
-    engine.register_module_instance("mirror", mid, vec!["pull".to_string()], mstate);
+    engine
+        .register_module_instance(
+            "counter",
+            cid,
+            vec!["increment".to_string()],
+            ModuleGrants::none(),
+            cstate,
+        )
+        .unwrap();
+    engine
+        .register_module_instance(
+            "mirror",
+            mid,
+            vec!["pull".to_string()],
+            ModuleGrants::none(),
+            mstate,
+        )
+        .unwrap();
 
     let result = engine.dispatch_action(Action::new("pull"));
     assert!(
@@ -509,7 +547,15 @@ fn module_uses_wasi_http_for_real_http_round_trip() {
     let id = engine.module_host_mut().unwrap().instantiate("fetcher").unwrap();
     let init_state: serde_json::Value =
         serde_json::from_slice(&engine.module_host_mut().unwrap().init(id, b"{}").unwrap()).unwrap();
-    engine.register_module_instance("fetcher", id, vec!["fetch".to_string()], init_state);
+    engine
+        .register_module_instance(
+            "fetcher",
+            id,
+            vec!["fetch".to_string()],
+            ModuleGrants::none(),
+            init_state,
+        )
+        .unwrap();
 
     let url = format!("http://127.0.0.1:{port}/");
     engine

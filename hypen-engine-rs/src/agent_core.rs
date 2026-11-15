@@ -1354,6 +1354,7 @@ pub(crate) fn unregister_module(core: &mut EngineCore, name: &str) {
         core.module = None;
     }
 
+    core.wildcard_action_scopes.retain(|s| s != &name);
     core.evict_action_scope(&Some(name.clone()));
     core.modules.shift_remove(&name);
     core.placeholder_scopes.remove(&name);

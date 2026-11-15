@@ -74,6 +74,7 @@ impl WasmHostedEngine {
             .inner
             .module_host_mut()
             .ok_or_else(|| js_err("no module host installed"))?;
+        let grants = crate::engine::ModuleGrants::from(&manifest);
         host.register(scope, component_bytes, manifest)
             .map_err(js_err)?;
         let id = host.instantiate(scope).map_err(js_err)?;
@@ -85,16 +86,20 @@ impl WasmHostedEngine {
             None => host.actions(id).map_err(js_err)?,
         };
         self.inner
-            .register_module_instance(scope, id, actions, initial_state);
+            .register_module_instance(scope, id, actions, grants, initial_state)
+            .map_err(js_err)?;
         Ok(id_to_f64(id))
     }
 
     /// Dispatch an action. The engine routes it; if the action is owned by a
     /// bridged module, the JS-side `dispatch` runs.
     ///
-    /// `scope` is optional: pass the owning module's scope to disambiguate when
-    /// several modules export the same action name. When omitted, the engine
-    /// resolves a unique bare action name on its own.
+    /// With `scope`, this is the host-trusted
+    /// [`Engine::dispatch_module_action`](crate::Engine::dispatch_module_action):
+    /// the action goes straight to that hosted module — never pass a scope
+    /// taken from renderer input. Without it, `name` goes through the
+    /// renderer-facing [`Engine::dispatch_action`](crate::Engine::dispatch_action)
+    /// (UI envelopes, or a bare name exactly one scope handles).
     #[wasm_bindgen(js_name = "dispatchAction")]
     pub fn dispatch_action(
         &mut self,
@@ -107,13 +112,13 @@ impl WasmHostedEngine {
         } else {
             serde_wasm_bindgen::from_value(payload).map_err(js_err)?
         };
-        let qualified = match scope {
-            Some(s) if !s.is_empty() => format!("{s}:{name}"),
-            _ => name.to_string(),
-        };
-        self.inner
-            .dispatch_action(Action::new(qualified).with_payload(payload_v))
-            .map_err(js_err)
+        match scope {
+            Some(s) if !s.is_empty() => self.inner.dispatch_module_action(&s, name, payload_v),
+            _ => self
+                .inner
+                .dispatch_action(Action::new(name).with_payload(payload_v)),
+        }
+        .map_err(js_err)
     }
 
     /// Read a named module's current state as a JS value (for assertions

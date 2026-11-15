@@ -78,7 +78,7 @@ pub mod uniffi;
 // ── Public API ─────────────────────────────────────────────────────────
 
 pub use agent::{AgentAction, AgentRoute, BoundInput, BACK, BIND_ACTION, NAVIGATE, SET_INPUT};
-pub use engine::Engine;
+pub use engine::{Engine, ModuleGrants};
 pub use error::EngineError;
 
 pub use ir::{ast_to_ir_node, Element, IRNode, Value};

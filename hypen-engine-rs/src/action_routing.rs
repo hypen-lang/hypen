@@ -14,6 +14,13 @@ pub fn split_scoped_action(name: &str) -> Option<(&str, &str)> {
     name.strip_prefix(SCOPED)?.split_once(':')
 }
 
+/// Whether a wildcard (`"*"`) action scope covers `name`. Reserved engine
+/// names (`__hypen_bind`, `__hypen_reorder`, …) are protocol, not application
+/// actions: a module receives them only if it exports them by name.
+pub fn wildcard_covers(name: &str) -> bool {
+    !name.is_empty() && !name.starts_with("__hypen_")
+}
+
 pub fn safe_state_path(path: &str) -> bool {
     !path.is_empty()
         && path
@@ -26,6 +33,16 @@ impl EngineCore {
         self.registered_actions
             .iter()
             .any(|n| n == name || split_scoped_action(n).is_some_and(|(_, a)| a == name))
+    }
+
+    /// Whether the scoped wire name `__hypen_scoped:<scope>:<name>` has a
+    /// handler: registered explicitly, or covered by a wildcard scope.
+    fn has_scoped_handler(&self, scoped: &str) -> bool {
+        self.registered_actions.iter().any(|a| a == scoped)
+            || (!self.wildcard_action_scopes.is_empty()
+                && split_scoped_action(scoped).is_some_and(|(scope, name)| {
+                    wildcard_covers(name) && self.wildcard_action_scopes.iter().any(|s| s == scope)
+                }))
     }
 
     /// Resolve live nodes, including effective primary scope and inherited
@@ -121,7 +138,7 @@ impl EngineCore {
             }
             // A renderer speaking the new protocol must never reach an old
             // name-global host callback when multiple owners exist.
-            if !self.registered_actions.contains(&action.name) {
+            if !self.has_scoped_handler(&action.name) {
                 if ((self.modules.is_empty() || name.starts_with("router."))
                     && self.registered_actions.iter().any(|a| a == name))
                     || self.build_data_source_action(name, Value::Null).is_some()
@@ -132,17 +149,17 @@ impl EngineCore {
                 }
             }
         } else if split_scoped_action(&action.name).is_some() {
-            if !self.registered_actions.contains(&action.name) {
+            if !self.has_scoped_handler(&action.name) {
                 return Err(EngineError::ActionNotFound(
                     "unregistered scoped action".into(),
                 ));
             }
         } else {
-            let suffix = format!(":{}", action.name);
-            let mut matches = self
-                .registered_actions
-                .iter()
-                .filter(|n| n.starts_with(SCOPED) && n.ends_with(&suffix));
+            // Exact match on the action part. (A suffix match would let a
+            // bare `scope:name` pass as a qualifier for `name`.)
+            let mut matches = self.registered_actions.iter().filter(|n| {
+                split_scoped_action(n).is_some_and(|(_, registered)| registered == action.name)
+            });
             if let Some(name) = matches.next() {
                 if matches.next().is_some() {
                     return Err(EngineError::ActionNotFound(
@@ -150,6 +167,18 @@ impl EngineCore {
                     ));
                 }
                 action.name = name.clone();
+            } else if !self.wildcard_action_scopes.is_empty()
+                && wildcard_covers(&action.name)
+                && !self.registered_actions.contains(&action.name)
+            {
+                // Nobody registered this name, scoped or bare: a wildcard
+                // scope takes it, but only when it is the sole candidate.
+                let [scope] = self.wildcard_action_scopes.as_slice() else {
+                    return Err(EngineError::ActionNotFound(
+                        "ambiguous unscoped action".into(),
+                    ));
+                };
+                action.name = scoped_action_name(scope, &action.name);
             } else if action.name.starts_with("__hypen_") && self.modules.len() > 1 {
                 return Err(EngineError::ActionNotFound(
                     "unscoped reserved action".into(),

@@ -241,7 +241,15 @@ fn ui_action_drives_async_wasm_module_and_rerenders() {
     let init_bytes = engine.module_host_mut().unwrap().init(id, b"{}").unwrap();
     let init_state: serde_json::Value = serde_json::from_slice(&init_bytes).unwrap();
 
-    engine.register_module_instance("counter", id, vec!["increment".to_string()], init_state);
+    engine
+        .register_module_instance(
+            "counter",
+            id,
+            vec!["increment".to_string()],
+            hypen_engine::ModuleGrants::none(),
+            init_state,
+        )
+        .unwrap();
 
     let patches: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
     let sink = Arc::clone(&patches);

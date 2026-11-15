@@ -4,8 +4,10 @@
 //! Covers how `Engine::dispatch_action` layers module routing on top of the
 //! UI action envelope (`__hypen_dispatch` → `__hypen_scoped:<scope>:<name>`):
 //! envelopes resolve by node ownership and then reach the owning module
-//! instance, the legacy `scope:action` / bare-name forms still work, and
-//! closure handlers are unaffected by an installed host.
+//! instance, renderer-controlled input gets no `scope:action` / sender-node
+//! shortcut around that, a bare name routes only when a single scope handles
+//! it, and closure handlers are unaffected by an installed host. Trusted
+//! embedder code addresses a scope with `Engine::dispatch_module_action`.
 
 use hypen_engine::dispatch::Action;
 use hypen_engine::ir::{Element, IRNode, Props, Value};
@@ -14,7 +16,7 @@ use hypen_engine::module_host::{
     SiblingState,
 };
 use hypen_engine::reactive::Binding;
-use hypen_engine::{Engine, EngineError, Patch};
+use hypen_engine::{Engine, EngineError, ModuleGrants, Patch};
 use indexmap::indexmap;
 use serde_json::json;
 use std::sync::{Arc, Mutex};
@@ -100,12 +102,15 @@ fn two_counters() -> (Engine, Arc<Mutex<Vec<(u64, String)>>>, String, String) {
         calls: Arc::clone(&calls),
     }));
     for (i, scope) in ["a", "b"].into_iter().enumerate() {
-        engine.register_module_instance(
-            scope,
-            ModuleInstanceId(i as u64),
-            vec!["increment".to_string()],
-            json!({ "count": 0 }),
-        );
+        engine
+            .register_module_instance(
+                scope,
+                ModuleInstanceId(i as u64),
+                vec!["increment".to_string()],
+                ModuleGrants::none(),
+                json!({ "count": 0 }),
+            )
+            .unwrap();
     }
 
     let created = Arc::new(Mutex::new(Vec::new()));
@@ -174,23 +179,76 @@ fn ui_envelope_for_an_action_the_module_does_not_export_fails_closed() {
 }
 
 #[test]
-fn qualified_sender_and_bare_names_still_route() {
-    let (mut engine, _, node_a, _) = two_counters();
+fn renderer_input_gets_no_qualifier_or_sender_shortcut() {
+    let (mut engine, calls, node_a, _) = two_counters();
 
-    // Explicit `scope:action` qualifier (REPL / HTTP API).
-    engine.dispatch_action(Action::new("b:increment")).unwrap();
-    assert_eq!(count(&engine, "b"), 10);
+    // `scope:action` is just an (unknown) action name on this entry point.
+    for name in ["b:increment", "B:increment", "a:b:increment"] {
+        let err = engine.dispatch_action(Action::new(name)).unwrap_err();
+        assert!(matches!(err, EngineError::ActionNotFound(_)), "{name}: {err}");
+    }
 
-    // Sender node id (the reference runtime's web client).
-    engine
+    // A claimed sender node is not a routing authority: the name is still
+    // owned by two scopes, so it drives neither. Ownership is only ever
+    // established by the `__hypen_dispatch` envelope checks.
+    let err = engine
         .dispatch_action(Action::new("increment").with_sender(node_a))
-        .unwrap();
-    assert_eq!(count(&engine, "a"), 1);
-
-    // A bare name two scopes export is ambiguous, and drives neither.
-    let err = engine.dispatch_action(Action::new("increment")).unwrap_err();
+        .unwrap_err();
     assert!(matches!(err, EngineError::ModuleError(_)), "{err}");
-    assert_eq!((count(&engine, "a"), count(&engine, "b")), (1, 10));
+    let err = engine.dispatch_action(Action::new("increment")).unwrap_err();
+    assert!(err.to_string().contains("exported by multiple modules (a, b)"), "{err}");
+
+    assert!(calls.lock().unwrap().is_empty());
+    assert_eq!((count(&engine, "a"), count(&engine, "b")), (0, 0));
+}
+
+#[test]
+fn bare_and_scoped_names_route_exactly_as_they_do_for_closure_handlers() {
+    let (mut engine, calls, _, _) = two_counters();
+    engine
+        .rewire_module_instance(
+            "b",
+            ModuleInstanceId(1),
+            vec!["increment".to_string(), "only_b".to_string()],
+            ModuleGrants::none(),
+        )
+        .unwrap();
+
+    // A bare name with a single registered owner resolves to it.
+    engine.dispatch_action(Action::new("only_b")).unwrap();
+    // A registered scoped wire name is accepted as-is; an unregistered one
+    // fails closed.
+    engine
+        .dispatch_action(Action::new("__hypen_scoped:a:increment"))
+        .unwrap();
+    let err = engine
+        .dispatch_action(Action::new("__hypen_scoped:a:only_b"))
+        .unwrap_err();
+    assert!(matches!(err, EngineError::ActionNotFound(_)), "{err}");
+
+    assert_eq!(
+        *calls.lock().unwrap(),
+        vec![(1, "only_b".to_string()), (0, "increment".to_string())]
+    );
+}
+
+#[test]
+fn trusted_api_addresses_a_scope_directly() {
+    let (mut engine, calls, _, _) = two_counters();
+
+    engine
+        .dispatch_module_action("B", "increment", json!({ "by": 1 }))
+        .unwrap();
+    assert_eq!((count(&engine, "a"), count(&engine, "b")), (0, 10));
+
+    // The name is opaque: no qualifier parsing here either.
+    for (scope, name) in [("a", "b:increment"), ("a", "reset"), ("nope", "increment")] {
+        let err = engine
+            .dispatch_module_action(scope, name, json!(null))
+            .unwrap_err();
+        assert!(matches!(err, EngineError::ActionNotFound(_)), "{scope}/{name}: {err}");
+    }
+    assert_eq!(*calls.lock().unwrap(), vec![(1, "increment".to_string())]);
 }
 
 #[test]
@@ -211,7 +269,14 @@ fn closure_handlers_are_unaffected_by_a_module_host() {
 #[test]
 fn rewiring_a_scope_drops_the_actions_it_no_longer_exports() {
     let (mut engine, calls, node_a, _) = two_counters();
-    engine.rewire_module_instance("a", ModuleInstanceId(0), vec!["bump".to_string()]);
+    engine
+        .rewire_module_instance(
+            "a",
+            ModuleInstanceId(0),
+            vec!["bump".to_string()],
+            ModuleGrants::none(),
+        )
+        .unwrap();
 
     // `increment` is no longer `a`'s: the envelope fails closed instead of
     // reaching the instance through a stale scoped-handler record.

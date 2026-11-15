@@ -56,6 +56,12 @@ pub(crate) struct EngineCore {
     /// `dispatch_external` then refused — and the WASI binding, which already
     /// gated on it, disagreed with the others.
     pub registered_actions: Vec<String>,
+    /// Module scopes whose handler accepts *any* action name (a hosted WASM
+    /// module whose `actions()` returned `"*"`). Such a scope cannot list its
+    /// names in [`registered_actions`](Self::registered_actions), so
+    /// [`route_ui_action`](Self::route_ui_action) consults this instead. The
+    /// wildcard never covers the engine's reserved `__hypen_*` names.
+    pub wildcard_action_scopes: Vec<String>,
     /// Normalized batch-animation spec stored by an `update_state` /
     /// `update_state_sparse` call that carried an animation context (Option
     /// D cheap subset). Consumed (taken) by the NEXT [`render_dirty`] cycle:
@@ -160,6 +166,7 @@ impl EngineCore {
             data_sources: IndexMap::new(),
             action_module_map: IndexMap::new(),
             registered_actions: Vec::new(),
+            wildcard_action_scopes: Vec::new(),
             pending_animation: None,
             declared_routes: IndexMap::new(),
             declared_bindings: IndexMap::new(),
@@ -252,23 +259,6 @@ impl EngineCore {
     /// Get a named module's state (for reconciler lookups).
     pub fn get_module_state(&self, name: &str) -> Option<&serde_json::Value> {
         self.modules.get(name).map(|m| m.get_state())
-    }
-
-    /// Resolve the module scope that owns a rendered node, given its
-    /// patch-wire id string (as produced by [`node_id_str`]).
-    ///
-    /// Renderers carry the node id of the element that dispatched an action;
-    /// the engine maps it back to the node's `module_scope` so a UI action can
-    /// be routed to the right module instance — even when several modules
-    /// export the same action name. Returns `None` when the id doesn't parse,
-    /// the node no longer exists, or the node is not module-scoped.
-    ///
-    /// [`node_id_str`]: crate::reconcile::node_id_str
-    pub(crate) fn scope_of_node(&self, node_id: &str) -> Option<String> {
-        use slotmap::KeyData;
-        let ffi: u64 = node_id.parse().ok()?;
-        let id = crate::ir::NodeId::from(KeyData::from_ffi(ffi));
-        self.tree.get(id).and_then(|n| n.module_scope.clone())
     }
 
     // ── State Updates ──────────────────────────────────────────────────
@@ -370,6 +360,28 @@ impl EngineCore {
         self.stamp_pending_animation(animation);
 
         self.schedule_dirty_for_paths(scope.as_deref(), paths.iter().map(|s| s.as_str()));
+        true
+    }
+
+    /// Replace a named module's state wholesale and schedule the bindings on
+    /// `changed_paths` for re-render.
+    ///
+    /// `scope` must already be the canonical (lowercased) module key. The
+    /// caller supplies the paths at which the new state differs from the old;
+    /// only those are invalidated, so a one-leaf change stays a one-binding
+    /// re-render even though the tree was swapped. Returns `false` when no
+    /// module is registered under `scope`.
+    pub fn replace_module_state(
+        &mut self,
+        scope: &str,
+        state: serde_json::Value,
+        changed_paths: &[String],
+    ) -> bool {
+        let Some(module) = self.modules.get_mut(scope) else {
+            return false;
+        };
+        module.replace_state(state);
+        self.schedule_dirty_for_paths(Some(scope), changed_paths.iter().map(String::as_str));
         true
     }
 
