@@ -760,14 +760,19 @@ impl HttpGrant {
 
     /// [`check`](Self::check) for a host that did not come out of
     /// [`HttpUrl::parse`] (the authority of a blocking `wasi:http` request).
-    /// `host` is canonicalized first; one that is not a valid host is denied.
+    /// With an allowlist, `host` is canonicalized first and one that is not
+    /// a host in [`HttpUrl`]'s grammar matches nothing; without one, any
+    /// host passes as it always did.
     pub fn check_authority(&self, host: &str, port: u16) -> Result<(), HttpDenial> {
-        match HostName::parse(host) {
-            Ok(host) => self.check_host(host.as_str(), port),
-            Err(_) if self.is_granted() => Err(HttpDenial::HostNotAllowed {
-                host: shown(host),
-            }),
-            Err(_) => Err(HttpDenial::NotGranted),
+        match self {
+            Self::Denied => Err(HttpDenial::NotGranted),
+            Self::AnyHost => Ok(()),
+            Self::Hosts(_) => match HostName::parse(host) {
+                Ok(host) => self.check_host(host.as_str(), port),
+                Err(_) => Err(HttpDenial::HostNotAllowed {
+                    host: format!("{}:{port}", shown(host)),
+                }),
+            },
         }
     }
 
@@ -1173,9 +1178,13 @@ mod tests {
         let denial = hosts.check(&url("https://evil.test/")).unwrap_err();
         assert!(denial.to_string().contains("'evil.test:443'"), "{denial}");
 
-        // The wasi:http path canonicalizes before matching and fails closed.
+        // The wasi:http path canonicalizes before matching and, under an
+        // allowlist, fails closed; without one nothing is second-guessed.
         assert_eq!(hosts.check_authority("API.Example.com", 443), Ok(()));
         assert!(hosts.check_authority("not a host", 443).is_err());
+        assert!(hosts.check_authority("", 443).is_err());
+        assert_eq!(HttpGrant::AnyHost.check_authority("example.com.", 80), Ok(()));
+        assert_eq!(HttpGrant::AnyHost.check_authority("", 80), Ok(()));
         assert_eq!(
             HttpGrant::Denied.check_authority("x", 1),
             Err(HttpDenial::NotGranted)

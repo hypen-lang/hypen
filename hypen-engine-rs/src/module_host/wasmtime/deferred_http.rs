@@ -116,10 +116,10 @@ impl WasiHttpHooks for AllowlistHooks {
         };
         let uri = request.uri();
         let port = uri.port_u16().unwrap_or(scheme.default_port());
-        let allowed = uri
-            .host()
-            .is_some_and(|host| self.grant.check_authority(host, port).is_ok());
-        if !allowed {
+        // A request with no host matches no pattern; with no allowlist it is
+        // passed on for the sender to reject as it always did.
+        let host = uri.host().unwrap_or("");
+        if self.grant.check_authority(host, port).is_err() {
             return Err(ErrorCode::HttpRequestDenied.into());
         }
         Ok(default_send_request(request, config))

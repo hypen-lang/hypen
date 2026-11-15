@@ -193,3 +193,49 @@ fn ffi_reports_liveness_denials_and_takes_a_cache_dir() {
     let err = HypenModuleHost::with_config(config).err().expect("refused").to_string();
     assert!(err.contains("is not a directory"), "{err}");
 }
+
+/// Deferred HTTP over the FFI: the manifest JSON carries `http` /
+/// `httpHosts` (a malformed pattern is refused at `register`), and the
+/// requests a reducer queued come back in the dispatch result as
+/// `httpRequests` for the embedder to perform and complete by dispatching
+/// `then`.
+#[test]
+fn ffi_reports_queued_http_requests_and_takes_http_hosts() {
+    const DEFERRED: &[u8] = include_bytes!("fixtures/deferred_http_module.wasm");
+    let host = HypenModuleHost::new().unwrap();
+
+    let err = host
+        .register("net".into(), DEFERRED.to_vec(), r#"{"http": true, "httpHosts": ["https://x"]}"#.into())
+        .unwrap_err();
+    assert!(err.to_string().contains("drop the scheme"), "{err}");
+
+    let manifest = r#"{"http": true, "httpHosts": ["*.example.com"]}"#;
+    host.register("net".into(), DEFERRED.to_vec(), manifest.into()).unwrap();
+    let id = host.instantiate("net".into()).unwrap();
+    let state = host.init(id, "{}".into()).unwrap();
+
+    let payload = r#"{"url": "https://api.example.com/v1", "method": "POST", "body": "hi",
+                      "headers": {"x-a": "1"}, "tag": "t"}"#;
+    let out = host.dispatch(id, state.clone(), "get".into(), payload.into(), String::new()).unwrap();
+    let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(
+        out["httpRequests"],
+        serde_json::json!([{
+            "method": "POST",
+            "url": "https://api.example.com/v1",
+            "headers": [["x-a", "1"]],
+            "bodyBase64": "aGk=",
+            "timeoutMs": 30000,
+            "then": "fetched",
+            "tag": "t",
+        }])
+    );
+
+    // Outside the allowlist: refused at `send`, nothing queued.
+    let out = host
+        .dispatch(id, state, "get".into(), r#"{"url": "https://evil.test/"}"#.into(), String::new())
+        .unwrap();
+    let out: serde_json::Value = serde_json::from_str(&out).unwrap();
+    assert_eq!(out["httpRequests"], serde_json::json!([]));
+    assert!(out["state"]["sendError"].as_str().unwrap().contains("'evil.test:443'"), "{out}");
+}
