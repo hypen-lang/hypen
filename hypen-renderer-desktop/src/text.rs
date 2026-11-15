@@ -1362,7 +1362,7 @@ fn generic_face_family(generic: GenericFamily) -> Arc<str> {
             name(fontdb::Family::Monospace),
             name(fontdb::Family::Cursive),
             name(fontdb::Family::Fantasy),
-            Arc::from(system_ui_family(db)),
+            system_ui_family(db),
         ]
     });
     Arc::clone(&families[generic as usize])

@@ -10125,3 +10125,38 @@ fn text_beside_a_label_in_a_row_wraps_within_the_row() {
         "caption should wrap to two lines: {caption:?} row {row_rect:?} col {col:?} user {user:?}"
     );
 }
+
+/// A Text with its own `text-center` fills its vertical parent's width
+/// (the DOM's text fill), so a centred title over a wider sibling sits
+/// in the middle; the parent stays content-sized (text fill is not
+/// width demand), and Row parents keep the Text intrinsic.
+#[test]
+fn text_with_its_own_center_alignment_fills_its_column() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Column {
+                Text("Inception").tw("text-center")
+                Text("A considerably longer line of plain body text")
+            }
+            Row { Text("Row title").tw("text-center") }
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let outer = first_of_type(&tree, "Column");
+    let inner = tree.children_of(&outer)[0].clone();
+    let kids = tree.children_of(&inner);
+    let rect = |id: &str| pass.item_by_id(id).unwrap().rect;
+    let (title, body) = (rect(&kids[0]), rect(&kids[1]));
+    assert!(
+        (title.w - body.w).abs() < 0.5 && (title.x - body.x).abs() < 0.5,
+        "centred title {title:?} should span the column like {body:?}"
+    );
+    let column_w = pass.item_by_id(&inner).map(|i| i.rect.w).unwrap_or(body.w);
+    assert!(column_w < 400.0, "the column stays content-sized: {column_w}");
+    let row = first_of_type(&tree, "Row");
+    let row_title = rect(&tree.children_of(&row)[0]);
+    let (natural, _) = text.measure("Row title", 16.0, None);
+    assert!(row_title.w <= natural + 1.0, "Row keeps the Text intrinsic: {row_title:?}");
+}

@@ -2582,6 +2582,44 @@ impl TaffyState {
             renderer_for_taffy,
             ..
         } = self;
+        // Text fill (the DOM's `data-hypen-text-fill`): a Text whose own
+        // `textAlign` is center / right / end / justify takes the full
+        // width of a vertical parent, so the alignment has room to act —
+        // at its intrinsic width a centred title in a content-sized
+        // Column stayed flush left. Row / Center / Badge parents keep it
+        // intrinsic, as on the web. Not width DEMAND: the parent stays
+        // content-sized (see the demand walk below).
+        for (tid, rid) in renderer_for_taffy.iter() {
+            let Some(node) = tree.get(rid) else { continue };
+            if !text_fills_parent_width(node) {
+                continue;
+            }
+            let Some(parent) = taffy.parent(*tid) else { continue };
+            let vertical_parent = taffy.style(parent).is_ok_and(|style| {
+                style.display == Display::Flex
+                    && matches!(
+                        style.flex_direction,
+                        FlexDirection::Column | FlexDirection::ColumnReverse
+                    )
+            });
+            let excluded_parent = renderer_for_taffy
+                .get(&parent)
+                .and_then(|prid| tree.get(prid))
+                .is_some_and(|p| {
+                    ["Row", "Center", "Badge"]
+                        .iter()
+                        .any(|t| p.element_type.eq_ignore_ascii_case(t))
+                });
+            if !vertical_parent || excluded_parent {
+                continue;
+            }
+            let Ok(style) = taffy.style(*tid) else { continue };
+            if style.align_self.is_none() && style.size.width.is_auto() {
+                let mut style = style.clone();
+                style.align_self = Some(AlignSelf::Stretch);
+                let _ = taffy.set_style(*tid, style);
+            }
+        }
         // Fixpoint: promoting one node to `Stretch` can make its parent
         // demand width too. Converges in a couple of rounds in practice;
         // the bound is a backstop, and the `changed` early-out is what
@@ -2608,9 +2646,14 @@ impl TaffyState {
                     .unwrap_or_default()
                     .iter()
                     .any(|child| {
+                        let text_fill = renderer_for_taffy
+                            .get(child)
+                            .and_then(|crid| tree.get(crid))
+                            .is_some_and(text_fills_parent_width);
                         taffy.style(*child).is_ok_and(|child_style| {
                             child_style.size.width.into_raw().uses_percentage()
-                                || child_style.align_self == Some(AlignSelf::Stretch)
+                                || (child_style.align_self == Some(AlignSelf::Stretch)
+                                    && !text_fill)
                         })
                     });
                 if demands_width {
@@ -9366,6 +9409,18 @@ fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign 
         cursor = tree.parent_of(current);
     }
     TextAlign::Start
+}
+
+/// The DOM's `applyTextAlign` text fill: a Text leaf whose OWN
+/// `textAlign` is center / right / end / justify fills its parent's width.
+fn text_fills_parent_width(node: &crate::tree::Node) -> bool {
+    is_text_leaf(node)
+        && crate::style::prop_str(node, "textAlign").is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "center" | "right" | "end" | "justify"
+            )
+        })
 }
 
 fn text_requests_stack_track_width(node: &crate::tree::Node) -> bool {
