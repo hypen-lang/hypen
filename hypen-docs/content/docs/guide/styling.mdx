@@ -668,7 +668,9 @@ A value can be a literal, a binding (`@theme.…`, `@state.…`, `@item.…` ins
 
 In a map with a `default`, every key that is not a breakpoint or a state is read as a scheme name, so a misspelt breakpoint (`mdd`) becomes a scheme that never matches and the `default` applies. Without a `default`, only `light` and `dark` are scheme keys, and a map with any other key is an ordinary object argument.
 
-Tailwind's `dark:` prefix does the same thing: `.tw("bg-white dark:bg-black")` renders `bg-black` while the scheme is `dark`. Combined with a breakpoint or a state (`dark:md:bg-gray-900`, `dark:hover:bg-black`), it applies to that variant.
+Scheme values do not combine with [`.states`](/docs/guide/animation) poses: a pose holds one literal per prop, so a scheme map inside `onState(…)`, or on a prop that a pose overrides, uses its `default` in every scheme (the engine logs a warning).
+
+Tailwind's `dark:` prefix does the same thing: `.tw("bg-white dark:bg-black")` renders `bg-black` while the scheme is `dark`. Combined with a breakpoint or a state (`dark:md:bg-gray-900`, `dark:hover:bg-black`), it applies to that variant. It overrides whatever the property already is, whether that came from the same class string, another `.tw()` or a plain applicator (`.color("#111").tw("dark:text-white")`).
 
 **Platform Support:** All renderers
 

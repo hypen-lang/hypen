@@ -33,82 +33,95 @@ fn css_to_camel_case(name: &str) -> String {
 /// the scheme name the resulting switch matches.
 const TAILWIND_DARK_VARIANT: &str = "dark";
 
-/// Expand Tailwind classes into CSS properties
-/// Returns a Vec of (prop_name, value) pairs with `.0` suffix,
-/// consistent with regular applicator props.
-/// CSS hyphenated names are converted to camelCase.
+/// Tailwind classes expanded into prop keys (`.0`-suffixed like regular
+/// applicator props, CSS names camelCased) and their CSS values.
+struct TailwindProps {
+    /// Base utilities and the renderer-resolved variants (suffix notation:
+    /// `padding@md.0` for responsive, `backgroundColor:hover.0` for state),
+    /// in class order.
+    plain: Vec<(String, String)>,
+    /// `dark:` utilities, keyed by the prop they override: the base prop, or
+    /// — combined with a breakpoint or state (`dark:md:…`, `dark:hover:…`) —
+    /// that variant's prop (`<prop>@md.0`, `<prop>:hover.0`).
+    dark: Vec<(String, String)>,
+}
+
+/// Expand Tailwind classes into CSS properties.
 ///
 /// Positioning classes (`absolute`, `relative`, `top-0`, …) are a hard error
 /// from the Tailwind crate — Hypen has no CSS positioning model — and are
 /// surfaced as `Err(message)` so the caller can fail the element loudly.
-fn expand_tailwind_classes(classes: &str) -> Result<Vec<(String, Value)>, String> {
+fn expand_tailwind_classes(classes: &str) -> Result<TailwindProps, String> {
     let output = hypen_tailwind_parse::parse_classes(classes)
         .map_err(|e| format!(".tw(\"{classes}\"): {e}"))?;
-    let mut props = Vec::new();
+    let mut props = TailwindProps {
+        plain: Vec::new(),
+        dark: Vec::new(),
+    };
 
-    // Add base properties (no variant)
     for css_prop in &output.base {
-        let camel = css_to_camel_case(&css_prop.property);
-        props.push((
-            format!("{}.0", camel),
-            Value::Static(serde_json::Value::String(css_prop.value.clone())),
+        props.plain.push((
+            format!("{}.0", css_to_camel_case(&css_prop.property)),
+            css_prop.value.clone(),
         ));
     }
-
-    // Renderer-resolved variants first (suffix notation: "padding@md.0" for
-    // responsive, "backgroundColor:hover.0" for state), so a `dark:` utility
-    // below finds the value it overrides whatever order the map yields.
     for (variant_key, css_props) in &output.variants {
-        if variant_key.contains(TAILWIND_DARK_VARIANT) {
-            continue;
-        }
+        let is_dark = variant_key.contains(TAILWIND_DARK_VARIANT);
+        let suffix = variant_key.replace(TAILWIND_DARK_VARIANT, "");
         for css_prop in css_props {
-            let camel = css_to_camel_case(&css_prop.property);
-            let prop_key = format!("{}{}.0", camel, variant_key);
-            props.push((
-                prop_key,
-                Value::Static(serde_json::Value::String(css_prop.value.clone())),
-            ));
-        }
-    }
-
-    // `dark:` is engine-resolved: it turns the value it overrides into a
-    // scheme switch (`dark` case over that value as default), exactly like
-    // `.prop({ default: …, dark: … })`. Combined with a breakpoint or state
-    // (`dark:md:…`, `dark:hover:…`) it switches that variant's prop
-    // (`<prop>@md.0`, `<prop>:hover.0`) instead of the base one.
-    for (variant_key, css_props) in &output.variants {
-        if !variant_key.contains(TAILWIND_DARK_VARIANT) {
-            continue;
-        }
-        let rest = variant_key.replace(TAILWIND_DARK_VARIANT, "");
-        for css_prop in css_props {
-            let key = format!("{}{}.0", css_to_camel_case(&css_prop.property), rest);
-            let mut cases = indexmap::IndexMap::new();
-            cases.insert(
-                TAILWIND_DARK_VARIANT.to_string(),
-                Value::Static(serde_json::Value::String(css_prop.value.clone())),
-            );
-            match props.iter_mut().find(|(k, _)| *k == key) {
-                Some((_, value)) => {
-                    let default = match value {
-                        Value::Static(_) => Some(Box::new(value.clone())),
-                        _ => None,
-                    };
-                    *value = Value::SchemeSwitch { cases, default };
-                }
-                None => props.push((
-                    key,
-                    Value::SchemeSwitch {
-                        cases,
-                        default: None,
-                    },
-                )),
-            }
+            let key = format!("{}{}.0", css_to_camel_case(&css_prop.property), suffix);
+            let target = if is_dark {
+                &mut props.dark
+            } else {
+                &mut props.plain
+            };
+            target.push((key, css_prop.value.clone()));
         }
     }
 
     Ok(props)
+}
+
+/// Insert one expanded Tailwind value into a node's props.
+///
+/// `dark:` is engine-resolved: it becomes the `dark` case of a scheme switch
+/// over whatever the prop already is — its value from the same class string,
+/// an earlier `.tw()` or a plain applicator (`.color("#111").tw("dark:…")`)
+/// — exactly like `.prop({ default: …, dark: … })`. A plain value in turn
+/// replaces only the default of a switch that is already there, so neither
+/// order of base and `dark:` utilities loses the other.
+fn insert_tailwind_prop(props: &mut Props, key: String, css_value: String, dark: bool) {
+    let value = Value::Static(serde_json::Value::String(css_value));
+    let dark_case = |value: Value| {
+        let mut cases = indexmap::IndexMap::new();
+        cases.insert(TAILWIND_DARK_VARIANT.to_string(), value);
+        cases
+    };
+    let merged = match (props.get(&key).cloned(), dark) {
+        (Some(Value::SchemeSwitch { cases, .. }), false) => Value::SchemeSwitch {
+            cases,
+            default: Some(Box::new(value)),
+        },
+        (Some(Value::SchemeSwitch { mut cases, default }), true) => {
+            cases.insert(TAILWIND_DARK_VARIANT.to_string(), value);
+            Value::SchemeSwitch { cases, default }
+        }
+        (Some(base), true) => Value::SchemeSwitch {
+            cases: dark_case(value),
+            // An action, a resource or a `.states` switch cannot be an entry.
+            default: matches!(
+                base,
+                Value::Static(_) | Value::Binding(_) | Value::TemplateString { .. }
+            )
+            .then(|| Box::new(base)),
+        },
+        (None, true) => Value::SchemeSwitch {
+            cases: dark_case(value),
+            default: None,
+        },
+        (_, false) => value,
+    };
+    props.insert(key, merged);
 }
 
 /// Extract all @{state.xxx} and @{item.xxx} bindings from a template string
@@ -280,8 +293,13 @@ fn process_applicators(
                 };
                 match expand_tailwind_classes(&class_string) {
                     Ok(expanded) => {
-                        for (prop_key, prop_value) in expanded {
-                            props.insert(prop_key, prop_value);
+                        // Plain values first, so a `dark:` utility finds the
+                        // value it overrides wherever it sits in the string.
+                        for (key, css_value) in expanded.plain {
+                            insert_tailwind_prop(props, key, css_value, false);
+                        }
+                        for (key, css_value) in expanded.dark {
+                            insert_tailwind_prop(props, key, css_value, true);
                         }
                     }
                     Err(message) => {
@@ -729,6 +747,24 @@ fn apply_states_applicator(
                 Value::Static(v) => {
                     static_props.insert(key.clone(), v.clone());
                 }
+                // A pose holds one literal per prop, so a scheme switch
+                // (`.tw("bg-white dark:bg-black")`, `{ default: …, dark: … }`)
+                // keeps its literal default and loses the scheme values —
+                // dropping the whole prop would take the base value with it.
+                Value::SchemeSwitch {
+                    default: Some(default),
+                    ..
+                } if matches!(**default, Value::Static(_)) => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".states: color-scheme values are not supported inside onState({}); prop '{}' uses its default in every scheme",
+                        label,
+                        key
+                    );
+                    if let Value::Static(v) = &**default {
+                        static_props.insert(key.clone(), v.clone());
+                    }
+                }
                 _ => {
                     crate::log_warn!(
                         LogScope::Engine,
@@ -756,6 +792,23 @@ fn apply_states_applicator(
         for key in &union {
             let default = match props.get(key.as_str()) {
                 Some(Value::Static(v)) => Some(v.clone()),
+                // The pose switch holds one literal default, so a
+                // scheme-switched base keeps its literal default and stops
+                // following the scheme rather than vanishing outside poses.
+                Some(Value::SchemeSwitch {
+                    default: Some(default),
+                    ..
+                }) if matches!(**default, Value::Static(_)) => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".states: '{}' has color-scheme values and a pose overrides it; outside the poses it uses its default in every scheme",
+                        key
+                    );
+                    match &**default {
+                        Value::Static(v) => Some(v.clone()),
+                        _ => None,
+                    }
+                }
                 Some(_) => {
                     crate::log_warn!(
                         LogScope::Engine,

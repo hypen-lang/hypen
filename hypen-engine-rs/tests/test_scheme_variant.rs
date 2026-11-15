@@ -474,3 +474,241 @@ fn tailwind_dark_combined_with_a_breakpoint_or_state_switches_that_variant() {
     );
     let _ = base;
 }
+
+// ---------------------------------------------------------------------------
+// Regressions found in review
+// ---------------------------------------------------------------------------
+
+#[test]
+fn a_row_edit_to_the_entry_not_in_effect_is_seen_after_the_scheme_changes() {
+    let items = |night1: &str, day1: &str| {
+        json!({ "items": [
+            { "id": 1, "day": day1, "night": night1 },
+            { "id": 2, "day": "#222222", "night": "#dddddd" },
+        ] })
+    };
+    let mut engine = engine_with(items("#eeeeee", "#111111"));
+    engine.set_context("appearance", appearance("light"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r##"Column {
+            ForEach(items: @state.items, key: "id") {
+                Text("row").color({ default: @item.day, dark: @item.night })
+                Text("glow").borderColor({ dark: @item.night })
+            }
+        }"##,
+    );
+
+    // Edit the dark entry while light: nothing visible changes…
+    patches.lock().unwrap().clear();
+    engine.update_state(None, items("#abcdef", "#111111"));
+    assert_eq!(changes(&patches.lock().unwrap()), Vec::<String>::new());
+
+    // …but the switch to dark must show the edited value, not the old one.
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("dark"));
+    let mut dark = changes(&patches.lock().unwrap());
+    dark.sort();
+    assert_eq!(
+        dark,
+        [
+            "borderColor.0=\"#abcdef\"",
+            "borderColor.0=\"#dddddd\"",
+            "color.0=\"#abcdef\"",
+            "color.0=\"#dddddd\"",
+        ]
+    );
+
+    // Mirror: edit the light entry while dark, then go back to light.
+    patches.lock().unwrap().clear();
+    engine.update_state(None, items("#abcdef", "#010101"));
+    assert_eq!(changes(&patches.lock().unwrap()), Vec::<String>::new());
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("light"));
+    let light = changes(&patches.lock().unwrap());
+    assert!(
+        light.contains(&"color.0=\"#010101\"".to_string()),
+        "{light:?}"
+    );
+    assert!(
+        !light.iter().any(|c| c == "color.0=\"#111111\""),
+        "{light:?}"
+    );
+}
+
+#[test]
+fn tailwind_dark_keeps_a_base_value_from_another_applicator() {
+    let mut engine = engine_with(json!({}));
+    engine.set_context("appearance", appearance("light"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r##"Column {
+            Text("a").color("#111111").tw("dark:text-white")
+            Text("b").tw("bg-white").tw("dark:bg-black")
+            Text("c").tw("dark:bg-black").tw("bg-white")
+        }"##,
+    );
+    let (white, got_color) = {
+        let got = patches.lock().unwrap();
+        let bg = created(&got, "backgroundColor");
+        assert_eq!(bg.len(), 2, "both base backgrounds survive: {bg:?}");
+        assert_eq!(bg[0].1, bg[1].1);
+        (bg[0].1.clone(), created(&got, "color"))
+    };
+    assert_eq!(got_color, [("color.0".to_string(), json!("#111111"))]);
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("dark"));
+    let dark = changes(&patches.lock().unwrap());
+    assert_eq!(dark.len(), 3, "{dark:?}");
+    assert!(dark.iter().all(|c| !c.ends_with('-')), "{dark:?}");
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("light"));
+    let mut light = changes(&patches.lock().unwrap());
+    light.sort();
+    assert_eq!(
+        light,
+        [
+            format!("backgroundColor.0={white}"),
+            format!("backgroundColor.0={white}"),
+            "color.0=\"#111111\"".to_string(),
+        ]
+    );
+}
+
+#[test]
+fn tailwind_repeated_utilities_on_one_property_keep_base_and_dark() {
+    let mut engine = engine_with(json!({}));
+    engine.set_context("appearance", appearance("light"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r#"Column {
+            Text("a").tw("bg-white dark:bg-black dark:bg-red-500")
+            Text("b").tw("bg-white bg-red-500 dark:bg-black")
+            Text("c").tw("leading-5 dark:text-lg dark:leading-6")
+        }"#,
+    );
+    let (a_light, b_light) = {
+        let got = patches.lock().unwrap();
+        let bg = created(&got, "backgroundColor");
+        assert_eq!(bg.len(), 2, "{bg:?}");
+        // Two dark utilities: the base survives.  Two base utilities: last wins.
+        assert_ne!(bg[0].1, bg[1].1);
+        assert_eq!(
+            created(&got, "lineHeight").len(),
+            1,
+            "base line-height survives two dark utilities touching it"
+        );
+        (bg[0].1.clone(), bg[1].1.clone())
+    };
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("dark"));
+    let dark = changes(&patches.lock().unwrap());
+    let bgs: Vec<&String> = dark
+        .iter()
+        .filter(|c| c.starts_with("backgroundColor.0="))
+        .collect();
+    assert_eq!(bgs.len(), 2, "{dark:?}");
+    // a: last dark utility (red) == b's light value; b: black, not its light red.
+    assert_eq!(*bgs[0], format!("backgroundColor.0={b_light}"));
+    assert_ne!(*bgs[1], format!("backgroundColor.0={b_light}"));
+    assert_ne!(*bgs[1], format!("backgroundColor.0={a_light}"));
+    assert!(
+        dark.iter().any(|c| c.starts_with("lineHeight.0=")),
+        "{dark:?}"
+    );
+}
+
+#[test]
+fn states_poses_and_scheme_values_degrade_to_the_default_instead_of_vanishing() {
+    let mut engine = engine_with(json!({ "s": "idle" }));
+    engine.set_context("appearance", appearance("dark"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r##"Column {
+            Text("base").color({ default: "#111111", dark: "#ffffff" }).states(@state.s) {
+                onState(on).color("#ff0000")
+            }
+            Text("pose").states(@state.s) {
+                onState(on).backgroundColor({ default: "#eeeeee", dark: "#000000" }).opacity(0.5)
+            }
+        }"##,
+    );
+    // A pose overrides the scheme-switched base: it keeps its default (and no
+    // longer follows the scheme) rather than having no color outside poses.
+    assert_eq!(
+        created(&patches.lock().unwrap(), "color"),
+        [("color.0".to_string(), json!("#111111"))]
+    );
+
+    patches.lock().unwrap().clear();
+    engine.update_state(None, json!({ "s": "on" }));
+    let on = changes(&patches.lock().unwrap());
+    assert!(on.contains(&"color.0=\"#ff0000\"".to_string()), "{on:?}");
+    // A scheme map inside a pose contributes its default.
+    assert!(
+        on.contains(&"backgroundColor.0=\"#eeeeee\"".to_string()),
+        "{on:?}"
+    );
+    assert!(on.contains(&"opacity.0=0.5".to_string()), "{on:?}");
+
+    patches.lock().unwrap().clear();
+    engine.update_state(None, json!({ "s": "idle" }));
+    let idle = changes(&patches.lock().unwrap());
+    assert!(
+        idle.contains(&"color.0=\"#111111\"".to_string()),
+        "{idle:?}"
+    );
+}
+
+#[test]
+fn a_row_entry_bound_to_state_reads_the_module_that_owns_the_row() {
+    let mut engine = engine_with(json!({ "accent": "PRIMARY" }));
+    engine.register_module(
+        "search",
+        ModuleInstance::new(
+            Module::new("Search"),
+            json!({ "accent": "SEARCH", "items": [{ "id": 1, "c": "#111111" }] }),
+        ),
+    );
+    engine.set_context("appearance", appearance("dark"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r##"Column {
+            module Search {
+                Column {
+                    ForEach(items: @state.items, key: "id") {
+                        Text("r").color({ default: @item.c, dark: @state.accent })
+                    }
+                }
+            }
+        }"##,
+    );
+    assert_eq!(
+        created(&patches.lock().unwrap(), "color"),
+        [("color.0".to_string(), json!("SEARCH"))]
+    );
+
+    // A row added later, and an edit to an existing row, still read the
+    // Search module's state — not the primary module's.
+    patches.lock().unwrap().clear();
+    engine.update_state(
+        Some("search"),
+        json!({ "items": [{ "id": 1, "c": "#222222" }, { "id": 2, "c": "#333333" }] }),
+    );
+    let after = format!("{:?}", patches.lock().unwrap());
+    assert!(!after.contains("PRIMARY"), "{after}");
+    assert!(after.contains("SEARCH"), "{after}");
+}

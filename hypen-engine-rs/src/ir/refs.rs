@@ -593,8 +593,10 @@ impl Collector<'_> {
                     // and the reserved `theme` provider, whose tokens the
                     // host can check against the project's theme file.
                     if from_expression
-                        && matches!(&b.source, BindingSource::DataSource(name) if name != THEME_PROVIDER)
+                        && matches!(b.source, BindingSource::DataSource(_))
                         && ctx.frame_for(b).is_none()
+                        && !(b.provider() == Some(THEME_PROVIDER)
+                            && expression_reads(template, &b.full_path_with_source()))
                     {
                         continue;
                     }
@@ -753,6 +755,41 @@ fn direct_interpolations(template: &str) -> HashSet<String> {
         .filter_map(|part| part.split_once('}'))
         .map(|(expression, _)| expression.trim().to_string())
         .collect()
+}
+
+/// Whether some `@{…}` expression of `template` reads `reference`
+/// (`theme.color.ink`) as a variable: outside string literals, and not as the
+/// tail of a longer path (`item.theme.color.ink`) or identifier. Dependency
+/// extraction is looser than that — it also yields quoted text and path
+/// suffixes — which is fine for dirtying a node but not for reporting a
+/// reference the template never made.
+fn expression_reads(template: &str, reference: &str) -> bool {
+    template
+        .split("@{")
+        .skip(1)
+        .filter_map(|part| part.split_once('}'))
+        .any(|(expression, _)| {
+            let mut quote: Option<char> = None;
+            let mut prev: Option<char> = None;
+            for (i, c) in expression.char_indices() {
+                match quote {
+                    Some(q) if c == q && prev != Some('\\') => quote = None,
+                    Some(_) => {}
+                    None if c == '\'' || c == '"' => quote = Some(c),
+                    None => {
+                        let standalone = !prev.is_some_and(|p| is_ident_char(p) || p == '.');
+                        if standalone && expression[i..].starts_with(reference) {
+                            let after = expression[i + reference.len()..].chars().next();
+                            if !after.is_some_and(is_ident_char) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                prev = Some(c);
+            }
+            false
+        })
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -953,6 +990,17 @@ mod tests {
             .all(|d| d.from_expression && d.root.as_deref() == Some("theme")));
         assert_eq!(ds[0].line, Some(2));
         assert!(ds[0].col < ds[1].col);
+    }
+
+    #[test]
+    fn quoted_text_and_path_tails_are_not_theme_refs() {
+        let src = "Column {\n    ForEach(items: @state.rows) {\n        Text(\"@{item.theme.name + 'a'}\")\n    }\n    Text(\"@{state.dark ? 'theme.color.a' : \\\"theme.b\\\"}\")\n    Text(\"@{state.user.theme.color == 'x' ? theme.color.ok : 2}\")\n}";
+        let r = refs(src);
+        let names: Vec<&str> = of_kind(&r, RefKind::DataSource)
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(names, ["theme.color.ok"]);
     }
 
     #[test]
