@@ -1150,10 +1150,29 @@ fn resolve_source(src: &str) -> CacheEntry {
 /// the worker's full 6 s upstream timeout, and a 40-row result list then
 /// filled in one tile at a time — rows below the first slow favicon stayed
 /// blank for tens of seconds while Chrome, fetching ~6 at a time per host,
-/// showed them all. Four keeps a slow response from serialising the rest
+/// showed them all. Several workers keep a slow response from serialising the rest
 /// while bounding peak decode memory (each decode may be large; see
 /// [`DECODED_CACHE_MAX_BYTES`]).
-const IMAGE_FETCH_WORKERS: usize = 4;
+///
+/// Six, like a browser's per-host HTTP/1.1 connection limit: most of an
+/// app's images come from its own origin (Radio's `/art/<id>`), and Chrome
+/// keeps six of those in flight.
+const IMAGE_FETCH_WORKERS: usize = 6;
+
+/// The one HTTP agent every image fetch goes through. `ureq::get` builds a
+/// fresh agent — a new TLS client config (root store parse included) and an
+/// empty connection pool — for EVERY request, so each image paid a new TCP
+/// (and TLS) handshake plus that setup; a shared agent keeps connections
+/// alive and reuses them, like a browser.
+fn http_agent() -> &'static ureq::Agent {
+    static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
+    AGENT.get_or_init(|| {
+        ureq::AgentBuilder::new()
+            .timeout(Duration::from_secs(10))
+            .max_idle_connections_per_host(IMAGE_FETCH_WORKERS)
+            .build()
+    })
+}
 
 fn run_image_worker(rx: &Mutex<mpsc::Receiver<String>>) {
     loop {
@@ -1164,7 +1183,13 @@ fn run_image_worker(rx: &Mutex<mpsc::Receiver<String>>) {
         let Ok(src) = next else {
             break;
         };
+        let started = std::time::Instant::now();
         let entry = resolve_source(&src);
+        log::debug!(
+            "image: {} {src} in {} ms",
+            if matches!(entry, CacheEntry::Failed) { "failed" } else { "resolved" },
+            started.elapsed().as_millis()
+        );
         {
             let mut entries = cache().entries.lock().expect("image cache poisoned");
             // `IndexMap::insert` keeps an existing key in place; the
@@ -1205,7 +1230,7 @@ fn run_image_worker(rx: &Mutex<mpsc::Receiver<String>>) {
 /// `key` is the source as authored (the cache / failure-registry key);
 /// it differs from `url` for a relative src resolved in remote mode.
 fn fetch_http_bytes(url: &str, key: &str) -> Option<Vec<u8>> {
-    let response = match ureq::get(url).timeout(Duration::from_secs(10)).call() {
+    let response = match http_agent().get(url).call() {
         Ok(r) => r,
         Err(ureq::Error::Status(code, _)) => {
             // Non-2xx: keep the status addressable so the renderer can

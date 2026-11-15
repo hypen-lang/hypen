@@ -1182,7 +1182,7 @@ impl VelloPainter {
                     &mut self.scene,
                     item.rect,
                     border_color,
-                    item.border.width * scale_factor,
+                    item.border.device_width(scale_factor),
                     item.border.sides,
                     item.border.style,
                 );
@@ -1192,7 +1192,7 @@ impl VelloPainter {
                     item.rect,
                     border_color,
                     radius,
-                    item.border.width * scale_factor,
+                    item.border.device_width(scale_factor),
                     item.border.style,
                 );
             }
@@ -1548,7 +1548,9 @@ impl VelloPainter {
                 );
             }
             ItemKind::Image { src, fit } => {
-                self.draw_image(item.rect, src.as_deref(), *fit, radius);
+                let (content, content_radius) =
+                    replaced_content_box(item.rect, &item.border, scale_factor, radius);
+                self.draw_image(content, src.as_deref(), *fit, content_radius);
             }
             ItemKind::Video {
                 poster,
@@ -1564,6 +1566,11 @@ impl VelloPainter {
                 // emitted right after this one, so they composite on
                 // top of whatever is drawn here.
                 let glyph = slots.draws_builtin_glyph(*state);
+                // The frame / poster fill the padding box, inside the
+                // border, like a `<video>`'s content (see
+                // `replaced_content_box`).
+                let (content, content_radius) =
+                    replaced_content_box(item.rect, &item.border, scale_factor, radius);
                 // Feature `video`: a live decoded frame wins over the
                 // poster — objectFit contain, letterboxed on black per
                 // the contract, with the play affordance overlaid only
@@ -1573,11 +1580,11 @@ impl VelloPainter {
                     if let Some(frame) = crate::media::current_frame(&item.node_id) {
                         fill_rect(
                             &mut self.scene,
-                            item.rect,
+                            content,
                             crate::paint::image::VIDEO_LETTERBOX_RGBA,
-                            radius,
+                            content_radius,
                         );
-                        self.draw_video_frame(item.rect, &frame, radius);
+                        self.draw_video_frame(content, &frame, content_radius);
                         if glyph && crate::media::is_paused(&item.node_id) {
                             draw_play_glyph(&mut self.scene, item.rect, scale_factor);
                         }
@@ -1606,17 +1613,17 @@ impl VelloPainter {
                             .unwrap_or(false);
                     if poster_ready {
                         self.draw_image(
-                            item.rect,
+                            content,
                             poster.as_deref(),
                             crate::layout::ObjectFit::Cover,
-                            radius,
+                            content_radius,
                         );
                     } else {
                         fill_rect(
                             &mut self.scene,
-                            item.rect,
+                            content,
                             crate::paint::image::VIDEO_PLACEHOLDER_RGBA,
-                            radius,
+                            content_radius,
                         );
                     }
                     if glyph {
@@ -2357,6 +2364,86 @@ impl Default for VelloPainter {
 // Drawing primitives.
 // ---------------------------------------------------------------------------
 
+/// The box a replaced element's content (an Image bitmap, a Video frame or
+/// poster) is painted into: the border box minus the border, with the
+/// corner radii shrunk by it — CSS's padding box and inner border radius.
+/// The border itself is stroked on the border box before the content, so
+/// painting the content over the whole border box hid the border and let
+/// the picture run to the outer edge: Hypeflix's `border border-white/10`
+/// video frame showed its own bright edge pixels as a 1px fringe along the
+/// rounded corners where Chrome shows the faint border over black.
+/// `scale` converts the border's logical width to the device pixels of
+/// `rect` / `radius`.
+fn replaced_content_box(
+    rect: LayoutRect,
+    border: &crate::style::Border,
+    scale: f32,
+    radius: CornerRadii,
+) -> (LayoutRect, CornerRadii) {
+    let w = border.device_width(scale);
+    if w <= 0.0 || border.sides == 0 {
+        return (rect, radius);
+    }
+    let side = |bit: u8| if border.sides & bit != 0 { w } else { 0.0 };
+    let (top, right, bottom, left) = (
+        side(BORDER_SIDE_TOP),
+        side(BORDER_SIDE_RIGHT),
+        side(BORDER_SIDE_BOTTOM),
+        side(BORDER_SIDE_LEFT),
+    );
+    let content = LayoutRect {
+        x: rect.x + left,
+        y: rect.y + top,
+        w: (rect.w - left - right).max(0.0),
+        h: (rect.h - top - bottom).max(0.0),
+    };
+    let inner = |r: f32, a: f32, b: f32| (r - a.max(b)).max(0.0);
+    let radii = CornerRadii {
+        tl: inner(radius.tl, top, left),
+        tr: inner(radius.tr, top, right),
+        br: inner(radius.br, bottom, right),
+        bl: inner(radius.bl, bottom, left),
+    };
+    (content, radii)
+}
+
+#[cfg(test)]
+mod replaced_content_box_tests {
+    use super::*;
+
+    #[test]
+    fn replaced_content_sits_inside_the_border_with_inner_radii() {
+        let rect = LayoutRect { x: 10.0, y: 20.0, w: 200.0, h: 100.0 };
+        let border = crate::style::Border {
+            width: 1.0,
+            color: Rgba(255, 255, 255, 26),
+            radius: 16.0,
+            ..Default::default()
+        };
+        // Device pixels at scale 2: a 2px border, 32px outer radius.
+        let (content, radii) =
+            replaced_content_box(rect, &border, 2.0, CornerRadii::uniform(32.0));
+        assert_eq!((content.x, content.y, content.w, content.h), (12.0, 22.0, 196.0, 96.0));
+        assert_eq!(radii, CornerRadii::uniform(30.0));
+        // `border-b` only: just the bottom edge is inset.
+        let bottom = crate::style::Border {
+            sides: BORDER_SIDE_BOTTOM,
+            ..border
+        };
+        let (content, _) = replaced_content_box(rect, &bottom, 1.0, CornerRadii::ZERO);
+        assert_eq!((content.x, content.y, content.w, content.h), (10.0, 20.0, 200.0, 99.0));
+        // No border: the border box itself.
+        let (content, radii) = replaced_content_box(
+            rect,
+            &crate::style::Border::default(),
+            1.0,
+            CornerRadii::uniform(8.0),
+        );
+        assert_eq!((content.x, content.w), (rect.x, rect.w));
+        assert_eq!(radii, CornerRadii::uniform(8.0));
+    }
+}
+
 /// Paint a rounded (or square) rect filled with a linear gradient.
 /// The DSL produces these via `bg-gradient-to-* from-* via-* to-*`
 /// Tailwind utilities; `style::prop_linear_gradient` resolves the
@@ -2722,7 +2809,7 @@ fn draw_inset_shadows(
 ) {
     let side = |bit: u8| {
         if border.is_visible() && border.sides & bit != 0 {
-            border.width * scale
+            border.device_width(scale)
         } else {
             0.0
         }
