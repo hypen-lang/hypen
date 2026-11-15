@@ -868,7 +868,10 @@ impl EngineCore {
     /// Skips scopes that match the primary module (by name, or the first scope
     /// when the primary module has a generic/anonymous name).
     pub fn auto_register_scoped_modules(&mut self, ir_node: &IRNode) {
-        let mut scopes = HashSet::new();
+        // Document order, not hash order: "the first scope" below must be the
+        // same scope on every run (a hash set made the primary pick depend on
+        // memory layout whenever more than one scope was unregistered).
+        let mut scopes = indexmap::IndexSet::new();
         collect_module_scopes_ir(ir_node, &mut scopes);
 
         if scopes.is_empty() {
@@ -912,7 +915,8 @@ impl EngineCore {
     }
 }
 
-fn collect_module_scopes_ir(node: &IRNode, scopes: &mut HashSet<String>) {
+/// Module scopes in `node`, in document order (pre-order walk), deduplicated.
+fn collect_module_scopes_ir(node: &IRNode, scopes: &mut indexmap::IndexSet<String>) {
     crate::ir::walk::walk_ir(node, &mut |n| {
         if let IRNode::Element(element) = n {
             if let Some(ref scope) = element.module_scope {
