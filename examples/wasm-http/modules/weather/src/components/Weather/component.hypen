@@ -1,0 +1,12 @@
+module Weather {
+    Column {
+        Heading("Forecast").level(2)
+        Text("City: @{state.city}")
+        Text("Temperature: @{state.temperature}")
+        Text("Sky: @{state.summary}")
+        Text("Status: @{state.status}").color("#666666")
+        Text("Requests sent: @{state.requests}").color("#666666")
+        Button { Text("Refresh") }.onClick(@actions.refresh)
+    }
+    .gap(8)
+}

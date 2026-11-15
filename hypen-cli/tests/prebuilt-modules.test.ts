@@ -97,6 +97,7 @@ describe("hypen.json: wasm.modules.<Name>.component / template", () => {
       dispatches: [],
       storage: [],
       http: false,
+      httpHosts: [],
       prebuilt: { component: "./p.wasm", template: "./P.hypen" },
     });
     expect(config.modules.get("Cart")!.prebuilt).toBeUndefined();
@@ -512,7 +513,118 @@ describe.skipIf(skip)("hypen dev with prebuilt modules", () => {
   });
 });
 
+describe.skipIf(skip)("httpHosts for a prebuilt module", () => {
+  test("is written to app.json only when it names hosts", async () => {
+    const dir = project("http-hosts");
+    write(join(dir, "src/components/App/component.hypen"), `Column { Tally {} }`);
+    write(join(dir, "modules/app/app.wasm"), readFileSync(fixture("seeded_module.wasm")));
+    const log = console.log;
+    console.log = () => {};
+    let manifest: Awaited<ReturnType<typeof buildWasm>>;
+    try {
+      manifest = await buildWasm({
+        root: dir,
+        components: "./src/components",
+        entry: "App",
+        wasm: {
+          modules: {
+            App: { component: "./modules/app/app.wasm", http: true, httpHosts: ["API.example.com", "*.example.org:8443"] },
+            Tally: { ...TALLY, http: true },
+          },
+        },
+      });
+    } finally {
+      console.log = log;
+    }
+    expect(manifest.modules.slice(0, 2)).toEqual([
+      {
+        name: "App",
+        wasm: "App.wasm",
+        ui: "App.hypen",
+        reads: [],
+        dispatches: [],
+        storage: [],
+        http: true,
+        httpHosts: ["api.example.com", "*.example.org:8443"],
+      },
+      // No allowlist: no key (an empty list would read as "no hosts" and mean "any").
+      { name: "Tally", wasm: "Tally.wasm", ui: "Tally.hypen", reads: [], dispatches: [], storage: ["cloud"], http: true },
+    ]);
+    const onDisk = JSON.parse(readFileSync(join(dir, "dist/wasm/app.json"), "utf8"));
+    expect(onDisk).toEqual(manifest);
+    expect(Object.keys(onDisk.modules[0])).toEqual(["name", "wasm", "ui", "reads", "dispatches", "storage", "http", "httpHosts"]);
+  });
+});
+
 describe("dev diagnostics rendering", () => {
+  test("a failed HTTP request shows the request, how it ended, and the field to change", () => {
+    const lines = formatHostedFailure({
+      kind: "http",
+      module: "Weather",
+      scope: "weather",
+      action: "loaded",
+      message:
+        "GET http://127.0.0.1:8080/forecast refused (denied): request to 127.0.0.1:8080 refused: it is a loopback address",
+      hint: 'add "127.0.0.1:8080" to hypen.json wasm.modules.Weather.httpHosts',
+      missingGrant: { field: "httpHosts", value: "127.0.0.1:8080" },
+      http: { method: "GET", url: "http://127.0.0.1:8080/forecast", errorKind: "denied", refusedBy: "policy" },
+    });
+    expect(lines).toEqual([
+      'Weather "loaded": HTTP request did not complete',
+      "  GET http://127.0.0.1:8080/forecast refused (denied): request to 127.0.0.1:8080 refused: it is a loopback address",
+      "  request: GET http://127.0.0.1:8080/forecast → denied; refused by policy",
+      '  missing grant: httpHosts ← "127.0.0.1:8080"',
+      '  Hint: add "127.0.0.1:8080" to hypen.json wasm.modules.Weather.httpHosts',
+    ]);
+  });
+
+  test("an engine-side HTTP refusal in a cascade names the request it was about", () => {
+    const lines = formatHostedFailure({
+      kind: "cascade",
+      module: "Weather",
+      scope: "weather",
+      action: "refresh",
+      message: "[weather] http request GET https://api.example.com/ dropped: too many requests in flight (limit 32)",
+      hint: '"Weather" already has 32 requests in flight',
+      report: {
+        root: { kind: "dispatch", scope: "weather", action: "refresh" },
+        rootFailed: false,
+        failureCount: 2,
+        failures: [
+          {
+            scope: "weather",
+            action: "loaded",
+            outcome: "dropped",
+            isRoot: false,
+            origin: { kind: "httpRequest", method: "GET", url: "https://api.example.com/" },
+            cause: { code: "httpLimit", limit: 32, per: "module" },
+            message: "dropped",
+          },
+          {
+            scope: "weather",
+            action: "loaded",
+            outcome: "refused",
+            isRoot: false,
+            origin: { kind: "httpRequest", method: "GET", url: "https://api.example.com/" },
+            cause: { code: "httpNotGranted", grant: "http" },
+            message: "refused",
+          },
+        ],
+        message: "",
+      },
+      missingGrant: { field: "http", value: "true" },
+    });
+    expect(lines).toEqual([
+      'Weather "refresh": action ran, but its follow-ups failed',
+      "  [weather] http request GET https://api.example.com/ dropped: too many requests in flight (limit 32)",
+      "  cascade: weather refresh — 2 failures (applied state stands)",
+      "    - weather loaded [dropped; http request GET https://api.example.com/] httpLimit",
+      "    - weather loaded [refused; http request GET https://api.example.com/] httpNotGranted",
+      "  missing grant: http ← true",
+      '  Hint: "Weather" already has 32 requests in flight',
+    ]);
+  });
+
   test("a cascade failure shows module, action, cause and the missing grant", () => {
     const lines = formatHostedFailure({
       kind: "cascade",

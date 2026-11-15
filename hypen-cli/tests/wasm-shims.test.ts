@@ -13,7 +13,12 @@ import { spawnSync } from "bun";
 import { renderGoShim, tsShimEntrySource } from "../src/build-wasm.js";
 import { goShimTemplatePath, tsShimPath } from "../src/wasm/assets.js";
 import {
+  ModuleHttpError,
   createModuleExports,
+  type DeferredHttpImports,
+  type ShimContext,
+  type ShimHttp,
+  type WitHttpRequest,
   type EngineStateImports,
   type ModuleDefinitionLike,
   type ShimActionHandler,
@@ -382,7 +387,257 @@ describe("TS shim: async handlers are rejected, not silently dropped", () => {
   });
 });
 
+describe("TS shim: context.http (hypen:http/deferred)", () => {
+  type Sent = { request: WitHttpRequest; then: string; tag: string | undefined };
+
+  /** A fake `hypen:http/deferred` import recording what was queued. */
+  function fakeHttp(refuse?: (sent: Sent) => { tag: string; val?: string } | undefined) {
+    const sent: Sent[] = [];
+    const http: DeferredHttpImports = {
+      send(request, then, tag) {
+        const call = { request, then, tag };
+        const refusal = refuse?.(call);
+        if (refusal) throw componentError(refusal.tag, refusal.val);
+        sent.push(call);
+      },
+    };
+    return { http, sent };
+  }
+
+  /** Run `use(context.http)` inside a `load` action of a module that also handles `loaded`. */
+  function inHandler(options: Parameters<typeof createModuleExports>[2], use: (http: ShimHttp, context: ShimContext) => void) {
+    const m = createModuleExports(
+      fakeModule({ load: ({ context }) => use(context.http, context), loaded: () => {} }),
+      fakeHost().host,
+      options
+    );
+    return () => m.dispatch(enc({ count: 0 }), { name: "load", payload: NO_PAYLOAD });
+  }
+
+  const text = (bytes: Uint8Array | undefined) => (bytes ? new TextDecoder().decode(bytes) : undefined);
+
+  test("get queues a GET and names the completion action; nothing else leaves the reducer", () => {
+    const { http, sent } = fakeHttp();
+    const out = inHandler({ name: "Weather", http }, (h) => {
+      expect(h.get("https://api.example.com/forecast?city=Oslo", { then: "loaded", tag: "oslo" })).toBeUndefined();
+    })();
+    expect(sent).toEqual([
+      {
+        request: {
+          method: "GET",
+          url: "https://api.example.com/forecast?city=Oslo",
+          headers: [],
+          body: undefined,
+          timeoutMs: undefined,
+        },
+        then: "loaded",
+        tag: "oslo",
+      },
+    ]);
+    // The request is not an effect and not an emit: the host carries it.
+    expect(out.effects).toEqual([]);
+    expect(out.emit).toEqual([]);
+  });
+
+  test("get passes headers and a time budget", () => {
+    const { http, sent } = fakeHttp();
+    inHandler({ http }, (h) =>
+      h.get("https://api.example.com/", { then: "loaded", headers: { accept: "application/json" }, timeoutMs: 2500 })
+    )();
+    expect(sent[0]!.request).toMatchObject({ headers: [["accept", "application/json"]], timeoutMs: 2500 });
+    expect(sent[0]!.tag).toBeUndefined();
+  });
+
+  test("send: an object body is JSON with a content-type, unless one is set", () => {
+    const { http, sent } = fakeHttp();
+    inHandler({ http }, (h) => {
+      h.send({ url: "https://api.example.com/items", body: { name: "kettle", qty: 2 } }, { then: "loaded" });
+      h.send(
+        { url: "https://api.example.com/items", body: [1, 2], headers: { "Content-Type": "application/vnd.api+json" } },
+        { then: "loaded" }
+      );
+    })();
+    expect(sent[0]!.request.method).toBe("POST"); // a body makes the default method POST
+    expect(text(sent[0]!.request.body)).toBe('{"name":"kettle","qty":2}');
+    expect(sent[0]!.request.headers).toEqual([["content-type", "application/json"]]);
+    expect(text(sent[1]!.request.body)).toBe("[1,2]");
+    expect(sent[1]!.request.headers).toEqual([["Content-Type", "application/vnd.api+json"]]);
+  });
+
+  test("send: a string body is UTF-8 text; bytes are sent as they are; no body is none", () => {
+    const { http, sent } = fakeHttp();
+    const bytes = new Uint8Array([0, 255, 7]);
+    inHandler({ http }, (h) => {
+      h.send({ method: "PUT", url: "https://api.example.com/note", body: "héllo" }, { then: "loaded" });
+      h.send({ method: "PUT", url: "https://api.example.com/blob", body: bytes, headers: [["x-kind", "raw"]] }, { then: "loaded" });
+      h.send({ method: "DELETE", url: "https://api.example.com/note" }, { then: "loaded" });
+      h.send({ url: "https://api.example.com/note", body: null }, { then: "loaded" });
+    })();
+    expect(sent.map((s) => s.request.method)).toEqual(["PUT", "PUT", "DELETE", "GET"]);
+    expect(text(sent[0]!.request.body)).toBe("héllo");
+    expect(sent[0]!.request.headers).toEqual([["content-type", "text/plain;charset=UTF-8"]]);
+    expect(sent[1]!.request.body).toBe(bytes);
+    expect(sent[1]!.request.headers).toEqual([["x-kind", "raw"]]);
+    expect(sent[2]!.request.body).toBeUndefined();
+    expect(sent[3]!.request.body).toBeUndefined();
+  });
+
+  test("without the http grant the helper says which field to add — and names the module", () => {
+    let caught: unknown;
+    const run = inHandler({ name: "Weather" }, (h) => {
+      try {
+        h.get("https://api.example.com/", { then: "loaded" });
+      } catch (e) {
+        caught = e;
+        throw e;
+      }
+    });
+    // Uncaught, it is the handler's failure, readable by the host.
+    expect(thrownBy(run)).toBe(
+      'context.http: this module has no `http` grant — add "http": true under wasm.modules.Weather in hypen.json'
+    );
+    expect(caught).toBeInstanceOf(ModuleHttpError);
+    expect(caught).toMatchObject({ name: "ModuleHttpError", code: "not-granted", detail: "this module has no `http` grant" });
+    // Still present on the context (so `context.http.get` is never a TypeError).
+    const m = createModuleExports(fakeModule({ probe: ({ context, state }) => void (state.has = typeof context.http.send) }), fakeHost().host);
+    expect(dec(m.dispatch(enc({}), { name: "probe", payload: NO_PAYLOAD }).state)).toEqual({ has: "function" });
+  });
+
+  test("the host's refusals become typed errors a handler can branch on", () => {
+    const refusals: Array<[variant: { tag: string; val?: string }, code: string, message: string]> = [
+      [
+        { tag: "permission-denied", val: "host 'evil.test:443' is not in the manifest's `httpHosts` allowlist" },
+        "permission-denied",
+        "context.http.send: permission-denied: host 'evil.test:443' is not in the manifest's `httpHosts` allowlist — add the host to wasm.modules.Weather.httpHosts in hypen.json",
+      ],
+      [
+        { tag: "invalid-request", val: "invalid url: must be absolute and start with http:// or https://" },
+        "invalid-request",
+        "context.http.send: invalid-request: invalid url: must be absolute and start with http:// or https://",
+      ],
+      [
+        { tag: "limit-exceeded", val: "too many requests in one call (limit 16)" },
+        "limit-exceeded",
+        "context.http.send: limit-exceeded: too many requests in one call (limit 16)",
+      ],
+    ];
+    for (const [variant, code, message] of refusals) {
+      const { http } = fakeHttp(() => variant);
+      const state: { error?: unknown } = {};
+      const m = createModuleExports(
+        fakeModule({
+          load: ({ context, state: s }) => {
+            try {
+              context.http.get("https://evil.test/", { then: "loaded" });
+            } catch (e) {
+              state.error = e;
+              // A handler that catches keeps running: the state it returns stands.
+              s.failed = (e as ModuleHttpError).code;
+            }
+          },
+          loaded: () => {},
+        }),
+        fakeHost().host,
+        { name: "Weather", http }
+      );
+      const out = m.dispatch(enc({}), { name: "load", payload: NO_PAYLOAD });
+      expect(dec(out.state)).toEqual({ failed: code });
+      expect(state.error).toBeInstanceOf(ModuleHttpError);
+      expect(state.error).toMatchObject({ code, message, detail: variant.val });
+    }
+  });
+
+  test("an error the host did not define is not dressed up as an HTTP refusal", () => {
+    const { http } = fakeHttp(() => ({ tag: "something-new", val: "?" }));
+    expect(thrownBy(inHandler({ http }, (h) => h.get("https://api.example.com/", { then: "loaded" })))).toBe(
+      'host capability error: {"tag":"something-new","val":"?"}'
+    );
+  });
+
+  test("mistakes only the shim can see are refused before the host is asked", () => {
+    const cases: Array<[label: string, use: (h: ShimHttp) => void, message: string]> = [
+      [
+        "a `then` that is not one of the module's actions",
+        (h) => h.get("https://api.example.com/", { then: "lodaed" }),
+        'context.http.send: `then: "lodaed"` is not an action of this module (it handles: load, loaded) — add .onAction("lodaed", …) to receive the response',
+      ],
+      [
+        "no completion target",
+        (h) => h.get("https://api.example.com/", undefined as never),
+        'context.http.send: `then` is missing: name the action that receives the response, e.g. { then: "loaded" }',
+      ],
+      ["no url", (h) => h.send({} as never, { then: "loaded" }), "context.http.send: the request needs a `url` string"],
+      [
+        "a fractional timeout",
+        (h) => h.send({ url: "https://api.example.com/", timeoutMs: 1.5 }, { then: "loaded" }),
+        "context.http.send: `timeoutMs` must be a whole number of milliseconds",
+      ],
+      [
+        "a non-string header value",
+        (h) => h.send({ url: "https://api.example.com/", headers: { "x-n": 1 as never } }, { then: "loaded" }),
+        "context.http.send: every header needs a string name and a string value",
+      ],
+      [
+        "a body JSON cannot carry",
+        (h) => h.send({ url: "https://api.example.com/", body: { n: 1n } }, { then: "loaded" }),
+        "context.http.send: `body` is not JSON-serialisable",
+      ],
+      [
+        "a non-string tag",
+        (h) => h.get("https://api.example.com/", { then: "loaded", tag: 7 as never }),
+        "context.http.send: `tag` must be a string",
+      ],
+    ];
+    for (const [label, use, message] of cases) {
+      const { http, sent } = fakeHttp();
+      const thrown = thrownBy(inHandler({ http }, use));
+      expect([label, String(thrown).startsWith(message)]).toEqual([label, true]);
+      expect(sent).toEqual([]);
+    }
+  });
+
+  test("a wildcard module may name any completion action", () => {
+    const { http, sent } = fakeHttp();
+    const m = createModuleExports(
+      {
+        initialState: {},
+        actions: ["*"],
+        handlers: { onAction: new Map([["load", ({ context }) => context.http.get("https://api.example.com/", { then: "whatever" })]]) },
+      },
+      fakeHost().host,
+      { http }
+    );
+    m.dispatch(enc({}), { name: "load", payload: NO_PAYLOAD });
+    expect(sent.map((s) => s.then)).toEqual(["whatever"]);
+  });
+
+  test("lifecycle handlers can queue too (on-activated: load when the screen appears)", () => {
+    const { http, sent } = fakeHttp();
+    const m = createModuleExports(
+      fakeModule({ loaded: () => {} }, { onActivated: (_state, context) => context.http.get("https://api.example.com/", { then: "loaded" }) }),
+      fakeHost().host,
+      { http }
+    );
+    m.onActivated(enc({}));
+    expect(sent).toHaveLength(1);
+  });
+});
+
 describe("TS shim: generated entry", () => {
+  test("a module granted http imports hypen:http/deferred under its versioned name and hands it to the shim", () => {
+    const granted = tsShimEntrySource({ modulePath: "/abs/Weather/component.ts", shimPath: "/cli/module-shim.js", moduleName: "Weather", http: true });
+    const httpWit = readFileSync(join(import.meta.dir, "..", "wit", "deps", "hypen-http", "http.wit"), "utf8");
+    const pkg = httpWit.match(/^package\s+(hypen:http)@([\d.]+);/m)!;
+    expect(granted).toContain(`import { send as hypenHttpSend } from "${pkg[1]}/deferred@${pkg[2]}";`);
+    expect(granted).toContain(
+      'const hypenModule = createModuleExports(def, { read, subscribe }, { name: "Weather", http: { send: hypenHttpSend } });'
+    );
+    // Ungranted: the import is absent (it would not link) — only the name is passed.
+    const ungranted = tsShimEntrySource({ modulePath: "/abs/Weather/component.ts", shimPath: "/cli/module-shim.js", moduleName: "Weather" });
+    expect(ungranted).not.toContain("hypen:http");
+    expect(ungranted).toContain('const hypenModule = createModuleExports(def, { read, subscribe }, { name: "Weather" });');
+  });
+
   test("imports the user module, the versioned host import and the shim; exports the world", () => {
     const src = tsShimEntrySource({ modulePath: "/abs/Counter/component.ts", shimPath: "/cli/module-shim.js" });
     expect(src).toContain('import def from "/abs/Counter/component.ts";');

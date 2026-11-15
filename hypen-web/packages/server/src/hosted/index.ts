@@ -20,6 +20,16 @@ export {
 export type { HostedModuleSetupCode, HostedModuleSetupInfo } from "./errors.js";
 export { HostedModuleService, DEFAULT_MAX_PENDING_DELAYS } from "./runtime.js";
 export type { HostedModulesOptions, HostedReloadResult, HostedStorageQuotas } from "./runtime.js";
+export { DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS, httpTargetNetwork, httpHostsNameExplicitly } from "./http.js";
+export type {
+  HostedFetch,
+  HostedFetchInit,
+  HostedHttpRequestInfo,
+  HostedHttpRequestContext,
+  HttpEgressDecision,
+  HttpEgressPolicy,
+  HttpTargetNetwork,
+} from "./http.js";
 export { MemoryHostedStorage, FileHostedStorage, HostedStorageOwners, MAX_SESSION_STORES } from "./storage.js";
 export type {
   HostedStorageBackend,

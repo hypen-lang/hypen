@@ -122,7 +122,7 @@ describe.skipIf(skip)("wasmModule(): declaration errors", () => {
     );
     // Grants are normalised to scopes; `local` is implicit.
     const ok = wasmModule({ name: "P", component, grants: { reads: ["Cart", "cart"], storage: ["local", "app"] as never } });
-    expect(ok.hosted.grants).toEqual({ reads: ["cart"], dispatches: [], storage: ["app"], http: false });
+    expect(ok.hosted.grants).toEqual({ reads: ["cart"], dispatches: [], storage: ["app"], http: false, httpHosts: [] });
   });
 });
 

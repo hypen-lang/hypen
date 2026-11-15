@@ -624,7 +624,7 @@ A module has two ways to make an HTTP request. Both need the manifest's
 | Shape | the reducer calls its language's HTTP client and gets the response inline | the reducer calls `send(request, then, tag)` and returns; the response arrives later as the action `then` |
 | Native host (wasmtime: `hypen-runtime`, Kotlin/Swift embeds) | works — the guest is suspended while the host does the I/O | works |
 | Browser / JS host (jco) | **does not work**: a synchronous reducer cannot be suspended, the call traps | works |
-| TypeScript-authored modules | unavailable (the TS build disables `wasi:http`) | the way to do HTTP (once the CLI's per-module world lists the import) |
+| TypeScript-authored modules | unavailable (the TS build disables `wasi:http`) | the way to do HTTP: `context.http.send` / `get` (the CLI's per-module world lists the import for modules granted `http`) |
 | Engine while the request is in flight | held for the whole exchange (bounded by the per-call deadline, 5 s by default) | free — only the two reducer runs hold it |
 | Longest request | the per-call deadline | the request's own budget (default 30 s, max 120 s) |
 | Response handling | whatever the client library does (streaming, any size the module can hold) | whole body, at most 4 MiB, as text or base64 in the action payload |

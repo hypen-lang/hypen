@@ -99,6 +99,9 @@ export {
   DEFAULT_MAX_PENDING_DELAYS,
   MemoryHostedStorage,
   FileHostedStorage,
+  DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS,
+  httpTargetNetwork,
+  httpHostsNameExplicitly,
 } from "./hosted/index.js";
 export type {
   WasmModuleOptions,
@@ -115,6 +118,13 @@ export type {
   HostedStorageBackends,
   HostedStorageChoice,
   HostedStorageResolver,
+  HostedFetch,
+  HostedFetchInit,
+  HostedHttpRequestInfo,
+  HostedHttpRequestContext,
+  HttpEgressDecision,
+  HttpEgressPolicy,
+  HttpTargetNetwork,
 } from "./hosted/index.js";
 export { isHostedModuleDefinition } from "@hypen-space/core/hosted-module";
 export type {

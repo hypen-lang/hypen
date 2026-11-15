@@ -53,7 +53,15 @@ export type {
 export { JCO_VERSION, TINYGO_MIN_VERSION, findJco, resolveJco } from "./wasm/toolchain.js";
 export type { JcoTool, ToolLookup } from "./wasm/toolchain.js";
 
-export { PROVISIONED_MARKER, TS_BUILD_WORLD, provisionRustWit, sameTree, tsBuildWorld } from "./wasm/wit.js";
+export {
+  DEFERRED_HTTP_IMPORT,
+  PROVISIONED_MARKER,
+  TS_BUILD_WORLD,
+  provisionRustWit,
+  sameTree,
+  tsBuildWorld,
+} from "./wasm/wit.js";
+export type { TsWorldGrants } from "./wasm/wit.js";
 export type { WitProvisioning } from "./wasm/wit.js";
 
 export { classifyWasm } from "./wasm/artifact.js";

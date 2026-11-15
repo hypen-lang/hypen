@@ -161,6 +161,34 @@ Common patterns: `FakeEngine` mock for unit tests, `flushMicrotasks()` for async
 - Use `bun:test` instead of `jest`/`vitest`
 - Bun auto-loads `.env` files
 
+## Deferred HTTP for hosted modules (`hypen:http/deferred`)
+
+A hosted (WASM-component) module queues an HTTP request; the engine hands it to the session's
+effect handler; the server performs it and calls `engine.completeHttpRequest`. Where each piece
+lives:
+
+- `packages/module-host/src/http.ts` — the TypeScript port of the engine's
+  `hypen-engine-rs/src/module_host/http.rs` (bounds, the strict URL grammar, `httpHosts` patterns,
+  the completion payload) and the per-call queue behind `JsModuleHost`'s `hypen:http/deferred`
+  import. **The one place to edit.** `tests/http-parity.test.ts` pins it to the Rust unit tests and
+  reads the `MAX_HTTP_*` constants out of the Rust source.
+- `packages/core/src/http.ts` and `../hypen-cli/src/wasm/http-grammar.ts` — GENERATED copies of
+  that file (module-host has no `@hypen-space/*` dependency; the server and the CLI need the same
+  grammar). After editing the module-host file run `bun scripts/sync-http-grammar.ts`;
+  `tests/http-grammar-sync.test.ts` fails on drift.
+- `packages/core/src/{types,engine-base}.ts` — `HostedModuleEffect`'s `http` variant, the
+  `completeHttpRequest` / `httpRedirectAllowed` / in-flight-limit wrappers, `HttpCompletion`,
+  and the author-facing `ModuleHttp` (`context.http`).
+- `packages/server/src/hosted/http.ts` — `performHttpRequest` (redirects re-checked per hop,
+  timeout, streamed 4 MiB cap, failure kinds — the counterpart of `hypen_runtime/http.rs`), the
+  private-network rule (a server-only default: no loopback / link-local / private targets unless
+  `httpHosts` names the host exactly), the `onHttpRequest` policy hook, and `HttpJobQueue`
+  (8 per session). `runtime.ts` queues from the effect callback — never calling the engine there —
+  and completes from a later turn.
+- Tests: `tests/hosted-modules-http.test.ts`, `tests/hosted-http-surface.test.ts`,
+  `packages/module-host/tests/{deferred-http,http-parity}.test.ts`, and the browser harness
+  (`bun run test:browser` in `packages/module-host`, scenario (g)).
+
 ## Rust device broker (WASM) — RFC 001
 
 The server-side device broker is the Rust `DeviceBroker` (hypen-engine-rs `src/device/`), shared by

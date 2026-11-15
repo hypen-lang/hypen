@@ -459,6 +459,15 @@ export type BoundInput = {
 // `BaseEngine.supportsHostedModules` first. The shapes mirror
 // `hypen-engine-rs/src/wasm/js_modules.rs` and `src/hosted/report.rs`.
 
+import type { HttpCompletion, HttpFailureKind } from "./http.js";
+
+/**
+ * The completion payload a module receives for a deferred HTTP request, and
+ * its `error.kind` — defined with the rest of the deferred-HTTP contract in
+ * `@hypen-space/core/http`.
+ */
+export type { HttpCompletion, HttpFailureKind } from "./http.js";
+
 /**
  * The object the engine drives hosted modules through: a `JsModuleHost` from
  * `@hypen-space/module-host`, or anything with the same synchronous methods.
@@ -486,8 +495,14 @@ export type HostedModuleManifest = {
   reads?: string[];
   /** Scopes (hosted or in-process) the module may dispatch actions to. */
   dispatches?: string[];
-  /** Outbound HTTP (`wasi:http`). */
+  /** Outbound HTTP: blocking `wasi:http` and deferred `hypen:http/deferred`. */
   http?: boolean;
+  /**
+   * Hosts `http` is limited to: `api.example.com`, `*.example.com` (any
+   * subdomain, not the apex), either with `:port`. Omitted or empty = any
+   * host. A malformed pattern is an `invalidArgument` at registration.
+   */
+  httpHosts?: string[];
 };
 
 /** Options of `registerHostedModule`. */
@@ -518,11 +533,177 @@ export type HostedModuleInfo = {
   wildcard: boolean;
 };
 
+/**
+ * A deferred HTTP request (`hypen:http/deferred`) the engine admitted, for
+ * the embedder to perform. Shape: `http_effect_js` in
+ * `hypen-engine-rs/src/wasm/js_modules.rs`.
+ */
+export type HostedModuleHttpEffect = {
+  type: "http";
+  /** The engine's handle for the request: pass it to `completeHttpRequest`. */
+  id: number;
+  request: {
+    method: string;
+    url: string;
+    /** `[name, value]` pairs, in order. */
+    headers: Array<[string, string]>;
+    body: Uint8Array | null;
+    /** The effective time budget (defaulted to 30 s, clamped to 120 s). */
+    timeoutMs: number;
+  };
+  /** The action the completion is dispatched as (informational). */
+  then: string;
+  tag: string | null;
+  /**
+   * The module's `httpHosts` allowlist; `null` = any host. Do not match it
+   * by hand: ask `httpRedirectAllowed(id, url)` before following a redirect.
+   */
+  allowedHosts: string[] | null;
+};
+
 /** An effect a hosted reducer returned that only the embedder can perform. */
 export type HostedModuleEffect =
   | { type: "navigate"; path: string }
   /** After `ms`, dispatch `then` to the module (`dispatchModuleAction`). */
-  | { type: "delay"; ms: number; then: string };
+  | { type: "delay"; ms: number; then: string }
+  /** Perform the request, then report it with `completeHttpRequest(id, result)`. */
+  | HostedModuleHttpEffect;
+
+/**
+ * How a deferred HTTP request ended, as the embedder reports it to
+ * `completeHttpRequest`. Any status is a completed exchange (`ok: true`);
+ * `ok: false` means there is no response at all.
+ */
+export type HttpCompletionResult =
+  | {
+      ok: true;
+      status: number;
+      /** `{ name: value | values }` or `[name, value]` pairs, as received. */
+      headers?: Record<string, string | string[]> | Array<[string, string]>;
+      /** A string is sent as its UTF-8 bytes; absent = empty. */
+      body?: Uint8Array | ArrayBuffer | string | null;
+    }
+  | { ok: false; error: { kind: HttpFailureKind; message?: string } };
+
+/** Whether `value` is an {@link HttpCompletion} (e.g. an action's payload). */
+export function isHttpCompletion(value: unknown): value is HttpCompletion {
+  if (value === null || typeof value !== "object") return false;
+  const v = value as Record<string, unknown>;
+  if (v.tag !== null && typeof v.tag !== "string") return false;
+  if (v.ok === true) {
+    return (
+      typeof v.status === "number" &&
+      typeof v.body === "string" &&
+      (v.bodyEncoding === "utf8" || v.bodyEncoding === "base64") &&
+      v.headers !== null &&
+      typeof v.headers === "object"
+    );
+  }
+  if (v.ok !== false || v.error === null || typeof v.error !== "object") return false;
+  const error = v.error as Record<string, unknown>;
+  return typeof error.kind === "string" && typeof error.message === "string";
+}
+
+// ── `context.http`: what a module author writes ─────────────────────────────
+
+/** A request for `context.http.send`. */
+export interface ModuleHttpRequest {
+  /** Default: `"GET"`, or `"POST"` when there is a `body`. */
+  method?: string;
+  /** Absolute `http://` or `https://` URL (ASCII; percent-encode anything else). */
+  url: string;
+  /** A plain object or `[name, value]` pairs. */
+  headers?: Record<string, string> | ReadonlyArray<readonly [string, string]>;
+  /**
+   * A string (sent as UTF-8; `content-type: text/plain;charset=UTF-8` unless
+   * set), bytes (sent as they are), or any other JSON-serialisable value
+   * (sent as JSON; `content-type: application/json` unless set).
+   */
+  body?: unknown;
+  /** Time budget for the whole exchange, in milliseconds (default 30 s, capped at 120 s). */
+  timeoutMs?: number;
+}
+
+/** Where a request's completion goes. */
+export interface ModuleHttpCompletionTarget {
+  /**
+   * The action of THIS module that is dispatched when the request completes
+   * or fails, with an {@link HttpCompletion} as `action.payload`.
+   */
+  then: string;
+  /** Echoed back as `payload.tag`, so one handler can tell requests apart. */
+  tag?: string;
+}
+
+/** Why `context.http.send` refused a request. */
+export type ModuleHttpErrorCode =
+  /** The module has no `http` grant (`wasm.modules.<Name>.http` in hypen.json). */
+  | "not-granted"
+  /** The host is outside the module's `httpHosts`, or nothing can be queued from here. */
+  | "permission-denied"
+  /** Malformed: method, URL, header, timeout, or `then` is not one of the module's actions. */
+  | "invalid-request"
+  /** A bound was exceeded: 16 requests per call, URL 8 KiB, headers 16 KiB, body 1 MiB. */
+  | "limit-exceeded"
+  /** This runtime has no `context.http` (an in-process TypeScript module: use `fetch`). */
+  | "unavailable";
+
+/** What `context.http.send` / `get` throw. Recognise it with {@link isModuleHttpError}. */
+export interface ModuleHttpError extends Error {
+  name: "ModuleHttpError";
+  code: ModuleHttpErrorCode;
+  /** The host's own message, without the hint. */
+  detail: string;
+}
+
+/** Whether `err` was thrown by `context.http` because a request was refused. */
+export function isModuleHttpError(err: unknown): err is ModuleHttpError {
+  return (
+    err instanceof Error &&
+    err.name === "ModuleHttpError" &&
+    typeof (err as { code?: unknown }).code === "string"
+  );
+}
+
+/**
+ * `context.http`: outbound HTTP for a module that runs as a WASM component
+ * (`hypen build --target wasm`). A reducer cannot wait for a response, so a
+ * request is *queued*: the call returns at once, the host performs the
+ * request after the handler returns, and the response arrives as a new
+ * action.
+ *
+ * ```ts
+ * .onAction("refresh", ({ state, context }) => {
+ *   state.loading = true;
+ *   context.http.get("https://api.example.com/forecast", { then: "loaded" });
+ * })
+ * .onAction("loaded", ({ action, state }) => {
+ *   const response = action.payload as HttpCompletion;
+ *   state.loading = false;
+ *   if (response.ok && response.status === 200) state.forecast = JSON.parse(response.body);
+ *   else state.error = response.ok ? `HTTP ${response.status}` : response.error.message;
+ * })
+ * ```
+ *
+ * Needs `"http": true` under `wasm.modules.<Name>` in hypen.json
+ * (`httpHosts` narrows it to an allowlist).
+ */
+export interface ModuleHttp {
+  /**
+   * Queue `request`; when it completes or fails, `on.then` is dispatched to
+   * this module with the {@link HttpCompletion}. Returns nothing: accepted
+   * means queued, not sent.
+   *
+   * @throws {ModuleHttpError} when the request is refused (see
+   *   {@link ModuleHttpErrorCode}); nothing was queued.
+   */
+  send(request: ModuleHttpRequest, on: ModuleHttpCompletionTarget): void;
+  /** `send({ method: "GET", url, headers, timeoutMs }, on)`. */
+  get(
+    url: string,
+    on: ModuleHttpCompletionTarget & Pick<ModuleHttpRequest, "headers" | "timeoutMs">,
+  ): void;
+}
 
 /**
  * Receives `(scope, effect)`. Runs while the engine call that produced the
@@ -540,7 +721,11 @@ export type ModuleCascadeOrigin =
   | { kind: "emit" }
   | { kind: "crossDispatch"; from: string }
   | { kind: "subscriptionChange"; target: string; path: string }
-  | { kind: "subscribeRequest"; target: string; path: string };
+  | { kind: "subscribeRequest"; target: string; path: string }
+  /** A deferred HTTP request the module queued (admission refused it). */
+  | { kind: "httpRequest"; method: string; url: string }
+  /** The completion (`ok: false`, `denied`) of a request that was refused at admission. */
+  | { kind: "httpRefusal" };
 
 /** Why it did not run (or a subscription was not registered). */
 export type ModuleCascadeCause =
@@ -550,6 +735,16 @@ export type ModuleCascadeCause =
   | { code: "subscriptionLimit" | "depthExceeded"; limit: number }
   | { code: "budgetExhausted"; budget: number; dropped: number }
   | { code: "payloadNotJson" | "handler" | "stateEncoding"; detail: string }
+  /** A deferred HTTP request from a module without the `http` grant. */
+  | { code: "httpNotGranted"; grant: "http" }
+  /** A deferred HTTP request to a host (`host:port`) outside `httpHosts`. */
+  | { code: "httpDenied"; grant: "httpHosts"; host: string }
+  /** A malformed or oversized deferred HTTP request. */
+  | { code: "httpInvalid"; detail: string }
+  /** Too many deferred HTTP requests: in one call, or in flight for the module. */
+  | { code: "httpLimit"; limit: number; per: "call" | "module" }
+  /** No effect handler is installed: nothing can perform the request. */
+  | { code: "httpUnavailable" }
   | {
       code: "host";
       host: {
@@ -613,6 +808,8 @@ export type HostedModuleErrorCode =
   | "invalidState"
   | "moduleCallFailed"
   | "cascadeIncomplete"
+  /** `completeHttpRequest` with an id that is not in flight (never issued, or already completed). */
+  | "unknownHttpRequest"
   | "moduleError"
   /** JS called the engine from inside a callback the engine was running. */
   | "engineReentrancy"

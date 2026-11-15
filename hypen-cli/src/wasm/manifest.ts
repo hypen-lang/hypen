@@ -7,9 +7,12 @@
 import type { Capabilities, GrantableStorage, ModuleName, ScopeName, StatelessComponent } from "./types.js";
 
 /**
- * A stateful module's entry. All four capability fields are always written:
+ * A stateful module's entry. The four capability fields are always written:
  * the host is deny-by-default, and an explicit `[]` / `false` documents that
- * the absence of a grant is intended.
+ * the absence of a grant is intended. `httpHosts` is the exception — it
+ * narrows `http` rather than granting anything, and an empty list would read
+ * as "no hosts" while meaning "any host" — so it is written only when it
+ * names hosts.
  */
 export interface StatefulManifestEntry {
   name: ModuleName;
@@ -21,6 +24,7 @@ export interface StatefulManifestEntry {
   dispatches: ScopeName[];
   storage: GrantableStorage[];
   http: boolean;
+  httpHosts?: string[];
 }
 
 /**
@@ -54,6 +58,7 @@ export function statefulEntry(name: ModuleName, capabilities: Capabilities): Sta
     dispatches: capabilities.dispatches,
     storage: capabilities.storage,
     http: capabilities.http,
+    ...(capabilities.httpHosts.length > 0 ? { httpHosts: capabilities.httpHosts } : {}),
   };
 }
 

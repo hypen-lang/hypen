@@ -1056,6 +1056,73 @@ mod tests {
         );
     }
 
+    /// Regression for "pick the anonymous primary scope in document order":
+    /// the primary module's name matches no scope, so the FIRST scope of the
+    /// rendered template is taken as its own and every other scope gets a
+    /// placeholder. The scopes used to be collected into a hash set, which
+    /// made "first" depend on hash order.
+    ///
+    /// Each round renders a root `module <root>` holding five other module
+    /// scopes, with fresh names in a rotated order. A hash-ordered pick is
+    /// right for one round with probability about 1/6, so 64 rounds all
+    /// passing by luck has probability about 6^-64.
+    #[test]
+    fn the_anonymous_primary_scope_is_the_first_in_document_order() {
+        const ROUNDS: usize = 64;
+        const NESTED: usize = 5;
+        for round in 0..ROUNDS {
+            // Names vary in length and content per round so their hashes (and
+            // therefore any hash-set iteration order) differ between rounds.
+            let root = format!("Root{}{}", "x".repeat(round % 7), round * 31 + 7);
+            let mut nested: Vec<String> = (0..NESTED)
+                .map(|i| format!("Scope{}n{}r{round}", "y".repeat((i * 3 + round) % 5), i * 17 + round))
+                .collect();
+            nested.rotate_left(round % NESTED);
+
+            // The other scopes come in the way they do in an app: components
+            // whose own template is a `module` (resolved on demand).
+            let body: String = nested.iter().map(|name| format!("{name}() ")).collect();
+            let source = format!("module {root} {{ Column {{ {body}}} }}");
+            let doc = hypen_parser::parse_document(&source).expect("parse");
+            let ir = crate::ir::ast_to_ir_node(doc.components.first().expect("component"));
+
+            let mut core = EngineCore::new();
+            let known = nested.clone();
+            core.set_component_resolver(move |name, _context| {
+                known.iter().any(|n| n == name).then(|| crate::ir::ResolvedComponent {
+                    source: format!("module {name} {{ Text(\"{name}\") }}"),
+                    path: format!("{name}.hypen"),
+                    passthrough: false,
+                    lazy: false,
+                })
+            });
+            // A generic primary: its name is none of the template's scopes.
+            core.set_module(ModuleInstance::new(
+                Module::new("AnonymousPrimary"),
+                serde_json::json!({}),
+            ));
+            core.render_ir_node(&ir);
+
+            let root_scope = root.to_lowercase();
+            let nested_scopes: Vec<String> = nested.iter().map(|n| n.to_lowercase()).collect();
+            assert!(
+                !core.modules.contains_key(&root_scope),
+                "round {round}: the root scope `{root_scope}` is the primary module's and must \
+                 not get a placeholder (placeholders: {:?})",
+                core.placeholder_scopes
+            );
+            // Exactly the nested scopes are placeholders, registered in
+            // document order.
+            let registered: Vec<String> = core.modules.keys().cloned().collect();
+            assert_eq!(registered, nested_scopes, "round {round}");
+            let mut placeholders: Vec<String> = core.placeholder_scopes.iter().cloned().collect();
+            placeholders.sort();
+            let mut expected = nested_scopes.clone();
+            expected.sort();
+            assert_eq!(placeholders, expected, "round {round}");
+        }
+    }
+
     #[test]
     fn filter_spurious_removes_drops_flagged_remove_for_created_id() {
         let mut patches = vec![

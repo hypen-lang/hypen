@@ -1,0 +1,11 @@
+{
+  "components": "./src/components",
+  "entry": "Weather",
+  "outDir": "dist",
+  "wasm": {
+    "language": "ts",
+    "modules": {
+      "Weather": { "http": true, "httpHosts": ["127.0.0.1:8787"] }
+    }
+  }
+}

@@ -1,0 +1,1 @@
+{ "components": "./src/components", "entry": "Fetcher", "outDir": "dist" }

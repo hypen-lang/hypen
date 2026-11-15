@@ -18,6 +18,7 @@ import type {
   HostedModuleGrants,
   HostedStorageGrant,
 } from "@hypen-space/core/hosted-module";
+import { formatHostPattern, parseHostPattern } from "@hypen-space/core/http";
 import { HostedModuleSetupError } from "./errors.js";
 
 /** The grants of a hosted module, as written (module names in any case). */
@@ -28,8 +29,14 @@ export interface WasmModuleGrants {
   dispatches?: readonly string[];
   /** Storage tiers beyond the always-granted, module-private `local`. */
   storage?: readonly HostedStorageGrant[];
-  /** Outbound HTTP (`wasi:http`). */
+  /** Outbound HTTP: blocking `wasi:http` and deferred `hypen:http/deferred`. */
   http?: boolean;
+  /**
+   * Hosts `http` is limited to: `"api.example.com"`, `"*.example.com"` (any
+   * subdomain, not the apex), either with `:port`. Omitted or empty: any
+   * host. Needs `http: true`.
+   */
+  httpHosts?: readonly string[];
 }
 
 export interface WasmModuleOptions {
@@ -160,10 +167,10 @@ function normalizeGrants(grants: WasmModuleGrants | undefined, grantsAt: string,
       hint: `e.g. { reads: ["Cart"], storage: ["app"] }`,
     });
   }
-  const known = ["reads", "dispatches", "storage", "http"];
+  const known = ["reads", "dispatches", "storage", "http", "httpHosts"];
   for (const key of Object.keys(grants ?? {})) {
     if (!known.includes(key)) {
-      throw new HostedModuleSetupError(`Unknown grant "${key}" (expected reads, dispatches, storage or http).`, {
+      throw new HostedModuleSetupError(`Unknown grant "${key}" (expected reads, dispatches, storage, http or httpHosts).`, {
         code: "INVALID_OPTIONS",
         module,
         field: `${grantsAt}.${key}`,
@@ -201,7 +208,54 @@ function normalizeGrants(grants: WasmModuleGrants | undefined, grantsAt: string,
       field: `${grantsAt}.http`,
     });
   }
-  return { reads: scopes("reads"), dispatches: scopes("dispatches"), storage, http: grants?.http === true };
+  const http = grants?.http === true;
+  return {
+    reads: scopes("reads"),
+    dispatches: scopes("dispatches"),
+    storage,
+    http,
+    httpHosts: normalizeHttpHosts(grants?.httpHosts, http, grantsAt, module),
+  };
+}
+
+/**
+ * `httpHosts` as canonical pattern strings, deduplicated. Strict: a wrong
+ * shape or a malformed pattern is an error (an entry silently dropped would
+ * widen the grant — an empty allowlist means any host), and so is an
+ * allowlist without `http: true`.
+ */
+function normalizeHttpHosts(raw: unknown, http: boolean, grantsAt: string, module: string): string[] {
+  const field = `${grantsAt}.httpHosts`;
+  if (raw === undefined) return [];
+  if (!Array.isArray(raw) || !raw.every((v): v is string => typeof v === "string")) {
+    throw new HostedModuleSetupError(`${field} must be a list of host patterns.`, {
+      code: "INVALID_OPTIONS",
+      module,
+      field,
+      hint: `e.g. ["api.example.com", "*.example.org", "localhost:8080"]`,
+    });
+  }
+  const hosts: string[] = [];
+  for (const entry of raw) {
+    const pattern = parseHostPattern(entry);
+    if (!pattern.ok) {
+      throw new HostedModuleSetupError(`${field}: ${pattern.error}.`, {
+        code: "INVALID_OPTIONS",
+        module,
+        field,
+        hint: `entries look like "api.example.com", "*.example.com" or "localhost:8080"; leave the list out to allow any host`,
+      });
+    }
+    const text = formatHostPattern(pattern.value);
+    if (!hosts.includes(text)) hosts.push(text);
+  }
+  if (hosts.length > 0 && !http) {
+    throw new HostedModuleSetupError(
+      `${field} narrows the \`http\` grant, but ${grantsAt}.http is not true for "${module}".`,
+      { code: "INVALID_OPTIONS", module, field, hint: `set ${grantsAt}.http to true, or remove httpHosts` }
+    );
+  }
+  return hosts;
 }
 
 function componentSource(
@@ -348,6 +402,7 @@ interface ManifestModule {
   dispatches?: string[];
   storage?: HostedStorageGrant[];
   http?: boolean;
+  httpHosts?: string[];
 }
 
 /** What {@link loadWasmModules} read. */
@@ -461,6 +516,7 @@ export function loadWasmModules(source: string | URL, options: LoadWasmModulesOp
           dispatches: module.dispatches,
           storage: module.storage,
           http: module.http,
+          httpHosts: module.httpHosts,
         },
         config: options.config?.[module.name],
         baseDir: dir,

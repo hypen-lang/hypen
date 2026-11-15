@@ -62,6 +62,46 @@ describe.skipIf(missing)("wasi:http gate (fetcher_module.wasm)", () => {
     expect(parsed.received?.body).toBe(BODY);
   }, 60_000);
 
+  test("httpHosts narrows blocking wasi:http too: a host outside it is denied before any connection", async () => {
+    const BODY = '{"greeting":"allowlisted"}';
+    const server = new Worker(new URL("./_http-server-worker.mjs", import.meta.url), { workerData: { body: BODY } });
+    const hits: string[] = [];
+    server.on("message", (m) => m.hit !== undefined && hits.push(m.hit));
+    try {
+      const port = await new Promise<number>((res) => server.on("message", (m) => m.port !== undefined && res(m.port)));
+      const fetchWith = async (httpHosts: string[]) => {
+        const host = new JsModuleHost({ storage: new MemoryStorageBackend() });
+        await host.prepare("fetcher", readFixture(FIXTURE), { ...base, http: true, httpHosts });
+        const id = host.instantiate("fetcher");
+        const state = host.init(id, enc.encode("{}"));
+        const out = host.dispatch(
+          id,
+          state,
+          { name: "fetch", payload: enc.encode(JSON.stringify({ url: `http://127.0.0.1:${port}/gated` })) },
+          [],
+        );
+        return JSON.parse(dec.decode(out.state ?? state));
+      };
+
+      // Another host, and the right host on another port: both refused.
+      for (const hosts of [["api.example.com"], [`127.0.0.1:${port + 1}`], ["*.example.com"]]) {
+        const denied = await fetchWith(hosts);
+        expect(denied.received ?? null).toBeNull();
+        expect(denied.error ?? null).not.toBeNull();
+      }
+      await new Promise((r) => setTimeout(r, 100));
+      expect(hits).toEqual([]);
+
+      const allowed = await fetchWith([`127.0.0.1:${port}`]);
+      expect(allowed.error ?? null).toBeNull();
+      expect(allowed.received?.body).toBe(BODY);
+      await new Promise((r) => setTimeout(r, 100));
+      expect(hits).toEqual(["/gated"]);
+    } finally {
+      await server.terminate();
+    }
+  }, 120_000);
+
   for (const [label, http] of [
     ["http: false", false],
     ["http omitted", undefined],

@@ -62,7 +62,16 @@ export type {
   HostedModuleOptions,
   HostedModuleInfo,
   HostedModuleEffect,
+  HostedModuleHttpEffect,
   HostedModuleEffectHandler,
+  HttpCompletionResult,
+  HttpCompletion,
+  HttpFailureKind,
+  ModuleHttp,
+  ModuleHttpRequest,
+  ModuleHttpCompletionTarget,
+  ModuleHttpError,
+  ModuleHttpErrorCode,
   ModuleCascadeOrigin,
   ModuleCascadeCause,
   ModuleCascadeFailure,
@@ -71,7 +80,7 @@ export type {
   HostedModuleError,
 } from "./types.js";
 
-export { isHostedModuleError } from "./types.js";
+export { isHostedModuleError, isHttpCompletion, isModuleHttpError } from "./types.js";
 
 export {
   AGENT_NAVIGATE,

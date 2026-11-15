@@ -30,7 +30,49 @@ All fields:
 | `outDir` | `string` | `"dist"` | Production build output directory (`--outDir` overrides it) |
 | `a11y` | `object` | none | `{ "ignoreRules": ["rule-id"], "dev": true }`. `ignoreRules` suppresses those rules in `hypen check` and `hypen dev --a11y`; `dev: true` prints findings on every `hypen dev` rebuild without the flag |
 | `theme` | `string` | `"./theme.json"` when it exists | Path of the [theme file](/docs/guide/theming#the-theme-file). `hypen check` validates `@theme.*` references against it and `hypen theme export` reads it |
-| `wasm` | `object` | none | WASM modules. For `hypen build --target wasm`: `language` (`"ts"`, `"go"` or `"rust"`, overrides detection) and per-module capability grants in `modules` — see [`hypen build --target wasm`](/docs/tooling/cli#hypen-build---target-wasm). A `modules.<Name>` entry with a `component` path (and optionally `template`) declares a prebuilt module that `hypen dev` loads next to the project's own — see [Prebuilt WASM Modules](/docs/guide/wasm-modules) |
+| `wasm` | `object` | none | WASM modules. For `hypen build --target wasm`: `language` (`"ts"`, `"go"` or `"rust"`, overrides detection) and per-module capability grants in `modules` (`reads`, `dispatches`, `storage`, `http`, and `httpHosts` to narrow `http` to a host allowlist) — see [`hypen build --target wasm`](/docs/tooling/cli#hypen-build---target-wasm). A `modules.<Name>` entry with a `component` path (and optionally `template`) declares a prebuilt module that `hypen dev` loads next to the project's own — see [Prebuilt WASM Modules](/docs/guide/wasm-modules) |
+
+### WASM module grants
+
+Each entry under `wasm.modules` holds one module's grants. A module starts with none.
+
+```json
+{
+  "wasm": {
+    "modules": {
+      "Weather": {
+        "component": "./modules/weather/weather.wasm",
+        "reads": ["Settings"],
+        "storage": ["app"],
+        "http": true,
+        "httpHosts": ["api.example.com", "*.example.org", "localhost:8080"]
+      }
+    }
+  }
+}
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `component`, `template` | paths | none | Declare a [prebuilt module](/docs/guide/wasm-modules#declare-it) |
+| `reads`, `dispatches` | module names | `[]` | Modules it may read / dispatch to |
+| `storage` | `"app"`, `"cloud"` | `[]` | Storage tiers beyond `local` |
+| `http` | boolean | `false` | Outbound [HTTP requests](/docs/guide/wasm-modules#http-requests) |
+| `httpHosts` | host patterns | any host | Hosts `http` is limited to: `host`, `*.domain` (subdomains at any depth, not the domain itself), either with `:port`. An entry is a host, not a URL |
+
+`httpHosts` without `"http": true`, or an entry that is not a host pattern, stops the command:
+
+```text
+  Build failed: hypen.json: wasm.modules.Weather.httpHosts[0]: invalid host pattern 'https://api.example.com': a pattern names a host, not a URL — drop the scheme (expected `host`, `*.domain`, or either with `:port`)
+
+    file:    hypen.json
+    field:   wasm.modules.Weather.httpHosts[0]
+    code:    CONFIG_INVALID
+
+  Hint: an entry names a host, not a URL: "api.example.com", "*.example.com" (every subdomain, not the apex) or "localhost:8080"; remove httpHosts to allow any host
+```
+
+Under `hypen dev` and `@hypen-space/server`, a request to `localhost` or a private address also needs that host named in `httpHosts`; see [What a server adds](/docs/guide/wasm-modules#what-a-server-adds).
 
 ### Server-based projects
 

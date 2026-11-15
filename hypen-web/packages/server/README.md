@@ -313,7 +313,7 @@ read the module's state and subscribe to it.
 | `wasmModule(options)` | Define one hosted module. Validates the name, that the file exists and is a Component, the template and the grants; throws `HostedModuleSetupError` |
 | `loadWasmModules(dirOrAppJson, { only?, config? })` | The modules of a `hypen build --target wasm` output (`app.json` + `<Name>.wasm` + `<Name>.hypen`), with the manifest's grants. Returns `{ entry, dir, modules, templates }` |
 | `server.wasmModules(...definitions)` | Register hosted modules |
-| `server.hostedModules({ storage, storageDir, quotas, onError, maxPendingDelays })` | Storage owners, quotas, the failure hook |
+| `server.hostedModules({ storage, storageDir, quotas, onError, maxPendingDelays, fetch, onHttpRequest, privateNetwork, maxConcurrentHttpRequests })` | Storage owners, quotas, the failure hook, and how modules' HTTP requests are sent and policed |
 | `server.reloadWasmModule(definition, { reconnect? })` | Hot reload: swap a new build into every live session, keeping state when the new component accepts it. Returns `{ module, sessions, reloaded, stateReset, kept, failed }` |
 | `server.hostedModuleNames` | Names of the app's hosted modules |
 
@@ -354,7 +354,61 @@ next action, with its state reset to what `init` returns.
 
 **Effects.** A module's `navigate` effect goes to the session's router; a
 `delay` effect dispatches the named action to the module later (at most 1024
-pending per module per session, all cancelled when the session ends).
+pending per module per session, all cancelled when the session ends). An
+`http` effect is performed as described under **HTTP** below.
+
+**HTTP.** A module granted `http` can queue requests
+(`hypen:http/deferred`; `context.http` in a TypeScript-authored module). The
+session performs each one with `fetch` and hands the response back to the
+module as the action it named — nothing waits inside the engine.
+
+```typescript
+wasmModule({
+  name: "Weather",
+  component: "./modules/weather.wasm",
+  grants: { http: true, httpHosts: ["api.example.com", "*.example.org"] },
+});
+
+server.hostedModules({
+  // Runs before every request and every redirect hop; can only narrow.
+  onHttpRequest: (request, context) =>
+    request.host === "billing.example.com" ? { deny: "not for modules" } : "allow",
+  // Send module traffic your own way (a proxy, an agent, pinned DNS, a fake in tests).
+  fetch: (url, init) => fetch(url, init),
+});
+```
+
+- `grants.httpHosts` limits the grant to host patterns (`host`, `*.domain`,
+  either with `:port`); omitted = any host. A malformed pattern, or
+  `httpHosts` without `http: true`, is an `INVALID_OPTIONS` setup error. The
+  module is told `permission-denied` when it queues a request to another
+  host; nothing is sent.
+- **The server's own network is blocked by default.** A request (or a
+  redirect) to `localhost` or a loopback / link-local / private IP literal
+  completes as `denied` unless the module's `httpHosts` names that host
+  exactly — an any-host `http` grant must not reach the metadata service or
+  an internal port of the machine the module happens to run on. This is
+  stricter than `hypen-runtime`, which has no such rule. Opt out for
+  first-party modules with `privateNetwork: "allow"`. The rule reads the URL,
+  not DNS: pin resolution in `fetch` (or use an egress proxy) if modules are
+  untrusted.
+- Redirects are followed by the server (`redirect: "manual"`, at most 5),
+  with the module's allowlist (`engine.httpRedirectAllowed`), the
+  private-network rule and `onHttpRequest` asked before each hop;
+  `Authorization` / `Cookie` are dropped across origins.
+- Limits: the request's time budget (30 s by default, at most 120 s) covers
+  the whole exchange; a response body over 4 MiB is abandoned mid-stream
+  (`too-large`); at most 8 exchanges run at once per session
+  (`maxConcurrentHttpRequests`), the rest wait in order; the engine allows a
+  module 32 requests in flight (`engine.setModuleHttpInFlightLimit`).
+- Unlike the native runtime, the default `fetch` sends the runtime's usual
+  `accept-encoding` and hands the module the decoded body (the 4 MiB cap
+  applies to what is read after decoding).
+- A request that is refused or fails still completes to the module
+  (`ok: false`, with `network` / `timeout` / `denied` / `too-large` /
+  `invalid-response`) and is reported to `onError` as kind `"http"`, with
+  the request, how it ended and — for a refusal — the grant field to change.
+  Ending the session aborts what is in flight.
 
 **Limits.** The entry module must be TypeScript. Module handlers are
 synchronous. A hosted module's state is not restored when a client reconnects

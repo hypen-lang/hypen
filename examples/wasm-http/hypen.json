@@ -1,0 +1,16 @@
+{
+  "components": "./src/components",
+  "entry": "App",
+  "port": 3000,
+  "outDir": "dist",
+  "wasm": {
+    "modules": {
+      "Weather": {
+        "component": "./modules/weather/weather.wasm",
+        "template": "./modules/weather/src/components/Weather/component.hypen",
+        "http": true,
+        "httpHosts": ["127.0.0.1:8787"]
+      }
+    }
+  }
+}

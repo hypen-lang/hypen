@@ -73,8 +73,10 @@ export interface Capabilities {
   dispatches: ScopeName[];
   /** Storage tiers beyond `local` (which the host always grants). */
   storage: GrantableStorage[];
-  /** Outbound HTTP (`wasi:http`). */
+  /** Outbound HTTP: blocking `wasi:http` and deferred `hypen:http/deferred`. */
   http: boolean;
+  /** Canonical host patterns `http` is limited to; empty = any host. */
+  httpHosts: string[];
 }
 
 /** A template-only building block (`Header()`): UI, no wasm, no state scope. */

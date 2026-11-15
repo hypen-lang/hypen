@@ -138,7 +138,9 @@ and never exits. Layout, one responsibility per file:
 | `manifest.ts` | `app.json` types and serialisation |
 | `output.ts` | Private work dir, atomic publish into `<outDir>/wasm`, cleanup |
 | `node-stubs.ts` | esbuild plugin stubbing Node built-ins for the TS bundle |
-| `shims/module-shim.ts` | The TS shim (module definition → `hypen:module` exports). Runs *inside the guest*: no imports, no Node/Bun APIs. Type-checked by tsc, unit-tested in `tests/wasm-shims.test.ts` |
+| `shims/module-shim.ts` | The TS shim (module definition → `hypen:module` exports, plus `context.http` over `hypen:http/deferred`). Runs *inside the guest*: no imports, no Node/Bun APIs. Type-checked by tsc, unit-tested in `tests/wasm-shims.test.ts` |
+| `shim-contract.ts` | Compile-time only: the shim's `ShimHttp` is `@hypen-space/core`'s `ModuleHttp` (what authors type against) |
+| `http-grammar.ts` | GENERATED copy of `hypen-web/packages/module-host/src/http.ts` (URL / host-pattern grammar; `bun hypen-web/scripts/sync-http-grammar.ts`, checked by `tests/http-grammar-sync.test.ts`). Do not edit |
 | `shims/module_shim.go` | The Go shim template; a gofmt-valid file whose three `hypen.invalid/...` imports `renderGoShim` replaces |
 
 `build.ts` (the package build) compiles `module-shim.ts` to
@@ -149,7 +151,12 @@ both are read from disk at run time, not bundled into the CLI.
 Cargo.toml/go.mod detection; required when both exist) and
 `modules.<Name>.{reads,dispatches,storage,http}` capability grants, emitted
 explicitly on every stateful `app.json` entry (defaults
-`[]`/`[]`/`[]`/`false`; the host is deny-by-default). A `modules.<Name>`
+`[]`/`[]`/`[]`/`false`; the host is deny-by-default), plus
+`modules.<Name>.httpHosts` — a host allowlist narrowing `http`, parsed with
+the engine's `HostPattern` grammar (`http-grammar.ts`), stored canonically,
+`CONFIG_INVALID` for a bad entry (`…httpHosts[i]`) or when `http` is not
+`true`, written to `app.json` only when non-empty and passed through for
+prebuilt modules and `hypen dev`. A `modules.<Name>`
 entry with `component` (path to a `.wasm`) and optionally `template` declares a
 **prebuilt** module (`ModuleGrants.prebuilt`; `wasm/prebuilt.ts` resolves and
 validates the files → `PrebuiltModule`): the wasm build copies it into the
@@ -159,13 +166,27 @@ template-only component donates its template, no toolchain is looked up when
 every stateful module is prebuilt, and discovery's `assertNoForeignModule`
 skips declared names via `Project.prebuilt`); `hypen dev` loads it into the
 RemoteServer as a hosted module (`dev-hosted.ts`: `DevPrebuiltModules`
-attaches, prints `HostedModuleFailure`s, watches the files' directories and
+attaches, prints `HostedModuleFailure`s (including kind `"http"`: a refused
+or failed deferred request, with the `hypen.json` field to change), watches the files' directories and
 hypen.json, and calls `RemoteServer.reloadWasmModule`); the SPA build throws
 `PREBUILT_UNSUPPORTED_TARGET`; a server-based build copies the files under
 `outDir` (`copyPrebuiltModules`). TS modules are
 componentized with the pinned `@bytecodealliance/jco` (optional peer + dev
 dependency; a project-local `node_modules/.bin/jco` overrides it) against a
-per-module world carrying only the granted storage imports. Rust artifacts
+per-module world carrying only the granted storage imports — and
+`hypen:http/deferred` only when the module is granted `http`
+(componentize-js keeps every world import, and an ungranted one fails
+instantiation). The generated entry passes that import to the shim, which
+exposes it to handlers as `context.http.send(request, { then, tag })` /
+`context.http.get(url, { then, tag })`: the request is queued, the host
+performs it, and `then` is dispatched with an `HttpCompletion` payload. A
+refusal throws `ModuleHttpError` (`code`: `not-granted` when built without
+the grant — the message names `wasm.modules.<Name>.http` — or the WIT
+variant `permission-denied` / `invalid-request` / `limit-exceeded`). Go: the
+`tinygo-module` world declares the import (TinyGo links only what the code
+references, so ungranted Go modules are unaffected), but bindings are still
+generated with `--world module` and the Go shim has no helper — a Go module
+cannot use it through the CLI yet. Rust artifacts
 come from `cargo --message-format=json`; a CLI-provisioned crate `wit/`
 (marked `.hypen-provisioned`) is refreshed when it differs from the WIT for
 the crate's ABI.
@@ -177,7 +198,10 @@ and a `hint`. `bin/hypen.ts` prints them with `formatBuildError`. New failure
 modes get a code and a hint, not a bare message.
 
 Tests: `tests/build-wasm.test.ts` (units + E2E:
-`HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts`),
+`HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts` — including a TS module
+that calls `context.http`, built, hosted by a `RemoteServer` and completed
+through a fake `fetch`), `tests/example-wasm-http.test.ts` (examples/wasm-http
+through `hypen dev`),
 `tests/wasm-shims.test.ts`, `tests/wasm-errors.test.ts` (bad paths, driven by
 fake toolchain scripts — no real toolchain needed).
 

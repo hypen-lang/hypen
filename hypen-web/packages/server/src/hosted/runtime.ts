@@ -27,6 +27,7 @@ import type { BaseEngine } from "@hypen-space/core/engine-base";
 import {
   isHostedModuleError,
   type HostedModuleEffect,
+  type HostedModuleHttpEffect,
   type HostedModuleManifest,
   type ModuleCascadeFailure,
   type ModuleCascadeReport,
@@ -44,6 +45,14 @@ import type {
 import { createLogger } from "@hypen-space/core/logger";
 import { assertComponentBytes } from "./define.js";
 import { HostedModuleSetupError, isHostedModuleSetupError } from "./errors.js";
+import {
+  DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS,
+  HttpJobQueue,
+  performHttpRequest,
+  type HostedFetch,
+  type HttpEgressPolicy,
+  type PerformedHttpRequest,
+} from "./http.js";
 import {
   HostedStorageOwners,
   type HostedStorageBackend,
@@ -141,6 +150,43 @@ export interface HostedModulesOptions {
   onError?: (failure: HostedModuleFailure) => void;
   /** Most pending `delay` effects per module per session. Default 1024. */
   maxPendingDelays?: number;
+  /**
+   * How a hosted module's deferred HTTP requests (`hypen:http/deferred`) are
+   * sent: called once per hop with `redirect: "manual"` (the server follows
+   * and checks redirects itself). Default: the runtime's `fetch`. Replace it
+   * to route through a proxy or agent, to pin DNS, or to fake the network in
+   * tests.
+   */
+  fetch?: HostedFetch;
+  /**
+   * App-level egress policy for hosted modules' HTTP requests, evaluated
+   * before each request and each redirect hop — after the module's own
+   * `httpHosts` and the private-network rule (`privateNetwork`) let it
+   * through. Return `"allow"`, or `{ deny: "<reason>" }` to complete the
+   * request to the module as `denied`. It can only narrow.
+   */
+  onHttpRequest?: HttpEgressPolicy;
+  /**
+   * What happens to a request whose URL points into the server's own
+   * network: a loopback, link-local, private or unspecified IP literal, or
+   * `localhost`.
+   *
+   * - `"block"` (default): refused (`denied`) unless the module's
+   *   `httpHosts` names that host explicitly (an exact entry such as
+   *   `"127.0.0.1:8080"` or `"localhost"` — a wildcard does not count). A
+   *   hosted, possibly third-party module must not reach the machine's
+   *   metadata service or internal services just because it was granted
+   *   `http`.
+   * - `"allow"`: no such rule — what `hypen-runtime` does on a developer's
+   *   machine. Only for servers whose modules are all first-party.
+   *
+   * The rule reads the URL, not DNS: a public name that resolves to a
+   * private address is not caught. Pin resolution in `fetch` if modules are
+   * untrusted.
+   */
+  privateNetwork?: "block" | "allow";
+  /** Most deferred HTTP exchanges in progress per session; the rest wait in order. Default 8. */
+  maxConcurrentHttpRequests?: number;
   /** @internal Tests: stand in for `import("@hypen-space/module-host")`. */
   loadModuleHost?: () => Promise<unknown>;
 }
@@ -179,6 +225,8 @@ function manifestOf(definition: HostedModuleDefinition): HostedModuleManifest {
     reads: [...grants.reads],
     dispatches: [...grants.dispatches],
     http: grants.http,
+    // Only when narrowed: an older module host ignores a key it does not know.
+    ...(grants.httpHosts.length > 0 ? { httpHosts: [...grants.httpHosts] } : {}),
   };
 }
 
@@ -189,7 +237,9 @@ const errorMessage = (err: unknown): string =>
 function grantFor(importName: string): { field: "storage" | "http"; value: string } | null {
   if (importName === "hypen:storage/app") return { field: "storage", value: "app" };
   if (importName === "hypen:storage/cloud") return { field: "storage", value: "cloud" };
-  if (importName.startsWith("wasi:http/")) return { field: "http", value: "true" };
+  if (importName === "hypen:http/deferred" || importName.startsWith("wasi:http/")) {
+    return { field: "http", value: "true" };
+  }
   return null;
 }
 
@@ -235,6 +285,27 @@ export class HostedModuleService implements HostedModuleProvider {
   /** Sessions currently running hosted modules. */
   get sessionCount(): number {
     return this.sessions.size;
+  }
+
+  /** @internal What the session runtimes perform deferred HTTP requests with. */
+  get http(): {
+    fetch: HostedFetch;
+    policy: HttpEgressPolicy | undefined;
+    privateNetwork: "block" | "allow";
+    maxConcurrent: number;
+  } {
+    const { fetch: custom, onHttpRequest, privateNetwork, maxConcurrentHttpRequests: max } = this.options;
+    return {
+      // Looked up per request: a test (or an instrumentation library) that
+      // replaces `globalThis.fetch` after startup is honoured.
+      fetch:
+        custom ??
+        ((url, init) => globalThis.fetch(url, { ...init, body: init.body as Uint8Array<ArrayBuffer> | null })),
+      policy: onHttpRequest,
+      privateNetwork: privateNetwork === "allow" ? "allow" : "block",
+      maxConcurrent:
+        typeof max === "number" && max >= 1 ? Math.floor(max) : DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS,
+    };
   }
 
   get maxPendingDelays(): number {
@@ -397,7 +468,7 @@ export class HostedModuleService implements HostedModuleProvider {
           field: `${grantsAt}.${grant.field}`,
           hint:
             grant.field === "http"
-              ? `grant outbound HTTP: set ${grantsAt}.http to true — or use a build of the module that does not import wasi:http`
+              ? `grant outbound HTTP: set ${grantsAt}.http to true — or use a build of the module that does not import ${required.startsWith("wasi:http/") ? "wasi:http" : required}`
               : `grant the "${grant.value}" storage tier: add "${grant.value}" to ${grantsAt}.storage`,
         }
       );
@@ -448,8 +519,10 @@ export class HostedModuleService implements HostedModuleProvider {
       // Nobody is listening: the log is the only place it can go.
       const where = failure.sessionId ? ` (session ${failure.sessionId})` : "";
       const line = `[${failure.module}] ${failure.kind}${failure.action ? ` "${failure.action}"` : ""}: ${failure.message}${where}`;
-      if (failure.kind === "recovered") log.warn(line);
-      else log.error(failure.hint ? `${line}\n  Hint: ${failure.hint}` : line);
+      // A failed request is the outside world's doing, and the module was told.
+      if (failure.kind === "recovered" || failure.kind === "http") {
+        log.warn(failure.hint ? `${line}\n  Hint: ${failure.hint}` : line);
+      } else log.error(failure.hint ? `${line}\n  Hint: ${failure.hint}` : line);
       return;
     }
     try {
@@ -579,6 +652,9 @@ class SessionRuntime implements HostedModuleSession {
   /** Scopes whose instance trapped, with what killed it. */
   private readonly crashed = new Map<string, string>();
   private readonly timers = new Map<string, Set<ReturnType<typeof setTimeout>>>();
+  /** Deferred HTTP requests handed to this session and not completed yet, by engine id. */
+  private readonly httpPending = new Map<number, { scope: string; abort: AbortController }>();
+  private httpQueue: HttpJobQueue | null = null;
   private readonly notifyQueued = new Set<string>();
   /** A host call failed and no thrown error has accounted for it yet. */
   private unreportedFailure = false;
@@ -796,6 +872,10 @@ class SessionRuntime implements HostedModuleSession {
       const at = this.definitionOf(grant.scope)?.hosted.grantsAt ?? `the grants of "${grant.scope}"`;
       missingGrant = { field: grant.field, value: grant.value };
       hint = `"${this.nameOf(grant.scope)}" may not ${grant.field === "reads" ? "read" : "dispatch to"} "${grant.value}": add "${grant.value}" to ${at}.${grant.field}`;
+    } else if (first.cause.code === "host" && this.guestHttpRefusalHint(first.scope, first.cause.host.message)) {
+      // The module's own `context.http` call was refused and it did not
+      // catch the error: the action failed with the refusal as its message.
+      ({ hint, missingGrant } = this.guestHttpRefusalHint(first.scope, first.cause.host.message)!);
     } else if (first.cause.code === "host" && /permission[-_ ]?denied/i.test(first.cause.host.message)) {
       // The module host refused before the engine was asked; modules
       // usually pass the host's `permission-denied(<grant>)` on verbatim.
@@ -806,7 +886,13 @@ class SessionRuntime implements HostedModuleSession {
           ? `"${this.nameOf(first.scope)}" tried to ${which === "reads" ? "read (or subscribe to)" : "dispatch to"} a module it has no grant for: add that module to ${at}.${which}`
           : `"${this.nameOf(first.scope)}" called a module it has no grant for: list the target under ${at}.reads (to read / subscribe) or ${at}.dispatches (to dispatch)`;
     } else if (first.cause.code === "notAccepted") {
-      hint = `"${this.nameOf(first.scope)}" does not list the action "${first.action}"; check the action name`;
+      hint =
+        first.origin.kind === "httpRequest"
+          ? `"${this.nameOf(first.scope)}" queued an HTTP request whose completion action "${first.action}" it does not handle: \`then\` must name one of the module's own actions`
+          : `"${this.nameOf(first.scope)}" does not list the action "${first.action}"; check the action name`;
+    } else {
+      const http = this.httpRefusalHint(first);
+      if (http) ({ hint, missingGrant } = http);
     }
     const more = report.failureCount > 1 ? ` (+${report.failureCount - 1} more)` : "";
     this.emit({
@@ -818,6 +904,77 @@ class SessionRuntime implements HostedModuleSession {
       ...(missingGrant ? { missingGrant } : {}),
       report,
     });
+  }
+
+  /**
+   * The hint for a deferred HTTP request the engine refused at admission
+   * (`httpNotGranted` / `httpDenied` / `httpInvalid` / `httpLimit` /
+   * `httpUnavailable`), naming the field to change. The module host answers
+   * most of these at `send` already (the module sees the error and nothing
+   * reaches the engine); these are what is left — the in-flight cap, and a
+   * host that did not check.
+   */
+  private httpRefusalHint(
+    failure: ModuleCascadeFailure
+  ): { hint: string; missingGrant?: HostedModuleFailure["missingGrant"] } | null {
+    const { cause } = failure;
+    const name = this.nameOf(failure.scope);
+    const at = this.definitionOf(failure.scope)?.hosted.grantsAt ?? `the grants of "${failure.scope}"`;
+    switch (cause.code) {
+      case "httpNotGranted":
+        return {
+          hint: `"${name}" has no \`http\` grant: set ${at}.http to true`,
+          missingGrant: { field: "http", value: "true" },
+        };
+      case "httpDenied":
+        return {
+          hint: `"${name}" may not reach "${cause.host}": add it to ${at}.httpHosts (or remove httpHosts to allow any host)`,
+          missingGrant: { field: "httpHosts", value: cause.host },
+        };
+      case "httpInvalid":
+        return { hint: `"${name}" queued a request the engine cannot send: ${cause.detail}` };
+      case "httpLimit":
+        return {
+          hint:
+            cause.per === "module"
+              ? `"${name}" already has ${cause.limit} requests in flight: wait for completions before queueing more (the cap is engine.setModuleHttpInFlightLimit)`
+              : `"${name}" queued more than ${cause.limit} requests from one action: spread them over several actions`,
+        };
+      case "httpUnavailable":
+        return { hint: "this engine has no effect handler installed, so nothing can perform HTTP requests" };
+      default:
+        return null;
+    }
+  }
+
+  /**
+   * The hint for an action that failed because the module let a refused
+   * `hypen:http/deferred.send` escape — recognised by the host's wording
+   * (`DeferredHttpQueue` / the TS shim's `context.http`), which modules
+   * usually pass on verbatim. `null` when the message is about something else.
+   */
+  private guestHttpRefusalHint(
+    scope: string,
+    message: string
+  ): { hint: string; missingGrant?: HostedModuleFailure["missingGrant"] } | null {
+    const name = this.nameOf(scope);
+    const at = this.definitionOf(scope)?.hosted.grantsAt ?? `the grants of "${scope}"`;
+    const host = /host '([^']+)' is not in the manifest's `httpHosts` allowlist/.exec(message)?.[1];
+    if (host !== undefined) {
+      return {
+        hint: `"${name}" may not reach "${host}": add it to ${at}.httpHosts (or remove httpHosts to allow any host)`,
+        missingGrant: { field: "httpHosts", value: host },
+      };
+    }
+    if (/has no `http` grant|does not grant `http`/.test(message)) {
+      return {
+        hint:
+          `"${name}" was built without the \`http\` grant: set ${at}.http to true where the module is built ` +
+          "and rebuild it (the grant decides whether the component imports hypen:http/deferred), and grant it here too",
+        missingGrant: { field: "http", value: "true" },
+      };
+    }
+    return null;
   }
 
   /** Turn something an engine call threw into a reported failure. */
@@ -890,6 +1047,10 @@ class SessionRuntime implements HostedModuleSession {
       });
       return;
     }
+    if (effect.type === "http") {
+      this.queueHttp(scope, effect);
+      return;
+    }
     const pending = this.timers.get(scope) ?? new Set<ReturnType<typeof setTimeout>>();
     this.timers.set(scope, pending);
     const max = this.service.maxPendingDelays;
@@ -911,6 +1072,125 @@ class SessionRuntime implements HostedModuleSession {
       void this.dispatch(scope, then, null).catch(() => {});
     }, ms);
     pending.add(timer);
+  }
+
+  // ── deferred HTTP ─────────────────────────────────────────────────────────
+
+  /**
+   * Take a request the engine admitted. Runs inside the engine call that
+   * produced the effect: it only queues. The exchange starts in a later
+   * microtask (at most `maxConcurrentHttpRequests` at a time, in order) and
+   * its completion is delivered from a later turn still.
+   */
+  private queueHttp(scope: string, effect: HostedModuleHttpEffect): void {
+    const settings = this.service.http;
+    this.httpQueue ??= new HttpJobQueue(settings.maxConcurrent);
+    const abort = new AbortController();
+    this.httpPending.set(effect.id, { scope, abort });
+    this.httpQueue.push(async () => {
+      const performed = await performHttpRequest(effect, {
+        fetch: settings.fetch,
+        module: this.nameOf(scope),
+        scope,
+        sessionId: this.sessionId,
+        privateNetwork: settings.privateNetwork,
+        ...(settings.policy ? { policy: settings.policy } : {}),
+        redirectAllowed: (url) => !this.isClosed && this.engine.httpRedirectAllowed(effect.id, url),
+        signal: abort.signal,
+      });
+      await this.completeHttp(scope, effect, performed, abort.signal.aborted);
+    });
+  }
+
+  /** Report how a request ended to the engine, which runs the module's completion action. */
+  private async completeHttp(
+    scope: string,
+    effect: HostedModuleHttpEffect,
+    performed: PerformedHttpRequest,
+    aborted: boolean
+  ): Promise<void> {
+    this.httpPending.delete(effect.id);
+    // The session is gone and its engine with it: nobody to tell.
+    if (this.isClosed) return;
+    await this.recover();
+    if (this.isClosed) return;
+    let delivered = false;
+    try {
+      delivered = this.engine.completeHttpRequest(effect.id, performed.result);
+    } catch (err) {
+      // The completion action ran and failed (or its follow-ups did).
+      this.reportThrown(err, { kind: "action", scope, action: effect.then });
+      return;
+    }
+    // `false`: the module was destroyed or reloaded meanwhile — the result
+    // is dropped by contract, and there is nothing to diagnose.
+    if (!delivered || aborted || performed.result.ok) return;
+    this.emitHttpFailure(scope, effect, performed);
+  }
+
+  private emitHttpFailure(scope: string, effect: HostedModuleHttpEffect, performed: PerformedHttpRequest): void {
+    if (performed.result.ok) return;
+    const { kind, message = "" } = performed.result.error;
+    const at = this.definitionOf(scope)?.hosted.grantsAt ?? `the grants of "${scope}"`;
+    const name = this.nameOf(scope);
+    const host = performed.refusedHost;
+    let hint: string | undefined;
+    let missingGrant: HostedModuleFailure["missingGrant"];
+    let refusedBy: NonNullable<HostedModuleFailure["http"]>["refusedBy"];
+    switch (performed.refusedBy) {
+      case "httpHosts":
+        refusedBy = "httpHosts";
+        if (host) missingGrant = { field: "httpHosts", value: host };
+        hint = `"${name}" was redirected to a host outside its allowlist: add "${host}" to ${at}.httpHosts if it should follow that redirect`;
+        break;
+      case "privateNetwork":
+        refusedBy = "policy";
+        if (host) missingGrant = { field: "httpHosts", value: host };
+        hint =
+          `a hosted module may not reach the server's own network by default: name the host explicitly — add "${host}" ` +
+          `to ${at}.httpHosts (a wildcard does not count) — or, when every module is trusted, set ` +
+          `hostedModules({ privateNetwork: "allow" })`;
+        break;
+      case "policy":
+        refusedBy = "policy";
+        hint = "refused by the app's own egress policy: hostedModules({ onHttpRequest })";
+        break;
+      default:
+        if (kind === "timeout") {
+          hint = `the request's time budget is ${effect.request.timeoutMs} ms: pass a larger \`timeoutMs\` (up to 120000) if the endpoint is slow`;
+        } else if (kind === "too-large") {
+          hint = "a module can receive at most 4 MiB per response: ask the endpoint for less (paging, a range)";
+        }
+    }
+    this.emit({
+      kind: "http",
+      scope,
+      action: effect.then,
+      message: `${effect.request.method} ${effect.request.url} ${performed.refusedBy ? "refused" : "failed"} (${kind}): ${message}`,
+      ...(hint !== undefined ? { hint } : {}),
+      ...(missingGrant ? { missingGrant } : {}),
+      http: {
+        method: effect.request.method,
+        url: performed.url,
+        errorKind: kind,
+        ...(refusedBy ? { refusedBy } : {}),
+      },
+    });
+  }
+
+  /** Deferred HTTP requests of `scope` not completed yet: queued or in progress (diagnostics, tests). */
+  pendingHttpRequests(scope: string): number {
+    const wanted = scope.toLowerCase();
+    let count = 0;
+    for (const pending of this.httpPending.values()) if (pending.scope === wanted) count += 1;
+    return count;
+  }
+
+  /** Abort the requests `scope` has in flight: its instance is going away and would not get them. */
+  private cancelHttp(scope: string): void {
+    for (const pending of this.httpPending.values()) {
+      if (pending.scope === scope) pending.abort.abort();
+    }
   }
 
   /** Pending `delay` effects of `scope` (diagnostics, tests). */
@@ -1029,6 +1309,7 @@ class SessionRuntime implements HostedModuleSession {
   destroyModule(mounted: MountedModule): void {
     const { scope } = mounted;
     this.cancelTimers(scope);
+    this.cancelHttp(scope);
     if (this.instances.get(scope) === mounted) this.instances.delete(scope);
     const wasCrashed = this.crashed.delete(scope);
     this.mirror.delete(scope);
@@ -1124,6 +1405,7 @@ class SessionRuntime implements HostedModuleSession {
   private replaceInstance(mounted: MountedModule): void {
     const { scope } = mounted;
     this.cancelTimers(scope);
+    this.cancelHttp(scope);
     this.mirror.delete(scope);
     this.quiet += 1;
     try {
@@ -1224,6 +1506,11 @@ class SessionRuntime implements HostedModuleSession {
     }
     this.isClosed = true;
     for (const scope of [...this.timers.keys()]) this.cancelTimers(scope);
+    // In-flight requests are aborted and never completed: the engine is
+    // going away with the session.
+    this.httpQueue?.stop();
+    for (const pending of this.httpPending.values()) pending.abort.abort();
+    this.httpPending.clear();
     try {
       this.engine.setModuleEffectHandler(null);
     } catch {

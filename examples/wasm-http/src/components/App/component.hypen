@@ -1,0 +1,10 @@
+module App {
+    Column {
+        Heading("Weather")
+        Text("The forecast below is fetched by a TypeScript module running as a WebAssembly component.")
+            .color("#666666")
+        Weather {}
+    }
+    .padding(24)
+    .gap(16)
+}

@@ -27,7 +27,7 @@ export interface HostedServerPackage {
     name: string;
     component: string;
     template?: string;
-    grants: { reads: string[]; dispatches: string[]; storage: string[]; http: boolean };
+    grants: { reads: string[]; dispatches: string[]; storage: string[]; http: boolean; httpHosts?: string[] };
     declaredAt: string;
     grantsAt: string;
   }) => HostedModuleDefinition;
@@ -98,6 +98,7 @@ const FAILURE_TITLES: Record<HostedModuleFailure["kind"], string> = {
   crash: "crashed",
   recovered: "restarted after a crash",
   effect: "effect not performed",
+  http: "HTTP request did not complete",
   reload: "hot reload problem",
 };
 
@@ -133,14 +134,27 @@ export function formatHostedFailure(failure: HostedModuleFailure): string[] {
               ? `subscribing to ${f.origin.target}.${f.origin.path}`
               : f.origin.kind === "lifecycle"
                 ? `lifecycle ${f.origin.hook}`
-                : f.origin.kind;
+                : f.origin.kind === "httpRequest"
+                  ? `http request ${f.origin.method} ${f.origin.url}`
+                  : f.origin.kind === "httpRefusal"
+                    ? "completion of a refused http request"
+                    : f.origin.kind;
       const cause =
         f.cause.code === "host" ? `${f.cause.host.code}: ${f.cause.host.message}` : f.cause.code;
       lines.push(`    - ${f.scope} ${f.action} [${f.outcome}; ${origin}] ${cause}`);
     }
   }
+  if (failure.http) {
+    const by = failure.http.refusedBy ? `; refused by ${failure.http.refusedBy}` : "";
+    lines.push(`  request: ${failure.http.method} ${failure.http.url} → ${failure.http.errorKind}${by}`);
+  }
   if (failure.missingGrant) {
-    lines.push(`  missing grant: ${failure.missingGrant.field} ← "${failure.missingGrant.value}"`);
+    const { field, value } = failure.missingGrant;
+    lines.push(
+      field === "http"
+        ? `  missing grant: http ← true`
+        : `  missing grant: ${field} ← "${value}"`
+    );
   }
   if (failure.hint) lines.push(`  Hint: ${failure.hint}`);
   return lines;
@@ -219,6 +233,7 @@ export class DevPrebuiltModules {
       grants?.dispatches,
       grants?.storage,
       grants?.http,
+      grants?.httpHosts,
     ]);
   }
 
@@ -236,6 +251,9 @@ export class DevPrebuiltModules {
         dispatches: grants?.dispatches ?? [],
         storage: grants?.storage ?? [],
         http: grants?.http ?? false,
+        // Only when narrowed: a project on an older @hypen-space/server
+        // rejects a grant key it does not know.
+        ...(grants?.httpHosts?.length ? { httpHosts: grants.httpHosts } : {}),
       },
       declaredAt: at,
       grantsAt: at,

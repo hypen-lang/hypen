@@ -8,6 +8,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Added
+- Deferred HTTP for hosted modules (`hypen:http/deferred`): `BaseEngine.completeHttpRequest(id,
+  result)`, `httpRedirectAllowed(id, url)`, `moduleHttpInFlightLimit()`,
+  `setModuleHttpInFlightLimit(n)` and `supportsDeferredHttp` (typed wrappers over the server
+  engine's methods; an older engine build throws `hostedModulesUnsupported`). `HostedModuleEffect`
+  gains the `http` variant (`HostedModuleHttpEffect`); `ModuleCascadeCause` gains `httpNotGranted`
+  / `httpDenied` / `httpInvalid` / `httpLimit` / `httpUnavailable`, `ModuleCascadeOrigin` gains
+  `httpRequest` / `httpRefusal`, `HostedModuleErrorCode` gains `unknownHttpRequest`,
+  `HostedModuleFailureKind` gains `"http"`, `HostedModuleGrants` / `HostedModuleManifest` gain
+  `httpHosts`.
+- `HttpCompletion` (the payload a module's completion action receives), `HttpCompletionResult`
+  (what an embedder reports), `HttpFailureKind`, and the guard `isHttpCompletion`.
+- `GlobalContext.http` (`ModuleHttp`: `send` / `get`), the author-facing deferred-HTTP API of a
+  module built with `hypen build --target wasm`, with `ModuleHttpError` / `isModuleHttpError`.
+  Optional in the type; an in-process module's `context.http` throws `unavailable` (use `fetch` in
+  an async handler there).
+- `@hypen-space/core/http`: the deferred-HTTP grammar and limits (`parseHttpUrl`, `joinHttpUrl`,
+  `parseHostPattern`, `hostPatternMatches`, `MAX_HTTP_*`, …) — a generated copy of
+  `@hypen-space/module-host`'s `http.ts`, itself a port of the engine's.
 - Hosted modules — modules whose logic is a prebuilt WebAssembly Component, defined with
   `wasmModule()` in `@hypen-space/server` — are first-class module definitions. New
   `hosted-module.ts` (also `@hypen-space/core/hosted-module`): `HostedModuleDefinition`,

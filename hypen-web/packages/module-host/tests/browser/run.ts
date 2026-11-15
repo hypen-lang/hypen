@@ -186,16 +186,20 @@ const server = Bun.serve({
   },
 });
 
-// The wasi:http target: another origin (port), so CORS applies.
+// The HTTP target (blocking wasi:http and deferred requests): another origin
+// (port), so CORS applies.
 const httpHits: string[] = [];
 const HTTP_BODY = '{"greeting":"hello"}';
 const apiServer = Bun.serve({
   hostname: "127.0.0.1",
   port: 0,
   fetch(req) {
-    httpHits.push(`${req.method} ${new URL(req.url).pathname}`);
+    const path = new URL(req.url).pathname;
+    httpHits.push(`${req.method} ${path}`);
     const cors = { "access-control-allow-origin": "*", "access-control-allow-headers": "*" };
     if (req.method === "OPTIONS") return new Response(null, { status: 204, headers: cors });
+    if (path === "/moved") return new Response(null, { status: 302, headers: { ...cors, location: "/hello" } });
+    if (path === "/missing") return new Response("no such thing", { status: 404, headers: { ...cors, "content-type": "text/plain" } });
     return new Response(HTTP_BODY, { headers: { ...cors, "content-type": "application/json" } });
   },
 });
@@ -507,6 +511,97 @@ await scenario("(f) wasi:http granted: cross-origin fetch with CORS", async (c) 
 }, [/^console: $/, /panicked at .*waki/, /^console: incoming response available$/, /RUST_BACKTRACE/]);
 
 // ---------------------------------------------------------------------------
+// (g) deferred HTTP (hypen:http/deferred): the supported way to do HTTP in a
+//     browser. The reducer only queues; the page performs the request and
+//     dispatches the completion — nothing blocks, nothing traps.
+// ---------------------------------------------------------------------------
+
+const DEFERRED = "deferred_http_module.wasm";
+const deferredManifest = { name: "net", version: "1.0.0", reads: [], dispatches: [] };
+
+if (existsSync(join(fixturesDir, DEFERRED))) {
+  type Deferred = {
+    afterQueue: string;
+    performed: { method: string; url: string; then: string; tag: string | null; outcome: string }[];
+    state: string;
+  };
+
+  await scenario("(g) hypen:http/deferred denied: prepare() fails naming the import", async (c) => {
+    await c.goto("recommended");
+    await c.hx("newHost", "h", "memory");
+    for (const http of [false, undefined]) {
+      const r = await c.hx<PrepareResult>("prepare", "h", "net", DEFERRED, http === undefined ? deferredManifest : { ...deferredManifest, http });
+      check(
+        !r.ok && /http egress denied for module 'net'.*hypen:http\/deferred/.test(r.error),
+        `http: ${http} -> ${r.ok ? "prepared" : r.error}`,
+      );
+    }
+  });
+
+  await scenario("(g) hypen:http/deferred granted: `get` queues, the page fetches, `fetched` receives the completion", async (c) => {
+    await c.goto("recommended");
+    await c.hx("newHost", "h", "memory");
+    const allowed = `127.0.0.1:${apiServer.port}`;
+    const r = await c.hx<PrepareResult>("prepare", "h", "net", DEFERRED, { ...deferredManifest, http: true, httpHosts: [allowed] });
+    check(r.ok, `prepare with http: true, httpHosts: ["${allowed}"]${r.ok ? "" : `: ${r.error}`}`);
+    if (!r.ok) return;
+    if (r.ok) report.deferredHttpPrepare = { wallMs: r.wallMs, ...r.info };
+
+    httpHits.length = 0;
+    const url = `http://${allowed}/hello`;
+    const ok = await c.hx<Deferred>("deferredHttp", "h", "net", "get", { url, tag: "page" });
+    const queued = JSON.parse(ok.afterQueue);
+    check(queued.queued === 1 && queued.completions === 0 && queued.sendError === null, `the reducer returned with the request queued, nothing completed: ${ok.afterQueue}`);
+    check(
+      ok.performed.length === 1 && ok.performed[0]!.url === url && ok.performed[0]!.then === "fetched" && ok.performed[0]!.outcome === "status 200",
+      `the page performed it: ${JSON.stringify(ok.performed)}`,
+    );
+    check(httpHits.includes("GET /hello"), `the request reached the cross-origin server (hits: ${httpHits.join(", ") || "none"})`);
+    const done = JSON.parse(ok.state);
+    check(
+      done.completions === 1 &&
+        done.last?.ok === true &&
+        done.last.status === 200 &&
+        done.last.body === HTTP_BODY &&
+        done.last.bodyEncoding === "utf8" &&
+        done.last.contentType === "application/json" &&
+        done.last.tag === "page",
+      `the completion landed in module state: ${JSON.stringify(done.last)}`,
+    );
+    report.deferredHttp = { performed: ok.performed, last: done.last };
+
+    // A non-2xx status is a completed exchange, not a failure.
+    const missing = await c.hx<Deferred>("deferredHttp", "h", "net", "get", { url: `http://${allowed}/missing` });
+    const missed = JSON.parse(missing.state).last;
+    check(missed?.ok === true && missed.status === 404 && missed.body === "no such thing", `a 404 arrives as ok: true with its status: ${JSON.stringify(missed)}`);
+
+    // Chained: the completion handler queues the next request.
+    const chained = await c.hx<Deferred>("deferredHttp", "h", "net", "get", { url, tag: "first", next: `http://${allowed}/missing` });
+    const log = JSON.parse(chained.state).log;
+    check(JSON.stringify(log) === JSON.stringify(['"first":200', '"chained":404']), `a completion can queue the next request: ${JSON.stringify(log)}`);
+
+    // The allowlist answers at `send`, in the page, with the native wording.
+    const refused = await c.hx<Deferred>("deferredHttp", "h", "net", "get", { url: "https://evil.test/" });
+    check(refused.performed.length === 0, "a host outside httpHosts is not queued, so nothing is fetched");
+    check(
+      JSON.parse(refused.state).sendError === "permission-denied: host 'evil.test:443' is not in the manifest's `httpHosts` allowlist",
+      `the guest is told why: ${JSON.parse(refused.state).sendError}`,
+    );
+
+    // A browser embedder cannot check a redirect's target before following
+    // it, so the harness refuses redirects: the module sees a failure.
+    const moved = await c.hx<Deferred>("deferredHttp", "h", "net", "get", { url: `http://${allowed}/moved`, tag: "moved" });
+    const movedLast = JSON.parse(moved.state).last;
+    check(movedLast?.ok === false && movedLast.error === "network" && movedLast.tag === "moved", `a redirect is refused by the page (redirect: "error") and completes as a failure: ${JSON.stringify(movedLast)}`);
+    // Chromium logs the 404s it was asked to fetch and the refused
+    // redirect; nothing else may be logged.
+  }, [
+    /^console: Failed to load resource: net::ERR_FAILED$/,
+    /^console: Failed to load resource: the server responded with a status of 404 \(Not Found\)$/,
+  ]);
+}
+
+// ---------------------------------------------------------------------------
 // Performance: the 14 MB componentize-js module (opt-in, slow)
 // ---------------------------------------------------------------------------
 
@@ -560,6 +655,7 @@ for (const k of ["localStorageBrowserQuota"]) {
   if (report[k]) console.log(`\n## ${k}\n  ${JSON.stringify(report[k])}`);
 }
 if (report.httpGranted) console.log(`\n## wasi:http granted\n  ${JSON.stringify(report.httpGranted)}`);
+if (report.deferredHttp) console.log(`\n## hypen:http/deferred granted\n  ${JSON.stringify(report.deferredHttp)}`);
 
 if (failures.length) {
   console.log(`\nFAILED: ${failures.length} check(s)`);

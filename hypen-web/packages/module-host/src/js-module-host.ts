@@ -43,6 +43,14 @@ import {
   type HostStorageOptions,
 } from "./storage.ts";
 import { loadWasiImports, type WasiImports } from "./wasi.ts";
+import {
+  DeferredHttpQueue,
+  NOT_IN_A_REDUCER_CALL,
+  checkHttpAuthorityText,
+  type HttpGrant,
+  type HttpRequestError,
+  type QueuedHttpRequest,
+} from "./http.ts";
 import { importInMemoryModule, transpileComponent, wasmCspError, type LoadedVia } from "./loader.ts";
 
 // ----------------------------------------------------------------------------
@@ -97,6 +105,82 @@ function createEngineStateImport(current: () => CallContext | null): EngineState
 }
 
 // ----------------------------------------------------------------------------
+// hypen:http/deferred
+// ----------------------------------------------------------------------------
+
+/** The WIT `request` record as jco presents it to an import. */
+interface WitHttpRequest {
+  method: string;
+  url: string;
+  headers: Array<[string, string]>;
+  body?: Uint8Array | null;
+  timeoutMs?: number | null;
+}
+
+/**
+ * The `hypen:http/deferred` import (jco shape: the WIT `error` variant is
+ * thrown as `{ tag, val }`).
+ */
+export interface DeferredHttpImport {
+  send(request: WitHttpRequest, then: string, tag?: string | null): void;
+}
+
+/**
+ * `send` performs nothing: it validates the request against the bounds and
+ * the module's grant and queues it for the reducer output — the same checks,
+ * in the same order, with the same answers as the native host
+ * (`wasmtime/deferred_http.rs`). `current()` is the queue of the guest call in
+ * progress; outside a call that returns a reducer output there is none.
+ */
+function createDeferredHttpImport(current: () => DeferredHttpQueue | null): DeferredHttpImport {
+  return {
+    send(request, then, tag) {
+      const queue = current();
+      if (!queue) {
+        throw { tag: "permission-denied", val: NOT_IN_A_REDUCER_CALL } satisfies HttpRequestError;
+      }
+      const queued: QueuedHttpRequest = {
+        request: {
+          method: request.method,
+          url: request.url,
+          headers: request.headers.map(([name, value]): [string, string] => [name, value]),
+          // Own copy: the guest's memory is reused once the call returns.
+          body: request.body ? request.body.slice() : null,
+          timeoutMs: request.timeoutMs ?? null,
+        },
+        then,
+        tag: tag ?? null,
+      };
+      const refused = queue.send(queued);
+      if (refused !== null) throw refused;
+    },
+  };
+}
+
+/**
+ * `wasi:http/outgoing-handler` narrowed to a manifest's `httpHosts`: every
+ * blocking request is checked against the allowlist before it is handed to
+ * the shim, and a host outside it gets the WASI `HTTP-request-denied` error —
+ * what the native host's `AllowlistHooks` do. The shim follows no redirects
+ * (the guest's client issues each hop as a new request, through here again).
+ */
+function allowlistedOutgoingHandler(handler: unknown, grant: HttpGrant): unknown {
+  type Scheme = { tag: string } | undefined;
+  type OutgoingRequest = { scheme(): Scheme; authority(): string | undefined };
+  const inner = handler as { handle(request: OutgoingRequest, options: unknown): unknown };
+  return {
+    ...inner,
+    handle(request: OutgoingRequest, options: unknown): unknown {
+      const scheme = request.scheme()?.tag === "HTTP" ? "http" : "https";
+      if (checkHttpAuthorityText(grant, scheme, request.authority() ?? "") !== null) {
+        throw { tag: "HTTP-request-denied" };
+      }
+      return inner.handle(request, options);
+    },
+  };
+}
+
+// ----------------------------------------------------------------------------
 // Import map (link-time capability gate)
 // ----------------------------------------------------------------------------
 
@@ -104,6 +188,11 @@ const LOCAL = "hypen:storage/local";
 const APP = "hypen:storage/app";
 const CLOUD = "hypen:storage/cloud";
 const ENGINE_STATE = "hypen:engine/state";
+const DEFERRED_HTTP = "hypen:http/deferred";
+const WASI_OUTGOING_HANDLER = "wasi:http/outgoing-handler";
+
+/** Whether `key` (unversioned) is an interface the `http` grant gates. */
+const isHttpImport = (key: string): boolean => key === DEFERRED_HTTP || key.startsWith("wasi:http/");
 
 /** Strip a `@x.y.z` version suffix; the emitted bindings look imports up unversioned. */
 const unversioned = (key: string): string => key.replace(/@[^@/]*$/, "");
@@ -118,7 +207,9 @@ const unversioned = (key: string): string => key.replace(/@[^@/]*$/, "");
  * Always linked: `hypen:storage/local`, `hypen:engine/state` (its ACLs are
  * enforced per call) and every non-http WASI interface in `available`.
  * Linked only when granted: `hypen:storage/app` (`storage` lists `"app"`),
- * `hypen:storage/cloud` (`"cloud"`), `wasi:http/*` (`http === true`).
+ * `hypen:storage/cloud` (`"cloud"`), `wasi:http/*` and `hypen:http/deferred`
+ * (`http === true`; lookup is by unversioned name, so the `@0.1.0` and
+ * `@0.2.0` packages of the deferred interface are the same entry).
  *
  * @param available interface name (unversioned) -> implementation; the host
  *   passes its WASI shims, storage and engine-state imports here.
@@ -133,7 +224,7 @@ export function buildImportMap(
   const granted = (key: string): boolean => {
     if (key === APP) return m.storage.has("app");
     if (key === CLOUD) return m.storage.has("cloud");
-    if (key.startsWith("wasi:http/")) return m.http;
+    if (isHttpImport(key)) return m.http;
     return true;
   };
   const map: Record<string, unknown> = {};
@@ -145,7 +236,7 @@ export function buildImportMap(
   if (missing.length === 0) return map;
 
   const denied = missing.filter((k) => k in available || !granted(k));
-  const http = denied.filter((k) => k.startsWith("wasi:http/"));
+  const http = denied.filter(isHttpImport);
   if (http.length > 0) {
     throw new Error(
       `http egress denied for module '${name}': manifest.http is not true but ` +
@@ -180,7 +271,11 @@ function effectFromWit(e: any): Effect {
   return e;
 }
 
-function reducerOutputFromWit(out: any, ctx: CallContext | null = null): ReducerOutput {
+function reducerOutputFromWit(
+  out: any,
+  ctx: CallContext | null = null,
+  httpRequests: QueuedHttpRequest[] = [],
+): ReducerOutput {
   return {
     state: out?.state, // Uint8Array or undefined
     effects: (out?.effects ?? []).map(effectFromWit),
@@ -190,6 +285,8 @@ function reducerOutputFromWit(out: any, ctx: CallContext | null = null): Reducer
     // subscribe_requests}.
     crossDispatch: ctx?.crossDispatch ?? [],
     subscribeRequests: ctx?.subscribeRequests ?? [],
+    // Queued through `hypen:http/deferred`; decoded as `HttpRequestWire`.
+    httpRequests,
   };
 }
 
@@ -355,6 +452,12 @@ export class JsModuleHost {
   #nextId = 1;
   #activeCall: CallContext | null = null;
   /**
+   * The `hypen:http/deferred` queue of the guest call in progress — open for
+   * `dispatch`, `onActivated` and `onDeactivated` (the exports that return a
+   * reducer output), `null` otherwise.
+   */
+  #activeHttp: DeferredHttpQueue | null = null;
+  /**
    * Component instances that trapped, by their bindings object, with what
    * killed them. Every host instance id sharing those bindings is dead.
    */
@@ -371,9 +474,18 @@ export class JsModuleHost {
    */
   readonly engineState: EngineStateImport;
 
+  /**
+   * This host's `hypen:http/deferred` import. It only queues, and only
+   * inside a `dispatch` / `onActivated` / `onDeactivated` call of THIS host;
+   * outside one `send` answers `permission-denied`. Exposed for custom
+   * import maps and fake bindings in tests.
+   */
+  readonly deferredHttp: DeferredHttpImport;
+
   constructor(options: JsModuleHostOptions = {}) {
     this.storage = new HostStorage(options);
     this.engineState = createEngineStateImport(() => this.#activeCall);
+    this.deferredHttp = createDeferredHttpImport(() => this.#activeHttp);
     this.#onPrepare = options.onPrepare;
   }
 
@@ -418,18 +530,26 @@ export class JsModuleHost {
     const entry = this.#components.get(name);
     if (!entry) throw new Error(`module not registered: ${name}`);
     const wasi = await loadWasiImports();
-    return buildImportMap(name, entry.manifest, requiredImports, this.#available(name, wasi));
+    return buildImportMap(name, entry.manifest, requiredImports, this.#available(name, wasi, entry.manifest));
   }
 
-  #available(name: string, wasi: WasiImports): Record<string, unknown> {
+  #available(name: string, wasi: WasiImports, manifest: NormalizedManifest): Record<string, unknown> {
     const storage = createStorageImports(this.storage, name);
+    const grant = manifest.httpGrant;
+    // `httpHosts` covers blocking requests too: the shim is wrapped only
+    // when there is an allowlist, so an any-host grant is untouched.
+    const http =
+      grant.kind === "hosts"
+        ? { ...wasi.http, [WASI_OUTGOING_HANDLER]: allowlistedOutgoingHandler(wasi.http[WASI_OUTGOING_HANDLER], grant) }
+        : wasi.http;
     return {
       ...wasi.base,
-      ...wasi.http,
+      ...http,
       [LOCAL]: storage.local,
       [APP]: storage.app,
       [CLOUD]: storage.cloud,
       [ENGINE_STATE]: this.engineState,
+      [DEFERRED_HTTP]: this.deferredHttp,
     };
   }
 
@@ -494,7 +614,12 @@ export class JsModuleHost {
   ): Promise<ModuleBindings> {
     const normalized = normalizeManifest(manifest);
     const wasi = await loadWasiImports();
-    const importMap = buildImportMap(name, normalized, prepared.requiredImports, this.#available(name, wasi));
+    const importMap = buildImportMap(
+      name,
+      normalized,
+      prepared.requiredImports,
+      this.#available(name, wasi, normalized),
+    );
     const bindings = await prepared.instantiate(importMap);
     this.#components.set(name, { bytes: null, manifest: normalized, prepared: { bindings } });
     return bindings;
@@ -547,7 +672,8 @@ export class JsModuleHost {
   /**
    * Run a guest call. A trap from a module holding the `http` grant in a
    * runtime without synchronous wasi:io/poll (browsers) is almost always a
-   * blocked HTTP request: say so instead of a bare "unreachable".
+   * blocked `wasi:http` request: say so instead of a bare "unreachable", and
+   * point at deferred HTTP, which does work there.
    */
   #guard<T>(inst: InstanceEntry, run: () => T): T {
     try {
@@ -565,8 +691,9 @@ export class JsModuleHost {
           `module '${inst.name}' trapped (${e.message}). It holds the http grant, and in a ` +
             "browser wasi:http cannot complete inside a synchronous reducer call: the request " +
             "is sent, but preview2-shim's browser wasi:io/poll can only wait asynchronously, so " +
-            "a module that blocks on the response traps. Perform HTTP outside the module (an " +
-            "effect handled by the app) or run this module on a Node/Bun or native host. The " +
+            "a module that blocks on the response traps. Use deferred HTTP instead " +
+            "(`hypen:http/deferred`: queue the request, receive the response as an action — it " +
+            "works on every host), or run this module on a Node/Bun or native host. The " +
             "component instance may be unusable after a trap.",
           { cause: e },
         );
@@ -575,41 +702,59 @@ export class JsModuleHost {
     }
   }
 
-  #withCallContext(inst: InstanceEntry, siblings: SiblingState[] | undefined, run: () => unknown): ReducerOutput {
+  /**
+   * Run a guest call that returns a reducer output: open the per-call
+   * `hypen:http/deferred` queue and, when `siblings` is given (`dispatch`,
+   * `onActivated`), the `hypen:engine/state` context. Both close with the
+   * call; requests queued by a call that throws are discarded with it.
+   */
+  #reducerCall(
+    inst: InstanceEntry,
+    siblings: SiblingState[] | undefined | null,
+    run: () => unknown,
+  ): ReducerOutput {
     const manifest = this.#components.get(inst.name)?.manifest ?? normalizeManifest(undefined);
-    const ctx: CallContext = {
-      siblings: new Map((siblings ?? []).map((s) => [s.module, s.state])),
-      readsAllowed: manifest.reads,
-      dispatchesAllowed: manifest.dispatches,
-      crossDispatch: [],
-      subscribeRequests: [],
-    };
-    const prev = this.#activeCall;
+    const ctx: CallContext | null =
+      siblings === null
+        ? null
+        : {
+            siblings: new Map((siblings ?? []).map((s) => [s.module, s.state])),
+            readsAllowed: manifest.reads,
+            dispatchesAllowed: manifest.dispatches,
+            crossDispatch: [],
+            subscribeRequests: [],
+          };
+    const http = new DeferredHttpQueue(manifest.httpGrant);
+    const prevCall = this.#activeCall;
+    const prevHttp = this.#activeHttp;
     this.#activeCall = ctx;
+    this.#activeHttp = http;
     let out: unknown;
     try {
       out = this.#guard(inst, run);
     } finally {
-      this.#activeCall = prev;
+      this.#activeCall = prevCall;
+      this.#activeHttp = prevHttp;
     }
-    return reducerOutputFromWit(out, ctx);
+    return reducerOutputFromWit(out, ctx, http.drain());
   }
 
   dispatch(id: number, state: Uint8Array, action: ActionMessage, siblings?: SiblingState[]): ReducerOutput {
     const inst = this.#instance(id);
-    return this.#withCallContext(inst, siblings, () =>
+    return this.#reducerCall(inst, siblings, () =>
       inst.bindings.dispatch(state, { name: action.name, payload: action.payload }),
     );
   }
 
   onActivated(id: number, state: Uint8Array, siblings?: SiblingState[]): ReducerOutput {
     const inst = this.#instance(id);
-    return this.#withCallContext(inst, siblings, () => inst.bindings.onActivated(state));
+    return this.#reducerCall(inst, siblings, () => inst.bindings.onActivated(state));
   }
 
   onDeactivated(id: number, state: Uint8Array): ReducerOutput {
     const inst = this.#instance(id);
-    return reducerOutputFromWit(this.#guard(inst, () => inst.bindings.onDeactivated(state)));
+    // No `hypen:engine/state` here (as before): only the http queue is open.
+    return this.#reducerCall(inst, null, () => inst.bindings.onDeactivated(state));
   }
 
   onDestroyed(id: number, state: Uint8Array): void {

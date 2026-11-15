@@ -10,6 +10,9 @@ import {
   LocalStorageBackend,
   MemoryStorageBackend,
   createStorageImports,
+  effectiveTimeoutMs,
+  httpCompletionPayload,
+  type HttpOutcome,
   type ModuleManifest,
   type StorageQuotaOptions,
   type PrepareInfo,
@@ -97,6 +100,77 @@ const api = {
       effects.push(...out.effects);
     }
     return { actions: h.actions(id), states, effects };
+  },
+
+  /**
+   * Deferred HTTP with the PAGE as the embedder (there is no engine here):
+   * dispatch `action`, perform every request the reducer queued with the
+   * browser's `fetch`, and feed each outcome back as the action the request
+   * named — the completion payload built by `httpCompletionPayload`.
+   *
+   * `redirect: "error"`: a page cannot see where a redirect leads before
+   * following it (`manual` yields an opaque response), so it cannot re-check
+   * the module's allowlist per hop the way a server embedder does. Refusing
+   * redirects is the only safe default for a browser embedder.
+   */
+  async deferredHttp(hostId: string, name: string, action: string, payload: unknown) {
+    const h = host(hostId);
+    const id = h.instantiate(name);
+    let state = h.init(id, enc.encode("{}"));
+    const first = h.dispatch(id, state, { name: action, payload: enc.encode(JSON.stringify(payload)) }, []);
+    if (first.state) state = first.state;
+    const afterQueue = dec.decode(state);
+
+    const performed: { method: string; url: string; then: string; tag: string | null; outcome: string }[] = [];
+    let pending = first.httpRequests;
+    while (pending.length > 0) {
+      const next: typeof pending = [];
+      for (const queued of pending) {
+        const { request } = queued;
+        let outcome: HttpOutcome;
+        try {
+          const response = await fetch(request.url, {
+            method: request.method,
+            headers: request.headers,
+            body: (request.body as Uint8Array<ArrayBuffer> | null | undefined) ?? undefined,
+            redirect: "error",
+            signal: AbortSignal.timeout(effectiveTimeoutMs(request.timeoutMs)),
+          });
+          outcome = {
+            ok: true,
+            status: response.status,
+            headers: [...response.headers],
+            body: new Uint8Array(await response.arrayBuffer()),
+          };
+        } catch (e) {
+          const timedOut = (e as Error)?.name === "TimeoutError";
+          outcome = {
+            ok: false,
+            error: { kind: timedOut ? "timeout" : "network", message: String((e as Error)?.message ?? e) },
+          };
+        }
+        performed.push({
+          method: request.method,
+          url: request.url,
+          then: queued.then,
+          tag: queued.tag ?? null,
+          outcome: outcome.ok ? `status ${outcome.status}` : outcome.error.kind,
+        });
+        // What the engine would do with `completeHttpRequest`: dispatch
+        // `then` to the module that queued the request.
+        const completion = httpCompletionPayload(outcome, queued.tag);
+        const out = h.dispatch(
+          id,
+          state,
+          { name: queued.then, payload: enc.encode(JSON.stringify(completion)) },
+          [],
+        );
+        if (out.state) state = out.state;
+        next.push(...out.httpRequests);
+      }
+      pending = next;
+    }
+    return { afterQueue, performed, state: dec.decode(state) };
   },
 
   dump(hostId: string) {

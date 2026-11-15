@@ -49,6 +49,7 @@ import type {
   HostedModuleErrorCode,
   HostedModuleInfo,
   HostedModuleOptions,
+  HttpCompletionResult,
   ModuleCascadeReport,
   ModuleHostLike,
   RenderCallback,
@@ -1051,12 +1052,75 @@ export abstract class BaseEngine {
   }
 
   /**
-   * Install (or with `null` remove) the handler for `navigate` / `delay`
-   * effects of hosted reducers. See {@link HostedModuleEffectHandler}.
+   * Install (or with `null` remove) the handler for `navigate` / `delay` /
+   * `http` effects of hosted reducers. See {@link HostedModuleEffectHandler}.
    */
   setModuleEffectHandler(handler: HostedModuleEffectHandler | null): void {
     const engine = this.hostedEngine();
     hostedCall(() => engine.setModuleEffectHandler(handler ?? undefined));
+  }
+
+  // ── Deferred HTTP (`hypen:http/deferred`) ────────────────────────────
+  //
+  // A hosted reducer queues a request; the engine hands it to the effect
+  // handler as `{ type: "http", id, request, … }`; the embedder performs it
+  // and reports the outcome here. Engine builds that predate the capability
+  // have none of these methods: check `supportsDeferredHttp`.
+
+  /** Whether this engine build delivers `http` effects and accepts their completions. */
+  get supportsDeferredHttp(): boolean {
+    return typeof this.wasmEngine?.completeHttpRequest === "function";
+  }
+
+  private httpEngine(): any {
+    const engine = this.hostedEngine();
+    if (typeof engine.completeHttpRequest !== "function") {
+      throw hostedModuleError(
+        "hostedModulesUnsupported",
+        "This engine build has no deferred-HTTP support (`hypen:http/deferred`). " +
+          "Rebuild the engine's WASM artifacts (`cd hypen-engine-rs && ./build-wasm.sh`) " +
+          "or update @hypen-space/server.",
+      );
+    }
+    return engine;
+  }
+
+  /**
+   * Report how the request of an `{ type: "http", id }` effect ended, and run
+   * the module's completion action with it. Call it exactly once per effect
+   * and never from inside the effect handler (the engine is busy there).
+   *
+   * @returns `true` when the completion action ran; `false` when the module
+   *   was destroyed or reloaded while the request was in flight (the result
+   *   is dropped — not an error).
+   * @throws {HostedModuleError} `invalidArgument` (nothing consumed),
+   *   `unknownHttpRequest`, and — when the completion action ran and failed —
+   *   `moduleCallFailed` / `cascadeIncomplete` with `report`.
+   */
+  completeHttpRequest(id: number, result: HttpCompletionResult): boolean {
+    const engine = this.httpEngine();
+    return hostedCall(() => engine.completeHttpRequest(id, result)) === true;
+  }
+
+  /**
+   * Whether the request in flight under `id` may be sent on to `url` — the
+   * `httpHosts` check to make before following a redirect. `false` for a URL
+   * the module may not request, one that is not a valid `http(s)` URL in the
+   * engine's strict grammar, or an id that is not in flight.
+   */
+  httpRedirectAllowed(id: number, url: string): boolean {
+    const engine = this.httpEngine();
+    return hostedCall(() => engine.httpRedirectAllowed(id, url)) === true;
+  }
+
+  /** How many deferred HTTP requests one hosted module may have in flight (default 32). */
+  moduleHttpInFlightLimit(): number {
+    return this.httpEngine().moduleHttpInFlightLimit();
+  }
+
+  /** Set the per-module in-flight cap for deferred HTTP (at least 1). */
+  setModuleHttpInFlightLimit(limit: number): void {
+    this.httpEngine().setModuleHttpInFlightLimit(Math.max(1, limit >>> 0));
   }
 
   /** Most reducer invocations one dispatch / lifecycle call / state write may cause. */

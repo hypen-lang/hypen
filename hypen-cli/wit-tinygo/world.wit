@@ -219,8 +219,18 @@ world module-x {
 /// Hosts that implement plain `module` can still instantiate this; the
 /// extra wasi:* imports are provided by `wasmtime-wasi::p2::add_to_linker_sync`
 /// which our `WasmtimeHost` already wires.
+///
+/// `hypen:http/deferred` is declared so a Go module that calls it passes
+/// that same strict step. Declaring an import here does NOT put it into
+/// every Go component: unlike componentize-js (which keeps every import of
+/// its world), a TinyGo component imports only what its code references —
+/// `module`'s `hypen:storage/app` / `cloud` and several of the wasi:*
+/// interfaces below are declared here too and are absent from
+/// `go_counter_module.wasm`, which the runtime tests run with no grants at
+/// all. So a Go module that never calls `send` still needs no `http` grant.
 world tinygo-module {
     include module;
+    import hypen:http/deferred@0.1.0;
     import wasi:cli/environment@0.2.0;
     import wasi:cli/exit@0.2.0;
     import wasi:cli/stdin@0.2.0;

@@ -255,16 +255,17 @@ The runtime is deny-by-default: a module can't read or dispatch to other modules
 | `reads` | module names | `[]` | Reading and subscribing to those modules' state (`context.getModule`, `context.on`) |
 | `dispatches` | module names | `[]` | Dispatching actions to those modules |
 | `storage` | `"app"`, `"cloud"` | `[]` | Storage tiers beyond `local`, which is always granted |
-| `http` | boolean | `false` | Outbound HTTP |
+| `http` | boolean | `false` | Outbound HTTP: `context.http` in a TypeScript module (`hypen:http/deferred`), and blocking `wasi:http`. For a TypeScript module the grant also decides whether the built component imports the interface |
+| `httpHosts` | host patterns | any host | Narrows `http` to an allowlist: `"api.example.com"`, `"*.example.com"` (subdomains, not the apex), either with `:port`. Needs `http: true`. See [HTTP requests](/docs/guide/wasm-modules#http-requests) |
 
 A module entry can also carry `"component": "<path to a .wasm>"` and `"template": "<path to a .hypen>"`. That declares a **prebuilt** module: it is not compiled but copied into the output as `<Name>.wasm` and `<Name>.hypen` and listed in `app.json` with its grants, and it does not count as a module of another language. A project whose only stateful modules are prebuilt needs no toolchain. The build fails if the file is missing or is not a WebAssembly Component, if the template is missing (declare `template`, or keep a template-only component with that name), or if a source module has the same name. `hypen dev` loads the same declarations; the browser SPA build (`hypen build` without `--target wasm` on a component project) refuses them with `PREBUILT_UNSUPPORTED_TARGET`. See [Prebuilt WASM Modules](/docs/guide/wasm-modules).
 
-Every stateful module is written to `app.json` with all four fields; module names in `reads`/`dispatches` are written lowercased (the runtime's state scopes). An unknown module name, an unknown key or a value of the wrong type fails the build before anything compiles. So do module names that differ only by case (they would share a state scope) or contain `:`.
+Every stateful module is written to `app.json` with the four grant fields (`httpHosts` is added only when it names hosts); module names in `reads`/`dispatches` are written lowercased (the runtime's state scopes). An unknown module name, an unknown key or a value of the wrong type fails the build before anything compiles. So do module names that differ only by case (they would share a state scope) or contain `:`.
 
 On failure the build exits 1 and prints the reason, the module, file or `hypen.json` field it concerns, the command and exit code if a tool failed, a stable error code (`CONFIG_INVALID`, `TOOLCHAIN_MISSING`, `TOOL_FAILED`, ...) and a hint with the next step:
 
 ```text
-  Build failed: hypen.json: unknown key "wasm.modules.Cart.stoarge" (expected "reads", "dispatches", "storage" or "http")
+  Build failed: hypen.json: unknown key "wasm.modules.Cart.stoarge" (expected "reads", "dispatches", "storage", "http" or "httpHosts")
 
     file:    hypen.json
     field:   wasm.modules.Cart.stoarge

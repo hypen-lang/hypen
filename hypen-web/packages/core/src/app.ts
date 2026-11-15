@@ -3,7 +3,14 @@
  * Implements the stateful module system from RFC-0001
  */
 
-import type { Action, AgentAction, AgentRoute, BoundInput } from "./types.js";
+import type {
+  Action,
+  AgentAction,
+  AgentRoute,
+  BoundInput,
+  ModuleHttp,
+  ModuleHttpError,
+} from "./types.js";
 import type { Session } from "./remote/types.js";
 import { type Result, Ok, Err, fromPromise, ActionError, HypenError } from "./result.js";
 import { DataSourceManager, type DataSourcePlugin, type IDataSourceEngine } from "./datasource.js";
@@ -137,7 +144,41 @@ export type GlobalContext = {
    * `context.theme.scheme`, `context.theme.token("color.primary")`.
    */
   readonly theme?: Theme | null;
+  /**
+   * Outbound HTTP for a module that runs as a WASM component
+   * (`hypen build --target wasm`): `context.http.get(url, { then: "loaded" })`
+   * queues a request and the response arrives as the `loaded` action — see
+   * {@link ModuleHttp}.
+   *
+   * In an in-process TypeScript module (what this context is) there is no
+   * queue to put a request in: handlers may be `async` and call `fetch`
+   * directly. The property is still there at run time, and every call
+   * throws a `ModuleHttpError` with code `"unavailable"` saying so — a module
+   * written for the wasm target never fails with a bare TypeError.
+   *
+   * Optional in the type (like `i18n` / `theme`) so hand-built contexts in
+   * existing tests keep compiling; both runtimes always provide it, so
+   * `context.http!.get(…)` / `context.http?.get(…)` are safe.
+   */
+  readonly http?: ModuleHttp;
 };
+
+/** `context.http` of an in-process module: explains itself instead of queueing. */
+const IN_PROCESS_HTTP: ModuleHttp = (() => {
+  const unavailable = (): never => {
+    const detail =
+      "context.http queues requests for a module built as a WASM component " +
+      "(`hypen build --target wasm`); this module runs in-process";
+    const error = new Error(
+      `${detail} — make the handler async and call fetch() here, or build the module for the wasm target`,
+    ) as ModuleHttpError;
+    error.name = "ModuleHttpError";
+    error.code = "unavailable";
+    error.detail = detail;
+    throw error;
+  };
+  return { send: unavailable, get: unavailable };
+})();
 
 export type LifecycleHandler<T> = (
   state: T,
@@ -1306,6 +1347,7 @@ export class HypenModuleInstance<T extends object = any> {
       get theme() {
         return ctx.theme;
       },
+      http: IN_PROCESS_HTTP,
     };
 
     // Expose hypen engine for built-in components (if available)

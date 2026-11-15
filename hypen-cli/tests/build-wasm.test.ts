@@ -34,6 +34,7 @@ import {
   sameTree,
   cdylibWasmFromCargoMessages,
   tsBuildWorld,
+  DEFERRED_HTTP_IMPORT,
   TS_BUILD_WORLD,
   buildWasm,
   BuildError,
@@ -128,6 +129,23 @@ describe("build --target wasm: TS componentize world", () => {
     expect(world).toContain("import hypen:storage/cloud@");
     expect(world).not.toContain("import hypen:storage/app@");
   });
+
+  test("imports hypen:http/deferred only for a module granted http", () => {
+    // componentize-js keeps every world import, and the host refuses an
+    // ungranted one at instantiation: the import must not be in the world of
+    // a module without the grant.
+    for (const ungranted of [tsBuildWorld(moduleWit, []), tsBuildWorld(moduleWit, { storage: ["app"], http: false })]) {
+      expect(ungranted).not.toContain("hypen:http");
+    }
+    const granted = tsBuildWorld(moduleWit, { storage: [], http: true });
+    expect(granted).toContain(`    import ${DEFERRED_HTTP_IMPORT};\n}`);
+    expect(granted).toContain("import hypen:engine/state@0.1.0;");
+    expect(granted).not.toContain("import hypen:storage/app@");
+    // The specifier's version is the vendored WIT package's.
+    const httpWit = readFileSync(join(import.meta.dir, "..", "wit", "deps", "hypen-http", "http.wit"), "utf8");
+    const pkg = httpWit.match(/^package\s+(hypen:http)@([\d.]+);/m)!;
+    expect(DEFERRED_HTTP_IMPORT).toBe(`${pkg[1]}/deferred@${pkg[2]}`);
+  });
 });
 
 describe("build --target wasm: Node built-in stubs", () => {
@@ -190,7 +208,13 @@ describe("build --target wasm: hypen.json wasm config", () => {
       modules: { Cart: { reads: ["Catalog"], dispatches: ["Catalog"], storage: ["app", "app"], http: true } },
     });
     expect(cfg.language).toBe("rust");
-    expect(cfg.modules.get("Cart")).toEqual({ reads: ["Catalog"], dispatches: ["Catalog"], storage: ["app"], http: true });
+    expect(cfg.modules.get("Cart")).toEqual({
+      reads: ["Catalog"],
+      dispatches: ["Catalog"],
+      storage: ["app"],
+      http: true,
+      httpHosts: [],
+    });
     // Parsing normalises: an absent section, and absent grant fields, become
     // explicit defaults, so nothing downstream handles "maybe missing".
     expect(parseWasmConfig(undefined)).toEqual({ language: undefined, modules: new Map() });
@@ -200,7 +224,43 @@ describe("build --target wasm: hypen.json wasm config", () => {
       dispatches: [],
       storage: [],
       http: false,
+      httpHosts: [],
     });
+  });
+
+  test("httpHosts: parsed with the engine's pattern grammar, stored canonically, deduplicated", () => {
+    const cfg = parseWasmConfig({
+      modules: { Weather: { http: true, httpHosts: ["API.Example.com", "*.example.org:8443", "api.example.com", "[0:0:0:0:0:0:0:1]:9"] } },
+    });
+    expect(cfg.modules.get("Weather")!.httpHosts).toEqual(["api.example.com", "*.example.org:8443", "[::1]:9"]);
+    const caps = resolveModuleCapabilities(cfg, names("Weather"));
+    expect(caps.get(names("Weather")[0]!)).toEqual({
+      reads: [],
+      dispatches: [],
+      storage: [],
+      http: true,
+      httpHosts: ["api.example.com", "*.example.org:8443", "[::1]:9"],
+    });
+    // An explicit empty list is "any host", with or without the grant.
+    expect(parseWasmConfig({ modules: { Weather: { http: true, httpHosts: [] } } }).modules.get("Weather")!.httpHosts).toEqual([]);
+    expect(parseWasmConfig({ modules: { Weather: { httpHosts: [] } } }).modules.get("Weather")!.http).toBe(false);
+  });
+
+  test.each([
+    [{ http: true, httpHosts: "api.example.com" }, "wasm.modules.Weather.httpHosts", /must be an array of host patterns \(strings\)/, /"httpHosts": \["api\.example\.com"/],
+    [{ http: true, httpHosts: [42] }, "wasm.modules.Weather.httpHosts", /must be an array of host patterns \(strings\)/, /e\.g\./],
+    [{ http: true, httpHosts: ["ok.example", "https://api.example.com/v1"] }, "wasm.modules.Weather.httpHosts[1]", /invalid host pattern 'https:\/\/api\.example\.com\/v1': a pattern names a host, not a URL — drop the scheme/, /names a host, not a URL/],
+    [{ http: true, httpHosts: ["*"] }, "wasm.modules.Weather.httpHosts[0]", /leave the allowlist empty to allow any host/, /remove httpHosts to allow any host/],
+    [{ http: true, httpHosts: ["ex*mple.com"] }, "wasm.modules.Weather.httpHosts[0]", /only allowed as the whole first label/, /\*\.example\.com/],
+    [{ http: true, httpHosts: ["example.com:99999"] }, "wasm.modules.Weather.httpHosts[0]", /'99999' is not a port \(1-65535\)/, /localhost:8080/],
+    [{ httpHosts: ["api.example.com"] }, "wasm.modules.Weather.httpHosts", /httpHosts narrows the http grant, but wasm\.modules\.Weather\.http is not true/, /add "http": true to wasm\.modules\.Weather, or remove "httpHosts"/],
+    [{ http: false, httpHosts: ["api.example.com"] }, "wasm.modules.Weather.httpHosts", /http is not true/, /add "http": true/],
+  ] as const)("a bad httpHosts is CONFIG_INVALID naming the entry: %j", (grants, field, message, hint) => {
+    const err = buildErrorOf(() => parseWasmConfig({ modules: { Weather: grants } }));
+    expect(err.code).toBe("CONFIG_INVALID");
+    expect(err.field).toBe(field);
+    expect(err.message).toMatch(message);
+    expect(err.hint).toMatch(hint);
   });
 
   test.each([
@@ -228,8 +288,8 @@ describe("build --target wasm: hypen.json wasm config", () => {
     );
     // Targets are emitted as the host's lowercased state scopes.
     const [cart, catalog, header] = names("Cart", "Catalog", "Header");
-    expect(caps.get(cart)).toEqual({ reads: ["catalog"], dispatches: ["catalog"], storage: ["app"], http: true });
-    expect(caps.get(catalog)).toEqual({ reads: [], dispatches: [], storage: [], http: false });
+    expect(caps.get(cart)).toEqual({ reads: ["catalog"], dispatches: ["catalog"], storage: ["app"], http: true, httpHosts: [] });
+    expect(caps.get(catalog)).toEqual({ reads: [], dispatches: [], storage: [], http: false, httpHosts: [] });
     expect(caps.has(header)).toBe(false);
   });
 
@@ -572,6 +632,201 @@ describe.if(E2E)("build --target wasm: end-to-end", () => {
       expect(header).toEqual({ name: "Header", ui: "Header.hypen" });
     },
     180_000
+  );
+});
+
+// TS-authored modules and deferred HTTP, all the way through: the CLI builds a
+// module that calls `context.http` (the shim over `hypen:http/deferred`), the
+// built component is loaded by `@hypen-space/module-host` behind a
+// `RemoteServer`, the engine admits the request it queues, the server
+// "performs" it with an injected fetch, and the completion comes back to the
+// module as an action.
+describe.if(E2E)("build --target wasm: TS module with deferred HTTP, end-to-end", () => {
+  const web = join(repoRoot, "hypen-web");
+  const corePkg = join(web, "packages", "core");
+  const serverPkg = join(web, "packages", "server");
+  const haveToolchain =
+    existsSync(corePkg) &&
+    existsSync(join(serverPkg, "wasm-node", "hypen_engine.js")) &&
+    existsSync(join(web, "packages", "module-host", "src", "index.ts")) &&
+    (() => {
+      try {
+        resolveJco("/nonexistent-hypen-project");
+        return true;
+      } catch {
+        return false;
+      }
+    })();
+
+  let root: string;
+  beforeAll(() => {
+    root = tempDir("wasm-http-e2e");
+  });
+  afterAll(() => rmSync(root, { recursive: true, force: true }));
+
+  /** Build the fixture with the given grants for `Fetcher`; returns the output dir. */
+  async function buildFetcher(grants: Record<string, unknown>): Promise<string> {
+    const proj = copyFixture(root, "wasm-http-app", { wasm: { modules: { Fetcher: grants } } });
+    const nm = join(proj, "node_modules");
+    mkdirSync(join(nm, "@hypen-space"), { recursive: true });
+    symlinkSync(corePkg, join(nm, "@hypen-space", "core"));
+    symlinkSync(serverPkg, join(nm, "@hypen-space", "server"));
+    const { exitCode, stdout, stderr } = await runWasmBuild(proj);
+    expect(exitCode, `build failed:\n${stderr}\n${stdout}`).toBe(0);
+    return join(proj, "dist", "wasm");
+  }
+
+  type Failure = { kind: string; message: string; hint?: string; missingGrant?: { field: string; value: string } };
+  type Sent = { url: string; method: string; headers: Array<[string, string]>; body: string | null };
+
+  /** A RemoteServer running the built module next to a TypeScript entry, with a fake network. */
+  async function serve(wasmDir: string, respond: (sent: Sent) => Response) {
+    const { HypenApp } = await import(join(corePkg, "src", "app.ts"));
+    const { RemoteServer } = await import(join(serverPkg, "src", "remote", "server.ts"));
+    const { loadWasmModules } = await import(join(serverPkg, "src", "hosted", "index.ts"));
+    const { connect, eventually } = await import(join(web, "tests", "hosted-modules-harness.ts"));
+
+    const loaded = loadWasmModules(wasmDir);
+    const sent: Sent[] = [];
+    const failures: Failure[] = [];
+    const app = new HypenApp();
+    const entry = app.module("App").defineState({}).ui(`module App { Column { Fetcher {} } }`);
+    const server = new RemoteServer()
+      .app(app)
+      .module("App", entry)
+      .wasmModules(loaded.modules)
+      .hostedModules({
+        onError: (failure: Failure) => failures.push(failure),
+        fetch: async (url: string, init: { method: string; headers: Array<[string, string]>; body: Uint8Array | null }) => {
+          const request = {
+            url,
+            method: init.method,
+            headers: init.headers,
+            body: init.body ? new TextDecoder().decode(init.body) : null,
+          };
+          sent.push(request);
+          return respond(request);
+        },
+      });
+    await server.prepare();
+    const client = await connect(server);
+    const dispatch = (action: string, payload?: unknown): Promise<void> =>
+      (client.session.hostedModules as { dispatch(scope: string, action: string, payload: unknown): Promise<void> }).dispatch(
+        "fetcher",
+        action,
+        payload ?? null
+      );
+    return { loaded, client, sent, failures, dispatch, eventually: eventually as <T>(check: () => T) => Promise<T> };
+  }
+
+  test.skipIf(!haveToolchain)(
+    "granted http: context.http.get / send reach the network and the completion lands in state",
+    async () => {
+      const wasmDir = await buildFetcher({ http: true, httpHosts: ["api.example.test"] });
+      expect(readManifest(join(wasmDir, "..", "..")).modules[0]).toEqual({
+        name: "Fetcher",
+        wasm: "Fetcher.wasm",
+        ui: "Fetcher.hypen",
+        reads: [],
+        dispatches: [],
+        storage: [],
+        http: true,
+        httpHosts: ["api.example.test"],
+      });
+
+      const { loaded, client, sent, failures, dispatch, eventually } = await serve(wasmDir, (request) =>
+        request.url.endsWith("/echo")
+          ? new Response(request.body, { status: 201, headers: { "content-type": "application/json" } })
+          : Response.json({ greeting: "hello from the fake network" })
+      );
+      try {
+        // app.json's allowlist reached the module's definition.
+        expect(loaded.modules[0].hosted.grants).toMatchObject({ http: true, httpHosts: ["api.example.test"] });
+
+        // GET: queued by the reducer, performed afterwards.
+        await dispatch("load");
+        expect(client.state("fetcher")).toMatchObject({ status: "loading", completions: 0 });
+        await eventually(() => expect(client.state("fetcher").completions).toBe(1));
+        expect(client.state("fetcher")).toMatchObject({
+          status: "http 200",
+          body: '{"greeting":"hello from the fake network"}',
+          contentType: "application/json;charset=utf-8",
+          tag: "get",
+        });
+        expect(sent[0]).toMatchObject({ url: "https://api.example.test/hello", method: "GET", body: null });
+        expect(sent[0]!.headers).toContainEqual(["accept", "application/json"]);
+
+        // POST with an object body: JSON + content-type, default method POST.
+        await dispatch("post");
+        await eventually(() => expect(client.state("fetcher").completions).toBe(2));
+        expect(sent[1]).toMatchObject({
+          url: "https://api.example.test/echo",
+          method: "POST",
+          body: '{"name":"kettle","qty":2}',
+        });
+        expect(sent[1]!.headers).toContainEqual(["content-type", "application/json"]);
+        expect(client.state("fetcher")).toMatchObject({ status: "http 201", body: '{"name":"kettle","qty":2}', tag: "post" });
+        expect(failures).toEqual([]);
+
+        // Outside the allowlist: refused at `send`, as a typed error the handler caught.
+        await dispatch("load", { url: "https://elsewhere.example.test/" });
+        expect(client.state("fetcher")).toMatchObject({
+          status: "refused",
+          refused:
+            "permission-denied: context.http.send: permission-denied: host 'elsewhere.example.test:443' is not in the " +
+            "manifest's `httpHosts` allowlist — add the host to wasm.modules.Fetcher.httpHosts in hypen.json",
+        });
+        expect(sent).toHaveLength(2);
+        expect(failures).toEqual([]);
+
+        // The same refusal, uncaught: the action fails and the diagnostic names the field.
+        await dispatch("load", { url: "https://elsewhere.example.test/", uncaught: true }).catch(() => {});
+        await eventually(() => expect(failures).toHaveLength(1));
+        expect(failures[0]).toMatchObject({
+          kind: "action",
+          missingGrant: { field: "httpHosts", value: "elsewhere.example.test:443" },
+        });
+        expect(failures[0]!.hint).toContain('add it to');
+        expect(failures[0]!.hint).toContain(".httpHosts");
+      } finally {
+        await client.close();
+      }
+    },
+    300_000
+  );
+
+  test.skipIf(!haveToolchain)(
+    "no http grant: the component does not import the interface, loads ungranted, and the helper explains",
+    async () => {
+      const wasmDir = await buildFetcher({});
+      expect(readManifest(join(wasmDir, "..", "..")).modules[0]).toMatchObject({ name: "Fetcher", http: false });
+      expect(Object.keys(readManifest(join(wasmDir, "..", "..")).modules[0])).not.toContain("httpHosts");
+
+      // Link-time proof: an ungranted host instantiates it (it would refuse a
+      // component that imports hypen:http/deferred).
+      const { prepareComponent } = await import(join(web, "packages", "module-host", "src", "index.ts"));
+      const prepared = await prepareComponent("fetcher", new Uint8Array(readFileSync(join(wasmDir, "Fetcher.wasm"))));
+      expect(prepared.requiredImports.filter((name: string) => name.includes("http"))).toEqual([]);
+
+      const { client, sent, failures, dispatch, eventually } = await serve(wasmDir, () => new Response("unreachable"));
+      try {
+        await dispatch("load");
+        expect(client.state("fetcher")).toMatchObject({
+          status: "refused",
+          refused:
+            'not-granted: context.http: this module has no `http` grant — add "http": true under wasm.modules.Fetcher in hypen.json',
+        });
+        // Uncaught, it is the action's failure, with the grant to add.
+        await dispatch("load", { uncaught: true }).catch(() => {});
+        await eventually(() => expect(failures).toHaveLength(1));
+        expect(failures[0]!.message).toContain("this module has no `http` grant");
+        expect(failures[0]).toMatchObject({ kind: "action", missingGrant: { field: "http", value: "true" } });
+        expect(sent).toEqual([]);
+      } finally {
+        await client.close();
+      }
+    },
+    300_000
   );
 });
 

@@ -62,7 +62,8 @@ nature, a shared `localStorage`.
   importMapFor(name, requiredImports?)` returns the gated import map for such
   flows.
 - `host.storage` (`HostStorage`: backends, quotas, `usage()`, `dump()`) and
-  `host.engineState` (this host's `hypen:engine/state` import).
+  `host.engineState` (this host's `hypen:engine/state` import) and
+  `host.deferredHttp` (its `hypen:http/deferred` import).
 
 ### One component, many hosts
 
@@ -105,22 +106,28 @@ and `instantiate` again to recover.
 `NormalizedManifest`, `StorageBackend`, `StorageLike`, `StorageScope`,
 `StorageQuotas`, `StorageQuotaOptions`, `StorageError`, `BucketEntryInfo`,
 `ReducerOutput`, …). Subpath exports:
-`./js-module-host`, `./storage`, `./types`.
+`./js-module-host`, `./storage`, `./types`, `./http` (the deferred-HTTP
+grammar and limits).
 
 ## The capability contract: declare → grant → enforce
 
 A module **declares** what it needs in its manifest
-(`{ name, version, storage, reads, dispatches, http }` — the shape
+(`{ name, version, storage, reads, dispatches, http, httpHosts }` — the shape
 `BridgedHost::register` sends). Every field is **deny-by-default**: omitted
 `storage` = `local` only, omitted `http` = no egress, omitted
-`reads`/`dispatches` = none (`normalizeManifest`).
+`reads`/`dispatches` = none (`normalizeManifest`). `httpHosts` narrows
+`http` and is the one strict field: an entry that is not a valid host
+pattern, or an allowlist without `http: true`, makes `normalizeManifest`
+(and so `register()` / `prepare()`) throw — dropping a bad entry would
+silently widen the grant to every host.
 
 | Capability | Enforced | How |
 | --- | --- | --- |
 | `hypen:storage/local` | always linked | Module-private: keys live under the registered module name. |
 | `hypen:storage/app` | `prepare()` (link) time | Linked only if `storage` lists `"app"`; otherwise a component importing it fails `prepare()` with an error naming the interface. Shared by the app's modules. |
 | `hypen:storage/cloud` | `prepare()` (link) time | Linked only if `storage` lists `"cloud"`. User-scoped, shared by the app's modules. |
-| `http` | `prepare()` (link) time | Only `http: true` links preview2-shim's `wasi:http/*`; otherwise a component importing them fails `prepare()` naming the missing imports. |
+| `http` | `prepare()` (link) time | Only `http: true` links `hypen:http/deferred` and preview2-shim's `wasi:http/*`; otherwise a component importing either fails `prepare()` naming the missing imports. |
+| `httpHosts` | per request | With an allowlist, `hypen:http/deferred.send` throws `{ tag: 'permission-denied', val: "host 'x:443' is not in the manifest's `httpHosts` allowlist" }` for any other host, and blocking `wasi:http` requests to one fail with `HTTP-request-denied`. |
 | `reads` | per call | `hypen:engine/state.read`/`subscribe` throw `{ tag: 'permission-denied', val: 'reads' }` unless the target is granted. |
 | `dispatches` | per call | `hypen:engine/state.dispatch` throws `{ tag: 'permission-denied', val: 'dispatches' }` unless granted; granted dispatches are queued into `ReducerOutput.crossDispatch` (never re-entrant). |
 
@@ -131,6 +138,55 @@ again to change link-time grants. `wasi:filesystem` is always linked as an
 `WasiCtx`), so TinyGo and componentize-js modules, whose runtimes import it
 unconditionally, load but cannot reach any file. Never linked:
 `wasi:sockets`.
+
+## HTTP: deferred (`hypen:http/deferred`) and blocking (`wasi:http`)
+
+Both are behind the manifest's `http` grant.
+
+**Deferred** is the portable one. `send(request, then, tag)` performs
+nothing: the host validates the request, checks it against `httpHosts`,
+and queues it. The queue is open for `dispatch`, `onActivated` and
+`onDeactivated` (the calls that return a reducer output) and comes back as
+`ReducerOutput.httpRequests`:
+
+```ts
+const out = host.dispatch(id, state, action, siblings);
+out.httpRequests; // [{ request: { method, url, headers, body, timeoutMs }, then, tag }]
+```
+
+Behind the engine, that is all there is to it: the engine admits each
+request, hands it to the embedder's effect handler, and
+`engine.completeHttpRequest(id, result)` dispatches `then` with the
+response (`@hypen-space/server` does this for you). An embedder that drives
+a `JsModuleHost` directly — a browser page — performs the requests itself
+and dispatches `then` with `httpCompletionPayload(outcome, tag)` as the
+payload (see [Deferred HTTP in the browser](#deferred-http-in-the-browser)).
+
+`send` gives the guest the same answers as the native host
+(`permission-denied` / `invalid-request` / `limit-exceeded`, same wording):
+`src/http.ts` is a port of the engine's
+`hypen-engine-rs/src/module_host/http.rs` — bounds, the strict URL grammar,
+host patterns — pinned to it by `tests/http-parity.test.ts`. The pieces are
+exported for embedders: `parseHttpUrl`, `joinHttpUrl`, `parseHostPattern`,
+`hostPatternMatches`, `httpGrantOf`, `checkHttpGrant`,
+`validateQueuedHttpRequest`, `effectiveTimeoutMs`, `httpCompletionPayload`
+and the `MAX_HTTP_*` limits. (`packages/core/src/http.ts` and
+`hypen-cli/src/wasm/http-grammar.ts` are generated copies of that file:
+`bun scripts/sync-http-grammar.ts`.)
+
+| Limit | Value |
+| --- | --- |
+| Requests per guest call | 16 |
+| URL | 8 KiB, ASCII, `http(s)://`, no userinfo |
+| Request headers | 64, 16 KiB in total; host-owned headers refused |
+| Request body | 1 MiB |
+| `then`, `tag` | 256 bytes each |
+| Timeout | default 30 s, capped at 120 s, `0` refused |
+
+**Blocking** `wasi:http` is preview2-shim's: it works where the shim can
+park the thread (Node, Bun) and not in a browser (below). With `httpHosts`
+set, the host checks every blocking request's authority against the
+allowlist before handing it to the shim.
 
 ## Storage
 
@@ -271,18 +327,67 @@ jco's vendor wasm and your components — `'self'` when you host them):
   mobile or for many modules. Rust modules are ~200× smaller.
   (Run `HYPEN_BROWSER_PERF=1 bun run test:browser` to re-measure.)
 
-### wasi:http does not work in the browser (granted or not)
+### Deferred HTTP in the browser
 
-`http: true` links preview2-shim's browser `wasi:http`, and the request
-**is sent** (`fetch`, CORS applies). But the reducer call is synchronous and
-the browser shim's `wasi:io/poll` can only wait asynchronously (it returns a
-Promise from `Pollable.block()`), so a module that blocks on the response
-gets nothing and traps (Rust/`waki`: panics `incoming response available`).
-The host rethrows the trap as `module 'x' trapped (…). It holds the http
-grant, and in a browser wasi:http cannot complete inside a synchronous
-reducer call …`. Do HTTP outside the module (an app-handled effect) or run
-the module on a Node/Bun or native host. Denial (`http` not `true`) works
-as everywhere: `prepare()` fails naming the `wasi:http/*` imports.
+`hypen:http/deferred` works in a browser: the reducer only queues, so
+nothing has to wait inside the synchronous call. The page is the embedder —
+it performs each queued request and dispatches the action the request named:
+
+```ts
+import { effectiveTimeoutMs, httpCompletionPayload, type HttpOutcome } from "@hypen-space/module-host";
+
+const out = host.dispatch(id, state, action, []);
+for (const queued of out.httpRequests) {
+  const { request } = queued;
+  let outcome: HttpOutcome;
+  try {
+    const response = await fetch(request.url, {
+      method: request.method,
+      headers: request.headers,
+      body: request.body ?? undefined,
+      redirect: "error",
+      signal: AbortSignal.timeout(effectiveTimeoutMs(request.timeoutMs)),
+    });
+    outcome = { ok: true, status: response.status, headers: [...response.headers], body: new Uint8Array(await response.arrayBuffer()) };
+  } catch (e) {
+    outcome = { ok: false, error: { kind: e.name === "TimeoutError" ? "timeout" : "network", message: String(e.message) } };
+  }
+  const payload = new TextEncoder().encode(JSON.stringify(httpCompletionPayload(outcome, queued.tag)));
+  host.dispatch(id, state, { name: queued.then, payload }, []);
+}
+```
+
+What a page must know:
+
+- **CORS applies.** The target must allow the page's origin, and a
+  `connect-src` directive in the page's CSP must allow the target.
+- **Redirects cannot be checked.** A page cannot see where a redirect
+  leads before following it (`redirect: "manual"` yields an opaque
+  response), so it cannot re-check `httpHosts` per hop the way a server
+  does. Use `redirect: "error"` whenever the module has an allowlist.
+- **Cap the response yourself** (`MAX_HTTP_RESPONSE_BODY_BYTES`, 4 MiB):
+  `httpCompletionPayload` turns a larger body into a `too-large` failure,
+  but only after you have read it — stream and stop early for untrusted
+  endpoints.
+- Without the grant, `prepare()` fails naming `hypen:http/deferred`, as on
+  every host.
+
+The harness proves it against `deferred_http_module.wasm` in Chromium.
+
+### Blocking `wasi:http` cannot complete in the browser
+
+`http: true` also links preview2-shim's browser `wasi:http`, and a blocking
+request **is sent** (`fetch`, CORS applies). But the reducer call is
+synchronous and the browser shim's `wasi:io/poll` can only wait
+asynchronously (it returns a Promise from `Pollable.block()`), so a module
+that blocks on the response gets nothing and traps (Rust/`waki`: panics
+`incoming response available`). The host rethrows the trap as `module 'x'
+trapped (…). It holds the http grant, and in a browser wasi:http cannot
+complete inside a synchronous reducer call … Use deferred HTTP instead …`.
+A module that must run in a browser uses `hypen:http/deferred`; a module
+built on a `wasi:http` client library needs a Node/Bun or native host.
+Denial (`http` not `true`) works as everywhere: `prepare()` fails naming
+the `wasi:http/*` imports.
 
 ### localStorage capacity
 

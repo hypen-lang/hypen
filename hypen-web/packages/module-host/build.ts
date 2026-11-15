@@ -21,6 +21,7 @@ const result = await Bun.build({
     "./src/index.ts",
     "./src/js-module-host.ts",
     "./src/storage.ts",
+    "./src/http.ts",
     "./src/types.ts",
   ],
   root: "./src",

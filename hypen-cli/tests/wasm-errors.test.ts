@@ -999,7 +999,7 @@ describe("wasm build errors: through `hypen build --target wasm`", () => {
     expect(stderr).toBe(
       [
         ``,
-        `  Build failed: hypen.json: unknown key "wasm.modules.Counter.stoarge" (expected "reads", "dispatches", "storage" or "http")`,
+        `  Build failed: hypen.json: unknown key "wasm.modules.Counter.stoarge" (expected "reads", "dispatches", "storage", "http" or "httpHosts")`,
         ``,
         `    file:    hypen.json`,
         `    field:   wasm.modules.Counter.stoarge`,

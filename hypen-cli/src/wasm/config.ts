@@ -5,6 +5,7 @@
  * what discovery found (`resolveModuleCapabilities`).
  */
 
+import { formatHostPattern, parseHostPattern } from "./http-grammar.js";
 import { BuildError } from "../build-error.js";
 import {
   GRANTABLE_STORAGE,
@@ -28,6 +29,12 @@ export interface ModuleGrants {
   dispatches: string[];
   storage: GrantableStorage[];
   http: boolean;
+  /**
+   * `httpHosts`: the hosts `http` is limited to, as canonical pattern
+   * strings (`api.example.com`, `*.example.com`, either with `:port`).
+   * Empty = any host. Non-empty only with `http: true`.
+   */
+  httpHosts: string[];
   /**
    * Present when the entry declares a PREBUILT module (`component`): one
    * that is loaded as is — by `hypen dev`, and copied by the builds —
@@ -155,7 +162,34 @@ function parseStorage(value: unknown, field: string): GrantableStorage[] {
   return tiers;
 }
 
-const GRANT_KEYS = ["reads", "dispatches", "storage", "http"] as const;
+/**
+ * `httpHosts`: a list of host patterns in the engine's grammar
+ * (`HostPattern` in hypen-engine-rs/src/module_host/http.rs, ported in
+ * `@hypen-space/core/http`), stored canonically and deduplicated. A bad
+ * entry is an error, never dropped: an empty allowlist means *any host*.
+ */
+function parseHttpHosts(value: unknown, field: string): string[] {
+  const example = `e.g. "httpHosts": ["api.example.com", "*.example.org", "localhost:8080"]`;
+  if (!Array.isArray(value) || !value.every((v): v is string => typeof v === "string")) {
+    throw configError(`${field} must be an array of host patterns (strings)`, field, example);
+  }
+  const hosts: string[] = [];
+  value.forEach((entry, index) => {
+    const pattern = parseHostPattern(entry);
+    if (!pattern.ok) {
+      throw configError(
+        `${field}[${index}]: ${pattern.error}`,
+        `${field}[${index}]`,
+        `an entry names a host, not a URL: "api.example.com", "*.example.com" (every subdomain, not the apex) or "localhost:8080"; remove httpHosts to allow any host`
+      );
+    }
+    const text = formatHostPattern(pattern.value);
+    if (!hosts.includes(text)) hosts.push(text);
+  });
+  return hosts;
+}
+
+const GRANT_KEYS = ["reads", "dispatches", "storage", "http", "httpHosts"] as const;
 /** The keys that declare a prebuilt module, valid beside the grants. */
 const PREBUILT_KEYS = ["component", "template"] as const;
 
@@ -178,7 +212,7 @@ function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
       `e.g. { "reads": ["Catalog"], "storage": ["app"], "http": true }`
     );
   }
-  const grants: ModuleGrants = { reads: [], dispatches: [], storage: [], http: false };
+  const grants: ModuleGrants = { reads: [], dispatches: [], storage: [], http: false, httpHosts: [] };
   let component: string | undefined;
   let template: string | undefined;
   for (const [key, value] of Object.entries(raw)) {
@@ -202,9 +236,22 @@ function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
         }
         grants.http = value;
         break;
+      case "httpHosts":
+        grants.httpHosts = parseHttpHosts(value, `${at}.httpHosts`);
+        break;
       default:
         throw unknownKey(at, key, GRANT_KEYS, PREBUILT_KEYS);
     }
+  }
+  if (grants.httpHosts.length > 0 && !grants.http) {
+    // The same rule as the runtime's manifest (`HostsWithoutHttp`): an
+    // allowlist for a grant the module does not have is a mistake, and
+    // ignoring it would hide which one.
+    throw configError(
+      `${at}.httpHosts narrows the http grant, but ${at}.http is not true`,
+      `${at}.httpHosts`,
+      `add "http": true to ${at}, or remove "httpHosts"`
+    );
   }
   if (component !== undefined) {
     grants.prebuilt = { component, template };
@@ -340,6 +387,7 @@ export function resolveModuleCapabilities(
       dispatches: scopes("dispatches"),
       storage: grants?.storage ?? [],
       http: grants?.http ?? false,
+      httpHosts: grants?.httpHosts ?? [],
     });
   }
   return out;

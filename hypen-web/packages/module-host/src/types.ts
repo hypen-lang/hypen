@@ -9,6 +9,7 @@
  */
 
 import type { StorageScope } from "./storage.ts";
+import { httpGrantOf, type HttpGrant, type QueuedHttpRequest } from "./http.ts";
 
 /**
  * Module manifest as delivered by `BridgedHost::register` (`ManifestWire`):
@@ -22,9 +23,16 @@ import type { StorageScope } from "./storage.ts";
  *   importing it fails at `prepare()` (link) time. Omitted = local only.
  * - `reads` / `dispatches`: sibling modules this module may read from /
  *   cross-dispatch into (enforced per call). Omitted = none.
- * - `http`: wasi:http egress grant. Only an explicit `true` links the
- *   wasi:http shims; omitted or `false` withholds them at link time. (The
- *   Rust `ManifestWire` always sends this field.)
+ * - `http`: the HTTP egress grant, for both blocking `wasi:http` and
+ *   deferred `hypen:http/deferred`. Only an explicit `true` links them;
+ *   omitted or `false` withholds them at link time. (The Rust `ManifestWire`
+ *   always sends this field.)
+ * - `httpHosts`: narrows `http` to an allowlist of host patterns
+ *   (`api.example.com`, `*.example.com`, either with `:port`). Omitted or
+ *   empty = any host. Unlike the other lists this one is STRICT: an entry
+ *   that is not a valid pattern, or an allowlist without `http: true`, makes
+ *   {@link normalizeManifest} throw — dropping a bad entry would silently
+ *   widen the grant to every host.
  */
 export interface ModuleManifest {
   name?: string;
@@ -33,6 +41,7 @@ export interface ModuleManifest {
   reads?: readonly string[];
   dispatches?: readonly string[];
   http?: boolean;
+  httpHosts?: readonly string[];
 }
 
 /** A manifest with every default applied — what the host actually enforces. */
@@ -44,6 +53,12 @@ export interface NormalizedManifest {
   reads: ReadonlySet<string>;
   dispatches: ReadonlySet<string>;
   http: boolean;
+  /**
+   * `http` + `httpHosts` as one value: `denied`, `anyHost`, or `hosts` with
+   * the parsed patterns. What `hypen:http/deferred.send` (and the host's
+   * `wasi:http` shim) check a request against.
+   */
+  httpGrant: HttpGrant;
 }
 
 const stringList = (v: unknown): string[] =>
@@ -53,6 +68,9 @@ const stringList = (v: unknown): string[] =>
  * Apply the deny-by-default rules to a (possibly partial, possibly
  * untrusted) manifest: unknown storage scopes are ignored, non-string list
  * entries are dropped, and `http` is granted only by a literal `true`.
+ *
+ * @throws {Error} when `httpHosts` is not a list of valid host patterns, or
+ *   is set without `http: true` (see {@link ModuleManifest}).
  */
 export function normalizeManifest(manifest: ModuleManifest | null | undefined): NormalizedManifest {
   const m = (manifest ?? {}) as Record<string, unknown>;
@@ -60,13 +78,18 @@ export function normalizeManifest(manifest: ModuleManifest | null | undefined): 
   for (const s of stringList(m.storage)) {
     if (s === "local" || s === "app" || s === "cloud") storage.add(s);
   }
+  const name = typeof m.name === "string" ? m.name : "";
+  const http = m.http === true;
+  const httpGrant = httpGrantOf(http, m.httpHosts, name);
+  if (!httpGrant.ok) throw new Error(httpGrant.error);
   return {
-    name: typeof m.name === "string" ? m.name : "",
+    name,
     version: typeof m.version === "string" ? m.version : "",
     storage,
     reads: new Set(stringList(m.reads)),
     dispatches: new Set(stringList(m.dispatches)),
-    http: m.http === true,
+    http,
+    httpGrant: httpGrant.value,
   };
 }
 
@@ -105,7 +128,8 @@ export type Effect =
 /**
  * What the host hands back to the Rust `BridgedHost` after a reducer call.
  * `crossDispatch` / `subscribeRequests` are drained from the per-call ACL
- * context (they are queued, never re-entrant).
+ * context (they are queued, never re-entrant); `httpRequests` from the
+ * per-call `hypen:http/deferred` queue.
  */
 export interface ReducerOutput {
   state?: Uint8Array;
@@ -113,6 +137,8 @@ export interface ReducerOutput {
   emit: ActionMessage[];
   crossDispatch: CrossDispatch[];
   subscribeRequests: SubscribeRequest[];
+  /** The `hypen:http/deferred.send` calls the reducer made, in order. */
+  httpRequests: QueuedHttpRequest[];
 }
 
 /**

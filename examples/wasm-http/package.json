@@ -1,0 +1,22 @@
+{
+  "name": "wasm-http-example",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build:weather": "cd modules/weather && hypen build --target wasm && cp dist/wasm/Weather.wasm weather.wasm",
+    "api": "bun scripts/api.ts",
+    "dev": "hypen dev"
+  },
+  "dependencies": {
+    "@hypen-space/core": "latest",
+    "@hypen-space/module-host": "latest",
+    "@hypen-space/server": "latest"
+  },
+  "devDependencies": {
+    "@bytecodealliance/jco": "1.42.0",
+    "@hypen-space/cli": "latest",
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}

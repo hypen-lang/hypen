@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    // In this repository the example runs against the SDK sources next to
+    // it (Bun follows these at run time too), so it always matches the
+    // checked-out engine. In your own project, delete `paths` and install
+    // the published packages instead (see README.md).
+    "paths": {
+      "@hypen-space/core": ["../../hypen-web/packages/core/src/index.ts"],
+      "@hypen-space/core/components": ["../../hypen-web/packages/core/src/components/builtin.ts"],
+      "@hypen-space/core/*": ["../../hypen-web/packages/core/src/*"],
+      "@hypen-space/server": ["../../hypen-web/packages/server/src/index.ts"],
+      "@hypen-space/server/remote": ["../../hypen-web/packages/server/src/remote/server.ts"],
+      "@hypen-space/server/*": ["../../hypen-web/packages/server/src/*"],
+      "@hypen-space/module-host": ["../../hypen-web/packages/module-host/src/index.ts"]
+    }
+  },
+  "include": ["src/**/*", "scripts/**/*", "modules/weather/src/**/*"]
+}

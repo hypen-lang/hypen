@@ -36,7 +36,7 @@ TINYGO_CANONICAL="wit"
 
 # Derived into wit-tinygo:
 #   deps/<pkg>/*.wit  <- wit/deps/<pkg>/*.wit, for EVERY package in wit/deps
-#                        (hypen-engine, hypen-storage today; new canonical deps
+#                        (hypen-engine, hypen-storage, hypen-http today; new canonical deps
 #                        follow automatically).
 #   world.wit (head)  <- wit/hypen-module.wit, byte-for-byte; the file is that
 #                        content, one blank line, then the TinyGo-owned tail
@@ -48,7 +48,8 @@ TINYGO_TAIL_MARKER="// ==== TINYGO-ONLY BELOW (hypen-cli-owned) ===="
 # TinyGo-owned (kept in place, never regenerated):
 #   world.wit tail     the `tinygo-module` world: `include module` + the
 #                      wasi:cli/io/clocks/filesystem/random@0.2.0 imports that
-#                      TinyGo's wasip2 runtime always pulls in. Not part of the
+#                      TinyGo's wasip2 runtime always pulls in, and
+#                      hypen:http/deferred for modules that use it. Not part of the
 #                      canonical contract; `wasm-tools component new` (run by
 #                      tinygo) rejects a component whose imports its world
 #                      does not declare.

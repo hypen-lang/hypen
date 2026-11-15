@@ -1,0 +1,7 @@
+module Fetcher {
+    Column {
+        Text("Status: @{state.status}")
+        Text("Body: @{state.body}")
+        Button { Text("Load") }.onClick(@actions.load)
+    }
+}

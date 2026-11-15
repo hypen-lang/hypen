@@ -27,6 +27,7 @@
 import type { HypenModuleDefinition, HypenModuleInstance } from "./app.js";
 import type { BaseEngine } from "./engine-base.js";
 import type { Session } from "./remote/types.js";
+import type { HttpFailureKind } from "./http.js";
 import type { ModuleCascadeReport } from "./types.js";
 
 /** Storage tiers a hosted module can be granted beyond the always-on `local`. */
@@ -43,8 +44,13 @@ export interface HostedModuleGrants {
   /** Module scopes (hosted or in-process) it may dispatch actions to. */
   readonly dispatches: readonly string[];
   readonly storage: readonly HostedStorageGrant[];
-  /** Outbound HTTP (`wasi:http`). */
+  /** Outbound HTTP: blocking `wasi:http` and deferred `hypen:http/deferred`. */
   readonly http: boolean;
+  /**
+   * Host patterns `http` is limited to (`api.example.com`, `*.example.com`,
+   * either with `:port`), in canonical form. Empty = any host.
+   */
+  readonly httpHosts: readonly string[];
 }
 
 /** Where a hosted module's component bytes come from. */
@@ -151,6 +157,11 @@ export type HostedModuleFailureKind =
   | "recovered"
   /** A `navigate` / `delay` effect could not be performed. */
   | "effect"
+  /**
+   * A deferred HTTP request was refused or failed. The module still gets
+   * its completion (`ok: false`); this is the embedder-side diagnostic.
+   */
+  | "http"
   /** A hot reload was refused; the previous instance keeps running. */
   | "reload";
 
@@ -168,7 +179,17 @@ export interface HostedModuleFailure {
   /** What to change, when the failure points at configuration. */
   hint?: string;
   /** The grant that would have allowed a refused read / dispatch / import. */
-  missingGrant?: { field: "reads" | "dispatches" | "storage" | "http"; value: string };
+  missingGrant?: { field: "reads" | "dispatches" | "storage" | "http" | "httpHosts"; value: string };
+  /** For kind `"http"`: the request and how it ended. */
+  http?: {
+    method: string;
+    /** The URL being requested when it ended (the last hop of a redirect chain). */
+    url: string;
+    /** The completion `error.kind` the module was given. */
+    errorKind: HttpFailureKind;
+    /** What refused it, when something did: the module's grant, its allowlist, or the server's policy. */
+    refusedBy?: "grant" | "httpHosts" | "policy" | "limit" | "invalid" | "unavailable";
+  };
   /** The engine's structured cascade report, when the failure came out of one. */
   report?: ModuleCascadeReport;
   /** The session it happened on. */
