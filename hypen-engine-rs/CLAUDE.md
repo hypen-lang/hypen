@@ -76,8 +76,9 @@ hypen-engine-rs/src/
 │   ├── kv.rs                 # Storage backend of the wasmtime hosts: ModuleName, per-module `local` partitions, typed entry keys, quotas, per-call flush (module-loader)
 │   ├── wasmtime/             # The native hosts (module-loader, native only): one implementation, generic over the module ABI
 │   │   ├── mod.rs            # Sandbox model (module docs); WasmtimeHost = Host<V01>, WasmtimeHostAsync = Host<V02>
-│   │   ├── host.rs           # Host<A: Abi> + its ModuleHost impl; the Abi trait (what a bindgen! world must supply)
-│   │   ├── core.rs           # HostCore (engine + epoch ticker + tokio runtime), Deadline, ExecStrategy
+│   │   ├── host.rs           # Host<A: Abi> + its ModuleHost impl; the Abi trait (what a bindgen! world must supply); HostConfig, ComponentCompiler
+│   │   ├── core.rs           # HostCore (engine + epoch ticker + tokio runtime + compiled-component table), Deadline, ExecStrategy, CompileStats
+│   │   ├── cache_dir.rs      # The opt-in on-disk compilation cache directory: keying, trust statement, the checks (`prepare`)
 │   │   ├── limits.rs         # ModuleLimits, TotalMemoryLimiter, host-side bounds (handles, request sizes)
 │   │   ├── store.rs          # HostState: per-instance store data shared by both ABIs, WASI ctx, HostClock
 │   │   ├── linker.rs         # Capability, import inspection, manifest-gated linker construction
@@ -262,11 +263,28 @@ Module-host sandbox (one implementation for both ABIs; the model is stated in th
   `hypen:time.sleep-ms`). `max_memory_bytes` is a total over all of an instance's memories and
   tables. Open bucket handles, namespace length, the resource table and cross-module requests
   are bounded host-side.
-- **Death**: a trapped or timed-out instance is dead — `HostError::DeadInstance` afterwards,
-  `death_reason(id)` says what killed it. An export returning `Err(string)` is a `ModuleError`
-  and kills nothing. Errors name the module and the export (`error.rs` has the mapping table).
+- **Death**: a trapped or timed-out instance is dead — `HostError::DeadInstance` afterwards.
+  `ModuleHost::instance_status(id)` (`Live` / `Dead { reason }` / `Gone`; trait default `Unknown`)
+  answers from the instance table without calling the guest — use it, never a probing call or
+  error text, to tell a crash from a reducer error. An export returning `Err(string)` is a
+  `ModuleError` and kills nothing. Errors name the module and the export (`error.rs` has the
+  mapping table).
+- **Link denials as data**: `ModuleHost::denied_capabilities(name)` (trait default: empty) lists
+  the imports a registered component needs and its manifest does not grant. `HostError` has no
+  variant for it and must not grow one (other code matches it exhaustively).
+- **Compilation**: `HostCore::compile` is the only place a component is compiled. The table is
+  keyed by SHA-256 of the bytes only — compiled code does not depend on ABI, name or manifest
+  (those decide linking, done per registration) and the table belongs to one engine. Entries are
+  `Weak`; a `Registration` holds the `Arc`. `HostConfig::cache_dir` enables wasmtime's own disk
+  cache (`Config::cache`, which covers components in 46); `cache_dir.rs` states what the
+  directory must be and why it is opt-in. Don't add a second cache or hand-rolled
+  `Component::deserialize`.
 - **Storage**: `local` is partitioned by registered module name, `app`/`cloud` are shared by
-  grant; writes are quota-checked and flushed once per call. A failed flush is logged with its
+  grant; writes are quota-checked and flushed once per call. Every write is stamped with the
+  instance's `HostClock` (`modified-ms`; `kv.rs` never reads a clock itself). Snapshot format 3;
+  format 2 is migrated on load and rewritten on the next flush (`kv.rs` module docs). Blob
+  storage is unimplemented (`unavailable`) — README "Native WASM module host" is the one place
+  that says so to users. A failed flush is logged with its
   path and retried; it never costs the caller the guest's result (`flush_storage()` surfaces it).
 - **Re-register**: live instances keep the code and manifest they were created with; ids come
   from a process-wide counter, so a stale or foreign id can only miss.
@@ -286,8 +304,22 @@ pending per module), `reload` (`.wasm`/`.hypen` hot reload over the live module 
 JSON content type, 1 MiB bodies), `repl`, `error` (`RuntimeError` + `render`), `sync` (poisoned
 locks are recovered, not propagated). Single-module mode grants nothing beyond `local` storage
 unless `--grant-http` / `--grant-storage` / `--grant-all` is passed. A module instance that traps
-or times out fails that dispatch (`module_crashed`) and is re-instantiated + re-`init`ed from its
-original config on the next action. When two worktrees share a target dir, copy the built binary
+or times out fails that dispatch (`module_crashed`, with the host's death reason) and is
+re-instantiated + re-`init`ed from its original config on the next action. Crashes are detected
+with `instance_status` (fallback for `Unknown` hosts such as the unit tests' fake: the engine's
+cascade report of that same dispatch); capability hints come from `denied_capabilities`. An
+action no module handles is `RuntimeError::UnknownAction` (404), a bare name several export is
+`AmbiguousAction` (409); both list `scope:action` candidates from the runtime's module table.
+
+`server/mod.rs` documents what `tiny_http` forces on the server: dropping (so also answering) a
+request with unread body bytes blocks and allocates the declared remainder, so the `/dispatch`
+body is read on a helper thread under `--request-timeout-ms`, replies to requests with body bytes
+outstanding go through `finish` (detached thread, or `abandon` past 16 MiB), and nothing
+client-paced runs on the accept loop or inside an in-flight slot. `reload.rs` watches the files'
+*directories* (rename-replaced `.wasm`), compiles outside the engine lock via the host's
+`ComponentCompiler`, retires usage scopes a template edit orphaned (after the re-render), and
+re-seeds the single module when its `--ui` declaration config changes. `--cache-dir` is the
+opt-in compiled-module cache. When two worktrees share a target dir, copy the built binary
 aside and point the subprocess suites at it with `HYPEN_RUNTIME_BIN`.
 
 Two action entries, by where the input comes from (`src/action_routing.rs`):

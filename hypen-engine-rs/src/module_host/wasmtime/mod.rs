@@ -38,11 +38,33 @@
 //!
 //! **What kills an instance.** A trap, a deadline overrun, or a failed host
 //! call leaves guest memory mid-call, so the instance's store is dropped and
-//! the instance is dead: later calls return `HostError::DeadInstance`
-//! ([`Host::death_reason`] says why) until it is destroyed. An export that
-//! returns `Err(string)` is an ordinary module error and kills nothing.
+//! the instance is dead: later calls return `HostError::DeadInstance` until
+//! it is destroyed. `ModuleHost::instance_status` answers live / dead (with
+//! what killed it) / gone from the instance table, without a guest call;
+//! [`Host::death_reason`] is the reason alone. An export that returns
+//! `Err(string)` is an ordinary module error and kills nothing.
 //!
-//! Error mapping is centralised in `error.rs`.
+//! Error mapping is centralised in `error.rs`. Two facts an embedder would
+//! otherwise have to read out of a message are also available as data:
+//! instance liveness (above) and link-time denials
+//! (`ModuleHost::denied_capabilities`).
+//!
+//! ## Compilation
+//!
+//! Compiling is the expensive part of `register` (seconds for a component
+//! that embeds a JS engine). A host core compiles each distinct component
+//! once and shares the result between every name it is registered under and
+//! both ABIs of a `DualHost` (`core.rs`, `HostCore::compile`);
+//! [`ComponentCompiler`] does the same work off the host's thread. Across
+//! processes, [`HostConfig::cache_dir`] opts in to wasmtime's on-disk
+//! compilation cache — `cache_dir.rs` says how entries are keyed and why the
+//! directory has to be trusted.
+//!
+//! ## Not implemented
+//!
+//! Blob storage (`hypen:storage` `blob-bucket` / `blob-handle` /
+//! `blob-writer`): linked, and every operation answers `unavailable`
+//! (`storage.rs`). The user-facing statement is in the crate README.
 
 mod cache_dir;
 mod core;

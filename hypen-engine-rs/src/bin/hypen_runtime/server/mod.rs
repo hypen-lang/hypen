@@ -426,19 +426,14 @@ fn reason_phrase(status: u16) -> &'static str {
     }
 }
 
-/// What became of a request whose body was read under a deadline.
-enum BodyRead {
-    /// The body (or the reason it could not be read) arrived in time; the
-    /// request is back with the caller to be answered.
-    Done(tiny_http::Request, Result<Vec<u8>, RequestError>),
-    /// The deadline passed. The request stays with the helper thread, which
-    /// answers `408` when its read returns; the caller has nothing to answer.
-    Abandoned,
-}
-
 /// Read `request`'s body, waiting at most `timeout` for all of it (see the
 /// module docs, "Request bodies the client controls").
-fn read_body_within(mut request: tiny_http::Request, timeout: Duration) -> BodyRead {
+///
+/// `Some`: the body (or the reason it could not be read) arrived in time,
+/// and the request is back with the caller to be answered. `None`: the
+/// deadline passed; the request stays with the helper thread, which answers
+/// `408` when its read returns, and the caller has nothing to answer.
+fn read_body_within(mut request: tiny_http::Request, timeout: Duration) -> Option<BodyResult> {
     // Rendezvous channel: the helper's `send` succeeds only if the handler
     // is still waiting, so the request is always owned by exactly one side —
     // it can neither be answered twice nor dropped unanswered.
@@ -457,14 +452,11 @@ fn read_body_within(mut request: tiny_http::Request, timeout: Duration) -> BodyR
         // The request went down with the closure; tiny_http answers a
         // dropped request with a 500 itself.
         eprintln!("[serve] cannot start a body-reader thread: {e}");
-        return BodyRead::Abandoned;
+        return None;
     }
-    match wait.recv_timeout(timeout) {
-        Ok((request, body)) => BodyRead::Done(request, body),
-        // Timed out (dropping `wait` makes the helper's send fail), or the
-        // helper died without sending.
-        Err(_) => BodyRead::Abandoned,
-    }
+    // `Err`: timed out (dropping `wait` makes the helper's send fail), or
+    // the helper died without sending.
+    wait.recv_timeout(timeout).ok()
 }
 
 type BodyResult = (tiny_http::Request, Result<Vec<u8>, RequestError>);
@@ -501,14 +493,14 @@ fn handle(context: &Context, request: tiny_http::Request, permit: Permit) {
     let (request, body, unread) = if route == Route::Dispatch {
         match read_body_within(request, context.body_timeout) {
             // Read to its end: nothing is outstanding.
-            BodyRead::Done(request, Ok(body)) => (request, body, 0),
-            BodyRead::Done(request, Err(e)) => {
+            Some((request, Ok(body))) => (request, body, 0),
+            Some((request, Err(e))) => {
                 let unread = unread_body(&request);
                 return finish(request, Reply::error(&e.into()).with_cors(cors.as_ref()), unread);
             }
             // Returning drops `permit`: the stalled client stops counting
             // against the in-flight limit.
-            BodyRead::Abandoned => return,
+            None => return,
         }
     } else {
         (request, Vec::new(), unread)

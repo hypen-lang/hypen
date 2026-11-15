@@ -54,7 +54,7 @@ fn main() -> ExitCode {
             println!("{}", cli::USAGE);
             ExitCode::SUCCESS
         }
-        Command::Run(options) => match run(options) {
+        Command::Run(options) => match run(*options) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => fail(&e),
         },

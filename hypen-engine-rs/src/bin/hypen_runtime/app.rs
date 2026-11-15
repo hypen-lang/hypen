@@ -404,9 +404,23 @@ impl Core {
     }
 
     /// Register, instantiate, init and wire one new module instance.
+    ///
+    /// With `HYPEN_RUNTIME_TIMINGS` set in the environment, logs how long
+    /// each half took (registering is where a component is compiled or
+    /// loaded from the cache; starting is instantiate + `init`).
     pub fn mint(&mut self, spec: InstanceSpec) -> Result<(), RuntimeError> {
+        let started = Instant::now();
         self.register_component(&spec)?;
+        let registered = started.elapsed();
         let actions = self.start_and_wire(&spec)?;
+        if std::env::var_os("HYPEN_RUNTIME_TIMINGS").is_some() {
+            eprintln!(
+                "[timings] `{}`: register {:.1} ms, instantiate + init {:.1} ms",
+                spec.scope,
+                registered.as_secs_f64() * 1e3,
+                (started.elapsed() - registered).as_secs_f64() * 1e3,
+            );
+        }
         self.modules.push(HostedModule {
             spec,
             actions,

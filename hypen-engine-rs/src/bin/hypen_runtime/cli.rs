@@ -19,7 +19,7 @@ use crate::server::request::Origin;
 pub enum Command {
     /// `-h` / `--help`: print [`USAGE`] and exit 0.
     Help,
-    Run(Options),
+    Run(Box<Options>),
 }
 
 #[derive(Debug, PartialEq)]
@@ -183,6 +183,11 @@ Server:
                    handled at once. Requires --serve.
   -h, --help       Show this help.
 
+Environment:
+  HYPEN_RUNTIME_TIMINGS=1
+                   Log, per module instance, how long registering (compile or
+                   cache load) and starting (instantiate + init) took.
+
 REPL syntax (per stdin line):
   <action-name> [json-payload]
   <scope>:<action-name> [json-payload]   (qualify when scopes share a name)
@@ -328,7 +333,7 @@ where
         }
     };
 
-    Ok(Command::Run(Options { source, mode, data_dir, call_timeout, cache_dir }))
+    Ok(Command::Run(Box::new(Options { source, mode, data_dir, call_timeout, cache_dir })))
 }
 
 fn split_list(raw: &str) -> Vec<String> {
@@ -379,7 +384,7 @@ mod tests {
 
     fn options(args: &[&str]) -> Options {
         match run(args) {
-            Ok(Command::Run(o)) => o,
+            Ok(Command::Run(o)) => *o,
             other => panic!("expected Run, got {other:?}"),
         }
     }
