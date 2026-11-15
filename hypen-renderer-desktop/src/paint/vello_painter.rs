@@ -1741,22 +1741,24 @@ impl VelloPainter {
                 painted = format!("{}…", chars[..low].iter().collect::<String>().trim_end());
             }
         }
-        // Alignment needs the glyph run's intrinsic width. The wrapped
-        // measurement reports the full constraint width, which made center
-        // and end offsets resolve to zero even for a short single line.
-        let (intrinsic_w, _) = self.text.measure_weighted_line_height(
+        // Alignment works on two levels, like CSS: the text engine
+        // aligns every wrapped line within the widest one (the glyph
+        // tile), and the tile — exactly that widest line, as measured at
+        // the same wrap width — is aligned within the content box here.
+        let (block_w, _) = self.text.measure_weighted_line_height(
             &painted,
             scaled_size,
-            None,
+            wrap,
             weight,
             scaled_line_height,
         );
-        let line_w = intrinsic_w.min(content_w);
+        let line_w = block_w.min(content_w);
         let dx = match align {
             TextAlign::Start => 0.0,
             TextAlign::Center => ((content_w - line_w).max(0.0)) * 0.5,
             TextAlign::End => (content_w - line_w).max(0.0),
         };
+        let outer_align = self.text.replace_align(align);
         self.text.draw_text_into_scene_line_height(
             &mut self.scene,
             &painted,
@@ -1796,6 +1798,7 @@ impl VelloPainter {
                 );
             }
         }
+        self.text.replace_align(outer_align);
     }
 
     fn draw_input(
