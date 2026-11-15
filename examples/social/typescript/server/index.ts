@@ -44,6 +44,9 @@ const resourcesDir = resolve(import.meta.dir, "../../resources");
 // Router IR reconciles to the right subtree. Opt out via
 // `.disableAutoRouter()` if a host wants bespoke wiring.
 const server = new RemoteServer()
+  // The web client's `navigation.backAction` arrives as a bare action name
+  // (the browser back button has no node behind it).
+  .allowUnboundClientActions(["navigateBack"])
   .app(app)
   .module("App", appModule)
   .ui(appTemplate)

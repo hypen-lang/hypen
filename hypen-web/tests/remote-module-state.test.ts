@@ -86,7 +86,7 @@ describe("per-module state streaming", () => {
     app.clear?.();
     writeRoutedApp();
     const loaded = await loadDiscoveredComponents(await discoverComponents(fixtureDir));
-    server = new RemoteServer().module("App", loaded.get("App")!.module as any).source(fixtureDir);
+    server = new RemoteServer().allowUnboundClientActions("any").module("App", loaded.get("App")!.module as any).source(fixtureDir);
     await server.prepare();
   });
 
@@ -104,7 +104,7 @@ describe("per-module state streaming", () => {
     expect(lastModules(c.messages)).toEqual({ app: { location: "/" }, home: { taps: 0 } });
 
     for (let i = 0; i < 2; i++) {
-      await c.session.receive({ type: "dispatchAction", action: "__hypen_scoped:home:tap" } as any);
+      await c.session.receive({ type: "dispatchAction", action: "tap" } as any);
       await pause();
     }
     expect((lastModules(c.messages) as any).home.taps).toBe(2);
@@ -120,7 +120,7 @@ describe("per-module state streaming", () => {
     // Navigate: the cached Home stays in the map next to the active Counter.
     await c.session.receive({ type: "dispatchAction", action: "router.push", payload: { to: "/counter" } } as any);
     await pause(150);
-    await c.session.receive({ type: "dispatchAction", action: "__hypen_scoped:counter:inc" } as any);
+    await c.session.receive({ type: "dispatchAction", action: "inc" } as any);
     await pause();
     expect(lastModules(c.messages)).toEqual({
       app: { location: "/counter" },
@@ -148,7 +148,7 @@ describe("per-module state streaming", () => {
     const c = await connect(server!);
     await c.session.receive({ type: "subscribeState", modules: true } as any);
     for (let i = 0; i < 2; i++) {
-      await c.session.receive({ type: "dispatchAction", action: "__hypen_scoped:home:tap" } as any);
+      await c.session.receive({ type: "dispatchAction", action: "tap" } as any);
       await pause();
     }
     expect(patchText(c.messages)).toContain("Taps: 2");
@@ -170,7 +170,7 @@ describe("per-module state streaming", () => {
   test("time-travel across a navigation restores the route too", async () => {
     const c = await connect(server!);
     await c.session.receive({ type: "subscribeState", modules: true } as any);
-    await c.session.receive({ type: "dispatchAction", action: "__hypen_scoped:home:tap" } as any);
+    await c.session.receive({ type: "dispatchAction", action: "tap" } as any);
     await pause();
     await c.session.receive({ type: "dispatchAction", action: "router.push", payload: { to: "/counter" } } as any);
     await pause(150);
@@ -191,7 +191,7 @@ describe("per-module state streaming", () => {
     const c = await connect(server!);
     await c.session.receive({ type: "subscribeState" } as any);
     await pause();
-    await c.session.receive({ type: "dispatchAction", action: "__hypen_scoped:home:tap" } as any);
+    await c.session.receive({ type: "dispatchAction", action: "tap" } as any);
     await pause();
     const updates = c.messages.filter((m) => m.type === "stateUpdate");
     const patches = c.messages.filter((m) => m.type === "patch");

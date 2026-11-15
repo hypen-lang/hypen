@@ -100,7 +100,7 @@ describe("RemoteServer basics", () => {
   });
 
   test("sends initialTree with state on connect", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI);
 
@@ -119,7 +119,7 @@ describe("RemoteServer basics", () => {
   });
 
   test("does NOT send stateUpdate when client has not subscribed", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI);
 
@@ -156,7 +156,7 @@ describe("RemoteServer subscribeState", () => {
   });
 
   test("sends stateUpdate after action when client is subscribed", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI);
 
@@ -182,7 +182,7 @@ describe("RemoteServer subscribeState", () => {
   });
 
   test("sends stateUpdate for every patch when subscribed", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI);
 
@@ -211,7 +211,7 @@ describe("RemoteServer subscribeState", () => {
   });
 
   test("re-renders when subscribed client sends updateState (time-travel)", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI);
 
@@ -260,7 +260,7 @@ describe("RemoteServer syncActions + updateState", () => {
   });
 
   test("updateState syncs to other clients when syncActions is enabled", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI)
       .syncActions();
@@ -336,7 +336,7 @@ describe("RemoteServer compression", () => {
   const PER_MESSAGE = { compress: "shared", decompress: "shared" };
 
   test("per-message permessage-deflate by default (device plane on) with a 4 MiB payload cap", async () => {
-    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI);
+    server = new RemoteServer().allowUnboundClientActions("any").module("Counter", createCounterModule()).ui(UI);
 
     const options = await listenCapturingServeOptions(server);
     expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
@@ -344,7 +344,7 @@ describe("RemoteServer compression", () => {
   });
 
   test("disableDevice(): same per-message compression, Bun's payload cap (UI-only server)", async () => {
-    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI).disableDevice();
+    server = new RemoteServer().allowUnboundClientActions("any").module("Counter", createCounterModule()).ui(UI).disableDevice();
 
     const options = await listenCapturingServeOptions(server);
     expect(options.websocket.perMessageDeflate).toEqual(PER_MESSAGE);
@@ -352,7 +352,7 @@ describe("RemoteServer compression", () => {
   });
 
   test("explicit compression: true is the default: per-message DEFLATE, device plane still on (4 MiB cap)", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI)
       .config({ compression: true });
@@ -363,7 +363,7 @@ describe("RemoteServer compression", () => {
   });
 
   test("compression: false disables permessage-deflate (device plane unaffected: 4 MiB cap)", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI)
       .config({ compression: false });
@@ -374,7 +374,7 @@ describe("RemoteServer compression", () => {
   });
 
   test("still serves the initial tree with compression enabled", async () => {
-    server = new RemoteServer().module("Counter", createCounterModule()).ui(UI).config({ compression: true });
+    server = new RemoteServer().allowUnboundClientActions("any").module("Counter", createCounterModule()).ui(UI).config({ compression: true });
 
     await server.listen(PORT);
 
@@ -398,7 +398,7 @@ describe("RemoteServer default web client", () => {
   });
 
   test("serves an HTML shell and client bundle at / by default", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI);
     await server.listen(PORT);
@@ -421,7 +421,7 @@ describe("RemoteServer default web client", () => {
     // Own port: reusing PORT can ride a kept-alive connection into the
     // previous test's still-draining server and read its HTML instead.
     const port = PORT + 1;
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", createCounterModule())
       .ui(UI)
       .config({ webClient: false });

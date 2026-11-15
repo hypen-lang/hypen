@@ -26,7 +26,7 @@ function createCounterModule() {
 }
 
 async function buildServer(): Promise<RemoteServer> {
-  const server = new RemoteServer()
+  const server = new RemoteServer().allowUnboundClientActions("any")
     .module("Counter", createCounterModule())
     .ui(UI);
   await server.prepare();
@@ -78,7 +78,7 @@ describe("RemoteSession transport-agnostic API", () => {
   });
 
   test("createSession throws before prepare()", () => {
-    const server = new RemoteServer().module("Counter", createCounterModule()).ui(UI);
+    const server = new RemoteServer().allowUnboundClientActions("any").module("Counter", createCounterModule()).ui(UI);
     const transport: SessionTransport = { send: () => {}, close: () => {} };
     expect(() => server.createSession(transport)).toThrow(/prepared/i);
   });

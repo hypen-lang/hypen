@@ -80,6 +80,7 @@ function makeHost(
     resources: {},
     app: null,
     syncActions: opts.syncActions ?? false,
+    unboundClientActions: "any",
     // Device plane on by default: no switch unless the test opts out.
     ...(opts.deviceDisabled ? { deviceDisabled: true } : {}),
     // The Rust device broker (wasm-node), as RemoteServer supplies it.

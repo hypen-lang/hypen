@@ -484,6 +484,38 @@ export abstract class BaseEngine {
     return mapToPlainObject(engine.resolveUIAction(name, payload ?? null));
   }
 
+  /**
+   * Whether this WASM artifact has the client entry
+   * ({@link resolveClientAction}). Older artifacts resolve envelopes by node
+   * ownership only.
+   */
+  get hasClientActionEntry(): boolean {
+    return typeof this.ensureInitialized().resolveClientAction === "function";
+  }
+
+  /**
+   * Authorise and resolve an action received from an UNTRUSTED client (a
+   * Remote UI `dispatchAction` message). Only a `__hypen_dispatch` envelope
+   * whose live node itself declares the action resolves; a pre-scoped or bare
+   * name throws. The result is trusted input for {@link dispatchAction}.
+   *
+   * @throws when the action is refused, or the artifact predates the entry
+   * (check {@link hasClientActionEntry}).
+   */
+  resolveClientAction(name: string, payload?: unknown): { name: string; payload?: unknown } {
+    const engine = this.ensureInitialized();
+    if (typeof engine.resolveClientAction !== "function") {
+      throw new Error("Client action authorisation requires a rebuilt Hypen engine");
+    }
+    return mapToPlainObject(engine.resolveClientAction(name, payload ?? null));
+  }
+
+  /**
+   * Dispatch an action from the app's own trust domain: an in-process
+   * renderer, module/host code, or an action already resolved by
+   * {@link resolveClientAction}. Never feed it a name taken from a remote
+   * client — it runs pre-scoped and bare names as given.
+   */
   dispatchAction(name: string, payload?: any): void {
     const engine = this.ensureInitialized();
     try {

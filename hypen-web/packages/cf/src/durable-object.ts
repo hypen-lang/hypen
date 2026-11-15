@@ -67,6 +67,7 @@ import type { Theme } from "@hypen-space/core/theme";
 import { createLogger } from "@hypen-space/core/logger";
 import type { BaseEngine } from "@hypen-space/core/engine-base";
 import type { RemoteClient, RemoteMessage } from "@hypen-space/core/remote";
+import type { UnboundClientActions } from "@hypen-space/core/remote";
 import {
   RemoteSession,
   SessionManager,
@@ -343,6 +344,14 @@ export interface HypenDurableObjectConfig {
    * RFC 001 §1.7) — only the socket that dispatched can start device work.
    */
   syncActions?: boolean;
+  /**
+   * Bare action names clients may send with no node behind them (default
+   * none; `router.*` is always accepted). By default a client action runs
+   * only as a `__hypen_dispatch` envelope addressed to a live node that
+   * declares it. `"any"` restores the old by-name behaviour for
+   * application actions. See `RemoteServer.allowUnboundClientActions`.
+   */
+  unboundClientActions?: UnboundClientActions;
   /**
    * Device Capability Protocol (RFC 001). On by default: any client whose
    * hello offers `device` gets a device plane. `false` opts out — the DO then
@@ -654,6 +663,7 @@ export abstract class HypenDurableObject {
       theme: config.theme ?? null,
       app: config.app ?? null,
       syncActions: config.syncActions ?? false,
+      unboundClientActions: config.unboundClientActions ?? [],
       deviceDisabled: !deviceOn,
       deviceMaxRetainedBytes: DO_DEVICE_MAX_RETAINED_BYTES,
       // One Rust broker per device socket; the factory's pool is the

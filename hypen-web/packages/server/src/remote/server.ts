@@ -48,6 +48,7 @@ import { readFile, readdir } from "fs/promises";
 import { resolve, join, extname, basename } from "path";
 import type { ServerWebSocket } from "bun";
 import { SessionManager } from "@hypen-space/core/remote";
+import type { UnboundClientActions } from "@hypen-space/core/remote";
 import {
   DEFAULT_PROCESS_RETAINED_BYTES,
   type DeviceBrokerConfig,
@@ -214,6 +215,7 @@ export class RemoteServer {
   private _sessionManager: SessionManager | null = null;
   private _prepared = false;
   private _syncActions: boolean = false;
+  private _unboundClientActions: UnboundClientActions = [];
   /**
    * Device Capability Protocol (RFC 001) opt-out — the plane is on by
    * default. See `disableDevice()`.
@@ -276,6 +278,7 @@ export class RemoteServer {
       get theme() { return server._theme; },
       get app() { return server._app; },
       get syncActions() { return server._syncActions; },
+      get unboundClientActions() { return server._unboundClientActions; },
       get deviceDisabled() { return server._deviceOffReason !== null; },
       get deviceMaxRetainedBytes() { return server._deviceOptions.connectionRetainedBytes; },
       // The Rust device broker, one per device connection; the factory's pool
@@ -421,6 +424,27 @@ export class RemoteServer {
    */
   syncActions(): this {
     this._syncActions = true;
+    return this;
+  }
+
+  /**
+   * Accept these bare action names from clients.
+   *
+   * A client is untrusted: by default an action it sends runs only as a
+   * `__hypen_dispatch` envelope addressed to a live node that declares it
+   * (what every Hypen renderer sends for a UI event), plus the four
+   * `router.*` actions. A client that sends an action by bare name — the
+   * web client's `navigation.backAction`, a custom client's command — needs
+   * that name listed here; such an action is then dispatchable by any
+   * connected client at any time, whatever is on its screen, so list only
+   * names that are safe under that assumption.
+   *
+   * `"any"` restores the old behaviour for application names (any name
+   * exactly one module handles). `__hypen_*` names are never accepted
+   * outside an envelope.
+   */
+  allowUnboundClientActions(names: UnboundClientActions): this {
+    this._unboundClientActions = names === "any" ? "any" : [...names];
     return this;
   }
 

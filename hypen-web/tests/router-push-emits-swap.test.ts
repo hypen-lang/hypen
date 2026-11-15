@@ -114,7 +114,7 @@ describe("router.push emits a real route swap", () => {
         .onAction("back", ({ context }) => context?.router?.push("/"))
         .build();
 
-      const server = new RemoteServer()
+      const server = new RemoteServer().allowUnboundClientActions("any")
         .app(app)
         .module("App", primary)
         .source(dir)
@@ -199,7 +199,7 @@ describe("router.push emits a real route swap", () => {
         .onActivated((_s, ctx) => profileActivations.push(ctx?.router?.getCurrentPath() ?? ""))
         .build();
 
-      const server = new RemoteServer()
+      const server = new RemoteServer().allowUnboundClientActions("any")
         .app(app)
         .module("App", primary)
         .source(dir)
@@ -290,7 +290,7 @@ describe("router.push emits a real route swap", () => {
         .onActivated((_s, ctx) => profileActivations.push(ctx?.router?.getCurrentPath() ?? ""))
         .build();
 
-      const server = new RemoteServer()
+      const server = new RemoteServer().allowUnboundClientActions("any")
         .app(app)
         .module("App", primary)
         .source(dir)
@@ -361,7 +361,7 @@ describe("router.push emits a real route swap", () => {
       app.module("Home").defineState({}).build();
       app.module("X").defineState({}).build();
 
-      const server = new RemoteServer()
+      const server = new RemoteServer().allowUnboundClientActions("any")
         .app(app)
         .module("App", primary)
         .source(dir)

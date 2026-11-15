@@ -69,7 +69,7 @@ afterEach(async () => {
 });
 
 async function buildServer(sync = false, allowMultiple = false): Promise<RemoteServer> {
-  const server = new RemoteServer().module("Feed", feedModule()).ui(UI);
+  const server = new RemoteServer().allowUnboundClientActions("any").module("Feed", feedModule()).ui(UI);
   if (sync) server.syncActions();
   if (allowMultiple) server.session({ concurrent: "allow-multiple" });
   await server.prepare();
@@ -239,7 +239,7 @@ describe("RemoteSession viewport handler", () => {
 
 describe("viewport over a real WebSocket (RemoteServer + RemoteEngine)", () => {
   test("only the initial window arrives; a viewport brings in new rows", async () => {
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Feed", feedModule())
       .ui(UI)
       .config({ webClient: false });

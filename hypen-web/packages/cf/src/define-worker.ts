@@ -31,6 +31,7 @@
 
 import type { HypenApp, HypenModuleDefinition } from "@hypen-space/core/app";
 import type { Theme } from "@hypen-space/core/theme";
+import type { UnboundClientActions } from "@hypen-space/core/remote";
 import { HypenDurableObject, type HypenDurableObjectConfig, type DurableObjectState } from "./durable-object.js";
 import { createCFEngine, type CFWasmExports } from "./engine.js";
 import { hasDeviceBroker } from "./device-broker.js";
@@ -69,6 +70,11 @@ export interface DefineHypenWorkerOptions {
    * device plane stays on; mirrored dispatches cannot start device work.
    */
   syncActions?: boolean;
+  /**
+   * Bare action names clients may send with no node behind them (default
+   * none; `router.*` is always accepted). See `HypenDOConfig`.
+   */
+  unboundClientActions?: UnboundClientActions;
   /**
    * Device Capability Protocol (RFC 001). On by default — the broker is the
    * Rust one in the `wasm` glue passed below, wired automatically. `false`
@@ -157,6 +163,9 @@ export function defineHypenWorker(opts: DefineHypenWorkerOptions): WorkerExports
     ...(opts.resources !== undefined ? { resources: opts.resources } : {}),
     ...(opts.theme !== undefined ? { theme: opts.theme } : {}),
     ...(opts.syncActions !== undefined ? { syncActions: opts.syncActions } : {}),
+    ...(opts.unboundClientActions !== undefined
+      ? { unboundClientActions: opts.unboundClientActions }
+      : {}),
     ...(opts.device !== undefined ? { device: opts.device } : {}),
     // The device broker is the Rust one in the same web-target wasm glue
     // (built with `js,device-broker`) — supplied automatically. A glue

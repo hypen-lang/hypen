@@ -438,7 +438,7 @@ describe("RemoteServer", () => {
   test("each session forks the theme: one client's scheme switch does not touch another's", async () => {
     const { RemoteServer } = await import("../packages/server/src/remote/server");
     const host = makeTheme();
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module(
         "App",
         app
@@ -506,7 +506,7 @@ describe("RemoteServer: client color scheme", () => {
   test("hello.colorScheme seeds the session theme; a colorScheme message re-renders it", async () => {
     const { RemoteServer } = await import("../packages/server/src/remote/server");
     const { RemoteEngine } = await import("../packages/core/src/remote/client");
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module(
         "App",
         app
@@ -548,7 +548,7 @@ describe("RemoteServer: client color scheme", () => {
 
   test("a malformed scheme is ignored in hello and as a message", async () => {
     const { RemoteServer } = await import("../packages/server/src/remote/server");
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", app.defineState({}).build())
       .ui(`module App { Text("x").color(@theme.color.surface) }`)
       .theme(makeTheme());

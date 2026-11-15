@@ -64,6 +64,14 @@ export type {
   DeviceOutgoing,
 } from "./remote-session.js";
 
+// Admission of actions received from (untrusted) remote clients.
+export {
+  ClientActionRefused,
+  admitUnboundClientAction,
+  resolveClientEnvelope,
+} from "./client-action.js";
+export type { UnboundClientActions } from "./client-action.js";
+
 // Session snapshots (hibernation wake / hot-reload resume).
 export {
   NodeShadow,

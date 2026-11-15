@@ -97,7 +97,7 @@ async function helloWithDevice(server: RemoteServer, headers: Record<string, str
 
 describe("device plane on by default", () => {
   test("no device call at all: a device-offering hello gets a device plane", async () => {
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .config({ allowedOrigins: ["http://app.example"], webClient: false });
@@ -119,7 +119,7 @@ describe("device plane on by default", () => {
   });
 
   test("disableDevice() opts out: UI-only session, compression unchanged", async () => {
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .config({ allowedOrigins: ["http://app.example"], webClient: false })
@@ -156,7 +156,7 @@ describe("never refuses to start over device prerequisites", () => {
   test("no allowlist / authenticator: starts, admits any client, ONE warning", async () => {
     const log = captureWarnings();
     restoreLog = log.restore;
-    const server = new RemoteServer().module("Counter", counter).ui('Text("hi")').config({ webClient: false });
+    const server = new RemoteServer().allowUnboundClientActions("any").module("Counter", counter).ui('Text("hi")').config({ webClient: false });
     await server.listen(port());
     try {
       expect(log.warnings.filter((w) => w === OPEN_ADMISSION_WARNING)).toHaveLength(1);
@@ -185,7 +185,7 @@ describe("never refuses to start over device prerequisites", () => {
         results.push(await context.device.request("permission.query", { permission: "camera" }));
       })
       .build();
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Asker", asker)
       .ui('Text("hi")')
       .config({ allowedOrigins: ["http://localhost:1234"], webClient: false })
@@ -233,7 +233,7 @@ describe("never refuses to start over device prerequisites", () => {
   test("explicit compression: true is per message: device plane on, no warning", async () => {
     const log = captureWarnings();
     restoreLog = log.restore;
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .config({ allowedOrigins: ["http://app.example"], compression: true, webClient: false });
@@ -253,7 +253,7 @@ describe("never refuses to start over device prerequisites", () => {
   });
 
   test("compression: false: uncompressed socket, device plane on", async () => {
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .config({ allowedOrigins: ["http://app.example"], compression: false, webClient: false });
@@ -272,7 +272,7 @@ describe("never refuses to start over device prerequisites", () => {
   test("allow-multiple still turns the device plane off, with one warning", async () => {
     const log = captureWarnings();
     restoreLog = log.restore;
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .session({ concurrent: "allow-multiple" })
@@ -294,7 +294,7 @@ describe("never refuses to start over device prerequisites", () => {
 
 describe("Origin allowlist at the WebSocket upgrade (enforced when configured)", () => {
   test("cross-origin upgrade → 403; missing Origin → 403; listed origin admitted", async () => {
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .config({ allowedOrigins: ["http://app.example"] });

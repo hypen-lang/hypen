@@ -31,6 +31,9 @@ const componentsDir = resolve(import.meta.dir, "./components");
 // component resolver find each screen's template when the Router
 // swaps routes.
 const server = new RemoteServer()
+  // The web client's `navigation.backAction` arrives as a bare action name
+  // (the browser back button has no node behind it).
+  .allowUnboundClientActions(["navigateBack"])
   .app(app)
   .module("App", appModule)
   .ui(appModule.template ?? "")

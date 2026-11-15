@@ -5,7 +5,7 @@
  *
  *   - `.ui(tpl).build()` threw because `.ui()` already returns the built
  *     definition (no `build` on it);
- *   - `new RemoteServer().app(myApp)` threw "Module not set";
+ *   - `new RemoteServer().allowUnboundClientActions("any").app(myApp)` threw "Module not set";
  *   - `.module(name, def)` ignored `def.template` ("UI not set");
  *   - a NAMED module (`myApp.module("Counter")…`) served as the entry
  *     rendered a literal `@{state.count}` and dropped its actions, because
@@ -86,7 +86,7 @@ async function connect(server: RemoteServer) {
 
 describe("RemoteServer entry module", () => {
   test("README snippet: .app(myApp) alone serves the only (named) module", async () => {
-    const { session, texts, dispatch } = await connect(new RemoteServer().app(readmeApp()));
+    const { session, texts, dispatch } = await connect(new RemoteServer().allowUnboundClientActions("any").app(readmeApp()));
     expect(texts()).toContain("Count: 0");
     await dispatch("increment");
     expect(texts()).toContain("Count: 1");
@@ -102,7 +102,7 @@ describe("RemoteServer entry module", () => {
         state.count += 1;
       })
       .ui(COUNTER_UI);
-    const { session, texts, dispatch } = await connect(new RemoteServer().module("Counter", def));
+    const { session, texts, dispatch } = await connect(new RemoteServer().allowUnboundClientActions("any").module("Counter", def));
     expect(texts()).toContain("Count: 0");
     await dispatch("increment");
     expect(texts()).toContain("Count: 1");
@@ -113,7 +113,7 @@ describe("RemoteServer entry module", () => {
     const myApp = readmeApp();
     const def = myApp.get("Counter")!;
     for (const ui of [COUNTER_UI, `module Counter { ${COUNTER_UI} }`]) {
-      const server = new RemoteServer().app(myApp).module("Counter", def).ui(ui);
+      const server = new RemoteServer().allowUnboundClientActions("any").app(myApp).module("Counter", def).ui(ui);
       const { session, texts, dispatch } = await connect(server);
       expect(texts()).toContain("Count: 0");
       expect(texts().some((t) => t.includes("@{"))).toBe(false);
@@ -126,7 +126,7 @@ describe("RemoteServer entry module", () => {
   test(".app() picks the module named App among several", async () => {
     const myApp = readmeApp();
     myApp.module("App").defineState({ title: "home" }).ui(`Column { Text("@{state.title}") }`);
-    const server = new RemoteServer().app(myApp);
+    const server = new RemoteServer().allowUnboundClientActions("any").app(myApp);
     const { session, texts } = await connect(server);
     expect(texts()).toEqual(["home"]);
     await session.destroy();
@@ -135,11 +135,11 @@ describe("RemoteServer entry module", () => {
   test(".app() with several modules and no App is a clear error", async () => {
     const myApp = readmeApp();
     myApp.module("Other").defineState({}).ui(`Text("x")`);
-    await expect(new RemoteServer().app(myApp).prepare()).rejects.toThrow(/ambiguous \(Counter, Other\)/);
+    await expect(new RemoteServer().allowUnboundClientActions("any").app(myApp).prepare()).rejects.toThrow(/ambiguous \(Counter, Other\)/);
   });
 
   test("no module, app or source still fails fast", async () => {
-    await expect(new RemoteServer().prepare()).rejects.toThrow(/Module not set/);
+    await expect(new RemoteServer().allowUnboundClientActions("any").prepare()).rejects.toThrow(/Module not set/);
   });
 
   test(".app(myApp).source(dir) takes the template from discovery", async () => {
@@ -159,7 +159,7 @@ describe("RemoteServer entry module", () => {
         })
         .build();
       const { session, texts, dispatch } = await connect(
-        new RemoteServer().app(myApp).source(dir)
+        new RemoteServer().allowUnboundClientActions("any").app(myApp).source(dir)
       );
       expect(texts()).toContain("Disc: 0");
       await dispatch("increment");
@@ -196,7 +196,7 @@ describe("module definition contract", () => {
       .onAction("increment", ({ state }) => {
         state.count += 1;
       });
-    const server = new RemoteServer().module("Counter", builder).ui(COUNTER_UI);
+    const server = new RemoteServer().allowUnboundClientActions("any").module("Counter", builder).ui(COUNTER_UI);
     const { session, texts, dispatch } = await connect(server);
     expect(texts()).toContain("Count: 0");
     await dispatch("increment");

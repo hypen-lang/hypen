@@ -62,7 +62,7 @@ describe("RemoteServer app-registry component resolution", () => {
 
   test("resolves .ui()-registered modules without .source()", async () => {
     const appModule = buildRegistryModules();
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .app(app)
       .module("RegApp", appModule)
       .ui(APP_TEMPLATE);
@@ -95,7 +95,7 @@ describe("Auto-router state-driven navigation", () => {
   // module, so route-module actions like `increment` were dead.
   test("mounts route modules when state.location changes", async () => {
     const appModule = buildRegistryModules();
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .app(app)
       .module("RegApp", appModule)
       .ui(APP_TEMPLATE);

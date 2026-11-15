@@ -36,6 +36,7 @@ function makeHost(createEngine: () => BaseEngine): SessionHost {
     resources: {},
     app: null,
     syncActions: false,
+    unboundClientActions: "any",
     sessionManager: new SessionManager(),
     discoveredComponents: new Map(),
     createEngine,
@@ -141,6 +142,7 @@ function makeInlineRouterHost(engine: BaseEngine): SessionHost {
     resources: {},
     app: null, // ← the key condition: no registry
     syncActions: false,
+    unboundClientActions: "any",
     sessionManager: new SessionManager(),
     discoveredComponents: new Map(),
     createEngine: () => engine,
@@ -250,7 +252,7 @@ describe("scoped UI action fan-out", () => {
     class RoutingEngine extends FakeEngine {
       calls: Array<{ name: string; payload: unknown }> = [];
       resolved: unknown[] = [];
-      override resolveUIAction(name: string, payload: unknown) {
+      override resolveClientAction(name: string, payload: unknown) {
         this.resolved.push({ name, payload });
         return { name: "__hypen_scoped:board:__hypen_pin", payload: { path: "__dnd.board.a", x: .5, y: .25 } };
       }

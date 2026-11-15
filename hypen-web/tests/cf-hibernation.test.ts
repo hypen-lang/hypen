@@ -90,7 +90,7 @@ function makeConfig(): HypenDurableObjectConfig {
     .onAction("inc", ({ state }: any) => { state.counter += 1; })
     .persist(durableObjectStore(globalStrategy<AppState>()))
     .ui('module App { Text("counter:@{state.counter}") }');
-  return { module, template: module.template ?? "", moduleName: "App" };
+  return { module, template: module.template ?? "", moduleName: "App", unboundClientActions: ["inc"] };
 }
 
 class TestDO extends HypenDurableObject {
@@ -147,7 +147,7 @@ describe("HypenDurableObject hibernation", () => {
           }
         }
       }`;
-      const config = { module, template, moduleName: "App" };
+      const config = { module, template, moduleName: "App", unboundClientActions: ["addToCart"] };
       const storage = createSharedStorage();
       const ws = createMockWebSocket();
 

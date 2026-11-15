@@ -164,7 +164,7 @@ let server: RemoteServer;
 let url = "";
 
 beforeAll(async () => {
-  server = new RemoteServer()
+  server = new RemoteServer().allowUnboundClientActions("any")
     .module("App", deviceModule)
     // Every key is bound: stateUpdate messages ride renders.
     .ui(

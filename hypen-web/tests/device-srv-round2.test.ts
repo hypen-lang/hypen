@@ -774,7 +774,7 @@ describe("D1 upgrade admission (Bun)", () => {
   const authenticate = (req: Request) => req.headers.get("authorization") === "Bearer ok";
 
   test("allowlist + authenticator: native (no Origin) clients authenticate; the authenticator also runs for browsers", async () => {
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .config({ allowedOrigins: ["http://app.example"], authenticate, webClient: false });
@@ -793,7 +793,7 @@ describe("D1 upgrade admission (Bun)", () => {
   });
 
   test("authenticator only (native-only deployment): the authenticator decides, whatever the Origin", async () => {
-    const server = new RemoteServer()
+    const server = new RemoteServer().allowUnboundClientActions("any")
       .module("Counter", counter)
       .ui('Text("hi")')
       .config({ authenticate, webClient: false });
@@ -812,7 +812,7 @@ describe("D1 upgrade admission (Bun)", () => {
   });
 
   test("neither allowlist nor authenticator: the server starts and admits every client", async () => {
-    const server = new RemoteServer().module("Counter", counter).ui('Text("hi")').config({ webClient: false });
+    const server = new RemoteServer().allowUnboundClientActions("any").module("Counter", counter).ui('Text("hi")').config({ webClient: false });
     await server.listen(0);
     const url = `http://127.0.0.1:${boundPort(server)}/`;
     try {

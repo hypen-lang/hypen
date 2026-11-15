@@ -112,13 +112,13 @@ describe("RemoteServer hot reload", () => {
   test("route-module state survives template-only AND module (.ts) reloads", async () => {
     writeRoutedApp({ counterMarker: "Count:" });
     const loaded = await loadDiscoveredComponents(await discoverComponents(routedDir));
-    routed = new RemoteServer().module("App", loaded.get("App")!.module as any).source(routedDir);
+    routed = new RemoteServer().allowUnboundClientActions("any").module("App", loaded.get("App")!.module as any).source(routedDir);
     await routed.prepare();
 
     const a = await connect(routed);
     const sessionId = a.messages.find((m) => m.type === "sessionAck").sessionId;
     for (let i = 0; i < 2; i++) {
-      await a.session.receive({ type: "dispatchAction", action: "__hypen_scoped:home:tap" } as any);
+      await a.session.receive({ type: "dispatchAction", action: "tap" } as any);
       await pause(50);
     }
     expect(allText(a.messages)).toContain("Taps: 2");
@@ -134,7 +134,7 @@ describe("RemoteServer hot reload", () => {
     // Navigate to Counter, +1, then edit Counter's TEMPLATE: value kept.
     await b.session.receive({ type: "dispatchAction", action: "router.push", payload: { to: "/counter" } } as any);
     await pause();
-    await b.session.receive({ type: "dispatchAction", action: "__hypen_scoped:counter:inc" } as any);
+    await b.session.receive({ type: "dispatchAction", action: "inc" } as any);
     await pause();
     expect(allText(b.messages)).toContain("Counter is 1");
     writeRoutedApp({ counterMarker: "Value" });
@@ -176,7 +176,7 @@ describe("RemoteServer hot reload", () => {
     const loaded = await loadDiscoveredComponents(
       await discoverComponents(fixtureDir)
     );
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", loaded.get("App")!.module as any)
       .source(fixtureDir);
     await server.prepare();

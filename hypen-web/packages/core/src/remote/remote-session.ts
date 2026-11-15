@@ -78,6 +78,13 @@ import {
 } from "./snapshot.js";
 import { frameworkLoggers } from "../logger.js";
 import { BaseEngine } from "../engine-base.js";
+import {
+  ClientActionRefused,
+  UI_ACTION_ENVELOPE,
+  admitUnboundClientAction,
+  resolveClientEnvelope,
+  type UnboundClientActions,
+} from "./client-action.js";
 
 const log = frameworkLoggers.remote;
 
@@ -175,6 +182,13 @@ export interface SessionHost {
   readonly resources: Record<string, string>;
   readonly app: HypenApp | null;
   readonly syncActions: boolean;
+  /**
+   * Bare action names a client may send with no node behind them. By
+   * default none: a client action runs only as a `__hypen_dispatch`
+   * envelope addressed to a live node that declares it (`router.*` aside).
+   * See `client-action.ts`.
+   */
+  readonly unboundClientActions?: UnboundClientActions;
   /**
    * Opt-out of the Device Capability Protocol (RFC 001). The device plane is
    * on by default: any client whose hello offers `device` gets one, provided
@@ -1024,9 +1038,22 @@ export class RemoteSession {
           // handler before sending the semantic outcome to another session.
           const retarget = this._retargetNext;
           this._retargetNext = false;
-          const resolved = action.action === "__hypen_dispatch"
-            ? this.resolveUIDispatch(action.action, action.payload, retarget)
-            : { name: action.action, payload: action.payload };
+          // Wire input is untrusted: an envelope is authorised against the
+          // live tree, anything else against the host's allowlist. What
+          // comes out is a resolved action, safe to run here and to replay.
+          let resolved: { name: string; payload?: unknown };
+          try {
+            if (action.action === UI_ACTION_ENVELOPE) {
+              resolved = this.resolveUIDispatch(action.payload, retarget);
+            } else {
+              admitUnboundClientAction(action.action, this.host.unboundClientActions);
+              resolved = { name: action.action, payload: action.payload };
+            }
+          } catch (err) {
+            if (!(err instanceof ClientActionRefused)) throw err;
+            log.warn(`Session ${this.id}: action "${err.action}" refused — ${err.reason}`);
+            break;
+          }
           this.engine.dispatchAction(resolved.name, resolved.payload);
 
           if (this.host.syncActions) {
@@ -1674,7 +1701,6 @@ export class RemoteSession {
    * whose target the new engine rejects as stale (shortly after a wake).
    */
   private resolveUIDispatch(
-    name: string,
     payload: unknown,
     retarget: boolean
   ): { name: string; payload?: unknown } {
@@ -1682,19 +1708,19 @@ export class RemoteSession {
       const mapped = this.retargetEnvelope(payload);
       if (mapped !== null) {
         try {
-          return this.engine.resolveUIAction(name, mapped);
+          return resolveClientEnvelope(this.engine, mapped);
         } catch (err) {
           log.warn(`Session ${this.id}: re-targeted dispatch rejected, trying as sent`, err);
         }
       }
     }
     try {
-      return this.engine.resolveUIAction(name, payload);
+      return resolveClientEnvelope(this.engine, payload);
     } catch (err) {
       const mapped = this.retargetEnvelope(payload);
       if (mapped === null) throw err;
       log.info(`Session ${this.id}: re-targeting a dispatch addressed to the previous tree`);
-      return this.engine.resolveUIAction(name, mapped);
+      return resolveClientEnvelope(this.engine, mapped);
     }
   }
 

@@ -105,6 +105,7 @@ export function makeHost(
     resources: {},
     app: opts.app ?? null,
     syncActions: opts.syncActions ?? false,
+    unboundClientActions: "any",
     ...(opts.deviceDisabled ? { deviceDisabled: true } : {}),
     ...(opts.deviceMaxRetainedBytes !== undefined
       ? { deviceMaxRetainedBytes: opts.deviceMaxRetainedBytes }

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- `RemoteSession` no longer passes a client's `dispatchAction` message to the engine verbatim.
+  A client action now runs only as a `__hypen_dispatch` envelope addressed to a live node that
+  declares it (what the DOM, Canvas and native renderers send for every UI event). Refused, with
+  a warning and no handler call: a pre-scoped `__hypen_scoped:<scope>:<name>`, a bare reserved
+  write (`__hypen_bind` / `__hypen_reorder` / `__hypen_pin` — previously an arbitrary state-path
+  write in a single-module app), and a bare application name. With an engine artifact that has
+  `resolveClientAction`, an envelope must also address the node that carries the binding, not
+  just any node of the owning module.
+  **Breaking for clients that dispatch by bare name** (`RemoteEngine.dispatchAction("x")` from
+  app code, `navigation.backAction`): list those names with
+  `RemoteServer.allowUnboundClientActions([...])` / `SessionHost.unboundClientActions` / the CF
+  `unboundClientActions` option (`"any"` restores the old behaviour for application names).
+  `router.push|replace|back|forward` stay accepted by name. New: `BaseEngine.resolveClientAction`,
+  `BaseEngine.hasClientActionEntry`, `remote/client-action.ts`.
+
 ### Fixed
 - `RemoteSession`: named child modules mounted directly in a template
   (`module App { Column { Counter() } }`, or a second module inside one `Route`)

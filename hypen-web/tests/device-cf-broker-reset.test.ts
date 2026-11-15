@@ -112,6 +112,7 @@ function makeConfig(overrides: Partial<HypenDurableObjectConfig> = {}): HypenDur
     module,
     template: module.template ?? "",
     moduleName: "App",
+    unboundClientActions: ["inc", "pick"],
     // Device plane on by default. The Rust device broker (same exports as the web-target glue).
     deviceWasm: nodeWasm,
     allowedOrigins: ["https://app.example"],

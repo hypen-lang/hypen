@@ -149,7 +149,7 @@ describe("Conditional navigation via state.currentView", () => {
   });
 
   test("initial render shows feed page (currentView == 'feed')", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", createNavModule())
       .ui(NAVIGATION_UI);
 
@@ -180,7 +180,7 @@ describe("Conditional navigation via state.currentView", () => {
   });
 
   test("navigation patches use correct parent IDs (not transparent control-flow nodes)", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", createNavModule())
       .ui(NAVIGATION_UI);
 
@@ -225,7 +225,7 @@ describe("Conditional navigation via state.currentView", () => {
   });
 
   test("dispatching navigateToProfile changes view and generates patches", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", createNavModule())
       .ui(NAVIGATION_UI);
 
@@ -275,7 +275,7 @@ describe("Conditional navigation via state.currentView", () => {
   });
 
   test("dispatching viewStory with payload changes view to storyViewer", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", createNavModule())
       .ui(NAVIGATION_UI);
 
@@ -308,7 +308,7 @@ describe("Conditional navigation via state.currentView", () => {
   });
 
   test("navigating feed -> profile -> feed produces correct patches each time", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", createNavModule())
       .ui(NAVIGATION_UI);
 
@@ -352,7 +352,7 @@ describe("Conditional navigation via state.currentView", () => {
   });
 
   test("multiple rapid navigations all produce patches", async () => {
-    server = new RemoteServer()
+    server = new RemoteServer().allowUnboundClientActions("any")
       .module("App", createNavModule())
       .ui(NAVIGATION_UI);
 

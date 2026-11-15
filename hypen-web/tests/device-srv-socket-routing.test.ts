@@ -46,7 +46,7 @@ let server: RemoteServer;
 let url = "";
 
 beforeAll(async () => {
-  server = new RemoteServer()
+  server = new RemoteServer().allowUnboundClientActions("any")
     .module("App", module)
     .ui('Text("routing")')
     .config({ allowedOrigins: [ORIGIN], webClient: false });

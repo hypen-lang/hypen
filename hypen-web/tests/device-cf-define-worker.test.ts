@@ -155,6 +155,7 @@ function worker(opts: { device?: boolean; wasm?: CFWasmExports } = {}) {
     module: makeModule(),
     wasm: opts.wasm ?? webGlue,
     wasmModule,
+    unboundClientActions: "any",
     // No device option unless the test opts out: on by default.
     ...(opts.device !== undefined ? { device: opts.device } : {}),
     allowedOrigins: ["https://app.example"],
