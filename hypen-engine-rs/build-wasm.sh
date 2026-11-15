@@ -233,6 +233,24 @@ if command -v wasm-opt &> /dev/null; then
         mv "$wasm.stripped" "$wasm"
     done
     echo "Stripped name sections with wasm-opt"
+
+    # Not every binaryen writes a module that still works: 108 (Debian's)
+    # yields one whose externref table cannot grow, so it loads and then
+    # throws on first use, and 132 (the npm `binaryen` package) yields one
+    # that does not parse; 116 (`cargo install wasm-opt --locked`) is known
+    # good. Load the stripped Node build, which runs the glue's start
+    # function, and refuse to ship anything if that fails.
+    if command -v node &> /dev/null; then
+        if ! node -e "require('./pkg/nodejs/hypen_engine.js')" &> /dev/null; then
+            echo "ERROR: the module stripped by $(wasm-opt --version) does not load." >&2
+            echo "       Use binaryen 116 (cargo install wasm-opt --locked), or remove wasm-opt" >&2
+            echo "       from PATH to ship unstripped modules, then run this script again." >&2
+            exit 1
+        fi
+        echo "Stripped Node module loads ($(wasm-opt --version))"
+    else
+        echo "WARNING: node not found; the stripped modules were not load-checked"
+    fi
 else
     echo "WARNING: wasm-opt (binaryen) not found; shipping modules with their name section (~3 MB larger each)"
 fi

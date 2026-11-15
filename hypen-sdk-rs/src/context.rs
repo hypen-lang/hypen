@@ -39,6 +39,9 @@ pub struct GlobalContext {
     /// Device access of the invocation currently running (innermost last).
     /// Set by the remote session around each handler; empty elsewhere.
     device_scope: Mutex<Vec<crate::device::Device>>,
+
+    /// The app's (or session's) theme, if one is registered.
+    theme: Mutex<Option<crate::theme::Theme>>,
 }
 
 impl GlobalContext {
@@ -48,6 +51,7 @@ impl GlobalContext {
             events: EventEmitter::new(),
             router: Mutex::new(None),
             device_scope: Mutex::new(Vec::new()),
+            theme: Mutex::new(None),
         }
     }
 
@@ -108,6 +112,26 @@ impl GlobalContext {
     /// Get the router, if one has been configured.
     pub fn router(&self) -> Option<Arc<crate::router::HypenRouter>> {
         self.router.lock().unwrap().clone()
+    }
+
+    // ---- Theme ----
+
+    /// Install the app's theme. Handlers reach it as `ctx.theme()`, and
+    /// every [`ModuleInstance`](crate::module::ModuleInstance) created with
+    /// this context afterwards publishes it to its engine before the first
+    /// render. [`HypenAppBuilder::theme`](crate::app::HypenAppBuilder::theme)
+    /// and [`RemoteSession::with_theme`](crate::remote::RemoteSession::with_theme)
+    /// call this for you.
+    pub fn set_theme(&self, theme: crate::theme::Theme) {
+        *self.theme.lock().unwrap() = Some(theme);
+    }
+
+    /// The registered theme, or `None` when the app has none:
+    /// `ctx.theme().unwrap().set_scheme("dark")`, `.toggle()`, `.scheme()`,
+    /// `.token("color.primary")`. Safe to call from a handler — the engine
+    /// is updated when the running dispatch finishes.
+    pub fn theme(&self) -> Option<crate::theme::Theme> {
+        self.theme.lock().unwrap().clone()
     }
 
     // ---- Device (RFC 001) ----

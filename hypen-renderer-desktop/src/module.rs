@@ -45,6 +45,15 @@ pub trait HypenModule: Send + Sync + 'static {
     fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
         let _ = (list_id, start, end);
     }
+
+    /// Report the window's system color scheme (`dark` = the platform's
+    /// dark appearance). A remote module tells its server, whose theme
+    /// follows it while its preference is `"system"` (`hello.colorScheme`,
+    /// then a `colorScheme` message on change). The default does nothing:
+    /// a local module's host owns its theme and sets it directly.
+    fn set_color_scheme(&self, dark: bool) {
+        let _ = dark;
+    }
 }
 
 impl<S: State> HypenModule for ModuleInstance<S> {

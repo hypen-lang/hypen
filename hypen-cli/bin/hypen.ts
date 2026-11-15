@@ -81,6 +81,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${pink("generate")}        Generate component imports
     ${pink("check")} [path...] Accessibility + template checks over .hypen files
     ${pink("a11y")} [path...]  Accessibility checks only
+    ${pink("theme")} export    Export design tokens (CSS, Android, iOS)
     ${pink("studio")}          Open Hypen Studio IDE
     ${pink("test")}            Open Studio Test Mode (live previews + device mirrors)
     ${pink("run")} <platform>  Install and launch on device (android|ios|desktop)
@@ -93,6 +94,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     -d, --debug     dev: verbose framework logging (or ${dim("DEBUG=hypen:*")})
     --a11y          dev: print accessibility findings on every rebuild
     -o, --outDir    build: output directory (default: dist)
+    --format        theme export: css, android, ios or all (default: all)
     -m, --minify    build: minify (default on; ${dim("--no-minify")} to disable)
     -s, --sourcemap build: emit external source maps
     --no-open       studio/test: don't open a browser tab
@@ -196,6 +198,24 @@ const COMMAND_HELP: Record<string, string> = {
   ./src/components) and writes ${dim(".hypen/components.generated.ts")} in the
   project root.
 `,
+  theme: `
+  ${boldPink("hypen theme")} ${dim("-")} Work with the project's theme file
+
+  ${boldYellow("Usage:")}
+    hypen theme export [--format css|android|ios|all] [--outDir <dir>]
+
+  The theme file is the JSON form of createTheme's options
+  (${dim('{ "tokens": {…}, "schemes": { "dark": {…} } }')}), found at hypen.json
+  "theme" or ./theme.json. ${dim("hypen check")} validates @theme references
+  against it; ${dim("export")} writes the same tokens for each platform:
+    css      theme.css — custom properties, schemes under [data-hypen-scheme]
+    android  values/ and values-night/hypen_theme.xml
+    ios      HypenTheme.xcassets (light/dark color sets) + HypenTheme.swift
+
+  ${boldYellow("Options:")}
+    --format <f>        One format, or all (default)
+    -o, --outDir <dir>  Output directory (default: theme-export)
+`,
   check: `
   ${boldPink("hypen check")} ${dim("-")} Check .hypen files: accessibility + template references
 
@@ -209,6 +229,7 @@ const COMMAND_HELP: Record<string, string> = {
     unknown-action       @actions.x with no onAction handler
     unknown-component    not built in and not a component in the project
     item-outside-loop    @item… where no ForEach/List/Grid supplies a row
+    unknown-theme-token  @theme.x not defined in the project's theme file
   Templates without a TypeScript module get only the module-independent
   rules, and the report says so.
 
@@ -293,6 +314,8 @@ interface Config {
   a11y?: { ignoreRules?: string[]; dev?: boolean };
   /** Template checks: `ignoreRules` suppresses those rule ids project-wide. */
   check?: { ignoreRules?: string[] };
+  /** Path of the project's theme file (default: `theme.json` when present). */
+  theme?: string;
 }
 
 async function loadConfig(): Promise<Config> {
@@ -323,6 +346,7 @@ async function loadConfig(): Promise<Config> {
                 dev: config.a11y.dev === true,
               }
             : undefined,
+        theme: typeof config.theme === "string" && config.theme ? config.theme : undefined,
         check:
           config.check && typeof config.check === "object"
             ? {
@@ -924,6 +948,7 @@ async function checkAccessibility(paths: string[], options: { templates: boolean
       files,
       entry,
       ignoreRules: config.check?.ignoreRules,
+      theme: config.theme,
     });
     count = combineOutcomes(count, templateCount);
   }
@@ -935,6 +960,62 @@ async function checkAccessibility(paths: string[], options: { templates: boolean
   if (count > 0) process.exit(1);
   if (count === COULD_NOT_CHECK || missingPaths.length > 0) process.exit(2);
   process.exit(0);
+}
+
+/**
+ * `hypen theme export` — write the theme file's tokens in each platform's
+ * native form (see `src/theme.ts`).
+ */
+async function themeCommand(args: string[], options: { format?: string; outDir?: string }) {
+  const { loadThemeFile, exportTheme, resolveAllSchemes, EXPORT_FORMATS } = await import(
+    "../src/theme.js"
+  );
+  if (args[0] !== "export") {
+    console.error(`\n  Error: unknown theme command${args[0] ? ` "${args[0]}"` : ""}.`);
+    console.error(`  Run ${dim("hypen theme --help")} for usage.\n`);
+    process.exit(1);
+  }
+  const requested = options.format ?? "all";
+  const formats = requested === "all" ? [...EXPORT_FORMATS] : EXPORT_FORMATS.filter((f) => f === requested);
+  if (formats.length === 0) {
+    console.error(`\n  Error: unknown format "${requested}" (expected css, android, ios or all).\n`);
+    process.exit(1);
+  }
+  const projectRoot = resolve(".");
+  const config = await loadConfig();
+  const status = loadThemeFile(projectRoot, config.theme);
+  if (status.kind === "none") {
+    console.error(`\n  Error: no theme file found (theme.json, or hypen.json "theme").\n`);
+    process.exit(1);
+  }
+  if (status.kind === "failed") {
+    console.error(`\n  Error: ${status.file}: ${status.reason}\n`);
+    process.exit(1);
+  }
+  // Unresolved aliases would be exported as literal "{path}" strings.
+  const problems = new Set(resolveAllSchemes(status.theme).flatMap((s) => s.problems));
+  if (problems.size > 0) {
+    console.error(`\n  Error: ${status.file} has unresolved aliases:`);
+    for (const problem of problems) console.error(`    ${problem}`);
+    console.error("");
+    process.exit(1);
+  }
+  const outDir = resolve(options.outDir || "theme-export");
+  const notes = new Set<string>();
+  console.log("");
+  for (const format of formats) {
+    const result = exportTheme(status.theme, format);
+    for (const [path, contents] of Object.entries(result.files)) {
+      const target = join(outDir, format, path);
+      mkdirSync(dirname(target), { recursive: true });
+      writeFileSync(target, contents);
+    }
+    for (const note of result.notes) notes.add(note);
+    const count = Object.keys(result.files).length;
+    console.log(`  ${pink(format.padEnd(8))} ${count} file${count === 1 ? "" : "s"} → ${dim(join(outDir, format))}`);
+  }
+  for (const note of notes) console.log(`  ${dim(`Note: ${note}`)}`);
+  console.log("");
 }
 
 /**
@@ -1578,6 +1659,7 @@ try {
       runner: { type: "string" },
       a11y: { type: "boolean" },
       "studio-port": { type: "string" },
+      format: { type: "string" },
     },
     allowPositionals: true,
   });
@@ -1689,6 +1771,13 @@ switch (command) {
 
   case "check":
     await checkAccessibility(positionals.slice(1), { templates: true });
+    break;
+
+  case "theme":
+    await themeCommand(positionals.slice(1), {
+      format: values.format,
+      outDir: values.outDir,
+    });
     break;
 
   case "a11y":

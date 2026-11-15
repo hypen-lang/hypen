@@ -77,6 +77,26 @@ type Session struct {
 	mu              sync.Mutex
 	lastConnectedAt time.Time
 	props           map[string]any
+	themePreference string
+}
+
+// ThemePreference returns the theme scheme preference remembered for this
+// session ("" when none was recorded). It lives exactly as long as the
+// session: kept across suspend/resume, gone once the session expires or is
+// destroyed.
+func (s *Session) ThemePreference() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.themePreference
+}
+
+// SetThemePreference records the theme scheme preference (a scheme name or
+// "system") so a resumed session comes back with it. The remote server
+// calls it whenever the session's theme changes.
+func (s *Session) SetThemePreference(preference string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.themePreference = preference
 }
 
 // ID returns the session's unique identifier.

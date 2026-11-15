@@ -622,6 +622,11 @@ pub(crate) fn extract_state_refs(root: &IRNode) -> Vec<(Option<String>, String)>
             // from a binding it checks `is_state()` on (`ir::anim::collect_states`),
             // so a row-derived path cannot reach here.
             Value::StateSwitch { path, .. } => out.push((scope.clone(), path.clone())),
+            Value::SchemeSwitch { .. } => {
+                for entry in value.scheme_entries() {
+                    note(scope, entry, ctx, out);
+                }
+            }
             _ => {}
         }
     }

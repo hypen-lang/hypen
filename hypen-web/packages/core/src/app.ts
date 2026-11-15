@@ -9,6 +9,7 @@ import { type Result, Ok, Err, fromPromise, ActionError, HypenError } from "./re
 import { DataSourceManager, type DataSourcePlugin, type IDataSourceEngine } from "./datasource.js";
 import type { StateStore } from "./persistence.js";
 import type { I18n } from "./i18n.js";
+import type { Theme } from "./theme.js";
 
 // Interface for engine compatibility (works with both engine.js and engine.browser.js)
 export interface IEngine {
@@ -129,6 +130,12 @@ export type GlobalContext = {
    * `context.i18n.locale`, `context.i18n.dir`.
    */
   readonly i18n?: I18n | null;
+  /**
+   * The app's theme (`createTheme`), or `null` when none is registered:
+   * `context.theme.setScheme("dark")`, `context.theme.toggle()`,
+   * `context.theme.scheme`, `context.theme.token("color.primary")`.
+   */
+  readonly theme?: Theme | null;
 };
 
 export type LifecycleHandler<T> = (
@@ -1279,6 +1286,9 @@ export class HypenModuleInstance<T extends object = any> {
       // Live getter: the runtime may install i18n after this module exists.
       get i18n() {
         return ctx.i18n;
+      },
+      get theme() {
+        return ctx.theme;
       },
     };
 

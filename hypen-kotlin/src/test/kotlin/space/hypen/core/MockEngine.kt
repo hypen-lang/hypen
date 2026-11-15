@@ -120,6 +120,14 @@ class MockEngine : IEngine {
 
     override fun getRevision(): ULong = revision
 
+    /** Every [setContext] call, in order (name to data). */
+    val contextCalls: MutableList<Pair<String, Map<String, Any?>>> = mutableListOf()
+
+    override fun setContext(name: String, data: Map<String, Any?>): List<Patch> {
+        contextCalls.add(name to data)
+        return emptyList()
+    }
+
     /**
      * Simulate rendering patches (for testing)
      */

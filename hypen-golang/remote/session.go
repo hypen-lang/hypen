@@ -105,6 +105,13 @@ type SessionHost interface {
 	OnSessionDestroyed(session *RemoteSession, client *Client)
 }
 
+// ThemeHost is implemented by SessionHosts that carry an app theme
+// (RemoteServer.Theme). Optional, so other SessionHost implementations
+// keep compiling; a nil theme means none is registered.
+type ThemeHost interface {
+	Theme() *core.Theme
+}
+
 // SessionOption tweaks a session's construction. Use the WithXxx helpers.
 type SessionOption func(*sessionOptions)
 
@@ -228,6 +235,19 @@ type RemoteSession struct {
 	// build a fresh empty context and `GetModule("app")` / sibling
 	// reads from routed children would always return nil.
 	globalCtx *core.HypenGlobalContext
+
+	// theme is this session's fork of the host's theme (nil without one);
+	// detachTheme stops it publishing to the session's engine.
+	theme       *core.Theme
+	detachTheme func()
+	// clientColorScheme is the system color scheme this client last
+	// reported (hello.colorScheme or a `colorScheme` message); "" when
+	// none. Applied to the fork when it is created.
+	clientColorScheme string
+	// hypenSession is the resumable session this connection is attached
+	// to (set by initializeSession); it carries the theme preference
+	// across a resume.
+	hypenSession *core.Session
 
 	// ---- device plane (RFC 001) ----
 
@@ -371,6 +391,15 @@ func (s *RemoteSession) Engine() *core.WasmEngine {
 	return s.engine
 }
 
+// Theme returns this session's theme — a fork of the host's, with its own
+// scheme preference — or nil when the host has none or the engine hasn't
+// been built yet (before hello).
+func (s *RemoteSession) Theme() *core.Theme {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.theme
+}
+
 // UpdatePrimaryState merges a patch into the primary module's state
 // (both the session-held snapshot and the engine) and triggers a
 // reactive re-render. Use this for out-of-band state writes initiated
@@ -478,6 +507,8 @@ func (s *RemoteSession) Receive(data []byte) error {
 			s.helloTimeout.Stop()
 			s.helloTimeout = nil
 		}
+		// Seeds the session theme's system scheme before the first render.
+		s.clientColorScheme = parseColorScheme(raw.ColorScheme)
 		s.mu.Unlock()
 
 		var helloProps map[string]any
@@ -501,6 +532,14 @@ func (s *RemoteSession) Receive(data []byte) error {
 		// Virtualization contract §4: per-client, never an action, never
 		// replayed, never answered with a stateUpdate.
 		s.handleViewport(data)
+		return nil
+
+	case MessageTypeColorScheme:
+		// Per client, like `viewport`: only this session's theme hears it,
+		// and the change streams out as ordinary `patch` messages. An
+		// explicit preference makes it a no-op until the session goes
+		// back to "system".
+		s.handleColorScheme(parseColorScheme(raw.Scheme))
 		return nil
 
 	case "deviceRequest", "deviceResponse", "deviceEvent":
@@ -538,11 +577,18 @@ func (s *RemoteSession) Destroy() error {
 	sessionID := s.sessionID
 	engine := s.engine
 	s.engine = nil
+	detachTheme := s.detachTheme
+	s.detachTheme = nil
 	stateCopy := make(map[string]any, len(s.state))
 	for k, v := range s.state {
 		stateCopy[k] = v
 	}
 	s.mu.Unlock()
+
+	// Stop the theme publishing into an engine that is going away.
+	if detachTheme != nil {
+		detachTheme()
+	}
 
 	// The device plane dies with the connection: live requests settle
 	// connectionLost; app state may resume, device work never does.
@@ -677,6 +723,7 @@ func (s *RemoteSession) initializeSession(requestedSessionID string, helloProps 
 
 	s.mu.Lock()
 	s.sessionID = session.ID()
+	s.hypenSession = session
 	s.resumeToken = token
 	s.ackIsNew = !isRestored
 	s.mu.Unlock()
@@ -1081,7 +1128,45 @@ func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 	if s.globalCtx == nil {
 		s.globalCtx = core.NewHypenGlobalContext()
 	}
+	globalCtx := s.globalCtx
 	s.mu.Unlock()
+
+	// Theme: a per-session scheme preference over the host's shared
+	// tokens, published before the first render so `@theme.*` resolves in
+	// it (and before the patch callback exists, so nothing is sent early).
+	if th, ok := s.host.(ThemeHost); ok {
+		if hostTheme := th.Theme(); hostTheme != nil {
+			// The fork is created and seeded under mu, so a `colorScheme`
+			// message racing session setup is either seen here or finds
+			// the fork: it is never lost. Nothing is attached yet, so
+			// seeding calls nothing back.
+			s.mu.Lock()
+			hypenSession := s.hypenSession
+			preference := ""
+			if hypenSession != nil {
+				// A resumed session comes back with the preference it had.
+				preference = hypenSession.ThemePreference()
+			}
+			theme := hostTheme.Fork(preference)
+			if s.clientColorScheme != "" {
+				_ = theme.SetSystemScheme(s.clientColorScheme)
+			}
+			s.theme = theme
+			s.mu.Unlock()
+
+			if hypenSession != nil {
+				hypenSession.SetThemePreference(theme.Preference())
+				theme.OnChange(func(meta core.ThemeMeta) {
+					hypenSession.SetThemePreference(meta.Preference)
+				})
+			}
+			globalCtx.SetTheme(theme)
+			detach := theme.Attach(engine)
+			s.mu.Lock()
+			s.detachTheme = detach
+			s.mu.Unlock()
+		}
+	}
 
 	engine.SetModule(moduleName, allActions, stateKeys, initialStateCopy)
 
@@ -1425,6 +1510,37 @@ func (s *RemoteSession) handleViewport(data []byte) {
 	if _, err := engine.SetListViewport(listID, start, end); err != nil {
 		logServer.Warn("Session %s: viewport %s failed: %v", s.ID, listID, err)
 	}
+}
+
+// handleColorScheme applies a client-reported system color scheme to THIS
+// session's theme. Before hello, or for a malformed value (scheme == ""),
+// it is ignored. Before the theme fork exists it is remembered and applied
+// when the fork is created. Nothing else is sent: no stateUpdate, no
+// action dispatch, no replay to other sessions.
+func (s *RemoteSession) handleColorScheme(scheme string) {
+	if scheme == "" {
+		return
+	}
+	s.mu.Lock()
+	if !s.helloReceived || s.destroyed {
+		s.mu.Unlock()
+		return
+	}
+	s.clientColorScheme = scheme
+	theme := s.theme
+	s.mu.Unlock()
+	if theme != nil {
+		_ = theme.SetSystemScheme(scheme)
+	}
+}
+
+// parseColorScheme returns a client-reported system color scheme, or ""
+// for anything else (missing, another string, a non-string).
+func parseColorScheme(value any) string {
+	if scheme, ok := value.(string); ok && (scheme == core.SchemeLight || scheme == core.SchemeDark) {
+		return scheme
+	}
+	return ""
 }
 
 // parseViewport decodes a `viewport` message leniently: any shape it does

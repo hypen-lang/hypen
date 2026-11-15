@@ -91,10 +91,13 @@ enum RemoteHello {
     ///   - props: client metadata.
     ///   - device: the DeviceHost advertisement (`hello.device`), when the
     ///     device plane is attached to this socket.
+    ///   - colorScheme: the system color scheme to report
+    ///     (`hello.colorScheme`), or nil to omit the field.
     static func message(sessionId: String?,
                         credential: RemoteResumeCredential,
                         props: [String: Any]?,
-                        device: DeviceHello?) -> [String: Any] {
+                        device: DeviceHello?,
+                        colorScheme: HypenColorScheme? = nil) -> [String: Any] {
         var message: [String: Any] = ["type": "hello"]
         if let sessionId = sessionId {
             message["sessionId"] = sessionId
@@ -108,7 +111,73 @@ enum RemoteHello {
         if let device = device {
             message["device"] = device.jsonObject()
         }
+        if let colorScheme = colorScheme {
+            message["colorScheme"] = colorScheme.rawValue
+        }
         return message
+    }
+}
+
+// MARK: - System color scheme
+
+/// A system color scheme as the Remote UI protocol names it
+/// (`hello.colorScheme` and the `colorScheme` message): what a server-side
+/// theme follows while its preference is "system". The raw value is the
+/// value on the wire.
+public enum HypenColorScheme: String, Sendable {
+    case light
+    case dark
+}
+
+/// What a connection reports to the server as the system color scheme
+/// (`RemoteEngineConfig.colorScheme`).
+public enum ColorSchemeReporting: Sendable, Equatable {
+    /// Follow the device (default). `HypenView` reads SwiftUI's
+    /// `\.colorScheme` environment value and reports changes as they happen.
+    /// A `RemoteEngine` used on its own reports nothing until
+    /// `setColorScheme(_:)` is called.
+    case auto
+    /// Always report light.
+    case light
+    /// Always report dark.
+    case dark
+    /// Report nothing (unless the host calls `RemoteEngine.setColorScheme(_:)`).
+    case off
+
+    /// The fixed scheme this option names; nil for `.auto` / `.off`.
+    var fixedScheme: HypenColorScheme? {
+        switch self {
+        case .light: return .light
+        case .dark: return .dark
+        case .auto, .off: return nil
+        }
+    }
+}
+
+/// The system color scheme a `RemoteEngine` reports, kept Foundation-only so
+/// it is unit-testable. The value is remembered for the `hello` of every
+/// connection; a change while the socket is open (its hello already sent)
+/// yields one `colorScheme` message, and an unchanged value yields nothing.
+struct RemoteColorSchemeReport: Equatable {
+    /// The scheme last reported, or to report in the next hello.
+    private(set) var scheme: HypenColorScheme?
+
+    init(initial: HypenColorScheme? = nil) {
+        scheme = initial
+    }
+
+    /// Record `scheme`. Returns the message to send now, or nil when the
+    /// value is unchanged or no hello has gone out on the current socket
+    /// (`helloSent == false`: the next hello carries it).
+    mutating func report(_ scheme: HypenColorScheme, helloSent: Bool) -> [String: Any]? {
+        guard scheme != self.scheme else { return nil }
+        self.scheme = scheme
+        return helloSent ? Self.message(scheme) : nil
+    }
+
+    /// `{"type":"colorScheme","scheme":"light"|"dark"}`.
+    static func message(_ scheme: HypenColorScheme) -> [String: Any] {
+        ["type": "colorScheme", "scheme": scheme.rawValue]
     }
 }
 

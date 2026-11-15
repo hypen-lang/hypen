@@ -30,6 +30,7 @@
  */
 
 import type { HypenApp, HypenModuleDefinition } from "@hypen-space/core/app";
+import type { Theme } from "@hypen-space/core/theme";
 import { HypenDurableObject, type HypenDurableObjectConfig, type DurableObjectState } from "./durable-object.js";
 import { createCFEngine, type CFWasmExports } from "./engine.js";
 import { hasDeviceBroker } from "./device-broker.js";
@@ -57,6 +58,12 @@ export interface DefineHypenWorkerOptions {
   componentTemplates?: Record<string, string>;
   /** SVG resource bundle for `Icon(@resources.foo)`. */
   resources?: Record<string, string>;
+  /**
+   * The app's theme (`createTheme(...)`). Each session forks it: its own
+   * scheme preference over the shared tokens, following its client's system
+   * scheme and restored from the session snapshot after hibernation.
+   */
+  theme?: Theme;
   /**
    * Mirror actions/state across sockets sharing a DO (default false). The
    * device plane stays on; mirrored dispatches cannot start device work.
@@ -148,6 +155,7 @@ export function defineHypenWorker(opts: DefineHypenWorkerOptions): WorkerExports
       ? { componentTemplates: opts.componentTemplates }
       : {}),
     ...(opts.resources !== undefined ? { resources: opts.resources } : {}),
+    ...(opts.theme !== undefined ? { theme: opts.theme } : {}),
     ...(opts.syncActions !== undefined ? { syncActions: opts.syncActions } : {}),
     ...(opts.device !== undefined ? { device: opts.device } : {}),
     // The device broker is the Rust one in the same web-target wasm glue

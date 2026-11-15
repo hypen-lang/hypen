@@ -21,6 +21,7 @@ import androidx.compose.ui.layout.VerticalAlignmentLine
 import androidx.compose.ui.unit.Constraints
 import androidx.compose.ui.unit.Density
 import kotlin.math.roundToInt
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.DpSize
 import space.hypen.renderer.anim.ClearFocusOnExit
@@ -43,7 +44,9 @@ import space.hypen.renderer.dnd.rememberHypenDnd
 import space.hypen.renderer.model.HypenElement
 import space.hypen.renderer.navigation.BackNavigationDispatcher
 import space.hypen.renderer.navigation.NavigationOptions
+import space.hypen.renderer.remote.ColorSchemeReporting
 import space.hypen.renderer.remote.ConnectionState
+import space.hypen.renderer.remote.HypenColorScheme
 import space.hypen.renderer.remote.RemoteEngineConfig
 import space.hypen.renderer.render.ActionDispatcher
 import space.hypen.renderer.render.ComposeRenderer
@@ -77,7 +80,10 @@ val LocalHypenViewport = compositionLocalOf { DpSize.Unspecified }
  * Main entry point for rendering a Hypen app.
  *
  * @param url The WebSocket URL to connect to
- * @param config Configuration for the remote engine
+ * @param config Configuration for the remote engine. Its `colorScheme` is live: by default
+ *   the device's light/dark setting is reported to the server (and again when it changes),
+ *   so a server-side theme set to "system" matches the device; pass
+ *   `ColorSchemeReporting.LIGHT` / `DARK` to report a fixed value or `OFF` to report nothing.
  * @param modifier Modifier for the root container
  * @param navigation Back-button navigation options. Pass [NavigationOptions.DEFAULT] to enable
  *   with default settings, a custom [NavigationOptions] to configure the action name,
@@ -128,6 +134,21 @@ fun HypenApp(
     }
     val renderer = session.renderer
     val remoteEngine = session.engine
+
+    // Report the system color scheme (a server-side "system" theme follows
+    // it). LocalConfiguration recomposes this on a configuration change, so a
+    // light/dark switch reaches the server while connected; the engine sends
+    // nothing for an unchanged value.
+    val systemColorScheme = HypenColorScheme.fromUiMode(LocalConfiguration.current.uiMode)
+    val colorScheme = when (config.colorScheme) {
+        ColorSchemeReporting.AUTO -> systemColorScheme
+        ColorSchemeReporting.LIGHT -> HypenColorScheme.LIGHT
+        ColorSchemeReporting.DARK -> HypenColorScheme.DARK
+        ColorSchemeReporting.OFF -> null
+    }
+    LaunchedEffect(remoteEngine, colorScheme) {
+        if (colorScheme != null) remoteEngine.setColorScheme(colorScheme)
+    }
 
     HypenLoggers.app.debug("HypenApp composing: renderer=%s, engine=%s", System.identityHashCode(renderer), System.identityHashCode(remoteEngine))
 

@@ -10,6 +10,7 @@ import type { HypenModuleDefinition } from "@hypen-space/core/app";
 import { HypenRouter } from "@hypen-space/core/router";
 import { HypenGlobalContext } from "@hypen-space/core/context";
 import type { I18n } from "@hypen-space/core/i18n";
+import type { Theme } from "@hypen-space/core/theme";
 import { Router, Route, Link } from "@hypen-space/core/components";
 import { frameworkLoggers, setDebugMode } from "@hypen-space/core/logger";
 import { DOMRenderer } from "@hypen-space/web/dom";
@@ -40,6 +41,13 @@ export interface HypenConfig {
    * handlers as `context.i18n`, and drives `dir` / `lang` on the render root.
    */
   i18n?: I18n;
+  /**
+   * The app's theme (`createTheme(...)`). Published to the engine as the
+   * `theme` / `appearance` data sources before the first render, exposed to
+   * handlers as `context.theme`, follows `prefers-color-scheme` while its
+   * preference is `"system"`, and drives `color-scheme` on the render root.
+   */
+  theme?: Theme;
 }
 
 /**
@@ -65,6 +73,7 @@ export class Hypen {
   private moduleInstances = new Map<string, HypenModuleInstance<any>>();
   private componentLoader: ComponentLoaderLike | null = null;
   private i18nCleanup: Array<() => void> = [];
+  private themeCleanup: Array<() => void> = [];
 
   constructor(config: HypenConfig = {}) {
     this.config = {
@@ -82,6 +91,7 @@ export class Hypen {
     this.router = new HypenRouter();
     this.globalContext = new HypenGlobalContext();
     if (config.i18n) this.globalContext.setI18n(config.i18n);
+    if (config.theme) this.globalContext.setTheme(config.theme);
 
     // Use provided loader or create an in-memory one
     this.componentLoader = config.loader ?? createInMemoryLoader();
@@ -195,6 +205,20 @@ export class Hypen {
       renderer.setDirection(i18n.dir, i18n.locale);
     }
 
+    // Theme: resolve the system scheme, publish the tokens before anything
+    // renders, and keep the render root's color-scheme in step.
+    const theme = this.config.theme;
+    if (theme) {
+      for (const off of this.themeCleanup) off();
+      const renderer = this.renderer;
+      this.themeCleanup = [
+        theme.watchSystem(),
+        theme.attach(this.engine),
+        theme.onChange((meta) => renderer.setColorScheme(meta.scheme)),
+      ];
+      renderer.setColorScheme(theme.scheme);
+    }
+
     // Extract module ID from component name or .id() applicator
     const moduleId = this.extractModuleId(componentName, component.template);
 
@@ -240,6 +264,8 @@ export class Hypen {
 
     for (const off of this.i18nCleanup) off();
     this.i18nCleanup = [];
+    for (const off of this.themeCleanup) off();
+    this.themeCleanup = [];
 
     if (this.moduleInstance) {
       await this.moduleInstance.destroy();
@@ -282,6 +308,13 @@ export class Hypen {
    */
   getI18n(): I18n | null {
     return this.config.i18n ?? null;
+  }
+
+  /**
+   * The app's theme, if one was configured.
+   */
+  getTheme(): Theme | null {
+    return this.config.theme ?? null;
   }
 
   /**

@@ -210,6 +210,10 @@ elements, scrub/settle, and completion events.
 
 **Accessibility** — AccessKit exposes the tree to VoiceOver, NVDA, and Orca.
 
+## Color Scheme
+
+A remote module reports the window's system color scheme to the server (in its hello, and again when the OS switches), which a server-side [theme](/docs/guide/theming) follows while its preference is `"system"`. Linux under X11 exposes no system scheme, so nothing is reported there.
+
 ## Performance Notes
 
 Enable the `mimalloc` feature and wire the allocator in your binary for a

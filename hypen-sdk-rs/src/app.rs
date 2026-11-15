@@ -58,6 +58,7 @@ impl HypenApp {
             components: ComponentRegistry::new(),
             routes: Vec::new(),
             components_dirs: Vec::new(),
+            theme: None,
         }
     }
 
@@ -169,6 +170,7 @@ pub struct HypenAppBuilder {
     components: ComponentRegistry,
     routes: Vec<RouteEntry>,
     components_dirs: Vec<String>,
+    theme: Option<crate::theme::Theme>,
 }
 
 impl HypenAppBuilder {
@@ -206,6 +208,20 @@ impl HypenAppBuilder {
         self
     }
 
+    /// Register the app's theme. Handlers reach it as `ctx.theme()`, and
+    /// every module instantiated through the app publishes its tokens to
+    /// the engine (`@theme.*`, `@appearance.*`) before the first render.
+    ///
+    /// ```rust,ignore
+    /// let app = HypenApp::builder()
+    ///     .theme(Theme::builder().tokens(tokens).scheme_tokens("dark", dark).build())
+    ///     .build();
+    /// ```
+    pub fn theme(mut self, theme: crate::theme::Theme) -> Self {
+        self.theme = Some(theme);
+        self
+    }
+
     /// Build the `HypenApp`.
     pub fn build(mut self) -> HypenApp {
         // Load component directories
@@ -219,6 +235,9 @@ impl HypenAppBuilder {
         let context = Arc::new(GlobalContext::new());
         let router = Arc::new(HypenRouter::new());
         context.set_router(Arc::clone(&router));
+        if let Some(theme) = self.theme {
+            context.set_theme(theme);
+        }
 
         HypenApp {
             context,

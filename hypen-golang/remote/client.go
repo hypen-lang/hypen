@@ -46,6 +46,9 @@ type RemoteEngine struct {
 	currentState    any
 	currentRevision int
 	moduleName      string
+	// colorScheme is the system color scheme last reported (or to report
+	// in the next hello); "" when none.
+	colorScheme string
 
 	// Done channel for graceful shutdown
 	done chan struct{}
@@ -63,9 +66,11 @@ func NewRemoteEngine(wsURL string, options *EngineOptions) *RemoteEngine {
 		}
 		opts.AutoReconnect = options.AutoReconnect
 		opts.DisableCompression = options.DisableCompression
+		opts.ColorScheme = options.ColorScheme
 	}
 
 	return &RemoteEngine{
+		colorScheme:   validColorScheme(opts.ColorScheme),
 		url:           wsURL,
 		options:       opts,
 		state:         StateDisconnected,
@@ -116,7 +121,18 @@ func (e *RemoteEngine) Connect() error {
 	e.conn = conn
 	e.state = StateConnected
 	e.reconnectAttempts = 0
+	colorScheme := e.colorScheme
 	e.mu.Unlock()
+
+	// With a color scheme to report, open with a hello carrying it so the
+	// server's theme renders the first frame in that scheme. Without one
+	// nothing is sent, as before (the server's hello grace applies).
+	if colorScheme != "" {
+		hello, _ := json.Marshal(map[string]any{"type": MessageTypeHello, "colorScheme": colorScheme})
+		if err := conn.WriteMessage(websocket.TextMessage, hello); err != nil {
+			e.notifyError(err)
+		}
+	}
 
 	e.notifyConnect()
 
@@ -195,6 +211,46 @@ func (e *RemoteEngine) SetListViewport(listID string, start, end uint32) error {
 		return fmt.Errorf("marshal failed: %w", err)
 	}
 	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// SetColorScheme reports the system color scheme ("light" or "dark") to
+// the server as a `colorScheme` message and remembers it for the hello of
+// the next (re)connect. Call it when the platform's appearance changes.
+// While disconnected it only remembers the value; reporting the scheme
+// already reported is a no-op. The server's theme follows it while the
+// session's preference is "system"; the change arrives back as ordinary
+// patches through OnPatches.
+func (e *RemoteEngine) SetColorScheme(scheme string) error {
+	if validColorScheme(scheme) == "" {
+		return fmt.Errorf("unknown color scheme %q (known: light, dark)", scheme)
+	}
+	e.mu.Lock()
+	if scheme == e.colorScheme {
+		e.mu.Unlock()
+		return nil
+	}
+	e.colorScheme = scheme
+	conn := e.conn
+	connected := e.state == StateConnected && conn != nil
+	e.mu.Unlock()
+	if !connected {
+		return nil
+	}
+
+	data, err := json.Marshal(ColorSchemeMessage{Type: MessageTypeColorScheme, Scheme: scheme})
+	if err != nil {
+		return fmt.Errorf("marshal failed: %w", err)
+	}
+	return conn.WriteMessage(websocket.TextMessage, data)
+}
+
+// validColorScheme returns scheme when it is a system color scheme a
+// client can report, "" otherwise.
+func validColorScheme(scheme string) string {
+	if scheme == "light" || scheme == "dark" {
+		return scheme
+	}
+	return ""
 }
 
 // OnPatches registers a callback for patch events

@@ -19,6 +19,8 @@ import space.hypen.renderer.anim.AnimationCoordinator
 import space.hypen.renderer.anim.SettingsMotionPreference
 import space.hypen.renderer.device.DeviceHost
 import space.hypen.renderer.dnd.DndCoordinator
+import space.hypen.renderer.remote.ColorSchemeReporting
+import space.hypen.renderer.remote.HypenColorScheme
 import space.hypen.renderer.remote.RemoteEngine
 import space.hypen.renderer.remote.RemoteEngineConfig
 import space.hypen.renderer.render.ComposeRenderer
@@ -52,6 +54,12 @@ internal class HypenSession(
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     init {
+        // "Follow the device": the first hello carries the scheme the
+        // application context reports; HypenApp then keeps it in step with the
+        // hosting Activity's configuration.
+        if (config.colorScheme == ColorSchemeReporting.AUTO) {
+            engine.setColorScheme(HypenColorScheme.fromUiMode(appContext.resources.configuration.uiMode))
+        }
         // Windowed lists report what they show; the server moves the window.
         renderer.setViewportReporter { listId, start, end -> engine.setListViewport(listId, start, end) }
         scope.launch {

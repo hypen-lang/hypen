@@ -1,0 +1,95 @@
+{
+  "description": "Theme token resolution shared by every SDK's Theme: the active scheme's overrides are deep-merged over the base tokens, then whole-string \"{path}\" aliases are resolved against the merged set. `preference` is a scheme name or \"system\"; `system` is what the platform reports. `expected.problems` is the number of alias problems reported (missing target or cycle); a problematic alias is left as written.",
+  "cases": [
+    {
+      "name": "system preference resolves to the system scheme",
+      "tokens": { "color": { "surface": "#ffffff", "ink": "#111111" }, "space": { "md": 16 } },
+      "schemes": { "dark": { "color": { "surface": "#111111" } } },
+      "preference": "system",
+      "system": "dark",
+      "expected": {
+        "scheme": "dark",
+        "tokens": { "color": { "surface": "#111111", "ink": "#111111" }, "space": { "md": 16 } },
+        "problems": 0
+      }
+    },
+    {
+      "name": "explicit preference wins over the system scheme",
+      "tokens": { "color": { "surface": "#ffffff" } },
+      "schemes": { "dark": { "color": { "surface": "#111111" } }, "sepia": { "color": { "surface": "#f4ecd8" } } },
+      "preference": "sepia",
+      "system": "dark",
+      "expected": { "scheme": "sepia", "tokens": { "color": { "surface": "#f4ecd8" } }, "problems": 0 }
+    },
+    {
+      "name": "a scheme without overrides uses the base tokens",
+      "tokens": { "color": { "surface": "#ffffff" }, "on": true },
+      "schemes": { "dark": { "color": { "surface": "#111111" } } },
+      "preference": "light",
+      "system": "dark",
+      "expected": { "scheme": "light", "tokens": { "color": { "surface": "#ffffff" }, "on": true }, "problems": 0 }
+    },
+    {
+      "name": "aliases resolve after the scheme merge",
+      "tokens": { "color": { "brand": "#0066ff", "primary": "{color.brand}" } },
+      "schemes": { "dark": { "color": { "brand": "#66a3ff" } } },
+      "preference": "dark",
+      "system": "light",
+      "expected": {
+        "scheme": "dark",
+        "tokens": { "color": { "brand": "#66a3ff", "primary": "#66a3ff" } },
+        "problems": 0
+      }
+    },
+    {
+      "name": "aliases chain, keep their type, and can point at a group",
+      "tokens": {
+        "a": 4,
+        "b": "{a}",
+        "c": "{b}",
+        "flag": false,
+        "f": "{flag}",
+        "group": { "x": 1, "y": "{a}" },
+        "same": "{group}",
+        "text": "not {a} alias"
+      },
+      "schemes": {},
+      "preference": "system",
+      "system": "light",
+      "expected": {
+        "scheme": "light",
+        "tokens": {
+          "a": 4,
+          "b": 4,
+          "c": 4,
+          "flag": false,
+          "f": false,
+          "group": { "x": 1, "y": 4 },
+          "same": { "x": 1, "y": 4 },
+          "text": "not {a} alias"
+        },
+        "problems": 0
+      }
+    },
+    {
+      "name": "missing and cyclic aliases are reported and left as written",
+      "tokens": { "a": "{b}", "b": "{a}", "c": "{nope}", "self": { "inner": "{self}" }, "ok": "{d}", "d": 1 },
+      "schemes": {},
+      "preference": "light",
+      "system": "light",
+      "expected": {
+        "scheme": "light",
+        "tokens": { "a": "{b}", "b": "{a}", "c": "{nope}", "self": { "inner": "{self}" }, "ok": 1, "d": 1 },
+        "problems": 4
+      }
+    },
+    {
+      "name": "a scheme override replaces a leaf with a group and a group with a leaf",
+      "tokens": { "shadow": "none", "border": { "width": 1 } },
+      "schemes": { "dark": { "shadow": { "blur": 8 }, "border": 0 } },
+      "preference": "dark",
+      "system": "light",
+      "expected": { "scheme": "dark", "tokens": { "shadow": { "blur": 8 }, "border": 0 }, "problems": 0 }
+    }
+  ]
+}

@@ -33,6 +33,7 @@ import type {
 import { HypenModuleInstance, HypenApp as HypenAppClass } from "../app.js";
 import { HypenGlobalContext } from "../context.js";
 import type { I18n } from "../i18n.js";
+import type { Theme } from "../theme.js";
 import { HypenRouter } from "../router.js";
 import { ManagedRouter } from "../managed-router.js";
 import type {
@@ -98,6 +99,11 @@ function parseViewport(
   if (!ok(start) || !ok(end)) return null;
   return { listId, start: Math.min(start, U32_MAX), end: Math.min(end, U32_MAX) };
 }
+/** A client-reported system color scheme, or `undefined` for anything else. */
+function parseColorScheme(value: unknown): "light" | "dark" | undefined {
+  return value === "light" || value === "dark" ? value : undefined;
+}
+
 /** Upper bound on how long the router → `state.location` mirror waits for
  *  the target module to activate before rendering the route anyway. */
 const LOCATION_MIRROR_WAIT_MS = 250;
@@ -215,6 +221,12 @@ export interface SessionHost {
    * data sources; handlers reach the fork as `context.i18n`.
    */
   readonly i18n?: I18n | null;
+  /**
+   * The app's theme. Each session forks it (own scheme preference, shared
+   * tokens) and publishes it to its engine as the `theme` / `appearance`
+   * data sources; handlers reach the fork as `context.theme`.
+   */
+  readonly theme?: Theme | null;
   readonly discoveredComponents: Map<
     string,
     { template: string; module?: HypenModuleDefinition<any> }
@@ -445,6 +457,10 @@ export class RemoteSession {
   private readonly _globalContext = new HypenGlobalContext();
   /** This session's i18n instance (a fork of `host.i18n`), if the host has one. */
   private _i18n: I18n | null = null;
+  /** This session's theme (a fork of `host.theme`), if the host has one. */
+  private _theme: Theme | null = null;
+  /** The system color scheme this client last reported, if any. */
+  private _clientColorScheme: "light" | "dark" | undefined;
   /**
    * True once the hello handshake, primary-module construction and the
    * initial render have all completed — the point at which the engine's
@@ -989,7 +1005,8 @@ export class RemoteSession {
               ? hello.props
               : undefined,
             this.negotiateDevice(hello.device, text),
-            typeof hello.resumeToken === "string" ? hello.resumeToken : undefined
+            typeof hello.resumeToken === "string" ? hello.resumeToken : undefined,
+            parseColorScheme(hello.colorScheme)
           );
           break;
         }
@@ -1046,6 +1063,19 @@ export class RemoteSession {
           } finally {
             this._viewportRender = false;
           }
+          break;
+        }
+
+        case "colorScheme": {
+          // Per client, like `viewport`: only this session's theme hears
+          // it. The theme republishes in a microtask and the change streams
+          // out as ordinary `patch` messages; an explicit preference makes
+          // it a no-op until the session goes back to "system".
+          if (!this._helloReceived) break;
+          const scheme = parseColorScheme((msg as { scheme?: unknown }).scheme);
+          if (!scheme) break; // malformed: ignored
+          this._clientColorScheme = scheme;
+          this._theme?.setSystemScheme(scheme);
           break;
         }
 
@@ -1429,6 +1459,7 @@ export class RemoteSession {
       modules,
       ...(tree ? { tree } : {}),
       ...(this._i18n ? { locale: this._i18n.locale } : {}),
+      ...(this._theme ? { scheme: this._theme.preference } : {}),
       ...(this._sessionId && this.host.sessionManager.requiresResumeToken(this._sessionId)
         ? { device: true as const }
         : {}),
@@ -1697,7 +1728,8 @@ export class RemoteSession {
     requestedSessionId: string | undefined,
     props: Record<string, any> | undefined,
     deviceAck?: DeviceAck,
-    resumeToken?: string
+    resumeToken?: string,
+    colorScheme?: "light" | "dark"
   ): Promise<void> {
     if (this._helloReceived || this._destroyed) return;
     // `deviceAck` is the handshake selection (RFC 001 §2.2), negotiated
@@ -1814,6 +1846,21 @@ export class RemoteSession {
       i18n.attach(this.engine);
       // A locale switch is session state the durable snapshot must carry.
       i18n.onChange(() => this.markSnapshotDirty());
+    }
+
+    // Theme: same shape as i18n — a per-session scheme preference over the
+    // host's shared tokens, published before the first render and restored
+    // from the snapshot.
+    if (this.host.theme && !this._theme) {
+      const theme = this.host.theme.fork(snapshot?.scheme);
+      // The client's system scheme (hello, or a `colorScheme` message that
+      // raced session setup) applies before the first publish.
+      const system = this._clientColorScheme ?? colorScheme;
+      if (system) theme.setSystemScheme(system);
+      this._theme = theme;
+      this._globalContext.setTheme(theme);
+      theme.attach(this.engine);
+      theme.onChange(() => this.markSnapshotDirty());
     }
 
     // The broker is built before the ack is sent: `device` is only

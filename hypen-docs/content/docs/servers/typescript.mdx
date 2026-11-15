@@ -775,6 +775,26 @@ events.emit("user:login", { userId: "1", email: "alice@example.com" });
 
 Today the runtime emits only `error` (when a handler throws and `onError` does not handle it). The others are reserved names; for route changes use `router.onNavigate()`.
 
+## Theming
+
+Register the app's theme on the server. Every session gets its own fork: its own scheme preference over the shared tokens, following that client's system scheme and kept across a resume.
+
+```typescript
+import { createTheme } from "@hypen-space/core";
+
+const theme = createTheme({
+  tokens: { color: { surface: "#ffffff", ink: "#111111" } },
+  schemes: { dark: { color: { surface: "#111111", ink: "#f5f5f5" } } },
+});
+
+new RemoteServer().module("App", appModule).theme(theme).listen(3000);
+
+// In a handler
+.onAction("toggleTheme", ({ context }) => context.theme?.toggle())
+```
+
+See the [Theming guide](/docs/guide/theming) for tokens, schemes, aliases and the theme file.
+
 ## Logging
 
 Configure logging for debugging:

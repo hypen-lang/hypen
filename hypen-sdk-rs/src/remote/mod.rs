@@ -240,5 +240,5 @@ mod types;
 
 pub use agent::{AgentHandle, OutboundSink, SessionRegistry};
 pub use session::{ModuleSessionConfig, RemoteSession, SessionConfig};
-pub use session_manager::{SessionInfo, SessionManager, SessionManagerConfig};
+pub use session_manager::{PendingSession, SessionInfo, SessionManager, SessionManagerConfig};
 pub use types::*;

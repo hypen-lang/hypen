@@ -11,10 +11,13 @@ private typealias FFIComponentDef = HypenEngineComponentDef
 ///
 /// Handles type conversion between UniFFI types (`HypenEngine.Patch`, etc.)
 /// and the server's own wire-format types (`HypenServer.Patch`).
-public final class NativeEngine: @unchecked Sendable {
+public final class NativeEngine: @unchecked Sendable, ContextEngine {
     private let engine: FFIEngine
     private let lock = NSLock()
     private var actionHandlers: [String: (String, Any?) -> Void] = [:]
+    /// Receivers of the patches a context change produces (see
+    /// `onContextPatches`). Guarded by `lock`.
+    private var contextPatchListeners: [(id: UUID, callback: ([[String: Any]]) -> Void)] = []
     private let log = HypenLoggers.module
 
     public init() throws {
@@ -107,6 +110,77 @@ public final class NativeEngine: @unchecked Sendable {
         }
         let nativePatches = try engine.updateState(scope: scope, stateJson: json)
         return nativePatches.map { Self.convertPatch($0) }
+    }
+
+    // MARK: - Data-source contexts
+
+    /// Set (or replace) the data-source context `name` — what templates read
+    /// as `@<name>.path` / `@{<name>.path}` — and re-render the nodes bound
+    /// to it.
+    ///
+    /// The resulting patches are returned and also handed to every
+    /// `onContextPatches` listener, so a host that streams patches (e.g.
+    /// `RemoteSession`) delivers them the same way it delivers the patches
+    /// of a state update. Unchanged data produces no patches.
+    ///
+    /// - Throws: `NativeEngineError.stateSerializationFailed` when `data` is
+    ///   not JSON-compatible, or the engine's error when it refuses the call.
+    @discardableResult
+    public func setContext(_ name: String, data: [String: Any]) throws -> [[String: Any]] {
+        // `isValidJSONObject` first: on Darwin `data(withJSONObject:)` raises
+        // an Objective-C exception (not a Swift error) for a value that is
+        // not JSON-compatible, which `try` cannot catch.
+        guard JSONSerialization.isValidJSONObject(data) else {
+            throw NativeEngineError.stateSerializationFailed("Context '\(name)' is not JSON-compatible")
+        }
+        let encoded = try JSONSerialization.data(withJSONObject: data)
+        guard let json = String(data: encoded, encoding: .utf8) else {
+            throw NativeEngineError.stateSerializationFailed("Failed to encode context '\(name)' as UTF-8")
+        }
+        let nativePatches = try engine.setContext(name: name, dataJson: json)
+        let patches = nativePatches.map { Self.convertPatch($0) }
+        deliverContextPatches(patches)
+        return patches
+    }
+
+    /// Remove the data-source context `name` and re-render the nodes bound
+    /// to it. Patches are returned and handed to the `onContextPatches`
+    /// listeners, as with `setContext`. Removing an unknown context is a
+    /// no-op.
+    @discardableResult
+    public func removeContext(_ name: String) throws -> [[String: Any]] {
+        let nativePatches = try engine.removeContext(name: name)
+        let patches = nativePatches.map { Self.convertPatch($0) }
+        deliverContextPatches(patches)
+        return patches
+    }
+
+    /// Receive the patches every `setContext` / `removeContext` call
+    /// produces (never an empty batch). Returns a closure that stops the
+    /// delivery.
+    ///
+    /// The callback runs on the thread that changed the context, after the
+    /// native call has returned and with no lock of this class held.
+    @discardableResult
+    public func onContextPatches(_ callback: @escaping ([[String: Any]]) -> Void) -> () -> Void {
+        let id = UUID()
+        lock.lock()
+        contextPatchListeners.append((id: id, callback: callback))
+        lock.unlock()
+        return { [weak self] in
+            guard let self = self else { return }
+            self.lock.lock()
+            self.contextPatchListeners.removeAll { $0.id == id }
+            self.lock.unlock()
+        }
+    }
+
+    private func deliverContextPatches(_ patches: [[String: Any]]) {
+        if patches.isEmpty { return }
+        lock.lock()
+        let callbacks = contextPatchListeners.map { $0.callback }
+        lock.unlock()
+        for callback in callbacks { callback(patches) }
     }
 
     // MARK: - List virtualization

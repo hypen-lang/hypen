@@ -98,10 +98,28 @@ data class HelloMessage(
      * that session. A secret: omitted from [toString], never logged.
      */
     val resumeToken: String? = null,
+    /**
+     * The client's system color scheme, `"light"` or `"dark"`, which a
+     * server-side theme follows while its preference is "system". Null is
+     * omitted from the wire; servers that predate it ignore the field.
+     */
+    val colorScheme: String? = null,
 ) : RemoteMessage {
     override fun toString(): String =
-        "HelloMessage(type=$type, sessionId=$sessionId, props=$props, device=$device, resumeToken=${if (resumeToken != null) "<redacted>" else "null"})"
+        "HelloMessage(type=$type, sessionId=$sessionId, props=$props, device=$device, " +
+            "resumeToken=${if (resumeToken != null) "<redacted>" else "null"}, colorScheme=$colorScheme)"
 }
+
+/**
+ * Client -> server report that the system color scheme changed while
+ * connected ([scheme] is `"light"` or `"dark"`). The initial value travels in
+ * [HelloMessage.colorScheme]. Per client; never an action.
+ */
+@JsonClass(generateAdapter = true)
+data class ColorSchemeMessage(
+    @Json(name = "type") override val type: String = "colorScheme",
+    val scheme: String,
+) : RemoteMessage
 
 /**
  * Message sent by the server to confirm session establishment.

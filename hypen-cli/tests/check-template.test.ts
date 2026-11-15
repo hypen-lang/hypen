@@ -10,6 +10,7 @@ import {
   detectModuleLanguage,
   detectTemplateRuleDrift,
   evaluateTemplate,
+  themeFileFindings,
   EXPECTED_CHECK_RULES,
   findSingleFileComponentNames,
   formatSkipNotes,
@@ -20,6 +21,7 @@ import {
   type TemplateCheckInput,
 } from "../src/check-template.js";
 import { COULD_NOT_CHECK } from "../src/check.js";
+import { resolveAllSchemes } from "../src/theme.js";
 import { EXPECTED_TEMPLATE_CHECK_RULES } from "../../hypen-web/packages/core/src/template-refs.js";
 
 function ref(partial: Partial<TemplateRef> & Pick<TemplateRef, "kind" | "name">): TemplateRef {
@@ -274,6 +276,59 @@ describe("evaluateTemplate: suppression", () => {
   });
 });
 
+describe("evaluateTemplate: unknown-theme-token", () => {
+  const theme = resolveAllSchemes({
+    tokens: { color: { primary: "#06f", surface: "#fff" }, space: { md: 16 } },
+    schemes: { dark: { color: { surface: "#111" }, glow: "#fff" } },
+  });
+  const themeRef = (path: string, extra: Partial<TemplateRef> = {}) =>
+    ref({ kind: "dataSource", name: `theme.${path}`, root: "theme", path: path.split("."), ...extra });
+
+  test("flags a token no scheme defines, with a spelling suggestion", () => {
+    const { findings } = run(
+      ({ report: report([themeRef("color.primary"), themeRef("color.primry"), themeRef("space")]), theme }),
+    );
+    expect(findings.map((f) => f.rule)).toEqual(["unknown-theme-token"]);
+    expect(findings[0]!.message).toContain("@theme.color.primry is not defined");
+    expect(findings[0]!.message).toContain("did you mean @theme.color.primary?");
+  });
+
+  test("flags a token only some schemes define", () => {
+    const { findings } = run(({ report: report([themeRef("glow")]), theme }));
+    expect(findings[0]!.message).toContain("defined only for dark");
+    expect(findings[0]!.message).toContain("empty in light");
+  });
+
+  test("is silent without a theme file, for other providers, and when suppressed", () => {
+    const refs = [themeRef("color.nope")];
+    expect(run(({ report: report(refs) })).findings).toEqual([]);
+    const other = ref({ kind: "dataSource", name: "firebase.nope", root: "firebase", path: ["nope"] });
+    expect(run(({ report: report([other]), theme })).findings).toEqual([]);
+    const ignored = run(
+      ({ report: report([themeRef("color.nope", { ignoreRules: ["unknown-theme-token"] })]), theme }),
+    );
+    expect(ignored).toEqual({ findings: [], suppressedCount: 1 });
+    const config = run(
+      ({ report: report(refs), theme, ignoreRules: ["unknown-theme-token"] }),
+    );
+    expect(config).toEqual({ findings: [], suppressedCount: 1 });
+  });
+
+  test("themeFileFindings reports each alias problem once, with its schemes", () => {
+    const schemes = resolveAllSchemes({
+      tokens: { a: "{nope}", b: "{c}", c: 1 },
+      schemes: { dark: { c: "{b}" } },
+    });
+    const findings = themeFileFindings(schemes);
+    expect(findings.every((f) => f.rule === "unknown-theme-token" && f.elementType === "theme")).toBe(true);
+    expect(findings.map((f) => f.message)).toEqual([
+      'Token "a" aliases "nope", which is not defined',
+      "Token alias cycle: b -> c -> b (scheme dark)",
+      "Token alias cycle: c -> b -> c (scheme dark)",
+    ]);
+  });
+});
+
 describe("componentsInLoopContext", () => {
   test("loop context flows transitively through instantiation", () => {
     const ctx = componentsInLoopContext([
@@ -315,6 +370,7 @@ describe("rule ids", () => {
       "unknown-action",
       "unknown-component",
       "item-outside-loop",
+      "unknown-theme-token",
       "unknown-ignore-rule",
     ];
     expect([...EXPECTED_CHECK_RULES]).toEqual(ids);

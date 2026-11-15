@@ -62,6 +62,9 @@ pub enum CheckRule {
     UnknownComponent,
     /// `@item…` used where no ForEach/List/Grid can supply a row.
     ItemOutsideLoop,
+    /// `@theme.x.y` naming a token the project's theme file does not define
+    /// (in every scheme, or only in some).
+    UnknownThemeToken,
     /// A `// hypen-check-ignore` directive names a rule id that does not
     /// exist, so that entry suppresses nothing.
     UnknownIgnoreRule,
@@ -74,6 +77,7 @@ pub const ALL_CHECK_RULES: &[CheckRule] = &[
     CheckRule::UnknownAction,
     CheckRule::UnknownComponent,
     CheckRule::ItemOutsideLoop,
+    CheckRule::UnknownThemeToken,
     CheckRule::UnknownIgnoreRule,
 ];
 
@@ -91,6 +95,11 @@ impl CheckRule {
 pub fn all_check_rule_ids() -> Vec<String> {
     ALL_CHECK_RULES.iter().map(|rule| rule.id()).collect()
 }
+
+/// The data-source provider a theme publishes its tokens under
+/// (`@theme.color.primary`). References to it are reported even from inside
+/// expressions, so `unknown-theme-token` can be judged there too.
+pub const THEME_PROVIDER: &str = "theme";
 
 /// The directive token that suppresses template-check findings.
 pub const CHECK_IGNORE_TOKEN: &str = "hypen-check-ignore";
@@ -580,10 +589,14 @@ impl Collector<'_> {
                     let from_expression = !direct.contains(&b.full_path_with_source());
                     // Expression extraction also turns any `ident.path`
                     // (`Math.round`, quoted text) into a data-source binding;
-                    // only a name an enclosing loop declares is meaningful.
+                    // only a name an enclosing loop declares is meaningful —
+                    // and the reserved `theme` provider, whose tokens the
+                    // host can check against the project's theme file.
                     if from_expression
                         && matches!(b.source, BindingSource::DataSource(_))
                         && ctx.frame_for(b).is_none()
+                        && !(b.provider() == Some(THEME_PROVIDER)
+                            && expression_reads(template, &b.full_path_with_source()))
                     {
                         continue;
                     }
@@ -599,6 +612,14 @@ impl Collector<'_> {
             // `"@actions.x"`) — see `parser_value_to_ir`.
             Value::Static(json) => self.static_json(json, ctx, site),
             Value::Resource(_) => {}
+            // The switch itself reads `appearance.scheme`, which the engine
+            // chose rather than the template; its entries are what the
+            // template wrote.
+            Value::SchemeSwitch { .. } => {
+                for entry in value.scheme_entries() {
+                    self.value(entry, ctx, site);
+                }
+            }
         }
     }
 
@@ -734,6 +755,41 @@ fn direct_interpolations(template: &str) -> HashSet<String> {
         .filter_map(|part| part.split_once('}'))
         .map(|(expression, _)| expression.trim().to_string())
         .collect()
+}
+
+/// Whether some `@{…}` expression of `template` reads `reference`
+/// (`theme.color.ink`) as a variable: outside string literals, and not as the
+/// tail of a longer path (`item.theme.color.ink`) or identifier. Dependency
+/// extraction is looser than that — it also yields quoted text and path
+/// suffixes — which is fine for dirtying a node but not for reporting a
+/// reference the template never made.
+fn expression_reads(template: &str, reference: &str) -> bool {
+    template
+        .split("@{")
+        .skip(1)
+        .filter_map(|part| part.split_once('}'))
+        .any(|(expression, _)| {
+            let mut quote: Option<char> = None;
+            let mut prev: Option<char> = None;
+            for (i, c) in expression.char_indices() {
+                match quote {
+                    Some(q) if c == q && prev != Some('\\') => quote = None,
+                    Some(_) => {}
+                    None if c == '\'' || c == '"' => quote = Some(c),
+                    None => {
+                        let standalone = !prev.is_some_and(|p| is_ident_char(p) || p == '.');
+                        if standalone && expression[i..].starts_with(reference) {
+                            let after = expression[i + reference.len()..].chars().next();
+                            if !after.is_some_and(is_ident_char) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+                prev = Some(c);
+            }
+            false
+        })
 }
 
 fn is_ident_char(c: char) -> bool {
@@ -893,6 +949,7 @@ mod tests {
             CheckRule::UnknownAction,
             CheckRule::UnknownComponent,
             CheckRule::ItemOutsideLoop,
+            CheckRule::UnknownThemeToken,
             CheckRule::UnknownIgnoreRule,
         ];
         for rule in every {
@@ -902,6 +959,7 @@ mod tests {
                 | CheckRule::UnknownAction
                 | CheckRule::UnknownComponent
                 | CheckRule::ItemOutsideLoop
+                | CheckRule::UnknownThemeToken
                 | CheckRule::UnknownIgnoreRule => {}
             }
             assert!(ALL_CHECK_RULES.contains(&rule));
@@ -914,9 +972,35 @@ mod tests {
                 "unknown-action",
                 "unknown-component",
                 "item-outside-loop",
+                "unknown-theme-token",
                 "unknown-ignore-rule",
             ]
         );
+    }
+
+    #[test]
+    fn theme_refs_inside_expressions_are_reported_and_located() {
+        let src = "Column {\n    Text(\"@{appearance.scheme == 'dark' ? theme.color.a : theme.color.b}\")\n    Text(\"@{Math.round(state.n)}\")\n}";
+        let r = refs(src);
+        let ds = of_kind(&r, RefKind::DataSource);
+        let names: Vec<&str> = ds.iter().map(|d| d.name.as_str()).collect();
+        assert_eq!(names, ["theme.color.a", "theme.color.b"]);
+        assert!(ds
+            .iter()
+            .all(|d| d.from_expression && d.root.as_deref() == Some("theme")));
+        assert_eq!(ds[0].line, Some(2));
+        assert!(ds[0].col < ds[1].col);
+    }
+
+    #[test]
+    fn quoted_text_and_path_tails_are_not_theme_refs() {
+        let src = "Column {\n    ForEach(items: @state.rows) {\n        Text(\"@{item.theme.name + 'a'}\")\n    }\n    Text(\"@{state.dark ? 'theme.color.a' : \\\"theme.b\\\"}\")\n    Text(\"@{state.user.theme.color == 'x' ? theme.color.ok : 2}\")\n}";
+        let r = refs(src);
+        let names: Vec<&str> = of_kind(&r, RefKind::DataSource)
+            .iter()
+            .map(|d| d.name.as_str())
+            .collect();
+        assert_eq!(names, ["theme.color.ok"]);
     }
 
     #[test]

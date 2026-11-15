@@ -32,6 +32,12 @@ impl Default for SessionManagerConfig {
 pub struct PendingSession {
     pub info: SessionInfo,
     pub saved_state: serde_json::Value,
+    /// The theme scheme preference the session had when it was suspended
+    /// with [`SessionManager::suspend_session_with_theme`] (`None`
+    /// otherwise). Hand it to
+    /// [`RemoteSession::with_theme_preference`](super::RemoteSession::with_theme_preference)
+    /// when rebuilding the session.
+    pub theme_preference: Option<String>,
 }
 
 /// Manages session lifecycle: create, suspend, resume, expire.
@@ -81,6 +87,7 @@ struct Inner {
 struct PendingEntry {
     info: SessionInfo,
     saved_state: serde_json::Value,
+    theme_preference: Option<String>,
     cancel: Arc<Mutex<bool>>,
 }
 
@@ -151,6 +158,38 @@ impl SessionManager {
     where
         F: FnOnce() + Send + 'static,
     {
+        self.suspend_session_with_theme(id, saved_state, None, on_expire)
+    }
+
+    /// [`suspend_session`](Self::suspend_session), also keeping the
+    /// session's theme scheme preference
+    /// ([`RemoteSession::theme_preference`](super::RemoteSession::theme_preference))
+    /// so that a resumed session comes back in the scheme its user chose:
+    /// [`resume_session`](Self::resume_session) returns it as
+    /// [`PendingSession::theme_preference`]. It is dropped with the rest of
+    /// the suspension when the TTL elapses.
+    ///
+    /// ```rust,ignore
+    /// // On disconnect:
+    /// manager.suspend_session_with_theme(&id, session.get_state(), session.theme_preference(), || {});
+    ///
+    /// // On reconnect:
+    /// if let Some(pending) = manager.resume_session(&id) {
+    ///     let session = RemoteSession::connect(def, components, transport)
+    ///         .with_theme_preference(&app_theme, pending.theme_preference.as_deref());
+    ///     session.fire_reconnect(&pending.info, &pending.saved_state);
+    /// }
+    /// ```
+    pub fn suspend_session_with_theme<F>(
+        &self,
+        id: &str,
+        saved_state: serde_json::Value,
+        theme_preference: Option<String>,
+        on_expire: F,
+    ) -> bool
+    where
+        F: FnOnce() + Send + 'static,
+    {
         let mut inner = self.inner.lock().unwrap();
         let info = match inner.active.remove(id) {
             Some(s) => s,
@@ -161,6 +200,7 @@ impl SessionManager {
         let entry = PendingEntry {
             info: info.clone(),
             saved_state,
+            theme_preference,
             cancel: Arc::clone(&cancel),
         };
         inner.pending.insert(id.to_string(), entry);
@@ -210,6 +250,7 @@ impl SessionManager {
         Some(PendingSession {
             info,
             saved_state: entry.saved_state,
+            theme_preference: entry.theme_preference,
         })
     }
 

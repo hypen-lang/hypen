@@ -520,6 +520,24 @@ let unsub = ctx.on("custom:event") { payload in
 unsub()
 ```
 
+## Theming
+
+```swift
+let theme = createTheme(
+    tokens: ["color": ["surface": "#ffffff", "ink": "#111111"]],
+    schemes: ["dark": ["color": ["surface": "#111111", "ink": "#f5f5f5"]]]
+)
+
+let server = RemoteServer().theme(theme) // one fork per session
+
+// In a handler
+ctx.theme?.toggle()
+```
+
+Each session's fork follows its client's reported system scheme and keeps its preference across a resume. Two differences from the other servers: a scheme switch can arrive as two `patch` messages (one per context), and the theme is not yet available in the primary module's `onCreated`.
+
+See the [Theming guide](/docs/guide/theming) for tokens, schemes, aliases and the theme file.
+
 ## Session Management
 
 ### Session Lifecycle

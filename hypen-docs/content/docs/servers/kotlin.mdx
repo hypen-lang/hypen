@@ -989,6 +989,27 @@ if (NativeEngine.isAvailable()) {
 }
 ```
 
+## Theming
+
+```kotlin
+val theme = createTheme(
+    tokens = mapOf("color" to mapOf("surface" to "#ffffff", "ink" to "#111111")),
+    schemes = mapOf("dark" to mapOf("color" to mapOf("surface" to "#111111", "ink" to "#f5f5f5"))),
+)
+
+val server = HypenServer {
+    module("App", appModule)
+    theme(theme) // one fork per session
+}
+
+// In a handler
+ctx.context?.theme?.toggle()
+```
+
+Each session's fork follows its client's reported system scheme and keeps its preference when the session resumes within its TTL. Outside `HypenServer`, attach a theme with `theme.attach(engine)`.
+
+See the [Theming guide](/docs/guide/theming) for tokens, schemes, aliases and the theme file.
+
 ## Retry Utilities
 
 Built-in retry logic with exponential backoff for network operations:
