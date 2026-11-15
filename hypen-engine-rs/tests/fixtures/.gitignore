@@ -1,0 +1,13 @@
+# Fixture source crates/projects under src/ (see README.md).
+# Lockfiles are committed: each fixture crate is a standalone leaf artifact
+# (own `[workspace]`), overriding hypen-engine-rs/.gitignore's `Cargo.lock`.
+!src/*/Cargo.lock
+
+# Build output (the built .wasm is copied up into this dir and force-added).
+src/*/target/
+src/*/node_modules/
+src/*/dist/
+src/*/bun.lock
+src/go-module/internal/bindings/
+src/go-module/go.sum
+src/go-module/app.wasm

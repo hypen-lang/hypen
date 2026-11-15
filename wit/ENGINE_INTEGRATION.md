@@ -22,8 +22,9 @@ Status: **draft v0.2 — core implemented.** Sibling document to
 > - **Browser:** `BridgedHost` behind the `module-loader-bridged` feature
 >   (`src/module_host/bridged_host.rs`). When the engine itself runs in
 >   wasm32 it cannot embed wasmtime, so module loading is delegated to a
->   JS shim (jco-based) via wasm-bindgen. Proven by
->   `wit-spikes/web-host/src/bridged-test.mjs`: `engine.wasm`'s
+>   JS shim (jco-based) via wasm-bindgen. Proven by the web-host spike's
+>   `bridged-test.mjs` (spike since removed; the JS host and its bridged
+>   test now live in `@hypen-space/module-host`): `engine.wasm`'s
 >   `WasmHostedEngine.dispatchAction("increment")` ×3 reaches the
 >   jco-loaded counter through the bridge and the engine reports
 >   `{count: 3}` — same `ModuleHost` trait, different impl, no embedded
@@ -47,7 +48,7 @@ Status: **draft v0.2 — core implemented.** Sibling document to
 > the state endpoints + dispatch + error envelopes behave correctly.
 >
 > **Cross-language authoring proven across three languages**
-> (Rust, TypeScript, Go — `wit-spikes/{stub,ts,go}-module/`). The same
+> (Rust, TypeScript, Go — `hypen-engine-rs/tests/fixtures/src/{stub,ts,go}-module/`). The same
 > `hypen-runtime` binary loads counter modules written in each language;
 > they produce the identical `{count, history}` state shape because the
 > WIT contract is the unit of language-agnosticity, not the SDK.
@@ -86,7 +87,7 @@ Status: **draft v0.2 — core implemented.** Sibling document to
 > across all three languages (the Rust/TS/Go fixtures each export it) plus
 > `runtime_discovers_actions_from_module` and `actions_flag_overrides_discovery`
 > in `tests/test_hypen_runtime.rs`, and through the bridge in
-> `wit-spikes/web-host/src/bridged-test.mjs` (which passes `null` for
+> the web-host spike's `bridged-test.mjs` (which passes `null` for
 > actions and lets discovery run).
 >
 > What's *not* yet built: `Effect::Delay`, the network registry,
@@ -713,8 +714,8 @@ class JsModuleHost {
 window.__hypenModuleHost = new JsModuleHost();
 ```
 
-Same shape as `wit-spikes/web-host/src/run.mjs`, just with a stable bridge
-contract.
+Same shape as the (since removed) web-host spike's `run.mjs`, just with a stable
+bridge contract; the productionized version is `@hypen-space/module-host`.
 
 ## Hot reload
 
@@ -800,7 +801,8 @@ capability scoping is enforced.
 **v1.2 — web, ~4 weeks**
 - `BridgedHost` impl bridging `ModuleHost` calls to JS
 - JS-side `JsModuleHost` class in `hypen-web/packages/web-engine`
-- Capability impls in JS (productionize `wit-spikes/web-host`,
+- Capability impls in JS (productionize the web-host spike — done as
+  `@hypen-space/module-host`;
   IndexedDB instead of localStorage)
 - Service worker integration for offline asset caching of bundled
   modules

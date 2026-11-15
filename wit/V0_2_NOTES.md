@@ -155,7 +155,7 @@ default `component-model-async` feature), so the draft above was promoted:
   46). (2) the blob triple collapsed into a `blob-bucket` with `stream<u8>`
   get/put; hosts stub it while the wasmtime stream APIs mature. `effect`
   keeps `delay`/`navigate`/`log` for determinism + zero-import portability.
-- **Reference module** — `wit-spikes/async-module` (Rust, wit-bindgen 0.57,
+- **Reference module** — `hypen-engine-rs/tests/fixtures/src/async-module` (Rust, wit-bindgen 0.57,
   plain `cargo build --target wasm32-wasip2`): async `init` awaits a storage
   warm-start read; `dispatch` awaits set + read-back; cloud CAS, cross-module
   read, and `subscribe` from `on-activated` are all awaited inline.
@@ -173,11 +173,51 @@ default `component-model-async` feature), so the draft above was promoted:
   gate awaited reads, a runaway async dispatch still traps on the epoch
   deadline.
 
-The gate smoke test is now instrumented too (checklist step 4):
-`wit-spikes/async-gate-ts` + `hypen-engine-rs/tests/test_async_gate_ts.rs`,
-behavioral (drives the componentized JS module on `WasmtimeHostAsync` under a
-deadline, so a syncified-export hang also fails). First verdict (2026-07-04,
-jco 1.24.6): **gate closed at componentize** — the spidermonkey-embedding-
-splicer hits a `todo!()` (`bindgen.rs:713: not yet implemented`) on the async
-world. Only the TS cutover itself (step 5) remains, and it stays blocked
-until a jco release turns that test green.
+### componentize-js async gate (checklist step 4)
+
+**What it checks.** Whether `jco componentize` (componentize-js /
+StarlingMonkey) can build a JS module against the CM-async
+`/wit-v0_2` `module` world such that an `async` export that `await`s a
+*custom* async host import completes. That is the capability
+componentize-js has historically lacked: it can await built-in `wasi:http`
+but not bind a custom async import, and it syncifies exports. The gate is
+**behavioral**: componentize succeeding is not enough, because a
+syncified export can still hang at the sync-lowered import, so the built
+component must be driven on `WasmtimeHostAsync` under a hard deadline.
+Green = start the TS cutover (step 5: drop `--disable http` in
+`hypen-cli/src/build-wasm.ts`, enable async-export codegen); red = do not
+flip.
+
+**Last verdict: CLOSED.** 2026-07-04, jco 1.24.6: `jco componentize`
+panics before codegen with `spidermonkey-embedding-splicer/src/bindgen.rs:713:
+not yet implemented` (a `todo!()` hit while splicing bindings for the
+`async func` world). Watch that file upstream. Only the TS cutover itself
+(step 5) remains, and it stays blocked until a jco release passes.
+
+**How to re-test.** The gate module (formerly the `async-gate-ts` spike) and its
+runner (`hypen-engine-rs/tests/test_async_gate_ts.rs`, `HYPEN_WASM_E2E=1`)
+were removed from the repo with the rest of the spikes; recreate them from
+git history (the commit that removed the WIT spikes directory) or from this
+recipe:
+
+1. A single-file `module.mjs` implementing the v0.2 `module` world: import
+   `{ Bucket } from "hypen:storage/local@0.2.0"`; `async init` does
+   `await Bucket.open("persistent", "gate")` + `await bucket.get("count")`
+   (default `{"count":0}`); `async dispatch` for `increment` computes
+   `count + 1`, then `await bucket.set("count", …)` and returns the
+   `await bucket.get("count")` echo as `state`; `onActivated` /
+   `onDeactivated` return `{ state: undefined, effects: [], emit: [] }`;
+   `onDestroyed` is empty; sync `actions()` returns `["increment"]`.
+2. Build with the latest jco (`bun add -d @bytecodealliance/jco@latest`):
+   `jco componentize module.mjs --wit <repo>/wit-v0_2 --world-name module
+   -o async_gate.wasm --disable clocks --disable random --disable http`
+   (do NOT prune the storage imports, they are the object under test).
+   A componentize failure is itself a "closed" verdict.
+3. Drive it natively (`--features module-loader`): `WasmtimeHostAsync`
+   with `ModuleLimits { max_call: 60s, .. }`, `register("gate", …,
+   ModuleManifest::all("gate"))`, `instantiate`, `init(b"{}")`, then
+   `dispatch(increment)`; open only if the returned state is `{"count":1}`.
+   Failing at register/instantiate/init/dispatch, or hitting the deadline,
+   means closed.
+
+Append each run to the verdict above (date, jco version, where it died).

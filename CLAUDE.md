@@ -27,7 +27,6 @@ hypen-engine-rs/
 ├── hypen-golang/                # Go implementation (module system)
 ├── hypen-lsp/                   # Language Server Protocol implementation
 ├── wit/, wit-v0_2/              # `hypen:module` WIT contract (v0.1 sync, v0.2 CM-async) + WASM module hosting docs
-├── wit-spikes/                  # Reference modules / host harnesses for the WIT contract (source of the engine's .wasm test fixtures)
 ├── tailwind-parse/              # Tailwind CSS class parser (Rust)
 ├── component-gallery-server/    # Component gallery & screenshot testing
 ├── engine-compatibility-tests/  # Cross-SDK compatibility test suite

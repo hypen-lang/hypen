@@ -8,8 +8,8 @@
 //! just speaks the trait.
 //!
 //! The contract the JS shim must satisfy is documented in the
-//! `extern "C"` block below. A reference implementation is in
-//! `wit-spikes/web-host/src/bridged-shim.mjs`.
+//! `extern "C"` block below. The reference implementation is the
+//! `@hypen-space/module-host` package (`hypen-web/packages/module-host`).
 //!
 //! Capability grants ride on the manifest wire object passed to
 //! `register` (see [`ManifestWire`]): `storage` lists the granted

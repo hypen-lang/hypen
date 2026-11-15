@@ -56,8 +56,8 @@ Elm-style effect descriptors (navigate/delay) — see `wit/hypen-module.wit`.
 - JS-bridged subscribe on `BridgedHost` — native path fully tested, and the wasm32
   build is now UNBLOCKED (the old `getrandom` toolchain issue no longer reproduces
   post-wasmtime-46 dep moves): `wasm-pack build --target nodejs --out-dir pkg-bridged
-  --dev -- --features module-loader-bridged` builds, and `wit-spikes/web-host`'s
-  `node src/bridged-test.mjs` passes end-to-end (engine.wasm → BridgedHost →
+  --dev -- --features module-loader-bridged` builds, and the web-host spike's
+  `node src/bridged-test.mjs` (spike since removed; ported into `@hypen-space/module-host`) passes end-to-end (engine.wasm → BridgedHost →
   JsModuleHost). The browser JS host now lives as a **standalone library** —
   `@hypen-space/module-host` (`hypen-web/packages/module-host`, TS, 33 unit tests):
   cross-module `read`/`dispatch`/`subscribe` with native-parity per-call ACLs, a
@@ -133,20 +133,19 @@ This is the forward path. Do it **in order**, only starting the TS cutover when 
    engine/state @0.2.0; blobs collapsed to `stream<u8>` blob-buckets; wasi:http deliberately
    NOT in the world — modules will use `wasi:http/client@0.3.0` host-side when wasmtime's p3
    http stabilizes). `@0.1.0` stays the default world. See `V0_2_NOTES.md` §5 addendum.
-3. ~~**Prove with a Rust reference module**~~ — **DONE.** `wit-spikes/async-module` +
+3. ~~**Prove with a Rust reference module**~~ — **DONE.** `hypen-engine-rs/tests/fixtures/src/async-module` +
    `WasmtimeHostAsync` (`module_host/wasmtime_host_async.rs`) + `test_module_host_async`
    (8/8): async exports awaiting custom async host imports (storage/CAS/cross-module),
    delta lands post-suspension in the unchanged `reducer-output` shape, ACLs + link-time
    denial + epoch timeout all hold. Sync host + fixtures untouched.
 4. ~~**Instrument the gate**~~ — **DONE (and the gate is CLOSED).**
-   `wit-spikes/async-gate-ts` + `test_async_gate_ts` (E2E-gated): componentizes a JS module
+   A JS gate module + `test_async_gate_ts` (E2E-gated; both since removed from the repo): componentizes a JS module
    whose async exports `await` a custom async host import against `wit-v0_2`, then drives it
    on `WasmtimeHostAsync` under a deadline — behavioral, so a syncified-export hang also
    fails. First run (2026-07-04, jco 1.24.6): **closed at componentize** —
    `spidermonkey-embedding-splicer/src/bindgen.rs:713: not yet implemented` (`todo!()` on the
-   async world). Re-run per jco release:
-   `HYPEN_WASM_E2E=1 cargo test --features module-loader --test test_async_gate_ts`.
-   Verdict log in the spike's README.
+   async world). Re-run per jco release using the recipe and verdict log in
+   `V0_2_NOTES.md` §5 ("componentize-js async gate").
 5. **Flip TS** — only when (4) passes: in `build-wasm.ts` drop `--disable http`, enable
    async-export codegen, keep `--world-name module-x`; verify the real import list with
    `wasm-tools` (StarlingMonkey injects extra imports). The `onAction(async …)` body compiles
@@ -181,7 +180,7 @@ HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts   # real jco/tinygo/cargo bui
   `cargo clean` frees the ~20 GB deps cache before a wasmtime version change; heavy parallel
   worktree builds are infeasible.
 - **`.wasm` test fixtures are gitignored** — `git add -f` them (see `hypen-engine-rs/tests/fixtures/README.md`
-  for the source dirs under `wit-spikes/` and the rebuild commands).
+  for the source dirs under `tests/fixtures/src/` and the rebuild commands).
 - **jco / tinygo / cargo-wasm builds** are `HYPEN_WASM_E2E=1`-gated and often absent in
   sandboxes; codegen + detection are unit-tested without them.
 - **wasm32 host build** (`module-loader-bridged`) — previously hit a transitive
@@ -198,5 +197,5 @@ HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts   # real jco/tinygo/cargo bui
 | Browser host (JS-delegated) | `hypen-engine-rs/src/module_host/bridged_host.rs` |
 | `ModuleHost` trait, effects, subscribe | `hypen-engine-rs/src/module_host/mod.rs`, `src/engine.rs` |
 | WIT contract | `wit/hypen-module.wit`, `wit/deps/` (vendored into `hypen-cli/wit{,-tinygo}/`) |
-| Module fixtures | `wit-spikes/*`, `hypen-engine-rs/tests/fixtures/` |
+| Module fixtures | `hypen-engine-rs/tests/fixtures/` (sources in `tests/fixtures/src/`) |
 | Design + status | `wit/AUTHORING_MODEL.md`, `wit/V0_2_NOTES.md`, `wit/WASMTIME_46_MIGRATION.md` |

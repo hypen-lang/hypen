@@ -102,7 +102,8 @@ hypen build --target wasm         # portable target: module.wasm + ui assets
   shape* selected by `--target` — the same pattern as `GOOS`/`--target`
   elsewhere.
 - `--target wasm` runs the per-language componentize pipeline
-  (cargo+wit-bindgen / jco / tinygo, per the `wit-spikes/*` READMEs) for
+  (cargo+wit-bindgen / jco / tinygo; the per-language build commands are in
+  `hypen-engine-rs/tests/fixtures/README.md`) for
   the logic, and emits the `.hypen` UI as a sibling asset.
 - Leaves room for future targets (`--target cf`, `--target ios`) without
   more nouns.
@@ -173,7 +174,7 @@ Go components come in two shapes, auto-detected by package declaration:
   `ObservableState` rebuilt from the incoming JSON, and the snapshot is
   serialized back — identical behavior to a normal (RemoteServer) Go module.
 - **wit-mode (advanced)** — `package main` implementing the `hypen:module`
-  exports directly (the `wit-spikes/go-module` shape); built as-is.
+  exports directly (the shape of the `hypen-engine-rs/tests/fixtures/src/go-module` fixture); built as-is.
 
 **The parity this required.** `github.com/hypen-lang/hypen/hypen-golang` embeds a wazero
 WASM runtime (`wasm_engine.go`/`portable.go`) and `net/http`
@@ -276,7 +277,8 @@ embedded client (`hypen_runtime_client.html`) has a vanilla DOM
 patch-applier that builds the tree from `GET /patches`, wires Button
 clicks (via the `action` prop) to `/dispatch`, and applies each delta in
 place. Proven in a real headless browser by
-`wit-spikes/web-host/scripts/test-serve-ui.mjs`: load → `#app` shows
+the web-host spike's `scripts/test-serve-ui.mjs` (spike since removed from the
+repo): load → `#app` shows
 `Count: 0` (from wasm state), click "+1" → `Count: 1` → `Count: 2`.
 (The embedded applier is a minimal demo renderer; production would use
 the full `@hypen-space/web` DOM renderer, which consumes the same patch
@@ -363,7 +365,7 @@ after each dispatch: **Navigate** surfaces the path in the `/dispatch` response
 the originating scope after `ms` — the Elm-style debounce/retry primitive
 (chained effects from the delayed dispatch are drained too). Verified by
 `navigate_effect_is_surfaced_in_dispatch_response` and
-`delay_effect_reschedules_the_then_action` (fixture `wit-spikes/effects-module`).
+`delay_effect_reschedules_the_then_action` (fixture `hypen-engine-rs/tests/fixtures/src/effects-module`).
 
 ## Cross-module `subscribe` — now implemented
 
@@ -399,11 +401,12 @@ The three couplings the scoping flagged are handled:
 Verified by `cross_module_subscribe_fires_on_sibling_change`,
 `subscriptions_are_dropped_on_rewire`, and
 `on_activated_subscribe_tracks_sibling_without_watch` (fixture
-`wit-spikes/xmod-module`: action `watch` and, equivalently, an `on_activated`
+`hypen-engine-rs/tests/fixtures/src/xmod-module`: action `watch` and, equivalently, an `on_activated`
 that both call `subscribe("counter", "count", "pull")`). The native
 `WasmtimeHost` implements it end-to-end; the browser `BridgedHost` bridges the
 subscribe requests to the JS host (decoding `subscribe_requests` and forwarding
-them on the JS module-host shim, round-tripped in `wit-spikes/web-host`), though
+them on the JS module-host shim, round-tripped in the since-removed web-host spike; the bridged shim now lives in
+`@hypen-space/module-host` (`hypen-web/packages/module-host`)), though
 the wasm32 host build itself is currently blocked by an unrelated toolchain
 issue in a transitive dep.
 
@@ -457,7 +460,7 @@ go: the §5 draft from `V0_2_NOTES.md` is now a real package root at
 `/wit-v0_2` (async reducer/lifecycle exports; async `hypen:storage@0.2.0` +
 `hypen:engine/state@0.2.0`; blobs collapsed to `stream<u8>` blob-buckets;
 wasi:http deliberately left out of the world, same stance as v0.1), and the
-ABI is **proven end-to-end on the native host**: `wit-spikes/async-module`
+ABI is **proven end-to-end on the native host**: `hypen-engine-rs/tests/fixtures/src/async-module`
 (wit-bindgen 0.57, plain `cargo build --target wasm32-wasip2`) awaits
 storage warm-start/set/read-back, cloud CAS, and cross-module read/subscribe
 *inline* in its reducers, and `WasmtimeHostAsync` drives it through
@@ -466,13 +469,14 @@ trait — `test_module_host_async` 8/8, with ACLs, link-time scope denial, and
 the epoch timeout all carried over. The engine's path-diff pipeline is
 untouched: deltas arrive after suspension points in the same
 `reducer-output` shape. **The TS cutover gate is now instrumented and
-CLOSED**: `wit-spikes/async-gate-ts` + the E2E-gated `test_async_gate_ts`
+CLOSED**: a JS gate module + the E2E-gated `test_async_gate_ts` (both since
+removed from the repo; re-test recipe in `V0_2_NOTES.md` §5)
 drive a jco-componentized JS module (async exports awaiting a custom async
 host import) on `WasmtimeHostAsync` under a deadline; the first run
 (jco 1.24.6) died at componentize — the spidermonkey-embedding-splicer hits
 `bindgen.rs:713 todo!()` on async worlds. Re-run per jco release; green
 means flip `build-wasm.ts` (step 5). Full detail: `V0_2_NOTES.md` §5
-addendum + the gate spike's README verdict log.
+addendum ("componentize-js async gate", with the verdict log).
 
 ### Platform hosts: Kotlin/JVM library + Pulley (iOS answer) — landed (2026-07)
 
@@ -592,7 +596,8 @@ Three follow-ups to the async promotion, one commit series:
   reference module's `fetch` action does a live GET (waki) *plus* an awaited
   storage write in one reducer pass — `async_reducer_fetches_over_wasi_http`.
 - **Browser JS host grew native-parity cross-module `read`/`dispatch`**
-  (`wit-spikes/web-host/src/js-module-host.mjs`): a per-call context installs
+  (then the web-host spike's `js-module-host.mjs`, now
+  `hypen-web/packages/module-host/src/js-module-host.ts`): a per-call context installs
   sibling snapshots + manifest ACLs before each dispatch/on-activated and
   drains queued cross-dispatches/subscribes after, replacing the old
   throw-stubs. `subscribe` is now gated on the `reads` grant like the native
@@ -620,7 +625,7 @@ pass the declaration-site args of a `module X(args)` root as JSON config:
 parser AST args into config JSON, emitting integral numbers as ints (`7`, not
 `7.0`) so a `start: 7` arg round-trips as an integer. Verified end-to-end by
 `config_seeds_init_from_module_declaration_args` (fixture
-`wit-spikes/seeded-module`, `init` decodes `config.start` → `{"count":7}`).
+`hypen-engine-rs/tests/fixtures/src/seeded-module`, `init` decodes `config.start` → `{"count":7}`).
 
 The CLI's generated shims complete the story on the authoring side: the TS shim
 (`shimSource`) and Go shim (`goShimSource`) both shallow-merge the incoming
