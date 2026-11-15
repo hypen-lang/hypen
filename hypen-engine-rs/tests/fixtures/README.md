@@ -14,6 +14,8 @@ rebuild it.
 | `limits_module.wasm` | `src/limits-module` (Rust, `/wit` `module`) | `test_module_host.rs` |
 | `mirror_module.wasm` | `src/xmod-module` (Rust, `/wit` `module-x`) | `test_module_host.rs`, `app_acl/` |
 | `fetcher_module.wasm` | `src/fetcher-module` (Rust, `/wit` `module-x` + `wasi:http` via `waki`) | `test_module_host.rs`, `test_uniffi_host.rs`, `test_hypen_runtime.rs` |
+| `deferred_http_module.wasm` | `src/deferred-http-module` (Rust, `/wit` `module-x` + `hypen:http/deferred`) | `test_module_host_http.rs`, `test_hypen_runtime_http.rs` (which copies it into a temp app dir for its `--app` case) |
+| `deferred_http_async_module.wasm` | `src/deferred-http-async-module` (Rust, `/wit-v0_2` CM-async `module-x` + `hypen:http/deferred`) | `test_module_host_http.rs` |
 | `async_counter_module.wasm` | `src/async-module` (Rust, `/wit-v0_2` CM-async `module`) | `test_module_host_async.rs`, `test_hypen_runtime.rs`, `app_async/` |
 | `ts_counter_module.wasm` | `src/ts-module` (JS, `jco componentize`) | `test_hypen_runtime.rs` |
 | `go_counter_module.wasm` | `src/go-module` (Go, TinyGo `wasip2`) | `test_hypen_runtime.rs` |
@@ -72,6 +74,8 @@ git add -f hypen-engine-rs/tests/fixtures/<fixture>.wasm
 | `src/limits-module` | `hypen_limits_module.wasm` | `limits_module.wasm` |
 | `src/xmod-module` | `hypen_xmod_module.wasm` | `mirror_module.wasm` |
 | `src/fetcher-module` | `hypen_fetcher_module.wasm` | `fetcher_module.wasm` |
+| `src/deferred-http-module` | `hypen_deferred_http_module.wasm` | `deferred_http_module.wasm` |
+| `src/deferred-http-async-module` | `hypen_deferred_http_async_module.wasm` | `deferred_http_async_module.wasm` |
 | `src/async-module` | `hypen_async_module.wasm` | `async_counter_module.wasm` |
 
 For example, the counter:
@@ -93,6 +97,22 @@ What each module does:
   (`config_seeds_init_from_module_declaration_args`).
 - **effects-module** — emits engine-native effects (`Navigate`, `Delay`) to
   exercise host effect handling.
+- **deferred-http-module** — queues HTTP requests through
+  `hypen:http/deferred` instead of blocking (`module-x` world; needs the
+  `http` grant, and nothing else). `get` queues one request from its payload
+  (`url`, optional `method` / `headers` / `body` / `timeoutMs` / `tag`) with
+  `then: "fetched"`; `fetched` records the completion (`last`, `log`,
+  `completions`) and, if the `get` named a `next` URL, queues that from the
+  completion handler; `flood` queues `count` requests (the per-call bound);
+  `bad` sends one malformed request per `case`; `init({"probe": url})` tries
+  `send` where nothing can be queued. A refused `send` is recorded in
+  `state.sendError`, so tests read exactly what the guest was told. It is the
+  only fixture that imports the interface — the others predate it and were
+  **not** rebuilt (an import a component does not use is not in its binary).
+- **deferred-http-async-module** — the same capability from a
+  `hypen:module@0.2.0` module, minimal (`get`, `fetched`): `send` is a sync
+  func in the async world too, and the completion reaches an `async`
+  reducer.
 - **limits-module** — deliberately misbehaves to verify the sandbox
   (`module-x` world; imports `hypen:storage/app`, so it needs the `app`
   grant): spins / grows memory (epoch timeout, total-memory cap), `block`

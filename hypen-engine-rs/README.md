@@ -226,6 +226,52 @@ unoptimized.
 
 Neither changes `HostError`; both exist so embedders do not parse messages.
 
+### HTTP
+
+A manifest's `http: true` grants outbound HTTP in both of its forms;
+`httpHosts` (`ModuleManifest::http_hosts`, parsed `HostPattern`s) optionally
+limits it to an allowlist of hosts — `api.example.com`, `*.example.com`,
+either with `:port`; empty = any host.
+
+- **Blocking** — the module imports `wasi:http` and waits inside its
+  reducer. Performed by the host (`wasmtime-wasi-http`), bounded by the
+  per-call deadline. The allowlist is applied to every such request.
+- **Deferred** — the module imports `hypen:http/deferred` and *queues*
+  requests (`ReducerOutput::http_requests`). The engine admits each one and
+  hands it to the embedder's effect handler as `Effect::Http(HttpEffect { id,
+  request, url, grant, then, tag })`; the embedder performs it and calls
+  `Engine::complete_http_request(id, HttpOutcome)`, which runs the module's
+  `then` action with the payload documented in `wit/deps/hypen-http/http.wit`.
+
+```rust
+engine.set_effect_handler(move |scope, effect| {
+    if let Effect::Http(http) = effect {
+        outbox.push(scope.to_string(), http.clone());   // perform it elsewhere, off the engine
+    }
+});
+// … later, from the thread that owns the engine:
+match engine.complete_http_request(id, HttpOutcome::Response(HttpResponse { status, headers, body })) {
+    Ok(HttpDelivery::Delivered) => {}
+    Ok(HttpDelivery::ModuleGone) => {}                    // destroyed / reloaded meanwhile: dropped
+    Err(HttpCompletionError::UnknownRequest(_)) => {}     // never issued, or completed twice
+    Err(HttpCompletionError::Cascade(e)) => {}            // `then` ran and failed; see last_module_cascade_report()
+}
+```
+
+What the embedder owes the contract: connect to `http.url` (the engine's
+parse — do not re-parse `request.url`), honour `request.effective_timeout_ms()`,
+cap the response at `MAX_HTTP_RESPONSE_BODY_BYTES`, follow at most
+`MAX_HTTP_REDIRECTS` redirects and check `http.grant` on every hop, and
+complete every effect exactly once. The engine re-validates each queued
+request whatever the host enforced and keeps at most
+`Engine::module_http_in_flight_limit()` (default 32) in flight per module.
+Refusals are `FailureCause::{HttpNotGranted, HttpDenied { host }, HttpInvalid,
+HttpLimit, HttpUnavailable}` (codes `httpNotGranted`, `httpDenied`,
+`httpInvalid`, `httpLimit`, `httpUnavailable`) in the cascade report of the
+dispatch that queued the request — which still succeeds in applying its
+state — and the module's `then` receives `{ ok: false, error: { kind:
+"denied" } }` for them.
+
 ### Storage
 
 `hypen:storage` key-value buckets are backed by one in-memory store per host,
@@ -241,6 +287,33 @@ next flush. Any other format is refused with an error naming the file.
 `blob-writer` resources of `hypen:storage` exist in the WIT and are linked,
 but every operation answers `unavailable` on the native hosts (v0.1 and
 v0.2). A module that needs large binary values must not depend on them yet.
+
+### `hypen-runtime`: grants and deferred HTTP
+
+Single-module mode grants nothing but private `local` storage unless asked:
+
+| Flag | `app.json` field (per module) | Grants |
+|---|---|---|
+| `--grant-http` | `"http": true` | outbound HTTP: `hypen:http/deferred` and `wasi:http` |
+| `--grant-http-host PATTERN` (repeatable; needs `--grant-http`) | `"httpHosts": ["api.example.com", "*.example.com:8443"]` (needs `"http": true`) | limits `http` to matching hosts; a malformed pattern is a startup error naming the flag / field |
+| `--grant-storage app,cloud` | `"storage": ["app", "cloud"]` | shared storage scopes |
+| `--grant-all` | — | HTTP (any host unless `--grant-http-host` is given) and every storage scope |
+
+The runtime performs deferred requests itself. Under `--serve` they run on up
+to 8 worker threads, off the engine lock, and each completion is dispatched
+like a fired timer: its re-render goes to `GET /events` subscribers, and
+whatever it queues in turn (more requests, delays) is performed too. In the
+REPL they are performed inline, in order, before the next line is read
+(`http: GET <url> -> <scope>:<then>` then the resulting `state:`).
+
+The client is HTTP/1.1 over the hyper, tokio and rustls that `wasi:http`
+already links, with the same bundled Mozilla roots (`webpki-roots`): one
+connection per hop, the request's time budget for the whole exchange
+(default 30 s, max 120 s), responses up to 4 MiB, up to 5 redirects with the
+allowlist re-checked on each hop (a refused hop completes the request as
+`denied`, saying which host), `Authorization` / `Cookie` dropped when a
+redirect leaves the origin. Not supported: HTTP/2, proxies
+(`HTTPS_PROXY` is ignored), response decompression, connection reuse.
 
 ### `hypen-runtime --serve`
 

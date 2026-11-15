@@ -63,7 +63,8 @@ hypen-engine-rs/src/
 │   ├── names.rs              # ScopeName (lowercased, validated once), ActionSet (Named | Wildcard, `accepts`)
 │   ├── registry.rs           # Instance table, ModuleGrants (public) -> Grants (normalized), wire/unwire of the core's routing records
 │   ├── cascade.rs            # Work queue (hosted reducers + in-process handlers reached by cross-dispatch), depth cap + budget, drain loop, the host call (`invoke`)
-│   ├── fold.rs               # Applying one ReducerOutput: state -> subscriptions -> effects -> follow-ups
+│   ├── fold.rs               # Applying one ReducerOutput: state -> subscriptions -> effects -> deferred HTTP requests -> follow-ups
+│   ├── http.rs               # Deferred HTTP (`hypen:http/deferred`): admission of queued requests, the in-flight table (per-wiring), completion -> the module's `then` action
 │   ├── subscriptions.rs      # Cross-module subscriptions, who a change notifies
 │   ├── snapshots.rs          # Encoded-state cache lent to host calls (Weak-identity invalidation)
 │   ├── paths.rs              # Changed-path collection (replace / merge / sparse) + paths_overlap
@@ -72,6 +73,7 @@ hypen-engine-rs/src/
 │
 ├── module_host/              # WASM Component module hosting (`hypen:module`, see /wit/ENGINE_INTEGRATION.md)
 │   ├── mod.rs                # ModuleHost trait + value types (always compiled; `hosted::HostedModules` holds Option<Box<dyn ModuleHost>>) + re-exports
+│   ├── http.rs               # Deferred HTTP value types (always compiled, no deps): HttpRequest/QueuedHttpRequest + bounds, HttpUrl (the one strict parse), HostPattern/HttpGrant (`httpHosts`), HttpOutcome -> completion payload, HttpEffect
 │   ├── registry.rs           # ModuleRegistry / BundledRegistry
 │   ├── kv.rs                 # Storage backend of the wasmtime hosts: ModuleName, per-module `local` partitions, typed entry keys, quotas, per-call flush (module-loader)
 │   ├── wasmtime/             # The native hosts (module-loader, native only): one implementation, generic over the module ABI
@@ -84,6 +86,7 @@ hypen-engine-rs/src/
 │   │   ├── linker.rs         # Capability, import inspection, manifest-gated linker construction
 │   │   ├── storage.rs        # `hypen:storage` bucket operations over KvBackend
 │   │   ├── cross_module.rs   # `hypen:engine/state`: ACL-checked read/dispatch/subscribe, request bounds
+│   │   ├── deferred_http.rs  # `hypen:http/deferred`: per-call request queue (validated + allowlist-checked at `send`); AllowlistHooks applying `httpHosts` to blocking `wasi:http`
 │   │   ├── instances.rs      # Instance table, InstanceSlot::{Live, Dead { reason }}, id tagging
 │   │   ├── error.rs          # Every failure → HostError mapping (module + export + cause)
 │   │   ├── wit_glue.rs       # Generated-type ⇄ neutral-type conversions (one macro, invoked per ABI)
@@ -244,6 +247,8 @@ feature's tests targeted rather than as the whole suite:
 cargo test --features module-loader --lib --test test_module_host --test test_module_host_async
 cargo test --features runtime-bin --bin hypen-runtime          # the runtime's unit tests (fake ModuleHost, no wasm/sockets)
 cargo test --features runtime-bin --test test_hypen_runtime --test test_hypen_runtime_hardening   # build + drive the hypen-runtime binary
+cargo test --features module-loader --test test_module_host_http   # hypen:http/deferred on the native host + through the engine; httpHosts on wasi:http
+cargo test --features runtime-bin --test test_hypen_runtime_http   # deferred HTTP end to end against an in-process HTTP server
 cargo test --features uniffi,module-loader --test test_uniffi_host
 cargo test --test test_module_host_routing   # engine-side routing with a mock host, default features
 cargo test --test test_module_host_cascade   # reducer-output fold (ACLs, cascade queue, state, teardown), mock host
@@ -253,7 +258,8 @@ cargo test --lib hosted::                    # the subsystem without an Engine: 
 Module-host sandbox (one implementation for both ABIs; the model is stated in the
 `module_host/wasmtime/mod.rs` module docs, storage in `kv.rs`):
 - **Link time**: manifests are deny-by-default (`ModuleManifest::all` is the explicit
-  grant-everything constructor). An ungranted storage scope or `wasi:http` is not linked; the
+  grant-everything constructor). An ungranted storage scope, `wasi:http` or `hypen:http/deferred`
+  (both under the manifest's `http`) is not linked; the
   instantiation error names the import and the missing grant. `register` rejects bytes that are
   not a component of the host's world and says which (not wasm / core module / other ABI version
   / unlinkable imports / missing exports).
@@ -299,11 +305,13 @@ unique addressable names, paths confined to the manifest directory, grant target
 the engine and hosted-module table behind one lock; boot, dispatch, crash recovery), `patches`
 (`PatchHub`: tree mirror behind `GET /patches`, capture window that gives each render to exactly
 one of the `/dispatch` response or SSE), `effects` + `timers` (one timer thread, min-heap, 1024
-pending per module), `reload` (`.wasm`/`.hypen` hot reload over the live module table), `server`
+pending per module), `http` (the deferred-HTTP client and its ≤ 8-thread worker pool; a completion
+is dispatched like a fired timer and its effects performed in turn), `reload` (`.wasm`/`.hypen` hot reload over the live module table), `server`
 (`request.rs` is the pure admission policy: loopback `Host`, own-or-`--allow-origin` `Origin`,
 JSON content type, 1 MiB bodies), `repl`, `error` (`RuntimeError` + `render`), `sync` (poisoned
 locks are recovered, not propagated). Single-module mode grants nothing beyond `local` storage
-unless `--grant-http` / `--grant-storage` / `--grant-all` is passed. A module instance that traps
+unless `--grant-http` (narrowed by repeatable `--grant-http-host PATTERN`; app.json `httpHosts`) /
+`--grant-storage` / `--grant-all` is passed. A module instance that traps
 or times out fails that dispatch (`module_crashed`, with the host's death reason) and is
 re-instantiated + re-`init`ed from its original config on the next action. Crashes are detected
 with `instance_status` (fallback for `Unknown` hosts such as the unit tests' fake: the engine's
@@ -380,7 +388,10 @@ fails if the methods leak into it.
 | `dispatchModuleAction(scope, name, payload)` | trusted dispatch (`Engine::dispatch_module_action`) |
 | `hostedModules()` / `isHostedModule(scope)` / `getModuleState(scope)` | introspection; `getModuleState` is the trusted whole-state read (`getStateAt` is the guarded external one) |
 | `lastModuleCascadeReport()` | `CascadeReport::to_json()` or `null` |
-| `setModuleEffectHandler(fn)` | `fn(scope, {type:"navigate",path} \| {type:"delay",ms,then})` |
+| `setModuleEffectHandler(fn)` | `fn(scope, {type:"navigate",path} \| {type:"delay",ms,then} \| {type:"http",id,request:{method,url,headers,body,timeoutMs},then,tag,allowedHosts})` |
+| `completeHttpRequest(id, result)` | complete a deferred HTTP request: `{ok:true,status,headers?,body?}` or `{ok:false,error:{kind,message?}}`; `true` if delivered, `false` if the module is gone; throws `unknownHttpRequest` |
+| `httpRedirectAllowed(id, url)` | the request's allowlist applied to a redirect hop |
+| `moduleHttpInFlightLimit()` / `setModuleHttpInFlightLimit(n)` | per-module cap on deferred requests in flight |
 | `moduleDispatchBudget()` / `setModuleDispatchBudget(n)` | the cascade budget |
 
 Existing methods gained hooks, all behind `#[cfg(feature)]` and a no-hosted-module fast path:
@@ -410,9 +421,51 @@ Folding a reducer output (`dispatch`, `on_activated`, `on_deactivated`) never ro
 `ModuleGrants` given at `register_module_instance`, and follow-ups drain from a FIFO queue bounded
 by `MAX_CASCADE_DEPTH` and `Engine::module_dispatch_budget` (a failed follow-up is collected and
 reported after the queue is empty). The scope's state is replaced wholesale with what the reducer
-returned; the old/new comparison only yields the changed paths to invalidate. Fold order: state
+returned; the old/new comparison only yields the changed paths to invalidate. Deferred HTTP
+requests (below) are admitted between effects and follow-ups. Fold order: state
 (unusable state rejects the whole output) -> requested subscriptions -> effects -> follow-ups
 (`emit`, cross-dispatch, subscriber notifications).
+
+### Deferred HTTP (`hypen:http/deferred`)
+
+A reducer cannot wait, so it queues: `send(request, then, tag)` on the host puts a
+`QueuedHttpRequest` into `ReducerOutput::http_requests`; the fold admits it (`hosted/http.rs`) and
+hands it to the embedder's effect handler as `Effect::Http(HttpEffect)`; the embedder performs it
+and calls `Engine::complete_http_request(id, HttpOutcome)`, which builds the payload documented in
+`wit/deps/hypen-http/http.wit` and runs `then` as a cascade root. Contract docs:
+`wit/README.md`, `wit/AUTHORING_MODEL.md` "HTTP: blocking vs deferred".
+
+- **Grant**: `ModuleManifest::http` is the master switch for both `wasi:http` and the deferred
+  interface (link-time denial, `ManifestGrant::Http`). `http_hosts` (serde `httpHosts`) is a
+  `Vec<HostPattern>` — parsed at deserialization, so a bad pattern fails manifest load; never match
+  host strings by hand. `ModuleManifest::http_grant()` / `ModuleGrants::http` carry it as an
+  `HttpGrant` (`Denied` / `AnyHost` / `Hosts`).
+- **One parser**: `HttpUrl::parse` is the only URL parse; the allowlist is matched against it and
+  embedders connect to it (`HttpEffect::url`), never to a re-parse of the string. The grammar is
+  strict on purpose (ASCII, no userinfo, dotted-quad IPv4 only) so no other parser can disagree.
+- **Three checks**: the host at `send` (guest gets `permission-denied` naming the host), the engine
+  at admission (bridged hosts are not trusted to have checked), the embedder per redirect hop
+  (`HttpEffect::grant`, or `Engine::http_redirect_check`). The native host also runs every blocking
+  `wasi:http` request through the same grant (`AllowlistHooks`, `WasiHttpHooks::send_request`).
+- **Bounds** live with the types (`MAX_HTTP_*` in `module_host/http.rs`): 16 per call, URL 8 KiB,
+  64 headers / 16 KiB, body 1 MiB, response 4 MiB, 5 redirects, timeout 30 s default / 120 s cap;
+  32 in flight per module (`Engine::set_module_http_in_flight_limit`).
+- **Refusals** at admission are `FailureCause::{HttpNotGranted, HttpDenied { host }, HttpInvalid,
+  HttpLimit, HttpUnavailable}` with `Origin::HttpRequest { method, url }`; they never fail the
+  dispatch that queued the request. Because the guest was already told `ok`, a refused request is
+  also completed in the same cascade (`Origin::HttpRefusal`, payload `ok: false`, `denied`) —
+  except when `then` itself is not an action (`NotAccepted`): every accepted `send` gets exactly
+  one completion.
+- **In flight**: entries are keyed by `HttpRequestId` and remember the `Wiring` (a per-`register` /
+  `rewire` number, not the host's instance id) that asked. A module's count is the entries with its
+  current wiring, so destroy/reload frees slots at once; the late completion finds no matching
+  wiring and is dropped (`HttpDelivery::ModuleGone`). A second completion, or an id never issued,
+  is `HttpCompletionError::UnknownRequest`.
+- **Embedders**: `hypen-runtime` (`bin/hypen_runtime/http.rs`: hyper/tokio/rustls as linked by
+  wasmtime-wasi-http — no HTTP stack of its own — on ≤ 8 worker threads; REPL performs inline);
+  `WasmEngine` (`completeHttpRequest`, table below; the JS effect handler does the `fetch`);
+  UniFFI's `HypenModuleHost` is a bare module host with no engine, so it only reports
+  `httpRequests` in the dispatch result and the embedder dispatches `then` itself.
 
 Types carry the invariants: a `ScopeName` (lowercase, non-empty, no `:`, not `__hypen_*`) and an
 `ActionSet` are built once in `register`/`rewire` and nothing downstream re-validates or
