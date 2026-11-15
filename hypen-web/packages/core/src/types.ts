@@ -449,3 +449,194 @@ export type BoundInput = {
   /** Module scope of the declaring element, if any. */
   moduleScope: string | null;
 };
+
+// ============================================================================
+// HOSTED (WASM-COMPONENT) MODULES
+// ============================================================================
+//
+// The engine's hosted-module surface (`BaseEngine.registerHostedModule` et
+// al.). It exists only in server engine builds; check
+// `BaseEngine.supportsHostedModules` first. The shapes mirror
+// `hypen-engine-rs/src/wasm/js_modules.rs` and `src/hosted/report.rs`.
+
+/**
+ * The object the engine drives hosted modules through: a `JsModuleHost` from
+ * `@hypen-space/module-host`, or anything with the same synchronous methods.
+ * Typed loosely on purpose — core does not depend on that package.
+ */
+export interface ModuleHostLike {
+  register(name: string, bytes: Uint8Array, manifest: unknown): void;
+  instantiate(name: string): number;
+  destroy(id: number): void;
+  init(id: number, config: Uint8Array): Uint8Array;
+  dispatch(id: number, state: Uint8Array, action: any, siblings: any): unknown;
+  onActivated(id: number, state: Uint8Array, siblings: any): unknown;
+  onDeactivated(id: number, state: Uint8Array): unknown;
+  onDestroyed(id: number, state: Uint8Array): void;
+  actions(id: number): string[];
+}
+
+/** A hosted module's capability manifest. Everything omitted is denied. */
+export type HostedModuleManifest = {
+  name?: string;
+  version?: string;
+  /** Storage scopes granted besides the always-granted `local`. */
+  storage?: Array<"local" | "app" | "cloud">;
+  /** Scopes (hosted or in-process) whose state the module may read and subscribe to. */
+  reads?: string[];
+  /** Scopes (hosted or in-process) the module may dispatch actions to. */
+  dispatches?: string[];
+  /** Outbound HTTP (`wasi:http`). */
+  http?: boolean;
+};
+
+/** Options of `registerHostedModule`. */
+export type HostedModuleOptions = {
+  /**
+   * Name the component is registered and prepared under in the module host.
+   * Defaults to the scope.
+   */
+  component?: string;
+  manifest?: HostedModuleManifest;
+  /** `init` config: JSON-encoded, or a `Uint8Array` passed as is. Default `{}`. */
+  config?: unknown;
+  /** Action-list override. Default: the module's own `actions` export. */
+  actions?: string[];
+};
+
+/** One hosted module, as registration returns it and `hostedModules()` lists it. */
+export type HostedModuleInfo = {
+  /** The scope it is wired under (lowercase). */
+  scope: string;
+  /** Its component name in the module host. */
+  component: string | null;
+  /** The host's instance id. */
+  instanceId: number | null;
+  /** The actions it lists by name (never `"*"`). */
+  actions: string[];
+  /** Whether it also accepts any other application action. */
+  wildcard: boolean;
+};
+
+/** An effect a hosted reducer returned that only the embedder can perform. */
+export type HostedModuleEffect =
+  | { type: "navigate"; path: string }
+  /** After `ms`, dispatch `then` to the module (`dispatchModuleAction`). */
+  | { type: "delay"; ms: number; then: string };
+
+/**
+ * Receives `(scope, effect)`. Runs while the engine call that produced the
+ * effect is still in progress, so it must not call the engine synchronously.
+ */
+export type HostedModuleEffectHandler = (
+  scope: string,
+  effect: HostedModuleEffect,
+) => void;
+
+/** Why an action was going to run in a module. */
+export type ModuleCascadeOrigin =
+  | { kind: "root" }
+  | { kind: "lifecycle"; hook: "activated" | "deactivated" }
+  | { kind: "emit" }
+  | { kind: "crossDispatch"; from: string }
+  | { kind: "subscriptionChange"; target: string; path: string }
+  | { kind: "subscribeRequest"; target: string; path: string };
+
+/** Why it did not run (or a subscription was not registered). */
+export type ModuleCascadeCause =
+  | { code: "unknownModule" | "notAccepted" | "noHost" | "noStateSlot" }
+  | { code: "dispatchDenied"; grant: "dispatches"; missingGrant: string }
+  | { code: "readDenied"; grant: "reads"; missingGrant: string }
+  | { code: "subscriptionLimit" | "depthExceeded"; limit: number }
+  | { code: "budgetExhausted"; budget: number; dropped: number }
+  | { code: "payloadNotJson" | "handler" | "stateEncoding"; detail: string }
+  | {
+      code: "host";
+      host: {
+        code:
+          | "unknownModule"
+          | "deadInstance"
+          | "moduleError"
+          | "trap"
+          | "instantiate"
+          | "codec"
+          | "runtime";
+        message: string;
+      };
+    }
+  | { code: "invalidState"; reason: "notJson" | "notAnObject"; detail?: string };
+
+/** One refusal or failure met during a cascade. */
+export type ModuleCascadeFailure = {
+  /** The module the action was addressed to (for a refused subscription: the subscriber). */
+  scope: string;
+  /** The action name (a lifecycle call: `<on_activated>` / `<on_deactivated>`). */
+  action: string;
+  /** A policy said no / a cap was hit / it ran and broke. */
+  outcome: "refused" | "dropped" | "failed";
+  /** Whether this is the cascade's root call itself (then nothing was applied). */
+  isRoot: boolean;
+  origin: ModuleCascadeOrigin;
+  cause: ModuleCascadeCause;
+  /** The rendered one-line description. */
+  message: string;
+};
+
+/** The failures of one module cascade. */
+export type ModuleCascadeReport = {
+  root: {
+    kind: "dispatch" | "lifecycle" | "hostWrite";
+    scope: string;
+    /** The dispatched name, `<on_activated>` / `<on_deactivated>`, or `<host state update>`. */
+    action: string;
+    hook?: "activated" | "deactivated";
+  };
+  /** The root call itself failed: nothing was applied. */
+  rootFailed: boolean;
+  /** Exact; `failures` holds at most the first 8. */
+  failureCount: number;
+  failures: ModuleCascadeFailure[];
+  message: string;
+};
+
+/** The stable `code` of a {@link HostedModuleError}. */
+export type HostedModuleErrorCode =
+  | "invalidArgument"
+  | "invalidName"
+  | "noModuleHost"
+  | "modulesRegistered"
+  | "alreadyRegistered"
+  | "scopeInUse"
+  | "unknownModule"
+  | "actionNotAccepted"
+  | "hostError"
+  | "invalidState"
+  | "moduleCallFailed"
+  | "cascadeIncomplete"
+  | "moduleError"
+  /** JS called the engine from inside a callback the engine was running. */
+  | "engineReentrancy"
+  /** This engine build has no hosted-module support. */
+  | "hostedModulesUnsupported";
+
+/** What the hosted-module methods throw. */
+export interface HostedModuleError extends Error {
+  type: "moduleError";
+  code: HostedModuleErrorCode;
+  scope?: string;
+  /** The module-host call that failed (`hostError` / `invalidState`). */
+  stage?: "register" | "instantiate" | "init" | "actions" | "onDestroyed" | "destroy";
+  /** The host error's kind (`hostError`). */
+  hostCode?: string;
+  /** The cascade's failures (`moduleCallFailed` / `cascadeIncomplete`). */
+  report?: ModuleCascadeReport;
+}
+
+/** Whether `err` is an error thrown by the hosted-module surface. */
+export function isHostedModuleError(err: unknown): err is HostedModuleError {
+  return (
+    err instanceof Error &&
+    (err as { type?: unknown }).type === "moduleError" &&
+    typeof (err as { code?: unknown }).code === "string"
+  );
+}

@@ -43,6 +43,13 @@ import type {
   AgentAction,
   AgentRoute,
   BoundInput,
+  HostedModuleEffectHandler,
+  HostedModuleError,
+  HostedModuleErrorCode,
+  HostedModuleInfo,
+  HostedModuleOptions,
+  ModuleCascadeReport,
+  ModuleHostLike,
   RenderCallback,
   ActionHandler,
   ComponentResolver,
@@ -242,6 +249,44 @@ function camelizeAgentKeys<T>(value: unknown): T {
     out.elementType = element_type;
   }
   return out as T;
+}
+
+function hostedModuleError(
+  code: HostedModuleErrorCode,
+  message: string,
+): HostedModuleError {
+  const error = new Error(message) as HostedModuleError;
+  error.name = "HypenModuleError";
+  error.type = "moduleError";
+  error.code = code;
+  return error;
+}
+
+/**
+ * Run a hosted-module call on the WASM engine. The engine's own errors are
+ * already `HostedModuleError`s and pass through; the one thing it cannot
+ * report itself is a re-entrant call — wasm-bindgen refuses that before any
+ * engine code runs, with a message about "unsafe aliasing in rust" — so that
+ * one is given a code and a message that says what to do.
+ */
+function hostedCall<T>(call: () => T): T {
+  try {
+    return call();
+  } catch (err) {
+    if (
+      err instanceof Error &&
+      (err as { code?: unknown }).code === undefined &&
+      err.message.includes("recursive use of an object detected")
+    ) {
+      throw hostedModuleError(
+        "engineReentrancy",
+        "The engine was called from inside a callback it was running (module " +
+          "host, action handler, effect handler or render callback). Defer the " +
+          "call until the engine call in progress returns, e.g. with queueMicrotask.",
+      );
+    }
+    throw err;
+  }
 }
 
 /**
@@ -824,6 +869,198 @@ export abstract class BaseEngine {
       return;
     }
     engine.unregisterModule(name);
+  }
+
+  // ── Hosted (WASM-component) modules ──────────────────────────────────
+  //
+  // Modules whose reducers run inside a module host (`@hypen-space/module-host`)
+  // instead of as in-process handlers, in the SAME engine as in-process
+  // modules. The cascade, ACLs, subscriptions and failure report are the
+  // engine's (`hypen-engine-rs/src/hosted/`); these wrappers only marshal.
+  //
+  // Server engine builds only: the browser build has none of these methods.
+  // Check `supportsHostedModules`; every method below throws a
+  // `HostedModuleError` with `code: "hostedModulesUnsupported"` without it.
+  //
+  // While a hosted call runs, the engine calls back into JS (the module
+  // host, in-process action handlers reached by cross-dispatch, the effect
+  // handler, the render callback). Those callbacks must not call the engine
+  // synchronously — the call is refused (`engineReentrancy`); defer it with
+  // `queueMicrotask`.
+
+  /** Whether this engine build can run hosted modules. `false` before `init()`. */
+  get supportsHostedModules(): boolean {
+    return typeof this.wasmEngine?.registerHostedModule === "function";
+  }
+
+  private hostedEngine(): any {
+    const engine = this.ensureInitialized();
+    if (typeof engine.registerHostedModule !== "function") {
+      throw hostedModuleError(
+        "hostedModulesUnsupported",
+        "This engine build has no hosted-module support (it is in the server " +
+          "builds only; the browser build omits it).",
+      );
+    }
+    return engine;
+  }
+
+  /**
+   * Install the module host hosted modules run in — a `JsModuleHost` from
+   * `@hypen-space/module-host`. `prepare()` each component in it (async)
+   * before registering a module that uses it.
+   */
+  setModuleHost(host: ModuleHostLike): void {
+    const engine = this.hostedEngine();
+    hostedCall(() => engine.setModuleHost(host));
+  }
+
+  /**
+   * Instantiate a hosted module, run its `init`, and wire it under `scope`
+   * (state slot seeded from `init`, actions routed to it, grants from
+   * `manifest.reads` / `manifest.dispatches`). On failure nothing stays wired.
+   */
+  registerHostedModule(
+    scope: string,
+    options: HostedModuleOptions = {},
+  ): HostedModuleInfo {
+    const engine = this.hostedEngine();
+    const { component, manifest, config, actions } = options;
+    return hostedCall(() =>
+      engine.registerHostedModule(
+        scope,
+        component ?? undefined,
+        manifest ?? undefined,
+        config instanceof Uint8Array || config == null
+          ? config
+          : this.unwrapForWasm(config),
+        actions ?? undefined,
+      ),
+    );
+  }
+
+  /**
+   * Swap the instance behind a hosted scope for a fresh one, keeping the
+   * scope's state (hot reload; `init` does not run). Options default to what
+   * the scope was registered with. Call `activateHostedModule` afterwards so
+   * the new instance can re-subscribe.
+   */
+  reloadHostedModule(
+    scope: string,
+    options: Omit<HostedModuleOptions, "config"> = {},
+  ): HostedModuleInfo {
+    const engine = this.hostedEngine();
+    const { component, manifest, actions } = options;
+    return hostedCall(() =>
+      engine.reloadHostedModule(
+        scope,
+        component ?? undefined,
+        manifest ?? undefined,
+        actions ?? undefined,
+      ),
+    );
+  }
+
+  /** Run the module's `on_activated`. `false` when `scope` hosts no module. */
+  activateHostedModule(scope: string): boolean {
+    const engine = this.hostedEngine();
+    return hostedCall(() => engine.activateHostedModule(scope));
+  }
+
+  /** Run the module's `on_deactivated`. `false` when `scope` hosts no module. */
+  deactivateHostedModule(scope: string): boolean {
+    const engine = this.hostedEngine();
+    return hostedCall(() => engine.deactivateHostedModule(scope));
+  }
+
+  /**
+   * Tear a hosted module down (`on_destroyed`, engine state, host instance).
+   * `false` when `scope` hosts no module. The teardown always completes; a
+   * failing hook is thrown afterwards.
+   */
+  destroyHostedModule(scope: string): boolean {
+    const engine = this.hostedEngine();
+    return hostedCall(() => engine.destroyHostedModule(scope));
+  }
+
+  /**
+   * Dispatch `name` straight to the hosted module under `scope`.
+   *
+   * Host-trusted: it skips the renderer's ownership checks, so never pass a
+   * scope or name taken from client input (use `dispatchAction` for that).
+   *
+   * @throws {HostedModuleError} `moduleCallFailed` (nothing applied) or
+   * `cascadeIncomplete` (applied; some follow-ups failed), both with `report`.
+   */
+  dispatchModuleAction(scope: string, name: string, payload?: unknown): void {
+    const engine = this.hostedEngine();
+    hostedCall(() =>
+      engine.dispatchModuleAction(
+        scope,
+        name,
+        payload == null ? null : this.unwrapForWasm(payload),
+      ),
+    );
+  }
+
+  /** Every hosted module, in registration order. Empty when unsupported. */
+  hostedModules(): HostedModuleInfo[] {
+    const engine = this.ensureInitialized();
+    return (engine.hostedModules?.() as HostedModuleInfo[] | undefined) ?? [];
+  }
+
+  /**
+   * The whole current state of the module under `scope` (hosted or
+   * in-process), or `undefined` when there is none or the build has no
+   * hosted-module support.
+   *
+   * Host-trusted: unlike `getStateAt`, which serves an external caller only
+   * what the rendered templates declare, this returns everything. A hosted
+   * module's state lives only in the engine, so this is how server code
+   * reads it.
+   */
+  getModuleState<T = Record<string, unknown>>(scope: string): T | undefined {
+    const engine = this.ensureInitialized();
+    const state = engine.getModuleState?.(scope);
+    return state == null ? undefined : (state as T);
+  }
+
+  /** Whether `scope` hosts a module. */
+  isHostedModule(scope: string): boolean {
+    const engine = this.ensureInitialized();
+    return engine.isHostedModule?.(scope) === true;
+  }
+
+  /**
+   * The structured failures of the most recent module cascade (a dispatch, a
+   * lifecycle call, or the subscriber notifications of a state write), or
+   * `null` when it had none. The only place the failures of a state write's
+   * notifications surface, since `updateState*` do not throw for them.
+   */
+  lastModuleCascadeReport(): ModuleCascadeReport | null {
+    const engine = this.ensureInitialized();
+    return (
+      (engine.lastModuleCascadeReport?.() as ModuleCascadeReport | null | undefined) ??
+      null
+    );
+  }
+
+  /**
+   * Install (or with `null` remove) the handler for `navigate` / `delay`
+   * effects of hosted reducers. See {@link HostedModuleEffectHandler}.
+   */
+  setModuleEffectHandler(handler: HostedModuleEffectHandler | null): void {
+    const engine = this.hostedEngine();
+    hostedCall(() => engine.setModuleEffectHandler(handler ?? undefined));
+  }
+
+  /** Most reducer invocations one dispatch / lifecycle call / state write may cause. */
+  moduleDispatchBudget(): number {
+    return this.hostedEngine().moduleDispatchBudget();
+  }
+
+  setModuleDispatchBudget(budget: number): void {
+    this.hostedEngine().setModuleDispatchBudget(Math.max(1, budget >>> 0));
   }
 
   /**

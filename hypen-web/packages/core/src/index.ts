@@ -56,7 +56,22 @@ export type {
   AgentAction,
   AgentRoute,
   BoundInput,
+  // Hosted (WASM-component) modules (see engine-base `registerHostedModule` et al.)
+  ModuleHostLike,
+  HostedModuleManifest,
+  HostedModuleOptions,
+  HostedModuleInfo,
+  HostedModuleEffect,
+  HostedModuleEffectHandler,
+  ModuleCascadeOrigin,
+  ModuleCascadeCause,
+  ModuleCascadeFailure,
+  ModuleCascadeReport,
+  HostedModuleErrorCode,
+  HostedModuleError,
 } from "./types.js";
+
+export { isHostedModuleError } from "./types.js";
 
 export {
   AGENT_NAVIGATE,
