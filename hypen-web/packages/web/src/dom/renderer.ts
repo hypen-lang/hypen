@@ -99,6 +99,7 @@ function compileTextTemplate(template: string): TemplateSegment[] {
  * back to `textContent`.
  */
 function setElementText(element: HTMLElement, text: string): void {
+  if (element.dataset?.hypenType === "text") text = preserveEdgeSpaces(text);
   // Loose null check: fake-dom (tests) reports missing children as
   // `undefined` where the DOM spec says `null`.
   const first = element.firstChild;
@@ -256,6 +257,7 @@ import { ensureAnimStyles } from "./anim-styles.js";
 import type { SafeAreaInsetOverrides } from "../safe-area.js";
 import { createSafeAreaHandler } from "./components/safearea.js";
 import { flushPendingHeadingLevelStyles } from "./components/heading.js";
+import { preserveEdgeSpaces } from "./components/text.js";
 import { createImageHandler } from "./components/image.js";
 import { createHypenAppHandler, type HypenAppDeviceFactory } from "./components/hypenapp.js";
 import {
