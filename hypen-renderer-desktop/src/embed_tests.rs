@@ -15,6 +15,8 @@ struct Fake {
     actions: Mutex<Vec<(String, Option<Value>)>>,
     viewports: Mutex<Vec<(String, usize, usize)>>,
     mounted: Mutex<bool>,
+    /// `HypenModule::asset_origin` (`None`: an in-process module).
+    origin: Option<Arc<str>>,
 }
 
 impl Fake {
@@ -49,11 +51,15 @@ impl HypenModule for Fake {
             .unwrap()
             .push((list_id.into(), start, end));
     }
+    fn asset_origin(&self) -> Option<Arc<str>> {
+        self.origin.clone()
+    }
 }
 
 /// One connection the fake connector opened.
 struct Conn {
     url: String,
+    rule: AddressRule,
     module: Arc<Fake>,
     signal: EmbedSignalSink,
 }
@@ -68,13 +74,18 @@ struct Harness {
 
 impl Harness {
     fn new() -> Self {
-        let root = Arc::new(Fake::default());
+        Self::with_root(Fake::default())
+    }
+
+    fn with_root(root: Fake) -> Self {
+        let root = Arc::new(root);
         let conns: Arc<Mutex<Vec<Conn>>> = Arc::default();
         let sink = Arc::clone(&conns);
-        let connector: EmbedConnector = Arc::new(move |url: &str, signal: EmbedSignalSink| {
+        let connector: EmbedConnector = Arc::new(move |url: &str, rule, signal: EmbedSignalSink| {
             let module = Arc::new(Fake::default());
             sink.lock().unwrap().push(Conn {
                 url: url.into(),
+                rule,
                 module: Arc::clone(&module),
                 signal,
             });
@@ -669,10 +680,11 @@ fn a_refused_embed_shows_its_error_slot_and_never_connects() {
     let mut h = Harness::new();
     h.module = EmbeddingModule::with_connector(Arc::clone(&h.root) as Arc<dyn HypenModule>, {
         let conns = Arc::clone(&h.conns);
-        Arc::new(move |url: &str, signal: EmbedSignalSink| {
+        Arc::new(move |url: &str, rule, signal: EmbedSignalSink| {
             let module = Arc::new(Fake::default());
             conns.lock().unwrap().push(Conn {
                 url: url.into(),
+                rule,
                 module: Arc::clone(&module),
                 signal,
             });
@@ -690,4 +702,206 @@ fn a_refused_embed_shows_its_error_slot_and_never_connects() {
         "todo.test is not allowed"
     );
     assert_eq!(h.children("host"), vec!["error", "note"]);
+}
+
+// ---------------------------------------------------------------------------
+// final-leftovers: DNS rebinding — the private-network rule on the RESOLVED
+// address, and root ids that look like embed ids.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn public_content_embeds_connect_public_addresses_only() {
+    // Window app served from a public origin: its embed must enforce the
+    // rule at connect time (a public NAME may resolve privately).
+    let mut h = Harness::with_root(Fake {
+        origin: Some(Arc::from("https://apps.example.com")),
+        ..Fake::default()
+    });
+    h.root.push(vec![
+        create("host", "HypenApp", &[("0", json!("wss://todo.example.com/ws"))]),
+        insert("root", "host"),
+    ]);
+    h.take();
+    {
+        let conns = h.conns.lock().unwrap();
+        assert_eq!(conns.len(), 1);
+        assert_eq!(conns[0].rule, AddressRule::PublicOnly);
+    }
+    // Local content (an in-process module) embeds local apps freely.
+    let mut local = Harness::new();
+    local.root.push(launcher_frame());
+    local.take();
+    assert_eq!(local.conns.lock().unwrap()[0].rule, AddressRule::Any);
+    // An explicit allowlist, or allow_private_targets, lifts the rule.
+    let policy = EmbedPolicy::default();
+    assert_eq!(
+        policy.address_rule(Some("https://a.example")),
+        AddressRule::PublicOnly
+    );
+    assert_eq!(policy.address_rule(Some("http://localhost:8787")), AddressRule::Any);
+    assert_eq!(policy.address_rule(None), AddressRule::Any);
+    assert_eq!(
+        policy
+            .clone()
+            .allow_private_targets(true)
+            .address_rule(Some("https://a.example")),
+        AddressRule::Any
+    );
+    assert_eq!(
+        policy
+            .allow_hosts(["a.example"])
+            .address_rule(Some("https://a.example")),
+        AddressRule::Any
+    );
+}
+
+#[test]
+fn non_public_addresses_are_classified_in_every_spelling() {
+    use std::net::IpAddr;
+    for ip in [
+        "127.0.0.1",
+        "127.8.9.10",
+        "10.1.2.3",
+        "172.16.0.1",
+        "192.168.1.1",
+        "169.254.169.254",
+        "100.64.0.1",
+        "100.127.255.254",
+        "0.0.0.0",
+        "0.1.2.3",
+        "255.255.255.255",
+        "::1",
+        "::",
+        "fc00::1",
+        "fd12:3456::1",
+        "fe80::1",
+        "fec0::1",
+        "::ffff:127.0.0.1",
+        "::ffff:169.254.169.254",
+        "::ffff:10.0.0.1",
+        "::127.0.0.1",
+        "64:ff9b::7f00:1",
+        "64:ff9b::a9fe:a9fe",
+        "2002:7f00:1::",
+        "2002:c0a8:101::1",
+        "ff02::1",
+    ] {
+        let ip: IpAddr = ip.parse().unwrap();
+        assert!(is_non_public_ip(ip), "{ip} must be non-public");
+    }
+    for ip in [
+        "8.8.8.8",
+        "1.1.1.1",
+        "100.63.255.255",
+        "100.128.0.1",
+        "172.32.0.1",
+        "2606:4700::1111",
+        "::ffff:8.8.8.8",
+        "64:ff9b::808:808",
+        "2002:808:808::",
+    ] {
+        let ip: IpAddr = ip.parse().unwrap();
+        assert!(!is_non_public_ip(ip), "{ip} is public");
+    }
+}
+
+/// A root id that happens to contain a `:` is the window module's own
+/// node: it routes to the root (not to a look-alike embed prefix) and can
+/// never address, overwrite or collide with an embed's node.
+#[test]
+fn root_ids_that_look_like_embed_ids_stay_the_roots() {
+    let mut h = Harness::new();
+    h.root.push(launcher_frame());
+    h.take();
+    let conn_module = Arc::clone(&h.conns.lock().unwrap()[0].module);
+    conn_module.push(todo_tree());
+    h.take();
+    assert!(h.tree.get("e1:2").is_some(), "the embed's button is e1:2");
+    // The window app creates a node whose raw id spells the embed's.
+    h.root.push(vec![
+        create("e1:2", "Text", &[("0", json!("spoof"))]),
+        insert("frame", "e1:2"),
+        Patch::SetProp {
+            id: "e1:1".into(),
+            name: "backgroundColor".into(),
+            value: json!("red"),
+        },
+    ]);
+    let out = h.take();
+    assert_eq!(
+        h.tree.get("e1:2").map(|n| n.element_type.clone()).as_deref(),
+        Some("Button"),
+        "the embed's node is untouched: {out:?}"
+    );
+    assert!(
+        h.tree
+            .get("e1:1")
+            .is_some_and(|n| !n.props.contains_key("backgroundColor")),
+        "the window app cannot restyle the embed's node"
+    );
+    // The root's own colon id round-trips to the root, unprefixed.
+    let spoof = h
+        .tree
+        .children_of("frame")
+        .iter()
+        .find(|id| h.tree.get(id).is_some_and(|n| n.element_type == "Text"))
+        .cloned()
+        .expect("the root's text is in the window");
+    h.module.dispatch_ui_action(&spoof, "click", None);
+    assert_eq!(h.root.ui.lock().unwrap().last().unwrap().0, "e1:2");
+    assert!(conn_module.ui.lock().unwrap().is_empty());
+}
+
+/// Review gap: the private-network URL check's spelling variants (the
+/// trailing-dot FQDN form of `localhost`, case, IPv4-mapped / compatible
+/// IPv6, the metadata address) — none of them pinned before.
+#[test]
+fn private_target_spellings_are_refused_from_public_content() {
+    let policy = EmbedPolicy::default();
+    let public = Some("https://apps.example.com");
+    for target in [
+        "wss://localhost./ws",
+        "wss://LOCALHOST:8787/ws",
+        "wss://app.localhost./ws",
+        "wss://printer.local./ws",
+        "wss://[::ffff:127.0.0.1]/ws",
+        "wss://[::ffff:7f00:1]:8787/ws",
+        "wss://[::127.0.0.1]/ws",
+        "wss://169.254.169.254/ws",
+        "wss://0.0.0.0/ws",
+        "wss://100.64.1.2/ws",
+        "wss://[fd00::1]/ws",
+    ] {
+        assert!(
+            policy.check_target(public, target).is_err(),
+            "{target} must be refused from public content"
+        );
+    }
+    assert!(policy.check_target(public, "wss://todo.example.com/ws").is_ok());
+}
+
+/// Review follow-up: a UI envelope WITHOUT a `node` goes to the window
+/// module, but an embed's node id in it (`fromNode`) is blanked — it used
+/// to be forwarded verbatim, leaking the embed's merged ids to the window
+/// app's server.
+#[test]
+fn a_nodeless_ui_envelope_never_carries_an_embed_id_to_the_window() {
+    let mut h = Harness::new();
+    h.root.push(launcher_frame());
+    h.take();
+    h.conn(0).push(todo_tree());
+    h.take();
+    let ui = hypen_engine::action_routing::UI_ACTION;
+    h.module.dispatch_action(
+        ui,
+        Some(json!({"fromNode": "e1:2", "action": "drop", "payload": {"fromNode": "e1:1"}})),
+    );
+    assert_eq!(
+        *h.root.actions.lock().unwrap(),
+        vec![(
+            ui.to_string(),
+            Some(json!({"fromNode": null, "action": "drop", "payload": {"fromNode": null}}))
+        )]
+    );
+    assert!(h.conn(0).actions.lock().unwrap().is_empty());
 }

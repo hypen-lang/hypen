@@ -224,6 +224,103 @@ pub struct RemoteOptions {
     /// thread + runtime of its own. `HypenApp` embeds use it, so a page
     /// with many embeds does not cost a thread each. Default `false`.
     pub shared_runtime: bool,
+    /// Resolve the target host up front and connect only to PUBLIC
+    /// addresses (see [`PublicAddressesOnly`]). `None` (default): the
+    /// socket connects to whatever the system resolver answers.
+    pub public_addresses_only: Option<PublicAddressesOnly>,
+}
+
+/// A resolver for [`PublicAddressesOnly`]: `(host, port)` → addresses.
+/// The default is the system resolver (`tokio::net::lookup_host`); tests
+/// substitute a fake one.
+pub type ResolveFn = Arc<
+    dyn Fn(
+            String,
+            u16,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// Connect only to public addresses — the DNS-rebinding half of the
+/// `HypenApp` embed policy's private-network rule
+/// ([`crate::embed::EmbedPolicy`]).
+///
+/// Checking the URL's host NAME is not enough: a public name can resolve to
+/// `127.0.0.1` or `10.0.0.5` (DNS rebinding), and `getaddrinfo` also
+/// accepts numeric forms no URL parser treats as an IP (`2130706433`,
+/// `127.1`, `0x7f.0.0.1`, `0`). So every connect attempt (reconnects
+/// included) resolves the host itself, drops every address
+/// [`crate::embed::is_non_public_ip`] classifies as non-public (loopback,
+/// RFC 1918, link-local incl. `169.254.169.254`, CGNAT `100.64/10`,
+/// `0.0.0.0/8`, IPv6 loopback / ULA / link-local, and IPv4 embedded in
+/// IPv6 — mapped, compatible, NAT64, 6to4), and opens the TCP socket to
+/// one of the remaining addresses directly. The WebSocket / TLS handshake
+/// then runs over THAT socket (the `Host` header and TLS server name stay
+/// the URL's), so a second DNS answer can never swap the address after the
+/// check. No public address: the attempt fails like an unreachable server.
+#[derive(Clone)]
+pub struct PublicAddressesOnly {
+    resolver: ResolveFn,
+}
+
+impl std::fmt::Debug for PublicAddressesOnly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PublicAddressesOnly")
+    }
+}
+
+impl Default for PublicAddressesOnly {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PublicAddressesOnly {
+    /// With the system resolver.
+    pub fn new() -> Self {
+        Self::with_resolver(Arc::new(|host: String, port: u16| {
+            Box::pin(async move {
+                Ok(tokio::net::lookup_host((host.as_str(), port))
+                    .await?
+                    .collect())
+            })
+        }))
+    }
+
+    /// With a custom resolver (tests, or a host app's own DNS).
+    pub fn with_resolver(resolver: ResolveFn) -> Self {
+        Self { resolver }
+    }
+
+    /// Resolve `host:port` and keep the public addresses, in resolver
+    /// order. `Err` when none is left (or resolution failed).
+    pub async fn public_addrs(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<std::net::SocketAddr>, String> {
+        // An IPv6 literal arrives bracketed from the URI.
+        let host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        let all = (self.resolver)(host.to_string(), port)
+            .await
+            .map_err(|e| format!("resolve {host}: {e}"))?;
+        let public: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|addr| !crate::embed::is_non_public_ip(addr.ip()))
+            .collect();
+        if public.is_empty() {
+            return Err(format!(
+                "{host} resolves only to non-public addresses ({all:?}); refused"
+            ));
+        }
+        Ok(public)
+    }
 }
 
 impl Default for RemoteOptions {
@@ -232,6 +329,7 @@ impl Default for RemoteOptions {
             headers: Vec::new(),
             device: Some(DeviceConfig::native()),
             shared_runtime: false,
+            public_addresses_only: None,
         }
     }
 }
@@ -252,6 +350,12 @@ impl RemoteOptions {
     /// See [`Self::shared_runtime`] (the field).
     pub fn shared_runtime(mut self, on: bool) -> Self {
         self.shared_runtime = on;
+        self
+    }
+
+    /// See [`Self::public_addresses_only`] (the field).
+    pub fn public_addresses_only(mut self, guard: Option<PublicAddressesOnly>) -> Self {
+        self.public_addresses_only = guard;
         self
     }
 }
@@ -499,6 +603,7 @@ async fn run_worker(
         let result = run_session(
             &url,
             &options.headers,
+            options.public_addresses_only.as_ref(),
             &module_name,
             &mut resume,
             &mut outbound,
@@ -599,6 +704,34 @@ fn upgrade_request(
     Ok(req)
 }
 
+/// Open the TCP socket for `request` to a PUBLIC address only, pinned:
+/// the address checked is the address connected to (see
+/// [`PublicAddressesOnly`]). Tries each public address in turn.
+pub(crate) async fn connect_public(
+    request: &tokio_tungstenite::tungstenite::handshake::client::Request,
+    guard: &PublicAddressesOnly,
+) -> Result<tokio::net::TcpStream, String> {
+    let uri = request.uri();
+    let host = uri.host().ok_or_else(|| format!("{uri}: no host"))?;
+    let port = uri
+        .port_u16()
+        .or(match uri.scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| format!("{uri}: unsupported scheme"))?;
+    let addrs = guard.public_addrs(host, port).await?;
+    let mut last_err = None;
+    for addr in addrs {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(socket) => return Ok(socket),
+            Err(e) => last_err = Some(format!("connect {addr}: {e}")),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "no address".into()))
+}
+
 /// Run a single connect → handshake → pump cycle. Captures the session
 /// id and resume token from `SessionAck` so reconnects can resume. Returns
 /// `Shutdown` only when the outbound channel hangs up.
@@ -606,6 +739,7 @@ fn upgrade_request(
 async fn run_session(
     url: &str,
     headers: &[(String, String)],
+    public_only: Option<&PublicAddressesOnly>,
     module_name: &str,
     resume: &mut Resume,
     outbound: &mut mpsc::UnboundedReceiver<RemoteMessage>,
@@ -649,9 +783,17 @@ async fn run_session(
     // merges, enable the `deflate` feature and offer the extension here — and
     // then keep the device plane off on compressed sockets.
     let request = upgrade_request(url, headers)?;
-    let (ws_stream, _resp) = connect_async(request)
-        .await
-        .map_err(|e| format!("connect failed: {e}"))?;
+    let (ws_stream, _resp) = match public_only {
+        None => connect_async(request)
+            .await
+            .map_err(|e| format!("connect failed: {e}"))?,
+        Some(guard) => {
+            let socket = connect_public(&request, guard).await?;
+            tokio_tungstenite::client_async_tls_with_config(request, socket, None, None)
+                .await
+                .map_err(|e| format!("connect failed: {e}"))?
+        }
+    };
     let (mut sink, mut stream) = ws_stream.split();
     log::info!("remote: connected (module={module_name})");
 
@@ -1790,5 +1932,105 @@ mod tests {
             &patches[0],
             Patch::ClearChildren { id } if id.as_ref() == "4294967301"
         ));
+    }
+
+    // ---------------------------------------------------------------
+    // PublicAddressesOnly — the embed policy's DNS-rebinding guard
+    // ---------------------------------------------------------------
+
+    /// A resolver answering every name with `addrs` (port from the call),
+    /// counting its calls.
+    fn fake_resolver(
+        addrs: Vec<std::net::IpAddr>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> ResolveFn {
+        Arc::new(move |_host: String, port: u16| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let out = addrs
+                .iter()
+                .map(|ip| std::net::SocketAddr::new(*ip, port))
+                .collect();
+            Box::pin(async move { Ok(out) })
+        })
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_public_name_resolving_privately_is_refused() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for private in ["127.0.0.1", "10.0.0.7", "169.254.169.254", "::1", "::ffff:192.168.0.1"] {
+            let guard = PublicAddressesOnly::with_resolver(fake_resolver(
+                vec![private.parse().unwrap()],
+                Arc::clone(&calls),
+            ));
+            let got = rt().block_on(guard.public_addrs("rebind.example.com", 443));
+            assert!(got.is_err(), "{private} must be refused: {got:?}");
+        }
+        // Mixed answers keep only the public addresses, in order.
+        let guard = PublicAddressesOnly::with_resolver(fake_resolver(
+            vec![
+                "10.0.0.1".parse().unwrap(),
+                "8.8.8.8".parse().unwrap(),
+                "127.0.0.1".parse().unwrap(),
+                "2606:4700::1111".parse().unwrap(),
+            ],
+            Arc::clone(&calls),
+        ));
+        let got = rt().block_on(guard.public_addrs("[mixed.example.com]", 80)).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "8.8.8.8:80".parse().unwrap(),
+                "[2606:4700::1111]:80".parse().unwrap()
+            ]
+        );
+    }
+
+    /// The system resolver path: numeric host spellings `getaddrinfo`
+    /// accepts but no URL check sees as an IP, and `localhost.`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn numeric_and_dotted_local_hosts_are_refused_after_resolution() {
+        let guard = PublicAddressesOnly::new();
+        for host in ["2130706433", "127.1", "0x7f.0.0.1", "0", "localhost", "[::1]"] {
+            let got = rt().block_on(guard.public_addrs(host, 80));
+            assert!(got.is_err(), "{host} must be refused: {got:?}");
+        }
+    }
+
+    /// End to end over a real socket: a rebinding name pointing at a live
+    /// local server never reaches it under the guard (the address checked
+    /// is the address connected to), while the same connection without
+    /// the guard does — the control that shows the server was reachable.
+    #[test]
+    fn the_guarded_connection_never_reaches_a_rebound_local_server() {
+        let rt = rt();
+        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("ws://rebind.example.com:{port}/ws");
+        let request = upgrade_request(&url, &[]).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let guard = PublicAddressesOnly::with_resolver(fake_resolver(
+            vec!["127.0.0.1".parse().unwrap()],
+            Arc::clone(&calls),
+        ));
+        rt.block_on(async {
+            let refused = connect_public(&request, &guard).await;
+            assert!(refused.is_err(), "{refused:?}");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let accepted = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+            assert!(accepted.is_err(), "nothing may connect to the local server");
+            // Without the guard the same URL host (resolved to loopback)
+            // is reachable.
+            let direct = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
+            assert!(direct.is_ok());
+            assert!(listener.accept().await.is_ok());
+        });
     }
 }

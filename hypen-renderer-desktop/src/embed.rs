@@ -36,7 +36,9 @@
 //! (`https:` / `wss:`) only `wss:` (the browser's mixed-content rule the DOM
 //! `HypenApp` is subject to); and no private / loopback target from public
 //! content (Chrome's Private Network Access rule) unless the host allows it
-//! — content that is itself local (an in-process module, a `localhost` dev
+//! — checked on the URL's host and again on the address it RESOLVES to at
+//! connect time, pinned for the connection (DNS rebinding; see
+//! [`crate::remote::PublicAddressesOnly`]) — content that is itself local (an in-process module, a `localhost` dev
 //! server) may embed local apps, as the launcher does. A refused embed shows
 //! its `error` slot.
 //!
@@ -199,6 +201,35 @@ impl EmbedPolicy {
         }
         Ok(())
     }
+
+    /// The address rule an ALLOWED embed's connection must enforce: when
+    /// the private-network rule applies (public content, no allowlist, no
+    /// [`Self::allow_private_targets`]), the host the URL names must also
+    /// RESOLVE to public addresses only — checked at connect time, on the
+    /// address actually connected to ([`crate::remote::PublicAddressesOnly`]),
+    /// so DNS rebinding and numeric host forms the URL check cannot see
+    /// (`2130706433`, `127.1`) are refused too.
+    pub fn address_rule(&self, owner: Option<&str>) -> AddressRule {
+        let owner_is_local = owner
+            .and_then(UrlParts::parse)
+            .as_ref()
+            .is_none_or(UrlParts::is_private);
+        if self.allowed_hosts.is_none() && !self.allow_private_targets && !owner_is_local {
+            AddressRule::PublicOnly
+        } else {
+            AddressRule::Any
+        }
+    }
+}
+
+/// What an embed connection must enforce on the address it connects to
+/// (see [`EmbedPolicy::address_rule`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AddressRule {
+    /// Whatever the host resolves to.
+    Any,
+    /// Public addresses only, resolved and pinned at connect time.
+    PublicOnly,
 }
 
 /// Just what [`EmbedPolicy`] needs out of a URL.
@@ -251,36 +282,82 @@ impl UrlParts {
 
     /// Loopback, private, link-local, CGNAT or unspecified addresses, and
     /// the `localhost` / `.local` names — what Chrome's Private Network
-    /// Access treats as non-public. (A public name that RESOLVES to a
-    /// private address is not caught here.)
+    /// Access treats as non-public. A public name that RESOLVES to a
+    /// private address is caught at connect time instead
+    /// ([`EmbedPolicy::address_rule`]).
     fn is_private(&self) -> bool {
         let host = self.host.trim_end_matches('.');
         if host == "localhost" || host.ends_with(".localhost") || host.ends_with(".local") {
             return true;
         }
-        match host.parse::<std::net::IpAddr>() {
-            Ok(std::net::IpAddr::V4(v4)) => is_private_v4(v4),
-            Ok(std::net::IpAddr::V6(v6)) => {
-                if let Some(v4) = v6.to_ipv4_mapped() {
-                    return is_private_v4(v4);
-                }
-                let first = v6.segments()[0];
-                v6.is_loopback()
-                    || v6.is_unspecified()
-                    || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
-                    || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+        host.parse::<std::net::IpAddr>()
+            .is_ok_and(is_non_public_ip)
+    }
+}
+
+/// Whether `ip` is not a public unicast address — what the embed policy's
+/// private-network rule refuses from public content: loopback, private
+/// (RFC 1918), link-local (incl. the `169.254.169.254` metadata service),
+/// CGNAT `100.64/10`, `0.0.0.0/8`, broadcast / multicast, and on IPv6
+/// loopback, unspecified, ULA `fc00::/7`, link-local `fe80::/10`,
+/// site-local `fec0::/10`, multicast, plus every IPv4 address carried in
+/// IPv6 (mapped `::ffff:a.b.c.d`, compatible `::a.b.c.d`, NAT64
+/// `64:ff9b::/96`, 6to4 `2002::/16`) judged as that IPv4 address.
+pub fn is_non_public_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => is_non_public_v4(v4),
+        std::net::IpAddr::V6(v6) => {
+            let seg = v6.segments();
+            if let Some(v4) = v6.to_ipv4_mapped() {
+                return is_non_public_v4(v4);
             }
-            Err(_) => false,
+            // IPv4-compatible `::a.b.c.d` (deprecated; `::` and `::1` are
+            // themselves caught below).
+            if seg[..6].iter().all(|&s| s == 0) && !v6.is_loopback() && !v6.is_unspecified() {
+                return is_non_public_v4(std::net::Ipv4Addr::new(
+                    (seg[6] >> 8) as u8,
+                    seg[6] as u8,
+                    (seg[7] >> 8) as u8,
+                    seg[7] as u8,
+                ));
+            }
+            // NAT64 well-known prefix 64:ff9b::/96.
+            if seg[0] == 0x64 && seg[1] == 0xff9b && seg[2..6].iter().all(|&s| s == 0) {
+                return is_non_public_v4(std::net::Ipv4Addr::new(
+                    (seg[6] >> 8) as u8,
+                    seg[6] as u8,
+                    (seg[7] >> 8) as u8,
+                    seg[7] as u8,
+                ));
+            }
+            // 6to4 2002:AABB:CCDD::/48 carries AA.BB.CC.DD.
+            if seg[0] == 0x2002 {
+                return is_non_public_v4(std::net::Ipv4Addr::new(
+                    (seg[1] >> 8) as u8,
+                    seg[1] as u8,
+                    (seg[2] >> 8) as u8,
+                    seg[2] as u8,
+                ));
+            }
+            let first = seg[0];
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                || (first & 0xfe00) == 0xfc00 // unique local fc00::/7
+                || (first & 0xffc0) == 0xfe80 // link-local fe80::/10
+                || (first & 0xffc0) == 0xfec0 // site-local fec0::/10
         }
     }
 }
 
-fn is_private_v4(v4: std::net::Ipv4Addr) -> bool {
+fn is_non_public_v4(v4: std::net::Ipv4Addr) -> bool {
     let [a, b, ..] = v4.octets();
-    v4.is_loopback()
+    a == 0 // 0.0.0.0/8 ("this network"; 0.0.0.0 reaches the local host)
+        || v4.is_loopback()
         || v4.is_private()
         || v4.is_link_local()
-        || v4.is_unspecified()
+        || v4.is_broadcast()
+        || v4.is_multicast()
         || (a == 100 && (64..128).contains(&b)) // CGNAT 100.64/10
 }
 
@@ -290,18 +367,24 @@ pub type EmbedSignalSink = Arc<dyn Fn(EmbedSignal) + Send + Sync>;
 /// Opens the connection for one embed: given its URL and a signal sink,
 /// returns the module whose patches are grafted under the host. The
 /// default is [`remote_embed_connector`]; tests inject in-process fakes.
-pub type EmbedConnector = Arc<dyn Fn(&str, EmbedSignalSink) -> Arc<dyn HypenModule> + Send + Sync>;
+pub type EmbedConnector =
+    Arc<dyn Fn(&str, AddressRule, EmbedSignalSink) -> Arc<dyn HypenModule> + Send + Sync>;
 
 /// The production connector: a UI-only [`RemoteModule`] per embed (no
 /// device host — the web embed is UI-only too unless its host supplies a
 /// device factory), logged in as [`EMBED_MODULE_NAME`].
 pub fn remote_embed_connector() -> EmbedConnector {
-    Arc::new(|url: &str, signal: EmbedSignalSink| {
+    Arc::new(|url: &str, rule: AddressRule, signal: EmbedSignalSink| {
         // Every embed shares one remote runtime thread.
+        let public_only = (rule == AddressRule::PublicOnly)
+            .then(crate::remote::PublicAddressesOnly::new);
         let remote = RemoteModule::connect_with(
             url,
             EMBED_MODULE_NAME,
-            RemoteOptions::default().device(None).shared_runtime(true),
+            RemoteOptions::default()
+                .device(None)
+                .shared_runtime(true)
+                .public_addresses_only(public_only),
         );
         let tree_signal = Arc::clone(&signal);
         remote.on_initial_tree(move || tree_signal(EmbedSignal::InitialTree));
@@ -512,9 +595,101 @@ fn prefix_id(prefix: &str, id: &Arc<str>) -> Arc<str> {
 }
 
 /// The stream prefix of a merged id (`"e3:12"` → `Some("e3:")`), `None`
-/// for the window module's own ids.
+/// for the window module's own ids. An escaped root id (`"r:…"`, see
+/// [`escape_root_id`]) has the prefix `"r:"`, which names no embed; use
+/// [`split_merged`] to tell the streams apart.
 fn stream_prefix_of(id: &str) -> Option<&str> {
     id.find(':').map(|i| &id[..=i])
+}
+
+/// Prefix of a window-module id that itself contains a `:` in the merged
+/// id space. Embed prefixes are `e<n>:`, so this one is never an embed's.
+const ROOT_ESCAPE: &str = "r:";
+
+/// A window-module id in the merged space. The module's ids are passed
+/// through unprefixed, so one that contains a `:` would read as an embed's
+/// node (`"e1:2"`): its patches would land on — and its events route to —
+/// the embedded app's node. Such ids are escaped as `"r:" + id`; every
+/// other id stays as it is (no allocation).
+fn escape_root_id(id: Arc<str>) -> Arc<str> {
+    if id.contains(':') {
+        Arc::from(format!("{ROOT_ESCAPE}{id}"))
+    } else {
+        id
+    }
+}
+
+/// Which stream owns a merged id (`None`: the window module) and the id
+/// in that stream's own space.
+fn split_merged(id: &str) -> (Option<&str>, &str) {
+    match stream_prefix_of(id) {
+        None => (None, id),
+        Some(ROOT_ESCAPE) => (None, &id[ROOT_ESCAPE.len()..]),
+        Some(p) => (Some(p), &id[p.len()..]),
+    }
+}
+
+/// [`escape_root_id`] over every node id a window-module patch carries.
+fn escape_root_patch(patch: Patch) -> Patch {
+    let e = escape_root_id;
+    match patch {
+        Patch::Create {
+            id,
+            element_type,
+            props,
+            semantics,
+        } => Patch::Create {
+            id: e(id),
+            element_type,
+            props,
+            semantics,
+        },
+        Patch::SetSemantics { id, semantics } => Patch::SetSemantics {
+            id: e(id),
+            semantics,
+        },
+        Patch::SetProp { id, name, value } => Patch::SetProp {
+            id: e(id),
+            name,
+            value,
+        },
+        Patch::RemoveProp { id, name } => Patch::RemoveProp { id: e(id), name },
+        Patch::SetText { id, text } => Patch::SetText { id: e(id), text },
+        Patch::Insert {
+            parent_id,
+            id,
+            before_id,
+        } => Patch::Insert {
+            parent_id: e(parent_id),
+            id: e(id),
+            before_id: before_id.map(e),
+        },
+        Patch::Attach {
+            parent_id,
+            id,
+            before_id,
+        } => Patch::Attach {
+            parent_id: e(parent_id),
+            id: e(id),
+            before_id: before_id.map(e),
+        },
+        Patch::Move {
+            parent_id,
+            id,
+            before_id,
+        } => Patch::Move {
+            parent_id: e(parent_id),
+            id: e(id),
+            before_id: before_id.map(e),
+        },
+        Patch::Remove { id, transition } => Patch::Remove {
+            id: e(id),
+            transition,
+        },
+        Patch::ClearChildren { id } => Patch::ClearChildren { id: e(id) },
+        Patch::Detach { id } => Patch::Detach { id: e(id) },
+        other => other,
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -541,11 +716,17 @@ struct Deferred {
 
 impl State {
     /// Why the [`EmbedPolicy`] refuses an embed of `url` by stream `owner`.
-    fn refusal(&self, owner: Option<&str>, url: &str) -> Option<String> {
-        let owner_url = match owner {
+    /// The URL the content of stream `owner` came from (`None` owner: the
+    /// window module's origin, itself `None` for an in-process module).
+    fn owner_url(&self, owner: Option<&str>) -> Option<&str> {
+        match owner {
             None => self.root_origin.as_deref(),
             Some(prefix) => self.embeds.get(prefix).map(|e| e.url.as_str()),
-        };
+        }
+    }
+
+    fn refusal(&self, owner: Option<&str>, url: &str) -> Option<String> {
+        let owner_url = self.owner_url(owner);
         if let Err(reason) = self.policy.check_target(owner_url, url) {
             return Some(reason);
         }
@@ -1030,7 +1211,7 @@ impl Core {
             match stream {
                 None => {
                     for p in patches {
-                        g.route(None, p, &mut out, &mut d);
+                        g.route(None, escape_root_patch(p), &mut out, &mut d);
                     }
                 }
                 Some(prefix) => g.graft(prefix, patches, &mut out, &mut d),
@@ -1050,7 +1231,16 @@ impl Core {
     /// Open the embed's connection and wire its callbacks. Runs without the
     /// lock: a module may deliver its backlog / status synchronously.
     fn connect(self: &Arc<Self>, prefix: String) {
-        let Some(url) = self.lock().embeds.get(&prefix).map(|e| e.url.clone()) else {
+        let target = {
+            let g = self.lock();
+            g.embeds.get(&prefix).map(|e| {
+                let rule = g
+                    .policy
+                    .address_rule(g.owner_url(e.owner_prefix.as_deref()));
+                (e.url.clone(), rule)
+            })
+        };
+        let Some((url, rule)) = target else {
             return;
         };
         let weak = Arc::downgrade(self);
@@ -1063,7 +1253,7 @@ impl Core {
                 g.deliver(out);
             }
         });
-        let module = (self.connector)(&url, signal);
+        let module = (self.connector)(&url, rule, signal);
         let weak = Arc::downgrade(self);
         let batch_prefix = prefix.clone();
         module.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
@@ -1088,10 +1278,12 @@ impl Core {
 
     /// The module owning merged id `node`, and the id in its own space.
     fn owner_of(&self, node: &str) -> Option<(Arc<dyn HypenModule>, String)> {
-        let prefix = stream_prefix_of(node)?;
+        let (Some(prefix), local) = split_merged(node) else {
+            return None;
+        };
         let g = self.lock();
         let module = g.embeds.get(prefix)?.module.clone()?;
-        Some((module, node[prefix.len()..].to_string()))
+        Some((module, local.to_string()))
     }
 }
 
@@ -1101,9 +1293,9 @@ impl Core {
 /// different stream means nothing there and becomes `null`.
 fn localize_envelope(mut envelope: Value, prefix: Option<&str>) -> Value {
     let localize = |id: &str| -> Value {
-        match (stream_prefix_of(id), prefix) {
-            (None, None) => Value::String(id.to_string()),
-            (Some(p), Some(q)) if p == q => Value::String(id[p.len()..].to_string()),
+        match (split_merged(id), prefix) {
+            ((None, local), None) => Value::String(local.to_string()),
+            ((Some(p), local), Some(q)) if p == q => Value::String(local.to_string()),
             _ => Value::Null,
         }
     };
@@ -1200,7 +1392,7 @@ impl HypenModule for EmbeddingModule {
                 .and_then(Value::as_str)
                 .map(str::to_string);
             if let (Some(node), Some(envelope)) = (node, payload.as_ref()) {
-                let prefix = stream_prefix_of(&node);
+                let (prefix, _) = split_merged(&node);
                 let envelope = localize_envelope(envelope.clone(), prefix);
                 match prefix {
                     None => self.root.dispatch_action(name, Some(envelope)),
@@ -1213,6 +1405,11 @@ impl HypenModule for EmbeddingModule {
                 }
                 return;
             }
+            // No `node`: the window module's — with any embed id in it
+            // (`fromNode`) blanked like any other cross-stream id.
+            let payload = payload.map(|envelope| localize_envelope(envelope, None));
+            self.root.dispatch_action(name, payload);
+            return;
         }
         self.root.dispatch_action(name, payload);
     }
@@ -1222,9 +1419,9 @@ impl HypenModule for EmbeddingModule {
             let mut payload = payload?;
             if let Some(obj) = payload.as_object_mut() {
                 if let Some(from) = obj.get("fromNode").and_then(Value::as_str) {
-                    let local = match (stream_prefix_of(from), prefix) {
-                        (None, None) => Value::String(from.to_string()),
-                        (Some(p), Some(q)) if p == q => Value::String(from[p.len()..].to_string()),
+                    let local = match (split_merged(from), prefix) {
+                        ((None, local), None) => Value::String(local.to_string()),
+                        ((Some(p), local), Some(q)) if p == q => Value::String(local.to_string()),
                         // A node from another stream means nothing there.
                         _ => Value::Null,
                     };
@@ -1233,11 +1430,11 @@ impl HypenModule for EmbeddingModule {
             }
             Some(payload)
         };
-        match stream_prefix_of(node) {
-            None => self
+        match split_merged(node) {
+            (None, local) => self
                 .root
-                .dispatch_ui_action(node, action, localize_from(payload, None)),
-            Some(prefix) => match self.core.owner_of(node) {
+                .dispatch_ui_action(local, action, localize_from(payload, None)),
+            (Some(prefix), _) => match self.core.owner_of(node) {
                 Some((module, local)) => {
                     module.dispatch_ui_action(&local, action, localize_from(payload, Some(prefix)))
                 }
@@ -1247,9 +1444,9 @@ impl HypenModule for EmbeddingModule {
     }
 
     fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
-        match stream_prefix_of(list_id) {
-            None => self.root.set_list_viewport(list_id, start, end),
-            Some(_) => {
+        match split_merged(list_id) {
+            (None, local) => self.root.set_list_viewport(local, start, end),
+            (Some(_), _) => {
                 if let Some((module, local)) = self.core.owner_of(list_id) {
                     module.set_list_viewport(&local, start, end);
                 }

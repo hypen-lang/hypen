@@ -87,7 +87,7 @@ accesskit_winit = "0.32.2"
 arboard = "3"
 
 # Phase 11: WebSocket client for connecting to a Hypen RemoteServer.
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
 # `rustls-tls-webpki-roots` gives us TLS without a native libssl dep —
 # required for `wss://` URLs (e.g. workers.dev deployments). Without
 # it, `connect_async` returns an "unsupported url scheme" error and
