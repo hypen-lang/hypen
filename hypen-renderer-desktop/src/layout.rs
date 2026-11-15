@@ -1629,7 +1629,7 @@ impl TaffyState {
         // used to set this unconditionally, which made EVERY update
         // frame pay `collect_fit_candidates`' full-tree walk — the
         // dominant per-total-node frame tax on large trees.
-        if patches.iter().any(patch_affects_layout) {
+        if patches.iter().any(|p| patch_affects_layout(p, tree)) {
             self.fit_pass_dirty = true;
         }
         // Any batch at all invalidates the wrapped-height memo: a batch
@@ -1729,7 +1729,7 @@ impl TaffyState {
                 // the stale style while the fit-pass gate
                 // (`patch_affects_layout`, same key) correctly
                 // flagged the batch layout-affecting.
-                if is_layout_prop_key(name) {
+                if is_node_layout_prop_key(tree, id, name) {
                     if let Some(node) = tree.get(id) {
                         // Through `resolve_node_style`, NOT a raw
                         // `node_style_with`: a patch can hand a node its
@@ -1747,7 +1747,9 @@ impl TaffyState {
                         // their measure context, so re-resolve those too
                         // or they keep measuring at the old size until an
                         // unrelated full rebuild.
-                        if is_inherited_text_measure_key(name) {
+                        if is_inherited_text_measure_key(name)
+                            || is_heading_level_write(tree, id, name)
+                        {
                             self.restyle_text_descendants(tree, id, scale, viewport);
                         }
                     }
@@ -5095,26 +5097,54 @@ pub(crate) fn is_layout_prop_key(name: &str) -> bool {
 }
 
 /// True when `name` (a raw, possibly decorated patch key) is a text
-/// measure input that descendant Text leaves INHERIT: `fontSize`,
-/// `fontWeight`, and a Heading's `level` (which picks their defaults —
-/// see `inherited_text_font_size` / `inherited_text_font_weight`).
+/// measure input that descendant Text leaves INHERIT: `fontSize` and
+/// `fontWeight`. A Heading's `level` (which picks their defaults — see
+/// `inherited_text_font_size` / `inherited_text_font_weight`) is one too,
+/// but only ON A HEADING: see [`is_heading_level_write`].
 pub(crate) fn is_inherited_text_measure_key(name: &str) -> bool {
     let base = hypen_engine::portable::parse_prop_key(name).base;
     matches!(
         base.to_ascii_lowercase().as_str(),
-        "fontsize" | "font-size" | "fontweight" | "font-weight" | "level"
+        "fontsize" | "font-size" | "fontweight" | "font-weight"
     )
+}
+
+/// True when a write of `name` to node `id` is a `Heading`'s `level`
+/// (bare or decorated, `level.0`): it picks the heading's default font
+/// size and weight — and its text descendants' — so it is a layout /
+/// inherited-measure input there ([`heading_level_at`]). On any other
+/// element a `level` prop means nothing to layout (a Progress, a
+/// Rating, an app's own data prop) and must not trigger a relayout, so
+/// the element-agnostic [`is_layout_prop`] list does not carry it.
+pub(crate) fn is_heading_level_write(tree: &Tree, id: &str, name: &str) -> bool {
+    hypen_engine::portable::parse_prop_key(name)
+        .base
+        .eq_ignore_ascii_case("level")
+        && tree
+            .get(id)
+            .is_some_and(|node| node.element_type.eq_ignore_ascii_case("Heading"))
+}
+
+/// [`is_layout_prop_key`] for a write to node `id` of `tree`: also true
+/// for a Heading's `level` ([`is_heading_level_write`]). The gate every
+/// node-addressed classifier (Taffy restyle, fit-pass dirty bit,
+/// painter-cache paint-only checks) uses.
+pub(crate) fn is_node_layout_prop_key(tree: &Tree, id: &str, name: &str) -> bool {
+    is_layout_prop_key(name) || is_heading_level_write(tree, id, name)
 }
 
 /// True when `patch` can change Taffy geometry or content sizing —
 /// the condition for re-running the fit-content pre-pass. Structural
 /// patches always can; prop writes only when the (decoration-
-/// stripped) prop is layout-affecting; semantics and batch-animation
+/// stripped) prop is layout-affecting for the node it addresses
+/// ([`is_node_layout_prop_key`]); semantics and batch-animation
 /// preludes never can.
-pub(crate) fn patch_affects_layout(patch: &hypen_engine::Patch) -> bool {
+pub(crate) fn patch_affects_layout(patch: &hypen_engine::Patch, tree: &Tree) -> bool {
     use hypen_engine::Patch;
     match patch {
-        Patch::SetProp { name, .. } | Patch::RemoveProp { name, .. } => is_layout_prop_key(name),
+        Patch::SetProp { id, name, .. } | Patch::RemoveProp { id, name } => {
+            is_node_layout_prop_key(tree, id, name)
+        }
         Patch::SetSemantics { .. } | Patch::BatchAnimation { .. } => false,
         _ => true,
     }
@@ -5159,9 +5189,8 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "font-size"
             | "fontweight"
             | "font-weight"
-            // A Heading's level picks its default font size (and so the
-            // text's measured box); see `heading_level_at`.
-            | "level"
+            // NOT `level`: it is layout-affecting only on a Heading —
+            // see `is_heading_level_write`.
             // Textarea intrinsic height is `rows` lines of its line height.
             | "rows"
             | "lineheight"
@@ -5977,6 +6006,23 @@ pub(crate) fn resolve_media_source(
     node: &crate::tree::Node,
     viewport: Viewport,
 ) -> (Option<MediaSource>, u64) {
+    let (src, index, _) = resolve_media_selection(node, viewport);
+    (src, index)
+}
+
+/// [`resolve_media_source`] plus the playlist entries the INITIAL
+/// selection skipped. A playlist starts at `startIndex` (clamped); when
+/// that entry is refused by the node's asset origin, playback starts at
+/// the first allowed entry after it instead (wrapping to the start only
+/// under the node's `loop`, exactly like an auto-advance — see
+/// [`next_playlist_track`]), and every refused entry passed over is
+/// returned `(index, source)` in order so the caller can report each
+/// through `onError`. When no entry is playable the `startIndex` entry
+/// itself is returned (refused) and nothing is skipped.
+pub(crate) fn resolve_media_selection(
+    node: &crate::tree::Node,
+    viewport: Viewport,
+) -> (Option<MediaSource>, u64, Vec<(u64, MediaSource)>) {
     let playlist = node
         .props
         .get("playlist")
@@ -5988,13 +6034,35 @@ pub(crate) fn resolve_media_source(
                 .filter(|v| v.is_finite() && *v >= 0.0)
                 .unwrap_or(0.0) as usize;
             let idx = start.min(arr.len() - 1);
-            let src = arr
-                .get(idx)
-                .and_then(|v| v.as_str())
-                .map(str::trim)
-                .filter(|s| !s.is_empty())
-                .map(|s| MediaSource::resolve(node, s));
-            return (src, idx as u64);
+            let entry = |i: usize| {
+                arr.get(i)
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| MediaSource::resolve(node, s))
+            };
+            let src = entry(idx);
+            if !src.as_ref().is_some_and(MediaSource::is_refused) {
+                return (src, idx as u64, Vec::new());
+            }
+            // The current entry is refused: start on the next allowed
+            // one, as an advance from it would.
+            let all = resolve_media_playlist(node);
+            let wraps = media_prop_truthy(node, "loop");
+            let (skipped, next) = next_playlist_track(&all, idx as u64, wraps);
+            if let Some((next_idx, next_src)) = next {
+                if !next_src.authored().is_empty() {
+                    let mut passed = vec![(idx as u64, src.expect("refused entry"))];
+                    passed.extend(
+                        skipped
+                            .into_iter()
+                            .filter(|(i, _)| *i != idx as u64)
+                            .map(|(i, s)| (i, s.clone())),
+                    );
+                    return (Some(next_src.clone()), next_idx, passed);
+                }
+            }
+            return (src, idx as u64, Vec::new());
         }
     }
     let src = crate::style::prop_str_at(node, "src", viewport)
@@ -6003,7 +6071,21 @@ pub(crate) fn resolve_media_source(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .map(|s| MediaSource::resolve(node, s));
-    (src, 0)
+    (src, 0, Vec::new())
+}
+
+/// Truthy check for a bool-ish media prop (`autoplay`, `muted`, `loop`):
+/// JSON `true` or the string `"true"`, under either the named key or
+/// its positional `.0` variant. (Lives here, not in the feature-gated
+/// `media` module, because the playlist selection needs `loop` in every
+/// build.)
+pub(crate) fn media_prop_truthy(node: &crate::tree::Node, name: &str) -> bool {
+    let zero = format!("{name}.0");
+    let v = node.props.get(&zero).or_else(|| node.props.get(name));
+    match v {
+        Some(v) => v.as_bool() == Some(true) || v.as_str().map(str::trim) == Some("true"),
+        None => false,
+    }
 }
 
 /// [`resolve_media_source`] for loading: the current track's URL
@@ -8921,14 +9003,12 @@ pub(crate) fn resolve_font_weight(node: &crate::tree::Node, viewport: Viewport) 
 /// TEXT, never its level.
 ///
 /// Read live, so a level that changes after creation re-sizes the heading
-/// (`level` is a layout prop for exactly this reason). That is the
-/// cross-renderer contract: Canvas (`canvas/utils.ts`), SwiftUI
-/// (`HeadingComponent`) and Compose (`HeadingComponent.kt`) all derive the
-/// size from the CURRENT level on every render. The DOM is the outlier: it
-/// cannot re-tag a live `<hN>` without orphaning the node, so its visual
-/// size stays at the creation-time tag's UA style and only `aria-level`
-/// follows. Desktop follows the majority (its AccessKit node carries the
-/// heading role without a level, so there is no semantic split either).
+/// (a Heading's `level` is a layout prop for exactly this reason — see
+/// `is_heading_level_write`). That is the cross-renderer contract: Canvas
+/// (`canvas/utils.ts`), SwiftUI (`HeadingComponent`), Compose
+/// (`HeadingComponent.kt`) and the DOM (which applies the new level's
+/// size and weight inline, since it cannot re-tag a live `<hN>`) all
+/// derive the size from the CURRENT level.
 fn heading_level_at(node: &crate::tree::Node, viewport: Viewport) -> u8 {
     prop_f32_at(node, "level", viewport)
         .filter(|l| l.is_finite())

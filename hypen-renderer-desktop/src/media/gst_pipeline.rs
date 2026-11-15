@@ -152,6 +152,12 @@ pub(crate) fn guard_remote_element(pipeline: &gst::Element, element: &gst::Eleme
             }
             _ => {
                 skip_legacy_demuxers(element);
+                if factory
+                    .as_ref()
+                    .is_some_and(|f| HTTP_ONLY_ADAPTIVE_DEMUXERS.contains(&f.name().as_str()))
+                {
+                    watch_http_only_demuxer(pipeline, element);
+                }
                 None
             }
         }
@@ -163,27 +169,221 @@ pub(crate) fn guard_remote_element(pipeline: &gst::Element, element: &gst::Eleme
     element.set_locked_state(true);
     // A demuxer is brought up directly by its parent (lock ignored):
     // starve it instead — it never sees its manifest, so it never
-    // fetches anything the manifest names. (At EOS the legacy demuxer
-    // then logs a harmless GStreamer-CRITICAL about its missing
-    // playlist; the pipeline is torn down on the error below anyway.)
+    // fetches anything the manifest names. The probe answers `Handled`,
+    // not `Drop`: the Rust probe trampoline takes ownership of the
+    // buffer (and clears the probe info's pointer), so after `Drop`
+    // GStreamer would unref the now-NULL item itself
+    // (`gst_mini_object_unref: assertion 'mini_object != NULL'`);
+    // `Handled` tells it the probe consumed the item.
     if factory.as_ref().is_some_and(is_legacy_adaptive_demuxer) {
         for pad in element.sink_pads() {
             pad.add_probe(
                 gst::PadProbeType::BUFFER | gst::PadProbeType::BUFFER_LIST,
-                |_, _| gst::PadProbeReturn::Drop,
+                |_, _| gst::PadProbeReturn::Handled,
             );
         }
     }
+    post_refusal(pipeline, element, &what);
+    false
+}
+
+/// Post the `resource/NotAuthorized` refusal STRAIGHT on `pipeline` (see
+/// [`guard_remote_element`]); the bus handler turns it into the node's
+/// `onError`.
+fn post_refusal(pipeline: &gst::Element, element: &gst::Element, what: &str) {
     let _ = pipeline.post_message(
         gst::message::Error::builder(
             gst::ResourceError::NotAuthorized,
             "refusing a non-HTTP media source from a remote app",
         )
         .src(element)
-        .debug(&what)
+        .debug(what)
         .build(),
     );
-    false
+}
+
+/// The HTTP-only adaptive demuxers (`adaptivedemux2`, gst-plugins-good)
+/// a restricted pipeline is allowed to use. They refuse a non-HTTP URI
+/// named by a manifest on their own — but SILENTLY: the download never
+/// begins, nothing is posted on the bus and the stream stalls forever
+/// in `loading`. [`watch_http_only_demuxer`] turns that refusal into the
+/// same `resource/NotAuthorized` error the element guard posts.
+const HTTP_ONLY_ADAPTIVE_DEMUXERS: &[&str] = &["hlsdemux2", "dashdemux2", "mssdemux2"];
+
+/// Most manifest bytes buffered for the scan; a larger manifest is
+/// passed through unscanned (the log backstop still covers it).
+const MANIFEST_SCAN_LIMIT: usize = 4 << 20;
+
+/// Name prefix of a restricted pipeline, so the log backstop
+/// ([`install_refusal_log_hook`]) can tell a refusal in one of OUR
+/// remote-content pipelines from any other GStreamer user's.
+const RESTRICTED_PIPELINE_PREFIX: &str = "hypen-restricted:";
+
+/// The first absolute URI in `manifest` (an HLS playlist, DASH MPD or
+/// Smooth Streaming manifest, as text) whose scheme a restricted
+/// pipeline may not open — anything but `http(s)` / `data:`. Relative
+/// references resolve against the manifest's own (HTTP) URI and are
+/// fine. Scans every `scheme://` and every bare `file:` at a token
+/// boundary, wherever it appears (playlist lines, `URI="…"` attributes,
+/// `<BaseURL>`, `media=` / `initialization=` templates), so it does not
+/// depend on the manifest format.
+pub(crate) fn manifest_refused_uri(manifest: &str) -> Option<String> {
+    let bytes = manifest.as_bytes();
+    let boundary = |i: usize| {
+        i == 0
+            || !(bytes[i - 1].is_ascii_alphanumeric() || matches!(bytes[i - 1], b'+' | b'.' | b'-'))
+    };
+    let uri_at = |start: usize| {
+        let end = manifest[start..]
+            .find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ','))
+            .map_or(manifest.len(), |e| start + e);
+        manifest[start..end].to_string()
+    };
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b':' {
+            // Walk back over the scheme: ALPHA *( ALPHA / DIGIT / + - . )
+            let mut start = i;
+            while start > 0
+                && (bytes[start - 1].is_ascii_alphanumeric()
+                    || matches!(bytes[start - 1], b'+' | b'.' | b'-'))
+            {
+                start -= 1;
+            }
+            // A scheme starts with a letter; skip leading digits/marks.
+            while start < i && !bytes[start].is_ascii_alphabetic() {
+                start += 1;
+            }
+            let scheme = &manifest[start..i];
+            let authority = manifest[i + 1..].starts_with("//");
+            if !scheme.is_empty()
+                && boundary(start)
+                && (authority || scheme.eq_ignore_ascii_case("file"))
+            {
+                let candidate = uri_at(start);
+                if !remote_media_uri_allowed(&candidate) {
+                    return Some(candidate);
+                }
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Watch an HTTP-only adaptive demuxer joining a restricted pipeline:
+/// buffer the manifest it is fed (its sink pad sees the whole top-level
+/// manifest before it acts on it, at EOS) and, when the manifest names a
+/// URI the pipeline may not open ([`manifest_refused_uri`]), withhold
+/// the manifest's EOS — the demuxer never parses it, so it never tries
+/// the URI — and post the refusal. Sub-playlists the demuxer fetches
+/// itself never cross a pad; [`install_refusal_log_hook`] covers those.
+fn watch_http_only_demuxer(pipeline: &gst::Element, element: &gst::Element) {
+    install_refusal_log_hook();
+    let pipeline = pipeline.downgrade();
+    for pad in element.sink_pads() {
+        let manifest = std::sync::Mutex::new(Vec::<u8>::new());
+        let element_weak = element.downgrade();
+        let pipeline = pipeline.clone();
+        pad.add_probe(
+            gst::PadProbeType::BUFFER | gst::PadProbeType::EVENT_DOWNSTREAM,
+            move |_, info| {
+                let mut buf = manifest.lock().expect("manifest buffer poisoned");
+                match &info.data {
+                    Some(gst::PadProbeData::Buffer(buffer)) => {
+                        if buf.len() <= MANIFEST_SCAN_LIMIT {
+                            if let Ok(map) = buffer.map_readable() {
+                                buf.extend_from_slice(map.as_slice());
+                            }
+                        }
+                        gst::PadProbeReturn::Ok
+                    }
+                    Some(gst::PadProbeData::Event(event))
+                        if event.type_() == gst::EventType::FlushStop
+                            || event.type_() == gst::EventType::StreamStart =>
+                    {
+                        buf.clear();
+                        gst::PadProbeReturn::Ok
+                    }
+                    Some(gst::PadProbeData::Event(event))
+                        if event.type_() == gst::EventType::Eos
+                            && buf.len() <= MANIFEST_SCAN_LIMIT =>
+                    {
+                        let refused = manifest_refused_uri(&String::from_utf8_lossy(&buf));
+                        buf.clear();
+                        let Some(uri) = refused else {
+                            return gst::PadProbeReturn::Ok;
+                        };
+                        log::warn!(
+                            "video: refusing a manifest that names {uri} in a remote app's media pipeline"
+                        );
+                        if let (Some(pipeline), Some(element)) =
+                            (pipeline.upgrade(), element_weak.upgrade())
+                        {
+                            post_refusal(&pipeline, &element, &format!("manifest names {uri}"));
+                        }
+                        // Consumed (see the legacy probe on `Handled`).
+                        gst::PadProbeReturn::Handled
+                    }
+                    _ => gst::PadProbeReturn::Ok,
+                }
+            },
+        );
+    }
+}
+
+/// Backstop for refusals the manifest scan cannot see (a variant
+/// playlist the demuxer downloads itself naming a `file://` segment or
+/// key): `adaptivedemux2` reports a download it refused to begin only
+/// as an ERROR-level debug log line on the demuxer object — never on
+/// the bus. A process-wide GStreamer log function (installed once,
+/// with the `adaptivedemux2` category raised to at least ERROR so the
+/// line is emitted) maps such a line back to its top-level pipeline
+/// and, when that is one of our restricted pipelines, posts the
+/// refusal on it so the node gets its `onError` instead of stalling.
+fn install_refusal_log_hook() {
+    static INSTALLED: std::sync::Once = std::sync::Once::new();
+    INSTALLED.call_once(|| {
+        // The plugin is loaded by now (an element of it is joining a
+        // pipeline), so its category exists. Only ever RAISE it.
+        if let Some(category) = gst::DebugCategory::get("adaptivedemux2") {
+            if category.threshold() < gst::DebugLevel::Error {
+                category.set_threshold(gst::DebugLevel::Error);
+            }
+        }
+        gst::log::add_log_function(|category, level, _file, _function, _line, object, message| {
+            if level != gst::DebugLevel::Error || category.name() != "adaptivedemux2" {
+                return;
+            }
+            let Some(object) = object else { return };
+            let refused_download = message
+                .get()
+                .is_some_and(|m| m.contains("Failed to begin") && m.contains("download"));
+            if !refused_download {
+                return;
+            }
+            // SAFETY: the logged object is a live GObject for the
+            // duration of the log call; `from_glib_none` takes our own
+            // reference.
+            let object: gst::glib::Object =
+                unsafe { gst::glib::translate::from_glib_none(object.as_ptr()) };
+            let Ok(element) = object.downcast::<gst::Element>() else {
+                return;
+            };
+            let mut top = element.clone();
+            while let Some(parent) = top.parent().and_then(|p| p.downcast::<gst::Element>().ok()) {
+                top = parent;
+            }
+            if !top.name().starts_with(RESTRICTED_PIPELINE_PREFIX) {
+                return;
+            }
+            post_refusal(
+                &top,
+                &element,
+                "the adaptive demuxer refused a non-HTTP URI its stream names",
+            );
+        });
+    });
 }
 
 /// Ensure GStreamer is initialised (idempotent, thread-safe).
@@ -223,6 +423,10 @@ pub(crate) fn build(
         .map_or_else(|| gst::ElementFactory::make("playbin").build(), Ok)
         .map_err(|e| format!("playbin unavailable (is gstreamer-plugins-base installed?): {e}"))?;
     playbin.set_property("uri", &uri);
+    if restricted {
+        // Lets the refusal log backstop recognise this pipeline.
+        playbin.set_property("name", format!("{RESTRICTED_PIPELINE_PREFIX}{node_id}"));
+    }
 
     // Video sink: RGBA appsink. `drop = true, max_buffers = 2` keeps
     // the appsink from back-pressuring the decoder when the winit

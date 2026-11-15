@@ -422,11 +422,18 @@ impl BrowserModule {
         let inner_for_remote = Arc::clone(&self.inner);
         let shell_for_remote = Arc::clone(&self.shell);
         let tab_id_for_remote = tab_id.clone();
-        remote.on_patches(Arc::new(move |patches: &[Patch]| {
+        // Owned delivery: the decoded batch moves through the id
+        // rewriting instead of being cloned (props / values included).
+        remote.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
             log::debug!(
                 "hypen-browser: tab {tab_id_for_remote} on_patches: {} patches in",
                 patches.len(),
             );
+            // The console summary reads the incoming batch, which the
+            // rewrite below consumes: summarise first (no-op closed).
+            let summary = crate::devlog::console()
+                .enabled()
+                .then(|| summarize_patches(&patches));
             let mut rewritten = process_tab_patches(&inner_for_remote, &tab_id_for_remote, patches);
             // HypenApp embeds: register / tear down any the batch
             // creates or removes, and reconcile their slot visibility.
@@ -444,10 +451,9 @@ impl BrowserModule {
             }
             // Debug console: record the incoming batch (no-op when the
             // console is closed).
-            record_console(
-                &shell_for_remote,
-                format!("◀ in  {}", summarize_patches(patches)),
-            );
+            if let Some(summary) = summary {
+                record_console(&shell_for_remote, format!("◀ in  {summary}"));
+            }
         }));
 
         // Status callback — surface lifecycle transitions on the
@@ -1271,13 +1277,14 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
 ///
 /// Returns the rewritten patches; returns empty when the tab isn't
 /// known (worker fired after a close, for instance).
-fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch]) -> Vec<Patch> {
+fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: Vec<Patch>) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
     // The batch arrives from the tab's `RemoteModule` already lowered
     // (no template patches) and owner-stamped, so root-relative media
     // URLs resolve per node against the tab's server in the renderer —
-    // nothing to expand or absolutize here.
-    let patches: Vec<Patch> = patches.to_vec();
+    // nothing to expand or absolutize here. It arrives OWNED
+    // (`RemoteModule::on_owned_patches`): the rewrite below moves each
+    // patch, never cloning a `SetProp` value or a `Create`'s props.
     let (prefix, attached) = match g.tabs.get(tab_id) {
         Some(t) => (t.id_prefix.clone(), t.attached),
         None => return Vec::new(),
@@ -1288,7 +1295,7 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
             // Shell hasn't rendered yet; buffer per-tab so we can
             // replay once we learn the viewport id.
             if let Some(tab) = g.tabs.get_mut(tab_id) {
-                tab.queued.extend_from_slice(&patches);
+                tab.queued.extend(patches);
             }
             return Vec::new();
         }
@@ -1743,7 +1750,7 @@ fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
 
     let inner_for_patches = Arc::clone(inner);
     let marker_for_patches = marker.clone();
-    remote.on_patches(Arc::new(move |patches: &[Patch]| {
+    remote.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
         let mut rewritten = process_embed_patches(&inner_for_patches, &marker_for_patches, patches);
         // Embedded apps can embed further apps.
         let lifecycle = handle_embed_lifecycle(&inner_for_patches, &rewritten);
@@ -1803,14 +1810,17 @@ fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
 /// expansion, id prefixing, re-rooting onto the HypenApp host node,
 /// and action-name marking — plus replacement-root handling for
 /// reconnects and the loading→connected slot flip on the first batch.
-fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Patch]) -> Vec<Patch> {
+fn process_embed_patches(
+    inner: &Arc<Mutex<Inner>>,
+    marker: &str,
+    patches: Vec<Patch>,
+) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
     let Some(embed) = g.embeds.get_mut(marker) else {
         return Vec::new();
     };
-    // Already lowered and owner-stamped by the embed's `RemoteModule`
-    // (see `process_tab_patches`).
-    let patches = patches.to_vec();
+    // Already lowered, owner-stamped and OWNED, from the embed's
+    // `RemoteModule` (see `process_tab_patches`).
     let prefix = embed.id_prefix.clone();
     let host = embed.host_id.clone();
 
@@ -2678,7 +2688,7 @@ mod tests {
                 _ => None,
             })
             .collect();
-        let out = process_tab_patches(&module.inner, "tab-A", &batch);
+        let out = process_tab_patches(&module.inner, "tab-A", batch.clone());
         let out_ptrs: Vec<usize> = out
             .iter()
             .filter_map(|p| match p {
@@ -3033,7 +3043,7 @@ mod tests {
             semantics: None,
         };
         module.inner.lock().unwrap().viewport_id = Some("viewport".into());
-        let out = process_tab_patches(&module.inner, "tab-A", &[stamped]);
+        let out = process_tab_patches(&module.inner, "tab-A", vec![stamped]);
         let origin = out.iter().find_map(|p| match p {
             Patch::Create { id, props, .. } if id.as_ref() == "a1:img" => props
                 .get(ASSET_ORIGIN_PROP)
@@ -3168,7 +3178,7 @@ mod tests {
                 before_id: None,
             },
         ];
-        let out = process_tab_patches(&module.inner, "tab-bg", &in_patches);
+        let out = process_tab_patches(&module.inner, "tab-bg", in_patches.clone());
 
         // Expect: Create(a7:1), Insert(parent=viewport, id=a7:1), Detach(a7:1).
         assert_eq!(out.len(), 3, "got {out:?}");
@@ -3333,7 +3343,7 @@ mod tests {
                 before_id: None,
             },
         ];
-        let out = process_tab_patches(&module.inner, "tab-fg", &in_patches);
+        let out = process_tab_patches(&module.inner, "tab-fg", in_patches.clone());
         assert!(
             !out.iter().any(|p| matches!(p, Patch::Detach { .. })),
             "active tab's roots must NOT be Detach'd; got {out:?}",
@@ -3356,7 +3366,7 @@ mod tests {
             insert("root", "1"),
             insert("1", "2"),
         ];
-        let out = process_tab_patches(&module.inner, "tab-1", &again);
+        let out = process_tab_patches(&module.inner, "tab-1", again.clone());
 
         assert!(
             matches!(&out[0], Patch::Remove { id, transition: false } if id.as_ref() == "a9:1"),
@@ -3618,7 +3628,7 @@ mod tests {
     /// Feed a raw tab batch through the same pipeline the tab's
     /// on_patches closure runs: rewrite, embed lifecycle, forward.
     fn ingest_tab_batch(module: &Arc<BrowserModule>, tab_id: &str, batch: &[Patch]) -> Vec<Patch> {
-        let mut rewritten = process_tab_patches(&module.inner, tab_id, batch);
+        let mut rewritten = process_tab_patches(&module.inner, tab_id, batch.to_vec());
         let lifecycle = handle_embed_lifecycle(&module.inner, &rewritten);
         rewritten.extend(lifecycle.extra);
         forward(&module.inner, &rewritten);
@@ -3680,6 +3690,69 @@ mod tests {
             .any(|p| matches!(p, Patch::Detach { id } if id.as_ref() == "a9:52")));
     }
 
+    /// Tab and embed batches arrive OWNED (`RemoteModule::on_owned_patches`)
+    /// and the id rewrite moves each patch: a `Create`'s props map and a
+    /// `SetProp`'s value come out as the very allocations that went in —
+    /// never deep-copied (CLAUDE.md "Arc-Shared Props"; same check as
+    /// remote.rs's `stamping_does_not_deep_copy_a_creates_props`).
+    #[test]
+    fn tab_and_embed_batches_are_rewritten_without_deep_copies() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        let big = "x".repeat(4096);
+        let batch = |big: &str| {
+            let create = create_with("70", "Text", &[("0", json!("hi"))]);
+            let props_ptr = match &create {
+                Patch::Create { props, .. } => Arc::as_ptr(props),
+                _ => unreachable!(),
+            };
+            let value = json!(big);
+            let value_ptr = value.as_str().unwrap().as_ptr();
+            let set = Patch::SetProp {
+                id: "70".into(),
+                name: "0".into(),
+                value,
+            };
+            (vec![create, insert("root", "70"), set], props_ptr, value_ptr)
+        };
+        let check = |out: &[Patch], prefix: &str, props_ptr, value_ptr| {
+            let id = format!("{prefix}70");
+            let (mut saw_create, mut saw_set) = (false, false);
+            for p in out {
+                match p {
+                    Patch::Create { id: pid, props, .. } if pid.as_ref() == id => {
+                        assert_eq!(Arc::as_ptr(props), props_ptr, "props map deep-copied");
+                        assert_eq!(Arc::strong_count(props), 1, "props map shared");
+                        saw_create = true;
+                    }
+                    Patch::SetProp { id: pid, value, .. } if pid.as_ref() == id => {
+                        assert_eq!(
+                            value.as_str().map(str::as_ptr),
+                            Some(value_ptr),
+                            "SetProp value deep-copied"
+                        );
+                        saw_set = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(saw_create && saw_set, "{out:?}");
+        };
+
+        let (tab_batch, props_ptr, value_ptr) = batch(&big);
+        let out = process_tab_patches(&module.inner, "tab-1", tab_batch);
+        check(&out, "a9:", props_ptr, value_ptr);
+
+        let (embed_batch, props_ptr, value_ptr) = batch(&big);
+        let out = process_embed_patches(&module.inner, "e1:", embed_batch);
+        check(&out, "e1:", props_ptr, value_ptr);
+    }
+
     #[test]
     fn embed_patches_graft_under_host_and_carry_action_markers() {
         let (module, _captured) = fresh_browser_with_capture();
@@ -3704,7 +3777,7 @@ mod tests {
             ),
             insert("1", "2"),
         ];
-        let out = process_embed_patches(&module.inner, "e1:", &batch);
+        let out = process_embed_patches(&module.inner, "e1:", batch.clone());
 
         // Root re-rooted onto the HypenApp host, ids prefixed.
         assert!(
@@ -3732,11 +3805,11 @@ mod tests {
         let out2 = process_embed_patches(
             &module.inner,
             "e1:",
-            &[Patch::SetProp {
+            [Patch::SetProp {
                 id: "2".into(),
                 name: "0".into(),
                 value: json!("Play now"),
-            }],
+            }].to_vec(),
         );
         assert_eq!(out2.len(), 1);
         let inner = module.inner.lock().unwrap();
@@ -3750,7 +3823,7 @@ mod tests {
         let (module, captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-1", "a9:", &[], true);
         let raw = hypenapp_route_batch("ws://127.0.0.1:1/nope");
-        let rewritten = process_tab_patches(&module.inner, "tab-1", &raw);
+        let rewritten = process_tab_patches(&module.inner, "tab-1", raw.clone());
         let lifecycle = handle_embed_lifecycle(&module.inner, &rewritten);
 
         assert_eq!(lifecycle.to_connect.len(), 1);
@@ -3800,7 +3873,7 @@ mod tests {
         let out = process_embed_patches(
             &module.inner,
             "e1:",
-            &stamped(
+            stamped(
                 "wss://hypeflix.example/ws",
                 vec![
                     create_with("1", "Column", &[]),
@@ -3823,7 +3896,7 @@ mod tests {
                     create_with("4", "Image", &[("src", json!("file:///etc/passwd"))]),
                     insert("1", "4"),
                 ],
-            ),
+            ).to_vec(),
         );
 
         let creates: Vec<(&str, &Arc<IndexMap<String, Value>>)> = out
@@ -3868,12 +3941,12 @@ mod tests {
         let first = vec![create_with("1", "Column", &[]), insert("root", "1")];
         forward(
             &module.inner,
-            &process_embed_patches(&module.inner, "e1:", &first),
+            &process_embed_patches(&module.inner, "e1:", first.clone()),
         );
 
         // Fresh session after a reconnect: new ids, new root.
         let second = vec![create_with("7", "Column", &[]), insert("root", "7")];
-        let out = process_embed_patches(&module.inner, "e1:", &second);
+        let out = process_embed_patches(&module.inner, "e1:", second.clone());
         assert!(
             matches!(&out[0], Patch::Remove { id, .. } if id.as_ref() == "e1:1"),
             "expected the stale root removed first, got {out:?}",
@@ -3903,7 +3976,7 @@ mod tests {
             &process_embed_patches(
                 &module.inner,
                 "e1:",
-                &[create_with("1", "Column", &[]), insert("root", "1")],
+                [create_with("1", "Column", &[]), insert("root", "1")].to_vec(),
             ),
         );
 
@@ -3912,11 +3985,11 @@ mod tests {
         let route_change = process_embed_patches(
             &module.inner,
             "e1:",
-            &[
+            [
                 Patch::Detach { id: "1".into() },
                 create_with("2", "Column", &[]),
                 insert("root", "2"),
-            ],
+            ].to_vec(),
         );
         assert!(
             !route_change
@@ -4056,7 +4129,7 @@ mod tests {
             &process_embed_patches(
                 &module.inner,
                 "e1:",
-                &[create_with("1", "Column", &[]), insert("root", "1")],
+                [create_with("1", "Column", &[]), insert("root", "1")].to_vec(),
             ),
         );
 
@@ -4156,11 +4229,11 @@ mod tests {
         let first = vec![create_with("1", "Column", &[]), insert("root", "1")];
         forward(
             &module.inner,
-            &process_embed_patches(&module.inner, "e1:", &first),
+            &process_embed_patches(&module.inner, "e1:", first.clone()),
         );
 
         let again = vec![create_with("1", "Column", &[]), insert("root", "1")];
-        let out = process_embed_patches(&module.inner, "e1:", &again);
+        let out = process_embed_patches(&module.inner, "e1:", again.clone());
         assert!(
             matches!(&out[0], Patch::Remove { id, .. } if id.as_ref() == "e1:1"),
             "expected the old-session root removed first, got {out:?}",
@@ -4289,7 +4362,7 @@ mod tests {
         let grafted = process_embed_patches(
             &module.inner,
             "e1:",
-            &[create_with("1", "Column", &[]), insert("root", "1")],
+            [create_with("1", "Column", &[]), insert("root", "1")].to_vec(),
         );
         forward(&module.inner, &grafted);
         assert_eq!(

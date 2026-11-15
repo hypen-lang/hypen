@@ -9576,6 +9576,46 @@ fn heading_level_change_after_creation_resizes_incrementally() {
     }
 }
 
+/// `level` is a layout prop ONLY on a Heading: on any other element
+/// (a Progress, a Rating, a custom component's data prop) a `level`
+/// write is paint-only and must not dirty the fit pass / Taffy.
+#[test]
+fn level_is_layout_affecting_only_on_a_heading() {
+    use crate::layout::{is_node_layout_prop_key, patch_affects_layout};
+    use crate::window::paint_only_affected_ids;
+    let mut tree = Tree::new();
+    tree.apply_batch(&[
+        create_patch("h", "Heading", &[("0", json!("Title")), ("level", json!(1))]),
+        insert_patch(ROOT_ID, "h"),
+        create_patch("p", "Progress", &[("level", json!(1))]),
+        insert_patch(ROOT_ID, "p"),
+        create_patch("c", "Column", &[("level.0", json!(1))]),
+        insert_patch(ROOT_ID, "c"),
+    ]);
+    let write = |id: &str, name: &str| Patch::SetProp {
+        id: id.into(),
+        name: name.into(),
+        value: json!(3),
+    };
+    for (id, name, layout) in [
+        ("h", "level", true),
+        ("h", "level.0", true),
+        ("p", "level", false),
+        ("c", "level.0", false),
+    ] {
+        assert_eq!(is_node_layout_prop_key(&tree, id, name), layout, "{id}.{name}");
+        assert_eq!(patch_affects_layout(&write(id, name), &tree), layout, "{id}.{name}");
+        assert_eq!(
+            paint_only_affected_ids(&[write(id, name)], &[], &tree, false, false, false)
+                .is_none(),
+            layout,
+            "{id}.{name}"
+        );
+    }
+    assert!(!crate::layout::is_layout_prop("level"));
+    assert!(!crate::layout::is_inherited_text_measure_key("level"));
+}
+
 // -----------------------------------------------------------------
 // Text decoration (`.textDecoration("line-through")`, Tailwind
 // `underline` / `line-through`, `.underline()` / `.strikethrough()`)

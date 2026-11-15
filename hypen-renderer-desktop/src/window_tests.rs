@@ -1806,6 +1806,104 @@ mod media_errors {
         assert!(crate::window::refused_track_dispatches(node, &skipped, &mut keys).is_empty());
     }
 
+    /// The playlist's `startIndex` entry refused: the initial selection
+    /// starts on the next allowed entry and the scan reports the skipped
+    /// entry once (its own index). A later auto-advance over the same
+    /// refused entry — the other path that reports refusals — shares the
+    /// dedupe set, so the entry never reports twice.
+    #[test]
+    fn refused_start_entry_is_skipped_and_reported_once_across_paths() {
+        use crate::layout::{
+            next_playlist_track, resolve_media_playlist, resolve_media_source, MediaSource,
+            REFUSED_MEDIA_ERROR_CODE,
+        };
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("http://a.test")),
+            (
+                "playlist",
+                json!(["/ep1.mp4", "file:///etc/passwd", "C:\\x.mp4", "/ep4.mp4"]),
+            ),
+            ("startIndex", json!(1)),
+            ("loop", json!(true)),
+            ("onError.0", json!("@actions.err")),
+            ("onPlay.0", json!("@actions.play")),
+        ]);
+        let viewport = Viewport::new(800.0, 600.0);
+        let node = tree.get("vid").unwrap();
+        let (source, index) = resolve_media_source(node, viewport);
+        assert_eq!(index, 3, "starts on the first allowed entry after startIndex");
+        assert_eq!(
+            source.as_ref().and_then(MediaSource::url),
+            Some("http://a.test/ep4.mp4")
+        );
+
+        let mut dispatched = HashSet::new();
+        let out = collect_media_error_dispatches(&tree, viewport, &mut dispatched, &|_: &str| None);
+        let reported: Vec<(Value, Value)> = out
+            .iter()
+            .map(|(_, _, p)| (p["src"].clone(), p["index"].clone()))
+            .collect();
+        assert_eq!(
+            reported,
+            vec![
+                (json!("file:///etc/passwd"), json!(1)),
+                (json!("C:\\x.mp4"), json!(2)),
+            ]
+        );
+        assert!(out
+            .iter()
+            .all(|(_, _, p)| p["code"] == json!(REFUSED_MEDIA_ERROR_CODE)));
+        // Rescan: nothing new.
+        assert!(collect_media_error_dispatches(&tree, viewport, &mut dispatched, &|_: &str| None)
+            .is_empty());
+        // Track 3 ends, `loop` wraps through 0 (allowed): nothing skipped.
+        // From 0 the advance skips 1 and 2 again — already reported.
+        let playlist = resolve_media_playlist(node);
+        let (skipped, next) = next_playlist_track(&playlist, 0, true);
+        assert_eq!(next.map(|(i, _)| i), Some(3));
+        assert_eq!(skipped.len(), 2);
+        assert!(
+            crate::window::refused_track_dispatches(node, &skipped, &mut dispatched).is_empty(),
+            "a refusal the scan reported must not report again from the advance"
+        );
+    }
+
+    /// And the other way round: an advance reports first, the scan then
+    /// stays quiet for that entry.
+    #[test]
+    fn refusal_reported_by_an_advance_is_not_rescanned() {
+        use crate::layout::{next_playlist_track, resolve_media_playlist};
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("http://a.test")),
+            ("playlist", json!(["/ep1.mp4", "file:///etc/passwd"])),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        let viewport = Viewport::new(800.0, 600.0);
+        let node = tree.get("vid").unwrap();
+        let playlist = resolve_media_playlist(node);
+        let (skipped, _) = next_playlist_track(&playlist, 0, false);
+        let mut dispatched = HashSet::new();
+        assert_eq!(
+            crate::window::refused_track_dispatches(node, &skipped, &mut dispatched).len(),
+            1
+        );
+        // The app now points startIndex at the refused entry (no `loop`,
+        // nothing allowed after it): the scan sees it as the refused
+        // current track — already reported.
+        let tree = video_tree(&[
+            (ASSET_ORIGIN_PROP, json!("http://a.test")),
+            ("playlist", json!(["/ep1.mp4", "file:///etc/passwd"])),
+            ("startIndex", json!(1)),
+            ("onError.0", json!("@actions.err")),
+        ]);
+        assert!(
+            collect_media_error_dispatches(&tree, viewport, &mut dispatched, &|_: &str| None)
+                .is_empty()
+        );
+    }
+
     #[test]
     fn healthy_poster_means_no_dispatch() {
         let tree = video_tree(&[

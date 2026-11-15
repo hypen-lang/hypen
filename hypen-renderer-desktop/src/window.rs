@@ -1064,8 +1064,11 @@ impl App {
                     // (once per (node, entry), like any sticky error).
                     let (skipped, next) =
                         crate::layout::next_playlist_track(&playlist, cur_idx, wraps);
-                    let refused =
-                        refused_track_dispatches(node, &skipped, &mut self.video_error_keys);
+                    let refused = refused_track_dispatches(
+                        node,
+                        &skipped,
+                        &mut self.dispatched_media_errors,
+                    );
                     let next = next.and_then(|(i, s)| {
                         Some((s.url()?.to_string(), s.authored().to_string(), i))
                     });
@@ -4306,7 +4309,8 @@ pub(crate) fn drive_animation_frame(
         && outcome.restyle.is_empty()
         && !writes.is_empty()
         && writes.iter().all(|(id, key)| {
-            !crate::layout::is_layout_prop_key(key) && !crate::chart::is_chart_family_node(tree, id)
+            !crate::layout::is_node_layout_prop_key(tree, id, key)
+                && !crate::chart::is_chart_family_node(tree, id)
         }) {
         let mut affected: HashSet<String> = HashSet::new();
         let mut capped = false;
@@ -4416,33 +4420,40 @@ pub(crate) fn clear_focus_if_exiting(
     }
 }
 
-/// The `onError` dispatches `(action, payload)` for playlist entries a
-/// track advance SKIPPED because the node's asset origin refuses them
-/// ([`crate::layout::next_playlist_track`]): payload
-/// `{ type: "error", src: <authored entry>, index, code, message }`
-/// merged over the applicator's static args, `code`
-/// [`crate::layout::REFUSED_MEDIA_ERROR_CODE`]. Each `(node, entry)`
-/// reports once — `error_keys` is the window's sticky video-error set.
-/// Empty when no `onError` is wired.
-#[cfg(any(feature = "video", test))]
+/// Dedupe key for the `onError` of a media source the node's asset
+/// origin refuses: ONE report per `(node, authored source)`, whichever
+/// path finds it first — the media error scan (the current track, or
+/// entries the initial playlist selection skipped) or a playlist
+/// auto-advance skipping it. Both paths share the window's
+/// `dispatched_media_errors` set through this key.
+pub(crate) fn refused_source_key(node_id: &str, authored: &str) -> String {
+    format!("{node_id}\u{0}refused-src\u{0}{authored}")
+}
+
+/// The `onError` dispatches `(action, payload)` for refused media
+/// sources — playlist entries a track advance (or the initial
+/// selection) SKIPPED because the node's asset origin refuses them
+/// ([`crate::layout::next_playlist_track`]), or a refused current
+/// track: payload `{ type: "error", src: <authored entry>, index, code,
+/// message }` merged over the applicator's static args, `code`
+/// [`crate::layout::REFUSED_MEDIA_ERROR_CODE`]. Each `(node, source)`
+/// reports once — `dispatched` is the window's media-error dedupe set,
+/// keyed by [`refused_source_key`]. Empty when no `onError` is wired
+/// (and then nothing is marked reported).
 pub(crate) fn refused_track_dispatches(
     node: &crate::tree::Node,
     skipped: &[(u64, &crate::layout::MediaSource)],
-    error_keys: &mut HashSet<String>,
+    dispatched: &mut HashSet<String>,
 ) -> Vec<(String, serde_json::Value)> {
     let mut out = Vec::new();
+    let Some((action, base)) = crate::layout::resolve_named_event_action(node, "onError") else {
+        return out;
+    };
     for (index, source) in skipped {
-        if !error_keys.insert(video_error_key(
-            &node.id,
-            &format!("refused\u{0}{}", source.authored()),
-        )) {
+        if !dispatched.insert(refused_source_key(&node.id, source.authored())) {
             continue;
         }
-        let Some((action, base)) = crate::layout::resolve_named_event_action(node, "onError")
-        else {
-            continue;
-        };
-        let mut obj = match base {
+        let mut obj = match base.clone() {
             serde_json::Value::Object(o) => o,
             _ => serde_json::Map::new(),
         };
@@ -4454,7 +4465,7 @@ pub(crate) fn refused_track_dispatches(
             json!(crate::layout::REFUSED_MEDIA_ERROR_CODE),
         );
         obj.insert("message".to_string(), json!(source.refused_message()));
-        out.push((action, serde_json::Value::Object(obj)));
+        out.push((action.clone(), serde_json::Value::Object(obj)));
     }
     out
 }
@@ -4495,8 +4506,19 @@ pub(crate) fn collect_media_error_dispatches(
         else {
             continue;
         };
-        let (source, index) = crate::layout::resolve_media_source(node, viewport);
+        let (source, index, skipped) = crate::layout::resolve_media_selection(node, viewport);
         let poster = crate::layout::resolve_media_poster_source(node, viewport);
+        // Refused tracks first: entries the initial playlist selection
+        // skipped, then a refused current track (shared dedupe with the
+        // auto-advance path — see `refused_source_key`).
+        let mut refused: Vec<(u64, &MediaSource)> =
+            skipped.iter().map(|(i, s)| (*i, s)).collect();
+        if let Some(src @ MediaSource::Refused { .. }) = &source {
+            refused.push((index, src));
+        }
+        for (action, payload) in refused_track_dispatches(node, &refused, dispatched) {
+            pending.push((node.id.clone(), action, payload));
+        }
         let mut push = |src: &str, extra: Vec<(&str, serde_json::Value)>| {
             let mut obj = match base_payload.clone() {
                 serde_json::Value::Object(o) => o,
@@ -4522,21 +4544,6 @@ pub(crate) fn collect_media_error_dispatches(
             .map(MediaSource::authored)
             .unwrap_or_default()
             .to_string();
-        if let Some(src @ MediaSource::Refused { .. }) = &source {
-            if dispatched.insert(format!(
-                "{}\u{0}refused-src\u{0}{}",
-                node.id,
-                src.authored()
-            )) {
-                push(
-                    src.authored(),
-                    vec![
-                        ("code", json!(REFUSED_MEDIA_ERROR_CODE)),
-                        ("message", json!(src.refused_message())),
-                    ],
-                );
-            }
-        }
         match &poster {
             Some(p @ MediaSource::Refused { .. }) => {
                 if dispatched.insert(format!(
@@ -4624,7 +4631,7 @@ pub(crate) fn paint_only_affected_ids(
     for patch in patches {
         let id = match patch {
             Patch::SetProp { id, name, .. } | Patch::RemoveProp { id, name } => {
-                if crate::layout::is_layout_prop_key(name) {
+                if crate::layout::is_node_layout_prop_key(tree, id, name) {
                     return None;
                 }
                 // A chart resolves its domains and every mark's geometry

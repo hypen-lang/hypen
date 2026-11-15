@@ -81,6 +81,10 @@ pub(crate) fn backoff_for(attempt: u32) -> Duration {
 }
 
 type PatchCallback = Arc<dyn Fn(&[Patch]) + Send + Sync>;
+/// A patch callback that takes the delivered batch BY VALUE — the
+/// decoded, owner-stamped `Vec<Patch>` itself, never a copy. See
+/// [`RemoteModule::on_owned_patches`].
+pub type OwnedPatchCallback = Arc<dyn Fn(Vec<Patch>) + Send + Sync>;
 type StatusCallback = Arc<dyn Fn(&ConnectionStatus) + Send + Sync>;
 
 /// Lifecycle of a [`RemoteModule`]'s WebSocket. Fired through
@@ -117,9 +121,10 @@ pub enum ConnectionStatus {
 
 #[derive(Default)]
 pub(crate) struct Inner {
-    /// Callback set by `on_patches`. The window's `PatchQueue` lives
-    /// behind this.
-    callback: Option<PatchCallback>,
+    /// Callback set by `on_patches` / `on_owned_patches`, taking each
+    /// batch by value (a borrowed `on_patches` callback is wrapped). The
+    /// window's `PatchQueue` lives behind this.
+    callback: Option<OwnedPatchCallback>,
     /// Callback set by `on_status`. Fires every time the worker
     /// transitions between states in [`ConnectionStatus`].
     status_callback: Option<StatusCallback>,
@@ -246,6 +251,24 @@ pub struct RemoteModule {
 }
 
 impl RemoteModule {
+    /// [`HypenModule::on_patches`] for a consumer that wants each batch
+    /// OWNED: `cb` receives the decoded, owner-stamped `Vec<Patch>` the
+    /// connection produced (and the pre-wiring backlog, drained here),
+    /// so a consumer that rewrites the batch (the browser re-prefixing
+    /// ids per tab / embed) moves patches instead of cloning them — a
+    /// `SetProp` value or a `Create`'s props are never deep-copied on
+    /// the way. Replaces any earlier callback, like `on_patches`.
+    pub fn on_owned_patches(&self, cb: OwnedPatchCallback) {
+        let pending = {
+            let mut guard = self.inner.lock().expect("remote inner poisoned");
+            guard.callback = Some(Arc::clone(&cb));
+            std::mem::take(&mut guard.pending)
+        };
+        if !pending.is_empty() {
+            cb(pending);
+        }
+    }
+
     /// Open a WebSocket to `url`, log in as `module_name`, and start
     /// pumping patches. Spawns a worker OS thread that owns its own
     /// single-threaded tokio runtime so the (sync) winit event loop
@@ -335,7 +358,7 @@ pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: Vec<Patch>) {
         }
     };
     if let Some(cb) = cb {
-        cb(&owned);
+        cb(owned);
     }
 }
 
@@ -817,14 +840,7 @@ impl HypenModule for RemoteModule {
     }
 
     fn on_patches(&self, cb: PatchCallback) {
-        let pending = {
-            let mut guard = self.inner.lock().expect("remote inner poisoned");
-            guard.callback = Some(Arc::clone(&cb));
-            std::mem::take(&mut guard.pending)
-        };
-        if !pending.is_empty() {
-            cb(&pending);
-        }
+        self.on_owned_patches(Arc::new(move |patches: Vec<Patch>| cb(&patches)));
     }
 
     fn mount(&self) {
@@ -1025,8 +1041,8 @@ mod tests {
         }));
         let seen: Arc<Mutex<Vec<usize>>> = Arc::default();
         let sink = Arc::clone(&seen);
-        inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
-            for patch in p {
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: Vec<Patch>| {
+            for patch in &p {
                 if let Patch::Create { props, .. } = patch {
                     sink.lock().unwrap().push(Arc::as_ptr(props) as usize);
                 }
@@ -1042,6 +1058,50 @@ mod tests {
             }],
         );
         assert_eq!(*seen.lock().unwrap(), vec![before as usize]);
+    }
+
+    /// `on_owned_patches` hands the consumer the delivered batch itself —
+    /// the backlog drained on wiring and every later batch — so a
+    /// `SetProp` value is the decoder's allocation, not a clone.
+    #[test]
+    fn owned_patch_callback_receives_the_batch_without_copies() {
+        let (tx, _rx) = mpsc::unbounded_channel::<RemoteMessage>();
+        let inner = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::from("http://a.test")),
+            ..Inner::default()
+        }));
+        let module = RemoteModule {
+            module_name: "Test".into(),
+            inner: Arc::clone(&inner),
+            outbound: tx,
+            asset_origin: "http://a.test".into(),
+        };
+        let set = |s: &str| {
+            let value = json!(s.repeat(64));
+            let ptr = value.as_str().unwrap().as_ptr() as usize;
+            (
+                Patch::SetProp {
+                    id: "t".into(),
+                    name: "0".into(),
+                    value,
+                },
+                ptr,
+            )
+        };
+        let (early, early_ptr) = set("a");
+        deliver_patches(&inner, vec![early]);
+        let seen: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        module.on_owned_patches(Arc::new(move |batch: Vec<Patch>| {
+            for p in batch {
+                if let Patch::SetProp { value, .. } = p {
+                    sink.lock().unwrap().push(value.as_str().unwrap().as_ptr() as usize);
+                }
+            }
+        }));
+        let (late, late_ptr) = set("b");
+        deliver_patches(&inner, vec![late]);
+        assert_eq!(*seen.lock().unwrap(), vec![early_ptr, late_ptr]);
     }
 
     /// Template patches the connection's expander can't lower must not
@@ -1128,14 +1188,13 @@ mod tests {
         deliver_patches(&inner, vec![fake_patch("early", "Image")]);
         let got: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let sink = Arc::clone(&got);
-        let cb: PatchCallback =
-            Arc::new(move |p: &[Patch]| sink.lock().unwrap().extend_from_slice(p));
+        let cb: OwnedPatchCallback = Arc::new(move |p: Vec<Patch>| sink.lock().unwrap().extend(p));
         let pending = {
             let mut g = inner.lock().unwrap();
             g.callback = Some(Arc::clone(&cb));
             std::mem::take(&mut g.pending)
         };
-        cb(&pending);
+        cb(pending);
         deliver_patches(&inner, vec![fake_patch("late", "Image")]);
         let got = got.lock().unwrap();
         assert_eq!(got.len(), 2);
@@ -1147,8 +1206,8 @@ mod tests {
         let inner = Arc::new(Mutex::new(Inner::default()));
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
-        let cb: PatchCallback = Arc::new(move |p: &[Patch]| {
-            captured.lock().unwrap().extend_from_slice(p);
+        let cb: OwnedPatchCallback = Arc::new(move |p: Vec<Patch>| {
+            captured.lock().unwrap().extend(p);
         });
         inner.lock().unwrap().callback = Some(cb);
 
@@ -1263,8 +1322,8 @@ mod tests {
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
-        inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
-            captured.lock().unwrap().extend_from_slice(p);
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: Vec<Patch>| {
+            captured.lock().unwrap().extend(p);
         }));
         let mut resume = Resume::default();
 
@@ -1383,8 +1442,8 @@ mod tests {
     fn capture(inner: &Arc<Mutex<Inner>>) -> Arc<Mutex<Vec<Patch>>> {
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
-        inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
-            captured.lock().unwrap().extend_from_slice(p);
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: Vec<Patch>| {
+            captured.lock().unwrap().extend(p);
         }));
         received
     }

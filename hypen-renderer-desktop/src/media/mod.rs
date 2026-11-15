@@ -600,12 +600,7 @@ pub fn release_all() {
 /// JSON `true` or the string `"true"`, under either the named key or
 /// its positional `.0` variant.
 pub(crate) fn prop_truthy(node: &crate::tree::Node, name: &str) -> bool {
-    let zero = format!("{name}.0");
-    let v = node.props.get(&zero).or_else(|| node.props.get(name));
-    match v {
-        Some(v) => v.as_bool() == Some(true) || v.as_str().map(str::trim) == Some("true"),
-        None => false,
-    }
+    crate::layout::media_prop_truthy(node, name)
 }
 
 /// The node's `playlist` prop as ordered sources, index-aligned with

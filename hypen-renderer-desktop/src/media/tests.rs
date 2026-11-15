@@ -570,13 +570,22 @@ fn broken_poster_does_not_error_a_live_pipeline() {
         crate::video_v2::VideoPlayerState::Playing,
         "a broken poster must not override a live playing pipeline"
     );
-    // Without a pipeline the same poster failure IS the error surface
-    // (the feature-off / never-started contract state).
+    // Without a pipeline the poster failure still doesn't error a
+    // PLAYABLE track: the poster just doesn't show and a click plays
+    // (state and click agree). Only a poster with no playable track
+    // behind it reads `error`.
     release(node_id);
     assert_eq!(
         crate::video_v2::player_state(&node, crate::style::vp(800.0)),
+        crate::video_v2::VideoPlayerState::Idle,
+        "with no pipeline a playable track behind a broken poster is idle"
+    );
+    let mut poster_only = node.clone();
+    poster_only.props.remove("src");
+    assert_eq!(
+        crate::video_v2::player_state(&poster_only, crate::style::vp(800.0)),
         crate::video_v2::VideoPlayerState::Error,
-        "with no pipeline the poster failure is the error state"
+        "a poster-only element's poster failure is the error state"
     );
 }
 
@@ -926,6 +935,122 @@ fn restricted_pipeline_refuses_legacy_adaptive_demuxers() {
     }
 }
 
+/// Count GStreamer-CRITICALs (`g_return_if_fail` failures) logged while
+/// `f` runs.
+fn gst_criticals_during(f: impl FnOnce()) -> usize {
+    use gstreamer::glib;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let count = Arc::new(AtomicUsize::new(0));
+    let seen = Arc::clone(&count);
+    let handler = glib::log_set_handler(
+        Some("GStreamer"),
+        glib::LogLevels::LEVEL_CRITICAL,
+        false,
+        false,
+        move |_, _, message| {
+            eprintln!("GStreamer-CRITICAL: {message}");
+            seen.fetch_add(1, Ordering::SeqCst);
+        },
+    );
+    f();
+    glib::log_remove_handler(Some("GStreamer"), handler);
+    count.load(Ordering::SeqCst)
+}
+
+/// A legacy adaptive demuxer the guard starved must consume what it is
+/// fed cleanly: the starving probe takes ownership of every buffer, so
+/// GStreamer must not be told to drop (and unref) it a second time —
+/// that logged `gst_mini_object_unref: assertion 'mini_object != NULL'`
+/// at the manifest's EOS. Skipped where gst-plugins-bad isn't installed.
+#[test]
+fn starved_legacy_demuxer_consumes_its_manifest_without_criticals() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
+    }
+    use gstreamer as gst;
+    let pipeline: gst::Element = gst::Pipeline::new().upcast();
+    let mut ran = false;
+    for (name, caps) in [
+        ("hlsdemux", "application/x-hls"),
+        ("dashdemux", "application/dash+xml"),
+        ("mssdemux", "application/vnd.ms-sstr+xml"),
+    ] {
+        let Ok(demux) = gst::ElementFactory::make(name).build() else {
+            continue;
+        };
+        ran = true;
+        assert!(!super::gst_pipeline::guard_remote_element(&pipeline, &demux));
+        let criticals = gst_criticals_during(|| {
+            let sink = demux.static_pad("sink").expect("demuxer sink pad");
+            let src = gst::Pad::builder(gst::PadDirection::Src).build();
+            src.set_active(true).unwrap();
+            src.link(&sink).unwrap();
+            demux.set_state(gst::State::Paused).unwrap();
+            assert!(src.push_event(gst::event::StreamStart::new("manifest")));
+            assert!(
+                src.push_event(gst::event::Caps::new(&gst::Caps::new_empty_simple(caps))),
+                "{name}: caps {caps}"
+            );
+            let _ = src.push_event(gst::event::Segment::new(
+                &gst::FormattedSegment::<gst::format::Bytes>::new(),
+            ));
+            let pushed = src.push(gst::Buffer::from_slice(
+                b"#EXTM3U\n#EXTINF:1.0,\nfile:///etc/passwd\n".to_vec(),
+            ));
+            assert!(pushed.is_ok(), "{name}: starved buffer push: {pushed:?}");
+            let mut list = gst::BufferList::new();
+            list.get_mut()
+                .unwrap()
+                .add(gst::Buffer::from_slice(b"#EXT-X-ENDLIST\n".to_vec()));
+            let _ = src.push_list(list);
+            let _ = src.push_event(gst::event::Eos::new());
+            let _ = demux.set_state(gst::State::Null);
+        });
+        assert_eq!(criticals, 0, "{name}: GStreamer-CRITICAL while starved");
+    }
+    let _ = take_events();
+    if !ran {
+        eprintln!("skipping: no legacy adaptive demuxer installed (gst-plugins-bad)");
+    }
+}
+
+/// The manifest scan behind the HTTP-only demuxers' refusal: any
+/// absolute non-HTTP URI, wherever the manifest names it, is reported;
+/// relative references and http(s) / data: URIs are fine.
+#[test]
+fn manifest_scan_finds_non_http_uris() {
+    use super::gst_pipeline::manifest_refused_uri;
+    let ok = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n\
+              #EXT-X-PROGRAM-DATE-TIME:2026-01-01T00:00:00Z\n\
+              #EXT-X-KEY:METHOD=AES-128,URI=\"https://k.test/key\"\n\
+              #EXTINF:1.0,\nseg0.ts\n#EXTINF:1.0,\nhttp://cdn.test/seg1.ts\n#EXT-X-ENDLIST\n";
+    assert_eq!(manifest_refused_uri(ok), None);
+    let mpd = r#"<?xml version="1.0"?><MPD xmlns="urn:mpeg:dash:schema:mpd:2011"
+        xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" profiles="urn:mpeg:dash:profile:isoff-live:2011">
+        <BaseURL>https://cdn.test/</BaseURL><SegmentTemplate media="$Number$.m4s"/></MPD>"#;
+    assert_eq!(manifest_refused_uri(mpd), None);
+
+    assert_eq!(
+        manifest_refused_uri("#EXTM3U\n#EXTINF:1.0,\nfile:///tmp/seg.ts\n").as_deref(),
+        Some("file:///tmp/seg.ts")
+    );
+    assert_eq!(
+        manifest_refused_uri("#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"FILE:/etc/key\"\n")
+            .as_deref(),
+        Some("FILE:/etc/key")
+    );
+    assert_eq!(
+        manifest_refused_uri("<MPD><BaseURL>smb://share/x/</BaseURL></MPD>").as_deref(),
+        Some("smb://share/x/")
+    );
+    assert_eq!(
+        manifest_refused_uri("<S media=\"rtsp://h/x\"/>").as_deref(),
+        Some("rtsp://h/x")
+    );
+}
+
 /// Encode 30 frames into an MPEG-TS segment at `path` (an HLS segment).
 fn build_ts_segment(path: &std::path::Path) -> bool {
     use gstreamer as gst;
@@ -1059,6 +1184,25 @@ fn remote_hls_manifest_cannot_reach_a_local_segment() {
         });
         (frame.is_some(), err)
     };
+    // Is decoding the segment possible at all here? (Played directly,
+    // as a local file.) Without that, neither run below means anything.
+    let (direct_frame, _) = {
+        let seg = segment.to_str().unwrap().to_string();
+        let _ = take_events();
+        let started = start("test-hls-direct", &seg, &seg, 0, &muted_opts(), true);
+        let frame = started
+            .as_ref()
+            .ok()
+            .and_then(|_| poll_until(Duration::from_secs(8), || current_frame("test-hls-direct")));
+        let _ = take_events();
+        release("test-hls-direct");
+        (frame.is_some(), ())
+    };
+    if !direct_frame {
+        let _ = std::fs::remove_file(&segment);
+        eprintln!("skipping: GStreamer cannot play the MPEG-TS segment here (no H.264 decoder?)");
+        return;
+    }
     let (local_frame, local_err) = run("test-hls-local", &muted_opts());
     let (remote_frame, remote_err) = run("test-hls-remote", &restricted_opts());
     let _ = std::fs::remove_file(&segment);
@@ -1068,20 +1212,99 @@ fn remote_hls_manifest_cannot_reach_a_local_segment() {
         have("hlsdemux").map(|f| f.rank()),
         have("hlsdemux2").map(|f| f.rank()),
     );
+    // The control: a local app's (unrestricted `playbin`) pipeline plays
+    // the manifest's `file://` segment through the legacy `hlsdemux` —
+    // the attack path the restriction exists for. Only `hlsdemux` can
+    // demux HLS under `playbin`, so without it there is no control.
+    if have("hlsdemux").is_some() {
+        assert!(
+            local_frame,
+            "control: a local pipeline must play the manifest's segment (err {local_err:?})"
+        );
+    } else {
+        eprintln!("no control run: the legacy hlsdemux (gst-plugins-bad) is not installed");
+    }
     assert!(
         !remote_frame,
         "a remote app's HLS manifest played a file:// segment"
     );
-    if let Some(code) = remote_err.as_deref() {
-        // Refused by the guard: the legacy demuxer (never plugged under
-        // playbin → missing plugin; starved under playbin3) or a
-        // `file://` source. `hlsdemux2` refuses the URI itself and
-        // stalls without an error.
-        assert!(
-            matches!(code, "core/MissingPlugin" | "resource/NotAuthorized"),
-            "{code}"
-        );
+    // And the refusal is surfaced, never a silent stall: refused by the
+    // guard (the legacy demuxer: never plugged under playbin → missing
+    // plugin; starved under playbin3) or, with `hlsdemux2`, by the
+    // manifest scan / refusal backstop — `resource/NotAuthorized`.
+    let code = remote_err.expect("a refused HLS segment must report onError, not stall");
+    assert!(
+        matches!(code.as_str(), "core/MissingPlugin" | "resource/NotAuthorized"),
+        "{code}"
+    );
+}
+
+/// `hlsdemux2` downloads VARIANT playlists itself (never through a pad
+/// the manifest scan sees), and refuses a `file://` segment one names
+/// without posting anything — the refusal log backstop must still turn
+/// that into `onError` (`resource/NotAuthorized`) instead of a stall.
+/// Skipped without souphttpsrc / hlsdemux2 / an H.264 encoder.
+#[test]
+fn remote_hls_variant_naming_a_local_segment_reports_onerror() {
+    let _guard = lock_tests();
+    if !gst_ready() {
+        eprintln!("skipping: GStreamer init failed in this sandbox");
+        return;
     }
+    use gstreamer as gst;
+    let registry = gst::Registry::get();
+    let have = |name: &str| {
+        registry
+            .find_feature(name, gst::ElementFactory::static_type())
+            .is_some_and(|f| f.rank() > gst::Rank::NONE)
+    };
+    if !have("souphttpsrc") || !have("hlsdemux2") {
+        eprintln!("skipping: souphttpsrc or hlsdemux2 is not installed");
+        return;
+    }
+    let segment =
+        std::env::temp_dir().join(format!("hypen_variant_seg_{}.ts", std::process::id()));
+    if !build_ts_segment(&segment) {
+        eprintln!("skipping: cannot encode an MPEG-TS segment here");
+        return;
+    }
+    let seg_uri = gst::glib::filename_to_uri(&segment, None).unwrap();
+    let port = serve(vec![
+        (
+            "/master.m3u8".to_string(),
+            "application/vnd.apple.mpegurl",
+            b"#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=200000,RESOLUTION=64x48\nv.m3u8\n".to_vec(),
+        ),
+        (
+            "/v.m3u8".to_string(),
+            "application/vnd.apple.mpegurl",
+            format!(
+                "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:0\n\
+                 #EXTINF:1.0,\n{seg_uri}\n#EXT-X-ENDLIST\n"
+            )
+            .into_bytes(),
+        ),
+    ]);
+    let url = format!("http://127.0.0.1:{port}/master.m3u8");
+    let node = "test-hls-variant-remote";
+    let _ = take_events();
+    start(node, &url, &url, 0, &restricted_opts(), true).expect("start");
+    let err = poll_until(Duration::from_secs(10), || {
+        crate::media::status(node)
+            .filter(|s| s.errored)
+            .map(|_| ())
+    });
+    let frame = current_frame(node);
+    let events = take_events();
+    release(node);
+    let _ = std::fs::remove_file(&segment);
+    assert!(frame.is_none(), "a remote app's variant played a file:// segment");
+    assert!(err.is_some(), "the refused variant segment stalled without onError");
+    let code = events.into_iter().find_map(|e| match e.kind {
+        MediaEventKind::Error { code, .. } if e.node_id == node => Some(code),
+        _ => None,
+    });
+    assert_eq!(code.as_deref(), Some("resource/NotAuthorized"));
 }
 
 /// A remote app's media still plays: progressive MP4 and an HLS stream

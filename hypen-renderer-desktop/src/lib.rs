@@ -60,7 +60,7 @@ pub use device::DeviceConfig;
 pub use layout::{window_controls_platform_insets, SafeAreaInsets, WINDOW_CONTROLS_BAR_HEIGHT};
 pub use module::HypenModule;
 pub use painter::{PaintTarget, Painter};
-pub use remote::{ConnectionStatus, RemoteModule, RemoteOptions};
+pub use remote::{ConnectionStatus, OwnedPatchCallback, RemoteModule, RemoteOptions};
 pub use tree::{Node, Tree};
 pub use window::Shortcut;
 
