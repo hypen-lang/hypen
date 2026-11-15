@@ -43,7 +43,7 @@ import {
   type HostStorageOptions,
 } from "./storage.ts";
 import { loadWasiImports, type WasiImports } from "./wasi.ts";
-import { importInMemoryModule, transpileComponent } from "./loader.ts";
+import { importInMemoryModule, transpileComponent, wasmCspError, type LoadedVia } from "./loader.ts";
 
 // ----------------------------------------------------------------------------
 // hypen:engine/state
@@ -197,8 +197,50 @@ function reducerOutputFromWit(out: any, ctx: CallContext | null = null): Reducer
 // The host
 // ----------------------------------------------------------------------------
 
+/**
+ * What one successful {@link JsModuleHost.prepare} did — for diagnostics and
+ * performance measurement (see {@link JsModuleHostOptions.onPrepare}).
+ */
+export interface PrepareInfo {
+  module: string;
+  /** How the emitted bindings JS was imported: a Blob URL or the `data:` fallback. */
+  loadedVia: LoadedVia;
+  /** Size of the component that was transpiled. */
+  componentBytes: number;
+  /** Size of the emitted bindings JS. */
+  bindingsBytes: number;
+  /** Total size of the emitted core wasm modules. */
+  coreWasmBytes: number;
+  /** Wall-clock milliseconds per step (`performance.now()` deltas). */
+  timings: {
+    /** jco bindgen (includes fetching + compiling jco's own wasm on the first call). */
+    transpileMs: number;
+    /** `WebAssembly.compile` of the emitted core modules. */
+    compileMs: number;
+    /** Import of the bindings JS (Blob / data: URL). */
+    importMs: number;
+    /** Component instantiation against the gated import map. */
+    instantiateMs: number;
+    totalMs: number;
+  };
+}
+
 /** Options for {@link JsModuleHost}. */
-export interface JsModuleHostOptions extends HostStorageOptions {}
+export interface JsModuleHostOptions extends HostStorageOptions {
+  /** Called after every successful `prepare()` with how it went. */
+  onPrepare?: (info: PrepareInfo) => void;
+}
+
+/**
+ * Whether preview2-shim can make a module's blocking `wasi:io/poll` wait
+ * synchronously here. Its Node build parks the thread (`Atomics.wait`, also
+ * used under Bun); its browser build can only return a Promise from
+ * `Pollable.block()`, which a synchronous reducer cannot await.
+ */
+const SYNC_WASI_POLL =
+  typeof process !== "undefined" && typeof (process as { versions?: { node?: string } }).versions?.node === "string";
+
+const now = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
 interface ComponentEntry {
   bytes: Uint8Array | null;
@@ -216,6 +258,7 @@ export class JsModuleHost {
   #instances = new Map<number, InstanceEntry>();
   #nextId = 1;
   #activeCall: CallContext | null = null;
+  readonly #onPrepare: ((info: PrepareInfo) => void) | undefined;
 
   /** This host's storage (backends, quotas). Shared by all its modules. */
   readonly storage: HostStorage;
@@ -230,6 +273,7 @@ export class JsModuleHost {
   constructor(options: JsModuleHostOptions = {}) {
     this.storage = new HostStorage(options);
     this.engineState = createEngineStateImport(() => this.#activeCall);
+    this.#onPrepare = options.onPrepare;
   }
 
   register(name: string, bytes: Uint8Array | null | undefined, manifest?: ModuleManifest): void {
@@ -301,10 +345,12 @@ export class JsModuleHost {
       throw new Error(`no component bytes registered for module: ${name}`);
     }
     const componentBytes = entry.bytes;
+    const t0 = now();
 
     // 1. In-memory bindgen (instantiation: async => bindings export
     //    `instantiate(getCoreModule, imports)`, no sibling-file fetches).
     const { files, imports: requiredImports } = await transpileComponent(name, componentBytes);
+    const t1 = now();
 
     // 2. Link-time gate. Throws if the component imports something the
     //    manifest does not grant.
@@ -313,13 +359,21 @@ export class JsModuleHost {
     // 3. Compile the emitted core wasm.
     const coreModules = new Map<string, WebAssembly.Module>();
     const jsFiles: string[] = [];
+    let coreWasmBytes = 0;
+    const t2 = now();
     for (const [file, contents] of files) {
       if (file.endsWith(".wasm")) {
-        coreModules.set(file, await WebAssembly.compile(contents as BufferSource));
+        coreWasmBytes += contents.byteLength;
+        try {
+          coreModules.set(file, await WebAssembly.compile(contents as BufferSource));
+        } catch (e) {
+          throw wasmCspError(e, `could not compile module '${name}'`) ?? e;
+        }
       } else if (file.endsWith(".js")) {
         jsFiles.push(file);
       }
     }
+    const t3 = now();
     const getCoreModule = (relPath: string): WebAssembly.Module => {
       const mod = coreModules.get(relPath.replace(/^\.\//, ""));
       if (!mod) throw new Error(`unknown core module requested by bindings: ${relPath}`);
@@ -337,11 +391,27 @@ export class JsModuleHost {
       );
     }
     const source = files.find(([f]) => f === mainJs)![1];
-    const { instantiate } = await importInMemoryModule(source);
-    const bindings: ModuleBindings = await instantiate(getCoreModule, importMap);
+    const { module: bindingsModule, via } = await importInMemoryModule(source);
+    const t4 = now();
+    const bindings: ModuleBindings = await bindingsModule.instantiate(getCoreModule, importMap);
+    const t5 = now();
 
     // Only commit if the entry wasn't replaced (fresh bytes) meanwhile.
     if (this.#components.get(name) === entry) entry.prepared = { bindings };
+    this.#onPrepare?.({
+      module: name,
+      loadedVia: via,
+      componentBytes: componentBytes.byteLength,
+      bindingsBytes: source.byteLength,
+      coreWasmBytes,
+      timings: {
+        transpileMs: t1 - t0,
+        compileMs: t3 - t2,
+        importMs: t4 - t3,
+        instantiateMs: t5 - t4,
+        totalMs: t5 - t0,
+      },
+    });
     return this;
   }
 
@@ -368,7 +438,36 @@ export class JsModuleHost {
   }
 
   init(id: number, config: Uint8Array): Uint8Array {
-    return this.#instance(id).bindings.init(config);
+    const inst = this.#instance(id);
+    return this.#guard(inst, () => inst.bindings.init(config));
+  }
+
+  /**
+   * Run a guest call. A trap from a module holding the `http` grant in a
+   * runtime without synchronous wasi:io/poll (browsers) is almost always a
+   * blocked HTTP request: say so instead of a bare "unreachable".
+   */
+  #guard<T>(inst: InstanceEntry, run: () => T): T {
+    try {
+      return run();
+    } catch (e) {
+      if (
+        !SYNC_WASI_POLL &&
+        e instanceof WebAssembly.RuntimeError &&
+        this.#components.get(inst.name)?.manifest.http
+      ) {
+        throw new Error(
+          `module '${inst.name}' trapped (${e.message}). It holds the http grant, and in a ` +
+            "browser wasi:http cannot complete inside a synchronous reducer call: the request " +
+            "is sent, but preview2-shim's browser wasi:io/poll can only wait asynchronously, so " +
+            "a module that blocks on the response traps. Perform HTTP outside the module (an " +
+            "effect handled by the app) or run this module on a Node/Bun or native host. The " +
+            "component instance may be unusable after a trap.",
+          { cause: e },
+        );
+      }
+      throw e;
+    }
   }
 
   #withCallContext(inst: InstanceEntry, siblings: SiblingState[] | undefined, run: () => unknown): ReducerOutput {
@@ -384,7 +483,7 @@ export class JsModuleHost {
     this.#activeCall = ctx;
     let out: unknown;
     try {
-      out = run();
+      out = this.#guard(inst, run);
     } finally {
       this.#activeCall = prev;
     }
@@ -404,11 +503,13 @@ export class JsModuleHost {
   }
 
   onDeactivated(id: number, state: Uint8Array): ReducerOutput {
-    return reducerOutputFromWit(this.#instance(id).bindings.onDeactivated(state));
+    const inst = this.#instance(id);
+    return reducerOutputFromWit(this.#guard(inst, () => inst.bindings.onDeactivated(state)));
   }
 
   onDestroyed(id: number, state: Uint8Array): void {
-    this.#instance(id).bindings.onDestroyed(state);
+    const inst = this.#instance(id);
+    this.#guard(inst, () => inst.bindings.onDestroyed(state));
   }
 
   actions(id: number): string[] {

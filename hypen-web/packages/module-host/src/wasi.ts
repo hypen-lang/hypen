@@ -6,9 +6,15 @@
 // never load the shim — its Node build starts an I/O worker thread on import.
 // The cached value is a set of immutable module namespaces, not host state.
 //
-// Deliberately NOT included: wasi:filesystem and wasi:sockets (never granted
-// to modules), and wasi:http unless the manifest grants it (see
-// buildImportMap).
+// wasi:filesystem is linked as an EMPTY filesystem (no preopened
+// directories), exactly like the native host's empty WasiCtx: toolchains
+// whose runtimes import it unconditionally (TinyGo `wasip2`,
+// componentize-js) can load, but a module can never obtain a descriptor, so
+// it has no file access. The shim's own filesystem is never loaded (its Node
+// build is a real host-filesystem passthrough).
+//
+// Deliberately NOT included: wasi:sockets (never granted to modules), and
+// wasi:http unless the manifest grants it (see buildImportMap).
 
 export interface WasiImports {
   /** Always-linked interfaces (cli, clocks, io, random). */
@@ -18,6 +24,25 @@ export interface WasiImports {
 }
 
 let cached: Promise<WasiImports> | null = null;
+
+/**
+ * `wasi:filesystem/{preopens,types}` with nothing in it. `getDirectories()`
+ * is empty and a descriptor can only be reached through a preopen, so the
+ * resource classes exist only for jco's bindings to link against.
+ */
+export function emptyFilesystem(): Record<string, unknown> {
+  class Descriptor {}
+  class DirectoryEntryStream {}
+  return {
+    "wasi:filesystem/preopens": { getDirectories: (): [] => [] },
+    "wasi:filesystem/types": {
+      Descriptor,
+      DirectoryEntryStream,
+      // `option<error-code>`: an io error never comes from this filesystem.
+      filesystemErrorCode: (): undefined => undefined,
+    },
+  };
+}
 
 type Ns = Record<string, unknown>;
 
@@ -49,6 +74,7 @@ export function loadWasiImports(): Promise<WasiImports> {
       "wasi:random/random": random!.random,
       "wasi:random/insecure": random!.insecure,
       "wasi:random/insecure-seed": random!.insecureSeed,
+      ...emptyFilesystem(),
     };
     const httpMap: Record<string, unknown> = {
       "wasi:http/types": http!.types,

@@ -23,6 +23,7 @@
     "setup:wasm": "echo 'WASM is now copied by server and web-engine build scripts'",
     "test": "bun test",
     "test:canvas": "bun test tests/canvas-renderer.test.ts",
+    "test:browser:module-host": "cd packages/module-host && bun run test:browser",
     "typecheck": "bun run typecheck:core && bun run typecheck:web && bun run typecheck:server && bun run typecheck:web-engine && bun run typecheck:cf && bun run typecheck:agent && bun run typecheck:device-web && bun run typecheck:device-fake && bun run typecheck:module-host",
     "typecheck:core": "cd packages/core && bunx tsc --noEmit",
     "typecheck:web": "cd packages/web && bunx tsc --noEmit",

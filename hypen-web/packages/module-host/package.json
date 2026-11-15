@@ -42,6 +42,7 @@
     "prepublishOnly": "bun run build",
     "typecheck": "tsc --noEmit",
     "test": "bun test",
+    "test:browser": "bun run build && bun tests/browser/run.ts",
     "clean": "rm -rf dist"
   },
   "dependencies": {

@@ -7,7 +7,8 @@
  */
 
 export { JsModuleHost, buildImportMap } from "./js-module-host.ts";
-export type { JsModuleHostOptions, EngineStateImport } from "./js-module-host.ts";
+export type { JsModuleHostOptions, EngineStateImport, PrepareInfo } from "./js-module-host.ts";
+export type { LoadedVia } from "./loader.ts";
 export {
   HostStorage,
   MemoryStorageBackend,
@@ -15,6 +16,9 @@ export {
   defaultStorageBackend,
   createStorageImports,
   DEFAULT_STORAGE_QUOTAS,
+  MAX_NAMESPACE_BYTES,
+  MAX_OPEN_BUCKETS,
+  entryCost,
   STORAGE_SCOPES,
   LS_PREFIX,
 } from "./storage.ts";
@@ -23,6 +27,7 @@ export type {
   StorageLike,
   StorageScope,
   StorageQuotas,
+  StorageQuotaOptions,
   StorageError,
   HostStorageOptions,
   BucketRef,

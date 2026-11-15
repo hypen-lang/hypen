@@ -36,8 +36,9 @@ engine.registerAndInstantiate("counter", new Uint8Array(0), manifest, null, conf
 | --- | --- | --- |
 | `storage` | `LocalStorageBackend` over `globalThis.localStorage` if usable, else a fresh `MemoryStorageBackend` | Backend for the `local` and `app` scopes. Decided per host, at construction. |
 | `cloudStorage` | fresh `MemoryStorageBackend` | Backend for `cloud` (see the limitation below). |
-| `quotas` | `{ maxValueBytes: 1 MiB, maxBytesPerModulePerScope: 5 MiB }` | Storage quotas (`DEFAULT_STORAGE_QUOTAS`). |
+| `quotas` | `{ maxValueBytes: 1 MiB, maxPartitionBytes: 5 MiB }` | Storage quotas (`DEFAULT_STORAGE_QUOTAS`), same meaning as the native host's (see [Storage](#storage)). `maxBytesPerModulePerScope` is a deprecated alias of `maxPartitionBytes`. |
 | `now` | `Date.now` | Clock for `entry-info.modified-ms`. |
+| `onPrepare` | — | `(info: PrepareInfo) => void`, called after every successful `prepare()`: `loadedVia` (`"blob"` / `"data"`), component / bindings / core-wasm sizes, and per-step `timings` (transpile, compile, import, instantiate, total). |
 
 A backend is any synchronous `StorageBackend` (`get` / `set` / `delete` /
 `keys`). Every host has its own storage policy object and its own per-call ACL
@@ -63,10 +64,12 @@ nature, a shared `localStorage`.
 
 `buildImportMap`, `normalizeManifest`, `HostStorage`, `createStorageImports`,
 `MemoryStorageBackend`, `LocalStorageBackend`, `defaultStorageBackend`,
-`DEFAULT_STORAGE_QUOTAS`, `STORAGE_SCOPES`, `LS_PREFIX`, and the types
-(`JsModuleHostOptions`, `ModuleManifest`, `NormalizedManifest`,
-`StorageBackend`, `StorageLike`, `StorageScope`, `StorageQuotas`,
-`StorageError`, `BucketEntryInfo`, `ReducerOutput`, …). Subpath exports:
+`DEFAULT_STORAGE_QUOTAS`, `MAX_NAMESPACE_BYTES`, `MAX_OPEN_BUCKETS`,
+`entryCost`, `STORAGE_SCOPES`, `LS_PREFIX`, and the types
+(`JsModuleHostOptions`, `PrepareInfo`, `LoadedVia`, `ModuleManifest`,
+`NormalizedManifest`, `StorageBackend`, `StorageLike`, `StorageScope`,
+`StorageQuotas`, `StorageQuotaOptions`, `StorageError`, `BucketEntryInfo`,
+`ReducerOutput`, …). Subpath exports:
 `./js-module-host`, `./storage`, `./types`.
 
 ## The capability contract: declare → grant → enforce
@@ -88,7 +91,10 @@ A module **declares** what it needs in its manifest
 
 Link-time grants are fixed at `prepare()`: re-`register()`-ing with empty
 bytes only refreshes the per-call grants. Register fresh bytes and `prepare()`
-again to change link-time grants. Never linked: `wasi:filesystem`,
+again to change link-time grants. `wasi:filesystem` is always linked as an
+**empty** filesystem (no preopened directories — the native host's empty
+`WasiCtx`), so TinyGo and componentize-js modules, whose runtimes import it
+unconditionally, load but cannot reach any file. Never linked:
 `wasi:sockets`.
 
 ## Storage
@@ -96,13 +102,32 @@ again to change link-time grants. Never linked: `wasi:filesystem`,
 - Composite keys are length-prefixed per component (scope, owner module,
   tier, namespace, key), so `/` or `:` in a namespace, key or module name
   cannot collide with another bucket.
-- Quotas (native-host defaults): a value over 1 MiB, or a write that would
-  take a module over 5 MiB in one scope (value bytes + UTF-8 key bytes), fails
-  with the WIT `quota-exceeded(bytes-over)` error. In the shared `app`/`cloud`
-  scopes an entry is charged to the module that last wrote it. Quota checks
-  scan the scope's metadata on each write — fine for localStorage-sized data.
-- Backend exceptions (e.g. the browser's own localStorage quota) surface as
-  the WIT `backend(message)` error.
+- Quotas — the native `KvBackend` rule (`hypen-engine-rs/src/module_host/kv.rs`),
+  byte for byte:
+  - the budget (`maxPartitionBytes`, 5 MiB) is per **partition**: one per
+    module for `local`, **one shared by all modules** for `app`, one for
+    `cloud`;
+  - an entry costs its value bytes + the UTF-8 bytes of its native entry key
+    `<tier>/<namespace byte length>:<namespace><key>` (`entryCost()`), e.g.
+    `("persistent", "n", "k1")` costs 16 + value;
+  - a value over `maxValueBytes` (1 MiB) fails with
+    `quota-exceeded(value − cap)`; a write taking the partition over budget
+    fails with `quota-exceeded(new total − budget)`, checked after the
+    compare-and-set version check; a rewrite that does not grow the entry is
+    always allowed (so a module can shrink under a lowered budget).
+  `tests/e2e-storage-parity.test.ts` drives the native tests' own
+  `limits_module.wasm` and gets the native answers (e.g. `quota-exceeded:548`).
+  Quota checks scan the partition's metadata on each write — fine for
+  localStorage-sized data.
+- Bucket handles (native parity): `open` with a namespace over 4 KiB of UTF-8
+  fails with `unavailable("namespace of N bytes exceeds the 4096-byte limit")`;
+  at most 256 handles may be open at once per prepared module (all scopes),
+  then `unavailable("too many open buckets (limit 256); drop unused handles")`.
+  jco releases a handle when the guest drops it (`Symbol.dispose`).
+- `keys(prefix, limit)` returns keys in UTF-8 byte order (the native
+  `BTreeMap` order), at most `limit`.
+- Backend exceptions surface as the WIT `backend(message)` error — notably
+  the **browser's own localStorage quota** (see [Browser](#browser)).
 - `info()` returns real sizes and modified times; `version` on `cloud` only.
 - Blob resources (`blob-bucket` / `blob-handle` / `blob-writer`) are stubs
   failing with `unavailable`, as in the native hosts.
@@ -123,17 +148,118 @@ mismatch throws `{ tag: 'unavailable', val: 'version mismatch' }`), so module
 code behaves the same once a real sync backend exists. A persistent
 `cloudStorage` backend can be injected, but it is still local-only.
 
-## Content-Security-Policy
+## Browser
 
-`prepare()` imports the generated bindings from an in-memory module: a
-**Blob URL** (revoked right after import) where supported, otherwise a
-`data:` URL (Node, whose ESM loader rejects `blob:`). Under a CSP, allow
-`blob:` in `script-src` (or `data:` if you cannot allow `blob:`). The
-generated bindings are a single self-contained JS file; the core wasm is
-compiled with `WebAssembly.compile` (needs `'wasm-unsafe-eval'` under a
-strict CSP), and jco's bindgen loads its own vendored wasm via `fetch` of
-URLs relative to `@bytecodealliance/jco-transpile` (bundlers must emit them
-as assets).
+Verified in headless Chromium 153 (Playwright) by `bun run test:browser`
+(`tests/browser/run.ts`): the built `dist/` bundled with `Bun.build`
+(`target: "browser"`), served from a local static server, real
+`localStorage`, real CSP headers.
+
+### Bundling: jco-transpile's own wasm assets
+
+`prepare()` runs jco's bindgen, which is itself a WASM component. On the
+first `prepare()` `@bytecodealliance/jco-transpile/component` fetches and
+compiles its vendored core modules from
+
+```js
+new URL('../vendor/js-component-bindgen-component.core.wasm', import.meta.url) // + core2/3/4
+```
+
+i.e. relative to **wherever the bundler put jco's code**. Your build must
+serve those four files (`node_modules/@bytecodealliance/jco-transpile/vendor/js-component-bindgen-component.core{,2,3,4}.wasm`,
+5.4 MiB raw / 1.9 MiB gzip) at `../vendor/` relative to the JS chunk that
+contains jco, with `Content-Type: application/wasm` (Chromium's
+`compileStreaming` rejects anything else).
+
+- **Bun (`Bun.build`) — verified:** Bun does *not* rewrite or emit
+  `new URL(…, import.meta.url)` assets; it leaves the literal. Copy the four
+  files to `<outdir>/../vendor/` (what the harness does: bundle in
+  `out/app/`, wasm in `out/vendor/`).
+- esbuild behaves like Bun (no asset emission). Vite and webpack 5 recognise
+  the `new URL('…', import.meta.url)` pattern and emit the files themselves
+  (not verified here).
+- If the files are missing, `prepare()` fails with `jco transpile failed for
+  module 'x': jco's own bindgen wasm could not be loaded (Failed to execute
+  'compile' on 'WebAssembly': HTTP status code is not ok). The bundler must
+  serve …/js-component-bindgen-component.core*.wasm at '../vendor/' …`.
+- Import `@hypen-space/module-host` from an ESM bundle; jco and
+  preview2-shim are imported lazily on the first `prepare()` (keep code
+  splitting on to keep them out of your initial chunk). preview2-shim's
+  `browser` build is picked by the bundler's export conditions.
+
+### Content-Security-Policy
+
+`prepare()` compiles WebAssembly at runtime (jco's bindgen and each
+module's core wasm) and imports the generated bindings from an in-memory
+module: a **Blob URL** first (revoked after import), else a `data:` URL
+(Node, whose ESM loader rejects `blob:`; or a CSP without `blob:`). Needed:
+
+```
+script-src 'self' 'wasm-unsafe-eval' blob:
+```
+
+Observed in Chromium (`connect-src`/`default-src` must also allow fetching
+jco's vendor wasm and your components — `'self'` when you host them):
+
+| `script-src` (or `default-src`) | Result |
+| --- | --- |
+| no CSP | works, Blob URL |
+| `'self' 'wasm-unsafe-eval' blob:` | works, Blob URL |
+| `default-src 'self'; script-src 'self' 'wasm-unsafe-eval' blob:` | works, Blob URL |
+| `'self' 'wasm-unsafe-eval' data:` | works via the `data:` fallback; Chromium logs **one** CSP violation per page for the first `blob:` attempt (later `prepare()`s go straight to `data:`) |
+| `'self' 'wasm-unsafe-eval'` | fails: `could not import the transpiled module bindings: the page's Content-Security-Policy blocked both blob: and data: module scripts (directive script-src-elem of policy "…"). Add \`blob:\` (preferred) or \`data:\` to script-src …` |
+| `'self' blob: data:` | fails: `jco transpile failed for module 'x': the page's Content-Security-Policy (script-src 'self' blob: data:) blocks WebAssembly compilation. Add 'wasm-unsafe-eval' to script-src …` |
+| `'self'` / `default-src 'self'` | fails with the same message, plus `; the generated bindings are then imported from a blob: URL, so also add blob: (or data:)` |
+
+`'unsafe-eval'` also permits the WebAssembly compile but not the `blob:` /
+`data:` import; prefer the narrower `'wasm-unsafe-eval'`.
+
+### Sizes and timings (measured)
+
+- Bundle (`Bun.build --minify`, splitting): the host + preview2-shim browser
+  build + jco bindgen glue is **≈ 307 KiB JS raw / 68 KiB gzip** (jco's glue
+  is 269 KiB / 52 KiB of that), plus jco's vendor wasm **5.4 MiB raw /
+  1.9 MiB gzip**, fetched on the first `prepare()` only.
+- First `prepare()` in a fresh page (Chromium, localhost — includes jco's own
+  wasm fetch + compile, excludes downloading your component):
+
+  | Component | Size (gzip) | First `prepare()` | Next `prepare()` in the same page |
+  | --- | --- | --- | --- |
+  | `counter_module.wasm` (Rust) | 65 KiB (26 KiB) | ≈ 0.7–1.6 s (≈ 90 % jco init) | ≈ 0.1–0.25 s |
+  | `go_counter_module.wasm` (TinyGo) | 1.0 MiB (350 KiB) | ≈ 2.0 s | — |
+  | `ts_counter_module.wasm` (componentize-js) | 13.4 MiB (4.3 MiB) | ≈ 3.1 s (transpile 3.0 s, compile 0.1 s) | — |
+
+  **TS-authored (componentize-js) modules work in the browser** and prepare
+  in ~3 s on a desktop-class machine; the real cost is the **4.3 MiB gzip
+  download per module** (the embedded StarlingMonkey JS engine), plus the
+  memory of a 14 MB module. Workable for a desktop app shell, heavy for
+  mobile or for many modules. Rust modules are ~200× smaller.
+  (Run `HYPEN_BROWSER_PERF=1 bun run test:browser` to re-measure.)
+
+### wasi:http does not work in the browser (granted or not)
+
+`http: true` links preview2-shim's browser `wasi:http`, and the request
+**is sent** (`fetch`, CORS applies). But the reducer call is synchronous and
+the browser shim's `wasi:io/poll` can only wait asynchronously (it returns a
+Promise from `Pollable.block()`), so a module that blocks on the response
+gets nothing and traps (Rust/`waki`: panics `incoming response available`).
+The host rethrows the trap as `module 'x' trapped (…). It holds the http
+grant, and in a browser wasi:http cannot complete inside a synchronous
+reducer call …`. Do HTTP outside the module (an app-handled effect) or run
+the module on a Node/Bun or native host. Denial (`http` not `true`) works
+as everywhere: `prepare()` fails naming the `wasi:http/*` imports.
+
+### localStorage capacity
+
+The default `local`/`app` backend stores values base64-encoded in
+`localStorage`. Chromium allows ≈ 5 M UTF-16 characters per **origin**,
+shared by every module, both scopes and anything else the app keeps there:
+about **3.5 MiB of module values in total**. So in a browser the browser's
+quota usually answers before the host's 5 MiB partition budget, as
+`backend("QuotaExceededError: …")` rather than `quota-exceeded` (the host's
+own quota still answers with the native payload when it is lower, e.g. a
+1 MiB budget → `quota-exceeded(76)` in the harness). Inject a different
+`storage` backend if you need more.
 
 ## Runtime notes
 
@@ -163,14 +289,26 @@ instantiation (one linear memory) — same semantics as a preloaded component.
 
 ```bash
 bun install        # from hypen-web/ (workspace root)
-bun test           # unit + end-to-end tests
+bun test           # unit + end-to-end tests (Bun)
 bun run build      # emits dist/ (ESM + .d.ts); deps stay external
 bun run typecheck
+bun run test:browser   # build, then the real-browser harness (≈ 30 s)
 ```
 
 End-to-end tests (`tests/e2e-*.test.ts`) drive the prebuilt component fixtures
 in `hypen-engine-rs/tests/fixtures` (`counter_module.wasm`,
-`fetcher_module.wasm`) through the real pipeline, and skip if they are absent.
+`fetcher_module.wasm`, `limits_module.wasm`, `go_counter_module.wasm`,
+`ts_counter_module.wasm`) through the real pipeline, and skip if they are
+absent.
+
+`test:browser` (`tests/browser/run.ts`, also `bun run
+test:browser:module-host` from `hypen-web/`) needs `playwright-core` (a
+workspace devDependency; it never downloads browsers) or a global
+`playwright`, a Chromium it can launch (`PLAYWRIGHT_BROWSERS_PATH`; in CI e.g.
+`bunx playwright-core install --with-deps chromium-headless-shell` matching
+the playwright-core version), and the fixtures. Without a browser it prints
+`SKIP test:browser — …` and exits 0; set `HYPEN_BROWSER_TEST_REQUIRED=1` to
+make that a failure. It is not part of `bun test`.
 `tests/e2e-bridged.test.ts` additionally needs a bridged engine build and
 skips without it:
 

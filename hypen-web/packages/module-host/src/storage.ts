@@ -30,6 +30,12 @@
 //          granted. NOT ACTUALLY SYNCED by this package: see CloudBucket
 //          below.
 //
+// Quotas follow the native KvBackend (hypen-engine-rs/src/module_host/kv.rs)
+// exactly: the budget is per PARTITION — per module for `local`, one shared
+// budget for the whole `app` scope and one for `cloud` — and an entry costs
+// the UTF-8 bytes of its native entry key (`<tier>/<namespace bytes>:<namespace><key>`)
+// plus its value bytes. See HostStorage#checkQuota.
+//
 // Blob resources (`blob-bucket` / `blob-handle` / `blob-writer`) are stubs
 // that fail with `unavailable`, matching the native hosts.
 
@@ -186,23 +192,45 @@ export type StorageError =
   | { tag: "corrupted"; val: string }
   | { tag: "backend"; val: string };
 
-/** Storage quotas enforced by {@link HostStorage}. */
+/** Storage quotas enforced by {@link HostStorage} (the native `KvQuota`). */
 export interface StorageQuotas {
   /** Largest single value, in bytes. */
   maxValueBytes: number;
   /**
-   * Total bytes one module may hold in one scope (sum over its entries of
-   * value bytes + UTF-8 key bytes). In the shared `app`/`cloud` scopes an
-   * entry is charged to the module that last wrote it.
+   * Budget of one storage partition, in bytes: `local` has one partition
+   * per module, `app` and `cloud` one each, shared by every module granted
+   * the scope. An entry costs its value bytes plus the UTF-8 bytes of its
+   * entry key `<tier>/<namespace UTF-8 length>:<namespace><key>` — the same
+   * accounting as the native host's `max_partition_bytes`.
    */
-  maxBytesPerModulePerScope: number;
+  maxPartitionBytes: number;
 }
 
-/** Defaults mirroring the native hosts: 1 MiB per value, 5 MiB per module per scope. */
+/** {@link HostStorageOptions.quotas}: overrides, plus a deprecated alias. */
+export type StorageQuotaOptions = Partial<StorageQuotas> & {
+  /**
+   * @deprecated Renamed to {@link StorageQuotas.maxPartitionBytes}. The
+   * budget was per module per scope; it is now per partition (shared by
+   * all modules in `app` / `cloud`), as in the native host.
+   */
+  maxBytesPerModulePerScope?: number;
+};
+
+/** Defaults mirroring the native hosts: 1 MiB per value, 5 MiB per partition. */
 export const DEFAULT_STORAGE_QUOTAS: Readonly<StorageQuotas> = Object.freeze({
   maxValueBytes: 1024 * 1024,
-  maxBytesPerModulePerScope: 5 * 1024 * 1024,
+  maxPartitionBytes: 5 * 1024 * 1024,
 });
+
+/** Longest bucket namespace, in UTF-8 bytes (native `MAX_NAMESPACE_BYTES`). */
+export const MAX_NAMESPACE_BYTES = 4 * 1024;
+
+/**
+ * Most bucket handles one module may hold open at once, across all scopes
+ * (native `MAX_OPEN_BUCKETS`). A handle is released when the guest drops it
+ * (jco calls the resource's `Symbol.dispose`).
+ */
+export const MAX_OPEN_BUCKETS = 256;
 
 /** `info(key)` result: the WIT `entry-info` record. */
 export interface BucketEntryInfo {
@@ -223,13 +251,13 @@ export interface BucketRef {
 }
 
 interface EntryMeta {
-  /** charged bytes (value + key) */
+  /** charged bytes: value + native entry key (see entryCost) */
   s: number;
   /** modified ms */
   t: number;
   /** cloud version */
   v?: number;
-  /** writer module (quota attribution) */
+  /** module that last wrote the entry (informational, see dump()) */
   o: string;
 }
 
@@ -252,6 +280,34 @@ function parseLastPart(rest: string): string | undefined {
   const len = Number(rest.slice(0, colon));
   const key = rest.slice(colon + 1);
   return Number.isInteger(len) && key.length === len ? key : undefined;
+}
+
+/** UTF-8 byte length. */
+const byteLen = (s: string): number => utf8.encode(s).byteLength;
+
+/**
+ * Bytes an entry costs against its partition's budget: exactly the native
+ * `cost()` — the entry key `<tier>/<namespace byte length>:<namespace><key>`
+ * (BucketPrefix::key) plus the value.
+ */
+export function entryCost(tier: string, namespace: string, key: string, valueBytes: number): number {
+  const nsBytes = byteLen(namespace);
+  return byteLen(tier) + 1 + String(nsBytes).length + 1 + nsBytes + byteLen(key) + valueBytes;
+}
+
+/** Order strings by their UTF-8 bytes (the native BTreeMap<String> order). */
+function compareUtf8(a: string, b: string): number {
+  // UTF-16 code-unit order differs from UTF-8 byte order only between
+  // surrogates (U+10000+) and U+E000..U+FFFF; compare code points instead.
+  const ia = a[Symbol.iterator]();
+  const ib = b[Symbol.iterator]();
+  for (;;) {
+    const x = ia.next();
+    const y = ib.next();
+    if (x.done || y.done) return x.done === y.done ? 0 : x.done ? -1 : 1;
+    const d = x.value.codePointAt(0)! - y.value.codePointAt(0)!;
+    if (d !== 0) return d;
+  }
 }
 
 const DATA = "d";
@@ -292,7 +348,7 @@ export interface HostStorageOptions {
    */
   cloudStorage?: StorageBackend;
   /** Override individual quotas; unspecified ones use {@link DEFAULT_STORAGE_QUOTAS}. */
-  quotas?: Partial<StorageQuotas>;
+  quotas?: StorageQuotaOptions;
   /** Clock for `entry-info.modified-ms`. Default `Date.now`. */
   now?: () => number;
 }
@@ -310,7 +366,12 @@ export class HostStorage {
   constructor(options: HostStorageOptions = {}) {
     this.plain = options.storage ?? defaultStorageBackend();
     this.cloud = options.cloudStorage ?? new MemoryStorageBackend();
-    this.quotas = Object.freeze({ ...DEFAULT_STORAGE_QUOTAS, ...(options.quotas ?? {}) });
+    const { maxBytesPerModulePerScope, ...quotas } = options.quotas ?? {};
+    this.quotas = Object.freeze({
+      ...DEFAULT_STORAGE_QUOTAS,
+      ...(maxBytesPerModulePerScope !== undefined ? { maxPartitionBytes: maxBytesPerModulePerScope } : {}),
+      ...quotas,
+    });
     this.#now = options.now ?? Date.now;
   }
 
@@ -330,16 +391,19 @@ export class HostStorage {
     return undefined;
   }
 
-  /** Bytes `module` is currently charged for in `scope`. */
-  usage(scope: StorageScope, module: string): number {
+  /**
+   * Bytes used by one partition: `local` of `module`, or the whole shared
+   * `app` / `cloud` scope (`module` is then ignored).
+   */
+  usage(scope: StorageScope, module = ""): number {
     const be = this.#backend(scope);
-    const scopePrefix = META + part(scope);
+    const prefix = META + part(scope) + part(scope === "local" ? module : "");
     let total = 0;
     return guarded(() => {
       for (const k of be.keys()) {
-        if (!k.startsWith(scopePrefix)) continue;
+        if (!k.startsWith(prefix)) continue;
         const m = this.#readMeta(be, k);
-        if (m && m.o === module) total += m.s;
+        if (m) total += m.s;
       }
       return total;
     });
@@ -365,35 +429,40 @@ export class HostStorage {
     });
   }
 
-  /** Throws `quota-exceeded` if `writer` storing `value` at `key` would break a quota. */
-  #checkQuota(b: BucketRef, key: string, value: Uint8Array, writer: string, prev?: EntryMeta): number {
-    const charged = value.byteLength + utf8.encode(key).byteLength;
+  /**
+   * The native KvBackend::write quota rule. Throws `quota-exceeded(bytes
+   * over)` if the value is over `maxValueBytes` (over = value - cap), or if
+   * the partition would end up over `maxPartitionBytes` (over = new total -
+   * budget) — except that a rewrite which does not grow the entry is always
+   * allowed, so a module can shrink its footprint under a lowered budget.
+   * Returns the entry's new cost.
+   */
+  #checkQuota(b: BucketRef, key: string, value: Uint8Array, prevValueBytes: number | undefined): number {
     if (value.byteLength > this.quotas.maxValueBytes) {
       throw {
         tag: "quota-exceeded",
         val: BigInt(value.byteLength - this.quotas.maxValueBytes),
       } satisfies StorageError;
     }
-    const current = this.usage(b.scope, writer);
-    const reclaimed = prev && prev.o === writer ? prev.s : 0;
-    const next = current - reclaimed + charged;
-    if (next > this.quotas.maxBytesPerModulePerScope) {
+    const newCost = entryCost(b.tier, b.namespace, key, value.byteLength);
+    const oldCost = prevValueBytes === undefined ? 0 : entryCost(b.tier, b.namespace, key, prevValueBytes);
+    const next = Math.max(0, this.usage(b.scope, b.owner) - oldCost) + newCost;
+    if (next > this.quotas.maxPartitionBytes && newCost > oldCost) {
       throw {
         tag: "quota-exceeded",
-        val: BigInt(next - this.quotas.maxBytesPerModulePerScope),
+        val: BigInt(next - this.quotas.maxPartitionBytes),
       } satisfies StorageError;
     }
-    return charged;
+    return newCost;
   }
 
   #write(b: BucketRef, key: string, value: Uint8Array, writer: string, version?: number): void {
     const be = this.#backend(b.scope);
     const tail = bucketPrefix(b) + part(key);
-    const prevMeta = guarded(() => this.#readMeta(be, META + tail));
-    const charged = this.#checkQuota(b, key, value, writer, prevMeta);
+    const prevValue = guarded(() => be.get(DATA + tail));
+    const charged = this.#checkQuota(b, key, value, prevValue?.byteLength);
     const meta: EntryMeta = { s: charged, t: this.#now(), o: writer };
     if (version !== undefined) meta.v = version;
-    const prevValue = guarded(() => be.get(DATA + tail));
     guarded(() => be.set(DATA + tail, value));
     try {
       be.set(META + tail, utf8.encode(JSON.stringify(meta)));
@@ -472,7 +541,7 @@ export class HostStorage {
         if (key !== undefined && key.startsWith(prefix)) out.push(key);
       }
     });
-    out.sort();
+    out.sort(compareUtf8);
     return out.slice(0, limit);
   }
 
@@ -623,18 +692,56 @@ export interface StorageImports {
   cloud: { Bucket: BucketClass<CloudBucket> } & ReturnType<typeof blobClasses>;
 }
 
-function kvBucketClass(storage: HostStorage, module: string, scope: "local" | "app") {
+/** The symbol jco calls when a guest drops a host resource handle. */
+const symbolDispose: symbol =
+  (Symbol as unknown as { dispose?: symbol }).dispose ?? Symbol.for("dispose");
+
+/** Open-handle accounting shared by one module's three bucket classes. */
+interface OpenBuckets {
+  count: number;
+}
+
+/**
+ * Native `bucket_open` bounds (hypen-engine-rs .../wasmtime/storage.rs): the
+ * namespace length and the number of handles open at once, both answered
+ * with `unavailable` and the native host's wording.
+ */
+function admitOpen(open: OpenBuckets, namespace: string): void {
+  const nsBytes = utf8.encode(namespace).byteLength;
+  if (nsBytes > MAX_NAMESPACE_BYTES) {
+    throw {
+      tag: "unavailable",
+      val: `namespace of ${nsBytes} bytes exceeds the ${MAX_NAMESPACE_BYTES}-byte limit`,
+    } satisfies StorageError;
+  }
+  if (open.count >= MAX_OPEN_BUCKETS) {
+    throw {
+      tag: "unavailable",
+      val: `too many open buckets (limit ${MAX_OPEN_BUCKETS}); drop unused handles`,
+    } satisfies StorageError;
+  }
+  open.count++;
+}
+
+function kvBucketClass(storage: HostStorage, module: string, scope: "local" | "app", open: OpenBuckets) {
   // Fresh class per (module, scope): jco checks `instanceof` against the
   // exact class it was handed, and the module identity is captured here —
   // the guest only ever supplies tier + namespace.
   const owner = scope === "local" ? module : "";
   return class Bucket implements KvBucket {
     readonly #ref: BucketRef;
+    #open = true;
     private constructor(tier: string, namespace: string) {
       this.#ref = { scope, owner, tier: String(tier), namespace: String(namespace) };
     }
     static open(tier: string, namespace: string): Bucket {
+      admitOpen(open, String(namespace));
       return new Bucket(tier, namespace);
+    }
+    /** Guest dropped the handle (called by jco). */
+    [symbolDispose](): void {
+      if (this.#open) open.count--;
+      this.#open = false;
     }
     get(key: string) {
       return storage.get(this.#ref, key);
@@ -657,14 +764,20 @@ function kvBucketClass(storage: HostStorage, module: string, scope: "local" | "a
   };
 }
 
-function cloudBucketClass(storage: HostStorage, module: string) {
+function cloudBucketClass(storage: HostStorage, module: string, open: OpenBuckets) {
   return class Bucket implements CloudBucket {
     readonly #ref: BucketRef;
+    #open = true;
     private constructor(tier: string, namespace: string) {
       this.#ref = { scope: "cloud", owner: "", tier: String(tier), namespace: String(namespace) };
     }
     static open(tier: string, namespace: string): Bucket {
+      admitOpen(open, String(namespace));
       return new Bucket(tier, namespace);
+    }
+    [symbolDispose](): void {
+      if (this.#open) open.count--;
+      this.#open = false;
     }
     get(key: string) {
       return storage.get(this.#ref, key);
@@ -689,13 +802,17 @@ function cloudBucketClass(storage: HostStorage, module: string) {
 
 /**
  * Build the `hypen:storage/{local,app,cloud}` import objects for `module`.
+ * Each call has its own open-bucket budget ({@link MAX_OPEN_BUCKETS}).
  * Whether `app`/`cloud` are actually linked is decided by
  * {@link buildImportMap} from the manifest; this only constructs them.
  */
 export function createStorageImports(storage: HostStorage, module: string): StorageImports {
+  // One handle budget per call = per prepared component instantiation
+  // (JsModuleHost builds one import map per prepare()).
+  const open: OpenBuckets = { count: 0 };
   return {
-    local: { Bucket: kvBucketClass(storage, module, "local"), ...blobClasses() },
-    app: { Bucket: kvBucketClass(storage, module, "app"), ...blobClasses() },
-    cloud: { Bucket: cloudBucketClass(storage, module), ...blobClasses() },
+    local: { Bucket: kvBucketClass(storage, module, "local", open), ...blobClasses() },
+    app: { Bucket: kvBucketClass(storage, module, "app", open), ...blobClasses() },
+    cloud: { Bucket: cloudBucketClass(storage, module, open), ...blobClasses() },
   };
 }

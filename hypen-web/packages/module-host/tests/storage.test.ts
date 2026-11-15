@@ -8,6 +8,9 @@ import { describe, expect, test } from "bun:test";
 import {
   DEFAULT_STORAGE_QUOTAS,
   HostStorage,
+  MAX_NAMESPACE_BYTES,
+  MAX_OPEN_BUCKETS,
+  entryCost,
   JsModuleHost,
   LS_PREFIX,
   LocalStorageBackend,
@@ -223,8 +226,22 @@ describe("app scope", () => {
   });
 });
 
-describe("quotas", () => {
-  test("values over maxValueBytes are rejected with quota-exceeded(bytes over)", () => {
+describe("quotas (native KvBackend rule)", () => {
+  // Entry cost = UTF-8 bytes of the native entry key
+  // `<tier>/<namespace bytes>:<namespace><key>` + value bytes.
+  // ("persistent", "ns", "a") -> "persistent/2:nsa" = 16 bytes.
+  const KEY_COST = 16;
+
+  test("entryCost matches the native BucketPrefix::key + value accounting", () => {
+    expect(entryCost("persistent", "ns", "a", 0)).toBe("persistent/2:nsa".length);
+    // namespace length is in UTF-8 bytes, keys and tiers count UTF-8 bytes
+    expect(entryCost("persistent", "ñ", "k", 3)).toBe(new TextEncoder().encode("persistent/2:ñk").length + 3);
+    expect(entryCost("cache", "", "€", 1)).toBe(new TextEncoder().encode("cache/0:€").length + 1);
+    // a 10-byte namespace prints a two-digit length
+    expect(entryCost("temp", "0123456789", "", 0)).toBe("temp/10:0123456789".length);
+  });
+
+  test("values over maxValueBytes are rejected with quota-exceeded(bytes over the value cap)", () => {
     const { local } = imports("m");
     const bucket = local.Bucket.open("persistent", "ns");
     const big = new Uint8Array(DEFAULT_STORAGE_QUOTAS.maxValueBytes + 10);
@@ -232,41 +249,143 @@ describe("quotas", () => {
     expect(bucket.get("k")).toBeUndefined();
   });
 
-  test("per-module per-scope total, counting value + key bytes, with overwrite credit", () => {
+  test("per-partition budget: payload is bytes over budget, overwrite and delete free budget", () => {
     const storage = new HostStorage({
       storage: new MemoryStorageBackend(),
-      quotas: { maxValueBytes: 100, maxBytesPerModulePerScope: 100 },
+      quotas: { maxValueBytes: 100, maxPartitionBytes: 100 },
     });
     const bucket = createStorageImports(storage, "m").local.Bucket.open("persistent", "ns");
-    bucket.set("a", new Uint8Array(49)); // 50
-    bucket.set("b", new Uint8Array(49)); // 100
+    bucket.set("a", new Uint8Array(50 - KEY_COST)); // 50
+    bucket.set("b", new Uint8Array(50 - KEY_COST)); // 100
     expect(storage.usage("local", "m")).toBe(100);
     expect(catchThrown(() => bucket.set("c", new Uint8Array(0)))).toEqual({
       tag: "quota-exceeded",
-      val: 1n,
+      val: BigInt(KEY_COST),
     });
-    // Overwriting reuses the old entry's budget.
-    bucket.set("a", new Uint8Array(49));
+    // Overwriting in place is charged the difference only.
+    bucket.set("a", new Uint8Array(50 - KEY_COST));
     bucket.delete("b");
+    expect(storage.usage("local", "m")).toBe(50);
     bucket.set("c", new Uint8Array(10));
-    expect(storage.usage("local", "m")).toBe(61);
+    expect(storage.usage("local", "m")).toBe(50 + KEY_COST + 10);
+    bucket.clear();
+    expect(storage.usage("local", "m")).toBe(0);
   });
 
-  test("shared scopes charge the writing module, separately per scope", () => {
+  test("a rewrite that does not grow the entry is allowed even over a lowered budget", () => {
+    const backend = new MemoryStorageBackend();
+    const big = new HostStorage({ storage: backend, quotas: { maxPartitionBytes: 100 } });
+    const b1 = createStorageImports(big, "m").local.Bucket.open("persistent", "ns");
+    b1.set("a", new Uint8Array(50 - KEY_COST));
+    b1.set("b", new Uint8Array(50 - KEY_COST));
+    // Same data, budget lowered under it.
+    const small = new HostStorage({ storage: backend, quotas: { maxPartitionBytes: 60 } });
+    const b2 = createStorageImports(small, "m").local.Bucket.open("persistent", "ns");
+    expect(catchThrown(() => b2.set("a", new Uint8Array(50 - KEY_COST + 1)))).toEqual({
+      tag: "quota-exceeded",
+      val: 41n,
+    });
+    b2.set("a", new Uint8Array(50 - KEY_COST)); // same size: allowed
+    b2.set("a", new Uint8Array(1)); // shrink: allowed
+    expect(small.usage("local", "m")).toBe(50 + KEY_COST + 1);
+  });
+
+  test("local is budgeted per module; app and cloud are ONE shared budget each", () => {
     const storage = new HostStorage({
       storage: new MemoryStorageBackend(),
-      quotas: { maxValueBytes: 100, maxBytesPerModulePerScope: 50 },
+      quotas: { maxValueBytes: 100, maxPartitionBytes: 100 },
     });
     const a = createStorageImports(storage, "a");
     const b = createStorageImports(storage, "b");
-    a.app.Bucket.open("persistent", "s").set("x", new Uint8Array(49));
-    // b has its own budget in the same shared scope
-    b.app.Bucket.open("persistent", "s").set("y", new Uint8Array(49));
-    // and a's local budget is untouched by its app usage
-    a.local.Bucket.open("persistent", "s").set("x", new Uint8Array(49));
-    expect(storage.usage("app", "a")).toBe(50);
-    expect(storage.usage("app", "b")).toBe(50);
-    expect(storage.usage("local", "a")).toBe(50);
+    a.app.Bucket.open("persistent", "ns").set("a", new Uint8Array(50 - KEY_COST));
+    b.app.Bucket.open("persistent", "ns").set("b", new Uint8Array(50 - KEY_COST));
+    // The app partition is full for EVERY module, whoever wrote the bytes.
+    expect(storage.usage("app")).toBe(100);
+    expect(storage.usage("app", "a")).toBe(100); // module ignored for shared scopes
+    for (const m of [a, b]) {
+      expect(catchThrown(() => m.app.Bucket.open("persistent", "ns").set("c", new Uint8Array(1)))).toEqual({
+        tag: "quota-exceeded",
+        val: BigInt(KEY_COST + 1),
+      });
+    }
+    // cloud is its own shared partition, and each module's local its own.
+    a.cloud.Bucket.open("persistent", "ns").set("a", new Uint8Array(100 - KEY_COST));
+    a.local.Bucket.open("persistent", "ns").set("a", new Uint8Array(100 - KEY_COST));
+    b.local.Bucket.open("persistent", "ns").set("a", new Uint8Array(100 - KEY_COST));
+    expect(storage.usage("cloud")).toBe(100);
+    expect(storage.usage("local", "a")).toBe(100);
+    expect(storage.usage("local", "b")).toBe(100);
+    expect(catchThrown(() => b.cloud.Bucket.open("persistent", "ns").set("b", new Uint8Array(0)))).toEqual({
+      tag: "quota-exceeded",
+      val: BigInt(KEY_COST),
+    });
+  });
+
+  test("compare-and-set checks the version before the quota (native order)", () => {
+    const storage = new HostStorage({ storage: new MemoryStorageBackend(), quotas: { maxValueBytes: 4 } });
+    const bucket = createStorageImports(storage, "m").cloud.Bucket.open("persistent", "ns");
+    expect(catchThrown(() => bucket.compareAndSet("k", 7n, new Uint8Array(10)))).toEqual({
+      tag: "unavailable",
+      val: "version mismatch",
+    });
+    expect(catchThrown(() => bucket.compareAndSet("k", undefined, new Uint8Array(10)))).toEqual({
+      tag: "quota-exceeded",
+      val: 6n,
+    });
+  });
+
+  test("the deprecated maxBytesPerModulePerScope option maps to maxPartitionBytes", () => {
+    const storage = new HostStorage({
+      storage: new MemoryStorageBackend(),
+      quotas: { maxBytesPerModulePerScope: 1234 },
+    });
+    expect(storage.quotas).toEqual({ maxValueBytes: DEFAULT_STORAGE_QUOTAS.maxValueBytes, maxPartitionBytes: 1234 });
+  });
+});
+
+describe("bucket handle bounds (native parity)", () => {
+  test("namespaces over 4 KiB of UTF-8 are refused at open with unavailable", () => {
+    const { local, app, cloud } = imports("m");
+    expect(() => local.Bucket.open("persistent", "n".repeat(MAX_NAMESPACE_BYTES))).not.toThrow();
+    for (const B of [local.Bucket, app.Bucket, cloud.Bucket]) {
+      expect(catchThrown(() => B.open("persistent", "n".repeat(MAX_NAMESPACE_BYTES + 1)))).toEqual({
+        tag: "unavailable",
+        val: `namespace of ${MAX_NAMESPACE_BYTES + 1} bytes exceeds the ${MAX_NAMESPACE_BYTES}-byte limit`,
+      });
+    }
+    // counted in bytes, not UTF-16 units: 2049 × "é" = 4098 bytes
+    expect(catchThrown(() => local.Bucket.open("persistent", "é".repeat(2049)))?.tag).toBe("unavailable");
+  });
+
+  test("at most 256 open handles per module across scopes; dropping one frees a slot", () => {
+    const { local, app, cloud } = imports("m");
+    const handles: object[] = [];
+    for (let i = 0; i < MAX_OPEN_BUCKETS; i++) {
+      const B = [local.Bucket, app.Bucket, cloud.Bucket][i % 3]!;
+      handles.push(B.open("persistent", `ns${i}`));
+    }
+    expect(catchThrown(() => local.Bucket.open("persistent", "one-more"))).toEqual({
+      tag: "unavailable",
+      val: `too many open buckets (limit ${MAX_OPEN_BUCKETS}); drop unused handles`,
+    });
+    // jco calls Symbol.dispose when the guest drops a handle; twice is harmless.
+    const dispose = (Symbol as unknown as { dispose?: symbol }).dispose ?? Symbol.for("dispose");
+    const dropped = handles.pop() as Record<symbol, () => void>;
+    dropped[dispose]!();
+    dropped[dispose]!();
+    expect(() => local.Bucket.open("persistent", "one-more")).not.toThrow();
+    expect(catchThrown(() => local.Bucket.open("persistent", "two-more"))?.tag).toBe("unavailable");
+    // Another module (another import set) has its own budget.
+    expect(() => imports("other").local.Bucket.open("persistent", "x")).not.toThrow();
+  });
+});
+
+describe("keys order", () => {
+  test("keys are ordered by UTF-8 bytes like the native BTreeMap, not UTF-16 units", () => {
+    const bucket = imports("m").local.Bucket.open("persistent", "ns");
+    for (const k of ["\u{1F600}", "\uFF01", "b", "a"]) bucket.set(k, enc.encode("v"));
+    expect(bucket.keys("", 10)).toEqual(["a", "b", "\uFF01", "\u{1F600}"]);
+    expect(bucket.keys("", 3)).toEqual(["a", "b", "\uFF01"]);
   });
 });
 
