@@ -1391,6 +1391,8 @@ impl TaffyState {
             &active_states,
             self.effective_safe_area(),
         );
+        let mut style = style;
+        apply_text_fill_stretch(&mut style, tree, rid, node, viewport);
         let is_text = node.element_type == "Text";
         let ctx = is_text.then(|| node_context_in_tree(tree, rid, node, scale, viewport));
         // Taken AFTER the context too: `node_context_in_tree` resolves
@@ -1608,13 +1610,16 @@ impl TaffyState {
                         self.forget_node_records(old);
                     }
                     let active_states = self.interaction.active_states_for(id, node);
-                    let style = node_style_with(
+                    let mut style = node_style_with(
                         node,
                         scale,
                         viewport,
                         &active_states,
                         self.effective_safe_area(),
                     );
+                    // The renderer Tree is post-batch, so the parent the
+                    // following Insert names is already linked there.
+                    apply_text_fill_stretch(&mut style, tree, id.as_ref(), node, viewport);
                     let ctx = node_context_in_tree(tree, id.as_ref(), node, scale, viewport);
                     // A node nothing has traced yet.
                     self.deps_complete = false;
@@ -1745,7 +1750,14 @@ impl TaffyState {
                 id,
                 before_id,
             } => {
-                self.set_parent_children(parent_id, id, before_id.as_deref(), tree);
+                self.set_parent_children(
+                    parent_id,
+                    id,
+                    before_id.as_deref(),
+                    tree,
+                    scale,
+                    viewport,
+                );
                 true
             }
             Patch::Attach {
@@ -1753,7 +1765,14 @@ impl TaffyState {
                 id,
                 before_id,
             } => {
-                self.set_parent_children(parent_id, id, before_id.as_deref(), tree);
+                self.set_parent_children(
+                    parent_id,
+                    id,
+                    before_id.as_deref(),
+                    tree,
+                    scale,
+                    viewport,
+                );
                 // A cached route can receive an entire embedded-app subtree
                 // while detached from the live root. Taffy's incremental
                 // dirty propagation does not reliably invalidate every
@@ -1770,7 +1789,14 @@ impl TaffyState {
                 // `set_parent_children` unlinks from the old Taffy
                 // parent itself (via `remove_child`, which marks that
                 // parent dirty) before inserting under the new one.
-                self.set_parent_children(parent_id, id, before_id.as_deref(), tree);
+                self.set_parent_children(
+                    parent_id,
+                    id,
+                    before_id.as_deref(),
+                    tree,
+                    scale,
+                    viewport,
+                );
                 true
             }
             Patch::Remove { id, .. } => {
@@ -1816,6 +1842,8 @@ impl TaffyState {
         child_id: &str,
         before_id: Option<&str>,
         tree: &Tree,
+        scale: f32,
+        viewport: Viewport,
     ) {
         let Some(&child_tid) = self.node_map.get(child_id) else {
             return;
@@ -1851,6 +1879,17 @@ impl TaffyState {
             Some(idx) => self.tree.insert_child_at_index(parent_tid, idx, child_tid),
             None => self.tree.add_child(parent_tid, child_tid),
         };
+
+        // An aligned Text's fill stretch depends on its parent's axis. A
+        // Move across batches (Column → Row) must re-derive it; within a
+        // batch Create already saw the post-batch parent, and
+        // `resolve_node_style` skips the write when nothing changed.
+        if let Some(node) = tree
+            .get(child_id)
+            .filter(|node| text_align_requests_fill(node, viewport))
+        {
+            self.resolve_node_style(tree, child_tid, child_id, node, scale, viewport);
+        }
 
         // Stack: every child past the first picks up `position:
         // absolute` + margin → inset so it overlays the base. This
@@ -2414,8 +2453,10 @@ impl TaffyState {
                     .iter()
                     .any(|child| {
                         taffy.style(*child).is_ok_and(|child_style| {
-                            child_style.size.width.into_raw().uses_percentage()
-                                || child_style.align_self == Some(AlignSelf::Stretch)
+                            child_demands_cross_axis_width(
+                                child_style,
+                                renderer_for_taffy.get(child).and_then(|rid| tree.get(rid)),
+                            )
                         })
                     });
                 if demands_width {
@@ -4441,6 +4482,7 @@ fn build_subtree(
             apply_flex_props(&mut style, node, &vs, scale);
             apply_alignment_props(&mut style, node, viewport);
             apply_size_props(&mut style, node, &vs, scale);
+            apply_text_fill_stretch(&mut style, tree, node_id, node, viewport);
             let id = taffy
                 .new_leaf_with_context(
                     style,
@@ -4849,8 +4891,10 @@ fn build_subtree(
             } else if style.size.width == Dimension::auto()
                 && children.iter().any(|child| {
                     taffy.style(*child).is_ok_and(|child_style| {
-                        child_style.size.width.into_raw().uses_percentage()
-                            || child_style.align_self == Some(AlignSelf::Stretch)
+                        child_demands_cross_axis_width(
+                            child_style,
+                            renderer_for_taffy.get(child).and_then(|rid| tree.get(rid)),
+                        )
                     })
                 })
             {
@@ -8399,6 +8443,101 @@ fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign 
         cursor = tree.parent_of(current);
     }
     TextAlign::Start
+}
+
+/// Whether a child's style asks its (unsized) parent for a finite width:
+/// a percentage width, or a cross-axis stretch.
+///
+/// A Text's automatic alignment fill is NOT demand. The DOM's
+/// `cross-axis-width.ts` never marks text-fill as horizontal demand, so a
+/// centred title stretches across whatever width its Column already has
+/// without making that Column — or its ancestors — grow to the viewport.
+/// Only an authored `alignSelf` (or a percentage width, caught by the
+/// first clause) on a Text propagates.
+fn child_demands_cross_axis_width(
+    child_style: &Style,
+    child_node: Option<&crate::tree::Node>,
+) -> bool {
+    if child_style.size.width.into_raw().uses_percentage() {
+        return true;
+    }
+    if child_style.align_self != Some(AlignSelf::Stretch) {
+        return false;
+    }
+    !child_node.is_some_and(|node| {
+        node.element_type.eq_ignore_ascii_case("Text") && !declares_align_self(node)
+    })
+}
+
+/// Any `alignSelf` / `align-self` prop, at any breakpoint or state variant.
+fn declares_align_self(node: &crate::tree::Node) -> bool {
+    node.props.keys().any(|key| {
+        let base = hypen_engine::portable::parse_prop_key(key).base;
+        base.eq_ignore_ascii_case("alignSelf") || base.eq_ignore_ascii_case("align-self")
+    })
+}
+
+/// A Text whose OWN `textAlign` needs horizontal room to act in —
+/// `center` / `right` / `end` / `justify`. Mirrors the DOM's
+/// `typography.ts#textAlign`, which makes such a Text a stretched block.
+fn text_align_requests_fill(node: &crate::tree::Node, viewport: Viewport) -> bool {
+    node.element_type.eq_ignore_ascii_case("Text")
+        && crate::style::prop_str_at(node, "textAlign", viewport).is_some_and(|value| {
+            matches!(
+                value.trim().to_ascii_lowercase().as_str(),
+                "center" | "right" | "end" | "justify"
+            )
+        })
+}
+
+/// Whether `parent` lays its children out vertically, so a stretched child
+/// widens horizontally. Row / Center / Badge keep intrinsic children (the
+/// DOM exempts them too); Stack has its own track rule
+/// ([`text_requests_stack_track_width`]); Grid cells and nested Text runs
+/// are not flex columns.
+fn text_fill_parent_is_vertical(parent: &crate::tree::Node, viewport: Viewport) -> bool {
+    let et = parent.element_type.as_str();
+    if ["Row", "Center", "Badge", "Stack", "Grid", "Text"]
+        .iter()
+        .any(|t| t.eq_ignore_ascii_case(et))
+    {
+        return false;
+    }
+    if crate::style::prop_str_at(parent, "display", viewport)
+        .is_some_and(|d| d.trim().eq_ignore_ascii_case("grid"))
+    {
+        return false;
+    }
+    !crate::style::prop_str_at(parent, "flexDirection", viewport).is_some_and(|d| {
+        matches!(
+            d.trim().to_ascii_lowercase().as_str(),
+            "row" | "row-reverse"
+        )
+    })
+}
+
+/// Stretch an aligned Text across its vertical parent's content width so
+/// `text-center` / `text-right` have room to act. Without it the Text is
+/// laid out at its glyph width under the Column's `align-items: start` and
+/// renders flush-left. An authored `alignSelf` wins (applied earlier by
+/// `apply_alignment_props`), matching the DOM's `if (!el.style.alignSelf)`.
+fn apply_text_fill_stretch(
+    style: &mut Style,
+    tree: &Tree,
+    rid: &str,
+    node: &crate::tree::Node,
+    viewport: Viewport,
+) {
+    if style.align_self.is_some() || !text_align_requests_fill(node, viewport) {
+        return;
+    }
+    if tree
+        .parent_of(rid)
+        .and_then(|parent| tree.get(parent))
+        .is_some_and(|parent| text_fill_parent_is_vertical(parent, viewport))
+    {
+        style.align_self = Some(AlignSelf::Stretch);
+    }
 }
 
 fn text_requests_stack_track_width(node: &crate::tree::Node) -> bool {

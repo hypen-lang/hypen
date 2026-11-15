@@ -8749,3 +8749,202 @@ fn button_under_stretching_parent_stays_content_width() {
         "button stretched: {btn:?} in {stack:?}"
     );
 }
+
+// ---------------------------------------------------------------
+// Text fill: an aligned Text owns its vertical parent's width.
+// ---------------------------------------------------------------
+
+/// `[middle, inner, title, body]` of [`text_fill_source`].
+fn text_fill_ids(tree: &Tree) -> [String; 4] {
+    let outer = first_of_type(tree, "Column");
+    let middle = tree.children_of(&outer)[0].clone();
+    let inner = tree.children_of(&middle)[0].clone();
+    let kids = tree.children_of(&inner).to_vec();
+    [middle, inner, kids[0].clone(), kids[1].clone()]
+}
+
+/// MovieDetail's title block, reduced: a centred title above a wider
+/// body line, in an UNSIZED padded Column inside another unsized Column.
+/// (The outermost Column is the app root, which the viewport wrapper
+/// stretches no matter what — so the chain under test starts below it.)
+fn text_fill_source(title_tw: &str) -> String {
+    format!(
+        r#"Column {{
+  Column {{
+Column {{
+  Text("Inception").tw("{title_tw}")
+  Text("A thief who steals corporate secrets through dreams")
+}}
+.padding(10)
+  }}
+}}"#
+    )
+}
+
+fn assert_title_fills_unsized_column(pass: &LayoutPass, ids: &[String; 4], viewport_w: f32) {
+    let rect = |id: &str| pass.item_by_id(id).unwrap().rect;
+    let (middle, inner, title, body) = (rect(&ids[0]), rect(&ids[1]), rect(&ids[2]), rect(&ids[3]));
+    // The title spans the Column's content box, so `text-center` has room.
+    assert!(
+        (title.x - (inner.x + 10.0)).abs() < 0.5 && (title.w - (inner.w - 20.0)).abs() < 0.5,
+        "centred title {title:?} must span its Column's content width {inner:?}"
+    );
+    assert!(title.w > body.w - 0.5, "title {title:?} vs body {body:?}");
+    // ...but the fill is not width DEMAND: neither Column stretches to the
+    // viewport. The inner one is as wide as its widest raw child.
+    assert!(
+        (inner.w - (body.w + 20.0)).abs() < 0.5,
+        "unsized Column {inner:?} must stay content-sized around {body:?}"
+    );
+    assert!(
+        inner.w < viewport_w - 100.0 && (middle.w - inner.w).abs() < 0.5,
+        "text fill propagated up the chain: inner={inner:?} middle={middle:?}"
+    );
+}
+
+#[test]
+fn centred_text_fills_its_column_without_stretching_ancestors() {
+    let source = text_fill_source("text-3xl font-bold text-center");
+    let tree = tree_from_dsl(&source, json!({}));
+    let ids = text_fill_ids(&tree);
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    assert_title_fills_unsized_column(&pass, &ids, 800.0);
+
+    // Every fill alignment, not just center; `start` stays intrinsic.
+    for (align, fills) in [
+        ("right", true),
+        ("end", true),
+        ("justify", true),
+        ("left", false),
+    ] {
+        let source = text_fill_source(&format!("text-3xl font-bold text-{align}"));
+        let tree = tree_from_dsl(&source, json!({}));
+        let ids = text_fill_ids(&tree);
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let (inner, title) = (
+            pass.item_by_id(&ids[1]).unwrap().rect,
+            pass.item_by_id(&ids[2]).unwrap().rect,
+        );
+        assert_eq!(
+            (title.w - (inner.w - 20.0)).abs() < 0.5,
+            fills,
+            "text-{align}: title {title:?} in {inner:?}"
+        );
+    }
+}
+
+#[test]
+fn centred_text_fills_a_sized_column() {
+    // The MovieDetail shape: the title's Column has its own width.
+    let tree = tree_from_dsl(
+        r#"Column {
+  Column {
+Text("Inception").tw("text-3xl font-bold text-center")
+  }
+  .padding(20)
+  .width(500)
+}"#,
+        json!({}),
+    );
+    let outer = first_of_type(&tree, "Column");
+    let inner = tree.children_of(&outer)[0].clone();
+    let title = first_of_type(&tree, "Text");
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let (inner, title) = (
+        pass.item_by_id(&inner).unwrap().rect,
+        pass.item_by_id(&title).unwrap().rect,
+    );
+    assert!((inner.w - 500.0).abs() < 0.5, "{inner:?}");
+    assert!(
+        (title.x - (inner.x + 20.0)).abs() < 0.5 && (title.w - 460.0).abs() < 0.5,
+        "title {title:?} must span the 460px content box of {inner:?}"
+    );
+}
+
+#[test]
+fn text_fill_skips_horizontal_parents_and_authored_align_self() {
+    let tree = tree_from_dsl(
+        r#"Column {
+  Row {
+Text("Row title").textAlign("center")
+  }
+  .width(500)
+  Center {
+Text("Centered title").textAlign("center")
+  }
+  .width(500)
+  Badge {
+Text("Badge").textAlign("center")
+  }
+  Column {
+Text("Pinned title").textAlign("center").alignSelf("start")
+  }
+  .width(500)
+}"#,
+        json!({}),
+    );
+    let outer = first_of_type(&tree, "Column");
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    for parent in tree.children_of(&outer) {
+        let child = &tree.children_of(parent)[0];
+        let (p, c) = (
+            pass.item_by_id(parent).unwrap().rect,
+            pass.item_by_id(child).unwrap().rect,
+        );
+        let ty = &tree.get(parent).unwrap().element_type;
+        assert!(
+            c.w < 200.0,
+            "{ty}: Text {c:?} must keep its intrinsic width inside {p:?}"
+        );
+    }
+}
+
+#[test]
+fn text_fill_survives_the_incremental_patch_path() {
+    // Same geometry through `TaffyState::apply_patches` (Create sees the
+    // post-batch parent) and then a live `textAlign` SetProp (the
+    // `resolve_node_style` restyle door).
+    let source = text_fill_source("text-3xl font-bold text-center");
+    let patches = patches_from_dsl(&source);
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let ids = text_fill_ids(&tree);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&patches, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let mut compute = |taffy: &mut TaffyState, tree: &Tree, generation| {
+        LayoutPass::compute_with_state(
+            taffy,
+            tree,
+            &mut text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            generation,
+        )
+    };
+    let pass = compute(&mut taffy, &tree, 1);
+    assert_title_fills_unsized_column(&pass, &ids, 800.0);
+
+    // Flip the BODY to right-aligned at runtime: it fills too.
+    let setprop = vec![hypen_engine::Patch::SetProp {
+        id: ids[3].clone().into(),
+        name: "textAlign".into(),
+        value: json!("right"),
+    }];
+    tree.apply_batch(&setprop);
+    assert!(taffy.apply_patches(&setprop, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut taffy, &tree, 2);
+    let (inner, body) = (
+        pass.item_by_id(&ids[1]).unwrap().rect,
+        pass.item_by_id(&ids[3]).unwrap().rect,
+    );
+    assert!(
+        (body.w - (inner.w - 20.0)).abs() < 0.5,
+        "runtime textAlign must restyle the body {body:?} to fill {inner:?}"
+    );
+}
