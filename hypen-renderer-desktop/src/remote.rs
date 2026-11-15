@@ -467,12 +467,39 @@ async fn run_worker(
                     delay,
                 );
                 deliver_status(&inner, ConnectionStatus::Reconnecting { attempt });
-                tokio::time::sleep(delay).await;
+                if backoff_or_shutdown(delay, &outbound).await {
+                    log::info!("remote: closed while waiting to reconnect; exiting worker");
+                    deliver_status(&inner, ConnectionStatus::Closed);
+                    break;
+                }
                 deliver_status(&inner, ConnectionStatus::Connecting);
             }
         }
     }
     drop(driver_tx);
+}
+
+/// Sleep out a reconnect backoff, returning early (`true`) once every
+/// [`RemoteModule`] handle is gone. Without the check a dropped module
+/// whose server is down — a closed `HypenApp` embed, say — kept its worker
+/// retrying for the whole reconnect budget (60 attempts, ~30 minutes).
+/// Queued actions are left in the channel for the next session.
+async fn backoff_or_shutdown(
+    delay: Duration,
+    outbound: &mpsc::UnboundedReceiver<RemoteMessage>,
+) -> bool {
+    const SLICE: Duration = Duration::from_millis(200);
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if outbound.is_closed() {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep((deadline - now).min(SLICE)).await;
+    }
 }
 
 /// Build the upgrade request: the URL plus the configured headers.
@@ -1424,6 +1451,26 @@ mod tests {
         // Past the shift cap — stays clamped.
         assert_eq!(backoff_for(20), Duration::from_secs(MAX_BACKOFF_SECS));
         assert_eq!(backoff_for(u32::MAX), Duration::from_secs(MAX_BACKOFF_SECS));
+    }
+
+    #[test]
+    fn backoff_wait_ends_early_once_the_module_is_dropped() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, rx) = mpsc::unbounded_channel::<RemoteMessage>();
+            // Live handle: the full backoff elapses.
+            let t0 = std::time::Instant::now();
+            assert!(!backoff_or_shutdown(Duration::from_millis(30), &rx).await);
+            assert!(t0.elapsed() >= Duration::from_millis(30));
+            // Dropped handle: a 30 s backoff returns straight away.
+            drop(tx);
+            let t0 = std::time::Instant::now();
+            assert!(backoff_or_shutdown(Duration::from_secs(30), &rx).await);
+            assert!(t0.elapsed() < Duration::from_secs(1));
+        });
     }
 
     #[test]

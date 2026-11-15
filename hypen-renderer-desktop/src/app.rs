@@ -304,9 +304,14 @@ impl DesktopApp {
     /// [`Self::connect_with`] for upgrade headers (a device-enabled server
     /// admits native clients only through its authenticator) or to connect
     /// UI-only.
+    ///
+    /// `HypenApp("ws://…")` elements in the remote tree are live embeds:
+    /// the connection is wrapped in an [`crate::EmbeddingModule`], which
+    /// connects each embedded app and renders its tree inside the
+    /// element's box (see [`crate::embed`]).
     pub fn connect(self, url: impl Into<String>, module_name: impl Into<String>) -> Self {
         let remote = RemoteModule::connect(url, module_name);
-        self.module(Arc::new(remote))
+        self.module(Arc::new(crate::EmbeddingModule::new(Arc::new(remote))))
     }
 
     /// [`Self::connect`] with explicit [`crate::RemoteOptions`]:
@@ -327,7 +332,7 @@ impl DesktopApp {
         options: crate::RemoteOptions,
     ) -> Self {
         let remote = RemoteModule::connect_with(url, module_name, options);
-        self.module(Arc::new(remote))
+        self.module(Arc::new(crate::EmbeddingModule::new(Arc::new(remote))))
     }
 
     /// Convenience for stateless demos. Builds an internal module with no
