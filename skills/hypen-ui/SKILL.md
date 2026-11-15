@@ -673,6 +673,38 @@ Any applicator accepts a map for responsive breakpoints or interaction states:
 .borderColor({default: "#D1D5DB", focus: "#3B82F6"})
 ```
 
+### Theming & Color Schemes
+
+Design tokens live in a theme, not in templates. The app creates one (`createTheme` / `NewTheme` / `Theme::builder()`), and templates read tokens through the `theme` source; switching scheme re-renders only the props whose token changed.
+
+```hypen
+// Tokens — prefer these over hard-coded colors and spacing
+Column { Text("Hello").color(@theme.color.ink).padding(@theme.space.md) }
+    .backgroundColor(@theme.color.surface)
+Text("Scheme: @{appearance.scheme}")                 // light | dark | a custom scheme name
+
+// A one-off value per scheme: light / dark keys, or any custom scheme beside a default
+.color({default: "#8A6D00", dark: "#FFD54F", sepia: "#5B4636"})
+.color({default: @theme.color.ink, dark: @state.accent})   // entries may be bindings
+.backgroundColor({default: "#3B82F6", dark: "#1E40AF", hover: "#2563EB"})  // layers with breakpoints/states
+
+// Tailwind
+.tw("bg-white dark:bg-black dark:md:bg-gray-900")
+```
+
+```typescript
+// theme.json (same shape) is read by `hypen check` and `hypen theme export`
+const theme = createTheme({
+  tokens: { color: { brand: "#0066ff", primary: "{color.brand}", surface: "#fff", ink: "#111" }, space: { md: 16 } },
+  schemes: { dark: { color: { brand: "#66a3ff", surface: "#111", ink: "#f5f5f5" } } },
+});
+new Hypen({ theme });                    // or new RemoteServer().theme(theme)
+
+.onAction("toggleTheme", ({ context }) => context.theme?.toggle())   // also setScheme("dark" | "system" | …)
+```
+
+Rules: a token whose whole value is `"{path}"` aliases another token; the preference defaults to `"system"` (follows the device); with no theme registered only `default` applies; scheme keys do not combine with `.states` poses (the `default` is used). `hypen check` reports `unknown-theme-token` for a `@theme.x` the theme file does not define.
+
 ## Accessibility
 
 The engine derives semantics automatically; `hypen check` flags what it can't derive. Follow these rules and generated code passes the checker.

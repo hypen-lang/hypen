@@ -264,6 +264,10 @@ engine.sessionExpired
     .store(in: &cancellables)
 ```
 
+## Color Scheme
+
+The client reports the system appearance to the server, which a server-side [theme](/docs/guide/theming) follows while its preference is `"system"`. `HypenView` reads SwiftUI's `colorScheme` (so a `.preferredColorScheme` on the view is respected) and reports changes; set `RemoteEngineConfig.colorScheme` (`.auto` by default, or `.light` / `.dark` / `.off`) to override, or call `RemoteEngine.setColorScheme(_:)` directly.
+
 ## Platform Support
 
 HypenSwift supports all Apple platforms:

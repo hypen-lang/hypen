@@ -55,7 +55,7 @@ new RemoteServer().module("App", appModule).theme(theme).listen(3000);
 The Go, Kotlin, Rust and Swift SDKs have the same theme with the same resolution rules (they share one fixture). Registration follows each SDK's own shape:
 
 ```go
-theme := hypen.NewTheme(hypen.ThemeOptions{Tokens: tokens, Schemes: map[string]hypen.Tokens{"dark": dark}})
+theme := core.NewTheme(core.ThemeOptions{Tokens: tokens, Schemes: map[string]core.Tokens{"dark": dark}})
 remote.NewRemoteServer().Theme(theme) // one fork per session; handlers: ctx.Theme().Toggle()
 ```
 
@@ -67,7 +67,7 @@ HypenServer { theme(theme) }          // one fork per session; handlers: ctx.con
 ```rust
 let theme = Theme::builder().tokens(tokens).scheme_tokens("dark", dark).build();
 let app = HypenApp::builder().theme(theme.clone());           // in-process modules
-let session = RemoteSession::new(/* … */).with_theme(&theme); // one fork per session
+let session = RemoteSession::connect(def, components, transport).with_theme(&theme); // one fork per session
 ```
 
 ```swift

@@ -699,6 +699,33 @@ let json = instance.get_state_json()?;
 instance.unmount();
 ```
 
+## Theming
+
+```rust
+use hypen_server::prelude::*;
+use serde_json::json;
+
+let theme = Theme::builder()
+    .tokens(json!({ "color": { "surface": "#ffffff", "ink": "#111111" } }))
+    .scheme_tokens("dark", json!({ "color": { "surface": "#111111", "ink": "#f5f5f5" } }))
+    .build();
+
+// In-process modules: registered on the app, attached before the first render
+let app = HypenApp::builder().theme(theme.clone());
+
+// Remote sessions: one fork per session
+let session = RemoteSession::connect(def, components, transport).with_theme(&theme);
+
+// In a handler (`ctx: Option<&GlobalContext>`)
+if let Some(theme) = ctx.and_then(|c| c.theme()) {
+    theme.toggle();
+}
+```
+
+A handler runs while the engine is locked, so a scheme switch made in one is applied when the dispatch finishes, together with its state changes. The session reads the client's reported system scheme itself. Because the host constructs sessions, it carries the preference across a resume: `suspend_session_with_theme(…, session.theme_preference(), …)` on disconnect and `with_theme_preference(&theme, pending.theme_preference.as_deref())` on resume.
+
+See the [Theming guide](/docs/guide/theming) for tokens, schemes, aliases and the theme file.
+
 ## Feature Flags
 
 | Feature | Description |

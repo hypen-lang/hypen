@@ -1059,6 +1059,25 @@ type WasmEngineConfig struct {
 }
 ```
 
+## Theming
+
+```go
+theme := core.NewTheme(core.ThemeOptions{
+    Tokens:  core.Tokens{"color": core.Tokens{"surface": "#ffffff", "ink": "#111111"}},
+    Schemes: map[string]core.Tokens{"dark": {"color": core.Tokens{"surface": "#111111", "ink": "#f5f5f5"}}},
+})
+
+server := remote.NewRemoteServer().Theme(theme) // one fork per session
+
+// In a handler: ctx.Theme() is the session's fork (nil when no theme is registered)
+ctx.Theme().Toggle()
+_ = ctx.Theme().SetScheme("dark")
+```
+
+Each session's fork follows its client's reported system scheme (`hello.colorScheme` and the `colorScheme` message) and keeps its preference across a resume. Outside a remote server, attach a theme to an engine yourself with `theme.Attach(engine)`; the Go client reports a scheme with `EngineOptions.ColorScheme` / `SetColorScheme`.
+
+See the [Theming guide](/docs/guide/theming) for tokens, schemes, aliases and the theme file.
+
 ## Error Types
 
 The SDK provides typed error classes:

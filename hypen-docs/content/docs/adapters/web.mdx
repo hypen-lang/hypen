@@ -150,6 +150,10 @@ Text("Highlighted")
 
 `ComponentRegistry` and `ApplicatorRegistry` are also exported from `@hypen-space/web` (and `@hypen-space/web/dom`), but a `new ComponentRegistry()` is not connected to any renderer; register on the renderer's own registries as shown.
 
+## Color Scheme
+
+With a [theme](/docs/guide/theming), `Hypen` follows `prefers-color-scheme` while the theme's preference is `"system"`, and the DOM renderer marks the render root with `data-hypen-scheme` and, for `light` / `dark`, the CSS `color-scheme` property so native controls match. As a remote client, `RemoteEngine` reports the system scheme to the server (`colorScheme: "auto" | "light" | "dark" | false`, default `"auto"`; `setColorScheme` to report it yourself).
+
 ## Canvas Renderer
 
 For canvas-based rendering (games, data visualizations, pixel-perfect control):
