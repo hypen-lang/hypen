@@ -28,6 +28,7 @@ import { pink, yellow, dim, boldPink } from "./colors.js";
 import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
 import { findPackageRoot, importFromProject, resolveFromProject } from "./dev-resolve.js";
 import { DevServerError } from "./dev-errors.js";
+import { DevPrebuiltModules, type HostedRemoteServer, type HostedServerPackage } from "./dev-hosted.js";
 import { createHypenSourceValidator, formatReloadError } from "./dev-diagnostics.js";
 import { acceptUpgrade, type NodeWebSocket } from "./node-ws.js";
 
@@ -72,6 +73,20 @@ export interface DevOptions {
    * rebuild, `hypen check` format). Never fails the server. Default: off.
    */
   a11y?: DevA11yOptions;
+
+  /**
+   * The raw `wasm` section of hypen.json. Modules it declares prebuilt
+   * (`wasm.modules.<Name>.component`) are loaded into the dev server next
+   * to the discovered TypeScript modules and hot-reloaded when their
+   * `.wasm` / `.hypen` (or their grants) change.
+   */
+  wasm?: unknown;
+
+  /**
+   * Path of hypen.json. When given, it is watched and re-read so a grant
+   * edited there reaches the running prebuilt modules without a restart.
+   */
+  configFile?: string;
 }
 
 export interface BuildOptions {
@@ -335,6 +350,14 @@ export async function dev(options: DevOptions): Promise<{
     .source(resolvedComponentsDir)
     // Mirror actions across all connected clients, like the Bun server.
     .syncActions();
+  // Prebuilt (hosted) modules declared in hypen.json (see dev-bun.ts).
+  const prebuilt = new DevPrebuiltModules({
+    wasm: options.wasm,
+    configFile: options.configFile,
+    projectRoot,
+    serverPackage: serverPkg as HostedServerPackage,
+  });
+  prebuilt.attach(remoteServer as HostedRemoteServer);
   await remoteServer.prepare();
   if (!debug) configureLogger({ level: "warn" });
 
@@ -484,13 +507,19 @@ export async function dev(options: DevOptions): Promise<{
     });
   }
 
+  const prebuiltWatcher = hot ? prebuilt.watch(remoteServer as HostedRemoteServer) : null;
+
   const serverUrl = `http://localhost:${port}`;
 
   console.log(`\n  ${boldPink("Hypen Dev Server")} ${dim("(Node.js)")}\n`);
   console.log(`  ${dim("Local:")}      ${yellow(serverUrl)}`);
   console.log(`  ${dim("Remote:")}     ${yellow(`ws://localhost:${port}`)}`);
   console.log(`  ${dim("Entry:")}      ${entry}`);
-  console.log(`  ${dim("Components:")} ${resolvedComponentsDir}\n`);
+  console.log(`  ${dim("Components:")} ${resolvedComponentsDir}`);
+  if (prebuilt.size > 0) {
+    console.log(`  ${dim("Prebuilt:")}   ${prebuilt.names.join(", ")} ${dim("(WASM, from hypen.json)")}`);
+  }
+  console.log("");
 
   onStart?.(serverUrl);
   void runA11y?.();
@@ -506,6 +535,7 @@ export async function dev(options: DevOptions): Promise<{
     url: serverUrl,
     stop: () => {
       watcher?.stop();
+      prebuiltWatcher?.stop();
       for (const ws of sockets) ws.close(1001, "Server stopping");
       sockets.clear();
       server.close();

@@ -64,9 +64,40 @@ nature, a shared `localStorage`.
 - `host.storage` (`HostStorage`: backends, quotas, `usage()`, `dump()`) and
   `host.engineState` (this host's `hypen:engine/state` import).
 
+### One component, many hosts
+
+`prepare()` does two things: the expensive, host-independent part (jco
+bindgen + `WebAssembly.compile`) and the cheap, host-specific part (linking
+against this host's storage and instantiating). They are also available
+separately, so a server can do the first once and the second per session:
+
+```ts
+import { JsModuleHost, prepareComponent } from "@hypen-space/module-host";
+
+const prepared = await prepareComponent("pricing", bytes);   // once
+// per session / per user:
+const host = new JsModuleHost({ storage: thatUsersBackend });
+await host.instantiatePrepared("pricing", prepared, manifest);
+```
+
+Each `instantiatePrepared` creates a fresh component instance (its own linear
+memory) linked against that host's storage and ACL context, gated by
+`manifest` exactly like `prepare()`. It resolves to the new bindings, which
+`registerPrepared` accepts if an earlier set has to be put back. This is how
+`@hypen-space/server` runs hosted modules: one prepared component per module,
+one host per session.
+
+A guest trap (`WebAssembly.RuntimeError`, or a stack overflow) leaves a
+component instance in an unknown state, so the host marks it dead: every
+later call on an instance id that uses those bindings throws `dead instance
+<id>: module '<name>' trapped: …`, and `host.deathReason(id)` returns the
+reason (`null` while usable). An export that returns `Err(...)` is not a trap
+and kills nothing. Replace the bindings (`instantiatePrepared` / `prepare`)
+and `instantiate` again to recover.
+
 ### Other exports
 
-`buildImportMap`, `normalizeManifest`, `HostStorage`, `createStorageImports`,
+`prepareComponent` (and the `PreparedComponent` type), `buildImportMap`, `normalizeManifest`, `HostStorage`, `createStorageImports`,
 `MemoryStorageBackend`, `LocalStorageBackend`, `defaultStorageBackend`,
 `DEFAULT_STORAGE_QUOTAS`, `MAX_NAMESPACE_BYTES`, `MAX_OPEN_BUCKETS`,
 `entryCost`, `STORAGE_SCOPES`, `LS_PREFIX`, and the types

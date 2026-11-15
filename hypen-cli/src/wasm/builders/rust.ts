@@ -41,7 +41,8 @@ export interface RustSource {
 export function collectRustComponents(
   componentsDir: string,
   entry: string,
-  projectDir: string
+  projectDir: string,
+  prebuilt?: ReadonlySet<string>
 ): Discovery<RustSource> {
   const found: Discovery<RustSource> = { stateful: [], stateless: [] };
   const dirs = scanComponentDirs(componentsDir);
@@ -50,7 +51,7 @@ export function collectRustComponents(
     const name = parseModuleName(c.name);
     const crateDir = multiModule ? (c.sources.rust ? c.dir : undefined) : c.name === entry ? projectDir : undefined;
     if (crateDir === undefined) {
-      assertNoForeignModule(c, "rust");
+      assertNoForeignModule(c, "rust", prebuilt);
       found.stateless.push({ kind: "stateless", name, template: c.template });
     } else {
       found.stateful.push({ kind: "stateful", name, template: c.template, source: { crateDir } });
@@ -226,7 +227,7 @@ export const rustBuilder: ModuleBuilder<RustSource, void> = {
   label: "Rust (cargo)",
 
   async discover(project) {
-    return collectRustComponents(project.componentsDir, project.entry, project.projectDir);
+    return collectRustComponents(project.componentsDir, project.entry, project.projectDir, project.prebuilt);
   },
 
   entryHint: (entry) =>

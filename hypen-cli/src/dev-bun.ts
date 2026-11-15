@@ -23,6 +23,7 @@ import { createDevA11yChecker, type DevA11yOptions } from "./dev.js";
 import { importFromProject } from "./dev-resolve.js";
 import { DevServerError } from "./dev-errors.js";
 import { createHypenSourceValidator, formatReloadError } from "./dev-diagnostics.js";
+import { DevPrebuiltModules, type HostedRemoteServer, type HostedServerPackage } from "./dev-hosted.js";
 
 export { DevServerError };
 
@@ -84,6 +85,20 @@ export interface DevOptions {
    * rebuild, `hypen check` format). Never fails the server. Default: off.
    */
   a11y?: DevA11yOptions;
+
+  /**
+   * The raw `wasm` section of hypen.json. Modules it declares prebuilt
+   * (`wasm.modules.<Name>.component`) are loaded into the dev server next
+   * to the discovered TypeScript modules and hot-reloaded when their
+   * `.wasm` / `.hypen` (or their grants) change.
+   */
+  wasm?: unknown;
+
+  /**
+   * Path of hypen.json. When given, it is watched and re-read so a grant
+   * edited there reaches the running prebuilt modules without a restart.
+   */
+  configFile?: string;
 }
 
 export interface BuildOptions {
@@ -253,10 +268,11 @@ export async function dev(options: DevOptions): Promise<{
   // The watcher comes from the project's @hypen-space/server too: its
   // rescan and `remoteServer.reload()` then share one discovery module (one
   // built-in-name warning per reload, not one per copy).
-  const { discoverComponents, loadDiscoveredComponents, watchComponents } = await importFromProject(
+  const serverPackage = await importFromProject(
     "@hypen-space/server",
     () => import("@hypen-space/server")
   );
+  const { discoverComponents, loadDiscoveredComponents, watchComponents } = serverPackage;
   const { configureLogger } = await importFromProject(
     "@hypen-space/core",
     () => import("@hypen-space/core")
@@ -292,6 +308,17 @@ export async function dev(options: DevOptions): Promise<{
     // preview the same scene, like `hypen test`). See the doc comment
     // above for the per-tab-isolation alternative.
     .syncActions();
+
+  // Prebuilt (hosted) modules declared in hypen.json run in the same
+  // server. Resolving them throws a BuildError (missing file, not a
+  // component, malformed `wasm` section) before anything listens.
+  const prebuilt = new DevPrebuiltModules({
+    wasm: options.wasm,
+    configFile: options.configFile,
+    projectRoot: resolve("."),
+    serverPackage: serverPackage as HostedServerPackage,
+  });
+  prebuilt.attach(remoteServer as unknown as HostedRemoteServer);
 
   try {
     await remoteServer.listen(port);
@@ -372,13 +399,19 @@ export async function dev(options: DevOptions): Promise<{
     });
   }
 
+  const prebuiltWatcher = hot ? prebuilt.watch(remoteServer as unknown as HostedRemoteServer) : null;
+
   const serverUrl = `http://localhost:${port}`;
 
   console.log(`\n  ${boldPink("Hypen Dev Server")}\n`);
   console.log(`  ${dim("Local:")}      ${yellow(serverUrl)}`);
   console.log(`  ${dim("Remote:")}     ${yellow(`ws://localhost:${port}`)}`);
   console.log(`  ${dim("Entry:")}      ${entry}`);
-  console.log(`  ${dim("Components:")} ${resolvedComponentsDir}\n`);
+  console.log(`  ${dim("Components:")} ${resolvedComponentsDir}`);
+  if (prebuilt.size > 0) {
+    console.log(`  ${dim("Prebuilt:")}   ${prebuilt.names.join(", ")} ${dim("(WASM, from hypen.json)")}`);
+  }
+  console.log("");
 
   onStart?.(serverUrl);
 
@@ -397,6 +430,7 @@ export async function dev(options: DevOptions): Promise<{
     url: serverUrl,
     stop: () => {
       watcher?.stop();
+      prebuiltWatcher?.stop();
       remoteServer.stop();
     },
   };

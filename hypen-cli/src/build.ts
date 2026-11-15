@@ -28,6 +28,7 @@
  * work).
  */
 
+import { declaredPrebuiltNames } from "./wasm/prebuilt.js";
 import { join, resolve, relative } from "path";
 import { createHypenSourceValidator } from "./dev-diagnostics.js";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
@@ -61,6 +62,12 @@ export interface BuildOptions {
   root?: string;
   /** Print progress. Default: true. */
   log?: boolean;
+  /**
+   * The raw `wasm` section of hypen.json. Only read to refuse — loudly — a
+   * project that declares prebuilt (WASM) modules: the browser engine this
+   * build ships cannot run them.
+   */
+  wasm?: unknown;
 }
 
 export interface BuildResult {
@@ -240,6 +247,26 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
   const projectRoot = resolve(root);
   const resolvedComponentsDir = resolve(projectRoot, componentsDir);
   const resolvedOutDir = resolve(projectRoot, outDir);
+
+  // This target is a static browser SPA: the engine it ships
+  // (@hypen-space/web-engine) has no hosted-module support, so a prebuilt
+  // module would silently have no logic. Refuse instead of dropping it.
+  const prebuilt = declaredPrebuiltNames(options.wasm);
+  if (prebuilt.length > 0) {
+    throw new BuildError(
+      `This project declares prebuilt WASM modules (${prebuilt.join(", ")}), which the browser SPA build ` +
+        "cannot run: the browser engine has no hosted-module support.",
+      {
+        code: "PREBUILT_UNSUPPORTED_TARGET",
+        module: prebuilt[0],
+        file: "hypen.json",
+        field: `wasm.modules.${prebuilt[0]}.component`,
+        hint:
+          "serve the app from a server instead (`hypen dev`, or a server entry using RemoteServer + wasmModule()), " +
+          "or build the portable target: `hypen build --target wasm`",
+      }
+    );
+  }
 
   say(`\n  ${boldPink("Hypen Build")}\n`);
   say(`  ${dim("Entry:")}      ${entry}`);

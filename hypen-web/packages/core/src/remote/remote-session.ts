@@ -79,6 +79,13 @@ import {
 import { frameworkLoggers } from "../logger.js";
 import { BaseEngine } from "../engine-base.js";
 import {
+  isHostedModuleDefinition,
+  type HostedModuleDefinition,
+  type HostedModuleInstance,
+  type HostedModuleProvider,
+  type HostedModuleSession,
+} from "../hosted-module.js";
+import {
   ClientActionRefused,
   UI_ACTION_ENVELOPE,
   admitUnboundClientAction,
@@ -245,6 +252,13 @@ export interface SessionHost {
     string,
     { template: string; module?: HypenModuleDefinition<any> }
   >;
+  /**
+   * Runs the app's hosted (WASM-component) modules, when it has any
+   * (`@hypen-space/server` supplies it once `wasmModule()` definitions are
+   * registered). Absent — the default — on hosts without hosted modules or
+   * that cannot run them; nothing hosted-related then costs anything.
+   */
+  readonly hostedModules?: HostedModuleProvider | null;
 
   /**
    * Construct a fresh engine for this session. Called once per session.
@@ -361,11 +375,38 @@ function scopeTemplate(
   def: HypenModuleDefinition<any> | undefined
 ): string {
   if (!def || MODULE_DECL.test(template)) return template;
+  // A hosted module's state and actions live in its component, so the
+  // definition shows neither — it is a module all the same.
+  if (isHostedModuleDefinition(def)) return `module ${name} {\n${template}\n}`;
   const state = def.initialState;
   const hasState =
     state !== null && typeof state === "object" && Object.keys(state).length > 0;
   if (!hasState && (def.actions?.length ?? 0) === 0) return template;
   return `module ${name} {\n${template}\n}`;
+}
+
+/** A hosted module that could not be given a runtime: every call is a no-op. */
+function inertHostedInstance(scope: string): HostedModuleInstance {
+  let destroyed = false;
+  return {
+    kind: "hosted",
+    scope,
+    get destroyed() {
+      return destroyed;
+    },
+    hasLiveBackgroundDeviceWork: false,
+    waitForReady: async () => {},
+    activate: async () => {},
+    deactivate: async () => {},
+    destroy: async () => {
+      destroyed = true;
+    },
+    getState: () => ({}),
+    dispatch: async () => {
+      throw new Error(`Hosted module "${scope}" is not running on this host`);
+    },
+    onStateChange: () => {},
+  };
 }
 
 /**
@@ -502,6 +543,16 @@ export class RemoteSession {
    * ManagedRouter, which owns their lifecycle.
    */
   private _nestedInstances: HypenModuleInstance<any>[] = [];
+  /**
+   * The session's hosted-module runtime (module host, storage, timers), or
+   * `null` when the app has no hosted modules. Opened in
+   * `initializeSession`, closed in `destroy()`.
+   */
+  private _hosted: HostedModuleSession | null = null;
+  /** Hosted child modules mounted directly in a template (not by a route). */
+  private _nestedHosted: HostedModuleInstance[] = [];
+  /** The session's router once the auto-router is wired (hosted `navigate` effects). */
+  private _router: HypenRouter | null = null;
   /**
    * Toggled by `RemoteServer.disableAutoRouter()` when the host wants
    * to wire a ManagedRouter by hand via `onSessionCreate` instead.
@@ -1054,7 +1105,21 @@ export class RemoteSession {
             log.warn(`Session ${this.id}: action "${err.action}" refused — ${err.reason}`);
             break;
           }
-          this.engine.dispatchAction(resolved.name, resolved.payload);
+          if (this._hosted) {
+            // A hosted module whose instance crashed is re-instantiated
+            // before its next use; a failing hosted action is reported
+            // (diagnostics + the app's error hook), not thrown at the
+            // transport.
+            await this._hosted.recover();
+            if (this._destroyed) return;
+            try {
+              this.engine.dispatchAction(resolved.name, resolved.payload);
+            } catch (err) {
+              if (!this._hosted.report(err, { action: resolved.name })) throw err;
+            }
+          } else {
+            this.engine.dispatchAction(resolved.name, resolved.payload);
+          }
 
           if (this.host.syncActions) {
             for (const other of this.host.otherSessions(this)) {
@@ -1062,8 +1127,13 @@ export class RemoteSession {
               // Replayed dispatch: handler contexts constructed inside carry
               // replay provenance, so context.device refuses to open requests
               // (RFC 001 §1.7) — the firewall at the dispatch layer.
-              const dispatch = () =>
-                other.engine.dispatchAction(resolved.name, resolved.payload);
+              const dispatch = () => {
+                try {
+                  other.engine.dispatchAction(resolved.name, resolved.payload);
+                } catch (err) {
+                  if (!other._hosted?.report(err, { action: resolved.name })) throw err;
+                }
+              };
               if (other._moduleInstance) other._moduleInstance.runReplayed(dispatch);
               else dispatch();
             }
@@ -1304,6 +1374,20 @@ export class RemoteSession {
       }
     }
 
+    // Hosted modules last: in-process teardown hooks above may still read
+    // them. Closing destroys every hosted instance (`on_destroyed`) and
+    // cancels the session's pending `delay` timers.
+    if (this._hosted) {
+      const hosted = this._hosted;
+      this._hosted = null;
+      this._nestedHosted = [];
+      try {
+        await hosted.close();
+      } catch (err) {
+        log.error(`Hosted module teardown failed on ${this.id}:`, err);
+      }
+    }
+
     this.host.onSessionDestroyed(this, this.toRemoteClient());
     // Ensure `ready` never dangles: if teardown happens before init (e.g.
     // transport dies before hello arrives), unblock any waiter so they can
@@ -1359,6 +1443,21 @@ export class RemoteSession {
       }
     }
     const mountInstance = (name: string, def: HypenModuleDefinition<any>): boolean => {
+      if (isHostedModuleDefinition(def)) {
+        // Reserve the scope before the first render, like every other
+        // child module: the engine treats a scope nobody registered as a
+        // candidate for the primary module, and a routed hosted module is
+        // not instantiated until its route is first visited. The runtime
+        // swaps the reservation for the component when it mounts.
+        this.engine.registerModule(name, [], [], {});
+        // A routed one is mounted by the ManagedRouter; any other gets its
+        // session-lifetime instance now.
+        if (eager && !routed.has(name)) {
+          const instance = this.mountHostedModule(def);
+          if (instance) this._nestedHosted.push(instance);
+        }
+        return true;
+      }
       if (!eager || routed.has(name) || name.startsWith("__")) return false;
       const instance = new HypenModuleInstance(
         this.engine,
@@ -1460,6 +1559,48 @@ export class RemoteSession {
         `Registered ${visible.length} nested module${visible.length === 1 ? "" : "s"}: ${visible.join(", ")}`
       );
     }
+  }
+
+  /**
+   * Create the session's instance of a hosted module and make it reachable
+   * (`context.getModule`). `null` — after an error naming the module — when
+   * this host cannot run hosted modules.
+   */
+  private mountHostedModule(def: HostedModuleDefinition): HostedModuleInstance | null {
+    if (!this._hosted) {
+      log.error(
+        `Session ${this.id}: "${def.name}" is a hosted (WASM) module (${def.hosted.declaredAt}), but this ` +
+          "host cannot run hosted modules. Serve the app with @hypen-space/server's RemoteServer."
+      );
+      return null;
+    }
+    const instance = this._hosted.mount(def);
+    this._globalContext.registerModule(def.name.toLowerCase(), instance);
+    instance.onStateChange(() => this.noteModuleStateChange());
+    return instance;
+  }
+
+  /**
+   * A route's hosted module. The router registers it in the global context
+   * itself; without a runtime the instance is an inert stand-in, so the
+   * route still renders its template.
+   */
+  private mountHostedForRoute(def: HostedModuleDefinition): HostedModuleInstance {
+    if (!this._hosted) {
+      log.error(
+        `Session ${this.id}: "${def.name}" is a hosted (WASM) module (${def.hosted.declaredAt}), but this ` +
+          "host cannot run hosted modules. Serve the app with @hypen-space/server's RemoteServer."
+      );
+      return inertHostedInstance(def.name.toLowerCase());
+    }
+    const instance = this._hosted.mount(def);
+    instance.onStateChange(() => this.noteModuleStateChange());
+    return instance;
+  }
+
+  /** The session's hosted-module runtime, or `null` (no hosted modules). */
+  get hostedModules(): HostedModuleSession | null {
+    return this._hosted;
   }
 
   // ------------------------------------------------------------------
@@ -1943,9 +2084,34 @@ export class RemoteSession {
 
     await this._moduleInstance.waitForReady();
 
+    // Hosted (WASM-component) modules: the provider installs this session's
+    // module host — its own component instances and its own storage — on
+    // the engine before any module mounts. Hosts without hosted modules
+    // have no provider and skip all of it.
+    if (this.host.hostedModules && !this._hosted) {
+      try {
+        this._hosted = await this.host.hostedModules.openSession({
+          engine: this.engine,
+          session,
+          navigate: (path) => {
+            const router = this._router;
+            if (!router) return false;
+            router.push(path);
+            return true;
+          },
+        });
+      } catch (err) {
+        // Reported per module by the provider where it can; whatever is
+        // left must not take the in-process half of the app down with it.
+        log.error(`Session ${this.id}: hosted modules unavailable:`, err);
+      }
+      if (this._destroyed) return;
+    }
+
     this.registerNestedModules();
     // Child modules' onCreated mutations belong in the initial tree too.
     await Promise.all(this._nestedInstances.map((i) => i.waitForReady()));
+    await Promise.all(this._nestedHosted.map((i) => i.waitForReady()));
 
     // Flush state proxy microtasks so onCreated mutations propagate.
     await new Promise<void>((resolve) => queueMicrotask(resolve));
@@ -2008,6 +2174,12 @@ export class RemoteSession {
     } catch (err) {
       log.error(`Primary module activate() failed on ${this.id}:`, err);
     }
+    // Hosted child modules mounted in a template are on screen for the
+    // session's lifetime: activate them (`on_activated` is where a
+    // component subscribes to other modules' state).
+    for (const instance of this._nestedHosted) {
+      await instance.activate();
+    }
 
     // Auto-wire a ManagedRouter from the template's own Router {} blocks.
     // The user gets routing "for free" from the DSL — no addRoute calls
@@ -2068,7 +2240,13 @@ export class RemoteSession {
       // A restored session seeds each route module, as it is first
       // constructed, with the state it had in the previous incarnation.
       initialStateFor: (moduleId, definition) => this.takeRestoredState(moduleId, definition),
+      createHostedInstance: (_moduleId, definition) => {
+        const instance = this.mountHostedForRoute(definition);
+        this.noteModuleStateChange();
+        return instance;
+      },
     });
+    this._router = router;
     const primary = this._moduleInstance;
 
     let added = 0;

@@ -17,6 +17,7 @@
     "agent-interface",
     "routing",
     "persistence",
+    "wasm-modules",
     "data-sources",
     "i18n",
     "theming",

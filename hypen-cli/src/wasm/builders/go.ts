@@ -61,13 +61,16 @@ function readGoPackage(file: string): string | undefined {
  * stateful module — `package main` means wit-mode, any other package
  * app-mode; a `.hypen`-only directory is stateless.
  */
-export function collectGoComponents(componentsDir: string): Discovery<GoSource> {
+export function collectGoComponents(
+  componentsDir: string,
+  prebuilt?: ReadonlySet<string>
+): Discovery<GoSource> {
   const found: Discovery<GoSource> = { stateful: [], stateless: [] };
   for (const c of scanComponentDirs(componentsDir)) {
     const name = parseModuleName(c.name);
     const goFiles = c.files.filter((f) => f.endsWith(".go"));
     if (goFiles.length === 0) {
-      assertNoForeignModule(c, "go");
+      assertNoForeignModule(c, "go", prebuilt);
       found.stateless.push({ kind: "stateless", name, template: c.template });
       continue;
     }
@@ -153,7 +156,7 @@ export const goBuilder: ModuleBuilder<GoSource, GoPrepared> = {
   label: "Go (tinygo)",
 
   async discover(project) {
-    return collectGoComponents(project.componentsDir);
+    return collectGoComponents(project.componentsDir, project.prebuilt);
   },
 
   entryHint: (entry) =>

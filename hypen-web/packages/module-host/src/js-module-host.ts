@@ -242,6 +242,92 @@ const SYNC_WASI_POLL =
 
 const now = (): number => (typeof performance !== "undefined" ? performance.now() : Date.now());
 
+/**
+ * A component transpiled and compiled once, ready to be instantiated any
+ * number of times — the expensive half of {@link JsModuleHost.prepare}
+ * (jco bindgen + `WebAssembly.compile`), with nothing host-specific in it.
+ * Share one between hosts: each {@link JsModuleHost.instantiatePrepared}
+ * links a fresh component instance (own linear memory) against that host's
+ * own storage and ACL context.
+ */
+export interface PreparedComponent {
+  /** The name it was transpiled under (diagnostics only). */
+  readonly name: string;
+  /** Interfaces the component imports (unversioned). */
+  readonly requiredImports: readonly string[];
+  readonly loadedVia: LoadedVia;
+  readonly componentBytes: number;
+  readonly bindingsBytes: number;
+  readonly coreWasmBytes: number;
+  readonly timings: { transpileMs: number; compileMs: number; importMs: number };
+  /** Link and instantiate against `imports` (see {@link JsModuleHost.importMapFor}). */
+  instantiate(imports: Record<string, unknown>): Promise<ModuleBindings>;
+}
+
+/**
+ * Transpile and compile component `bytes` (async, slow: do it once per
+ * component). Nothing is linked yet, so no manifest is involved — the
+ * capability gate applies when a host instantiates the result.
+ */
+export async function prepareComponent(name: string, bytes: Uint8Array): Promise<PreparedComponent> {
+  if (!bytes || bytes.length === 0) {
+    throw new Error(`no component bytes given for module: ${name}`);
+  }
+  const t0 = now();
+  // 1. In-memory bindgen (instantiation: async => bindings export
+  //    `instantiate(getCoreModule, imports)`, no sibling-file fetches).
+  const { files, imports: requiredImports } = await transpileComponent(name, bytes);
+  const t1 = now();
+
+  // 2. Compile the emitted core wasm.
+  const coreModules = new Map<string, WebAssembly.Module>();
+  const jsFiles: string[] = [];
+  let coreWasmBytes = 0;
+  for (const [file, contents] of files) {
+    if (file.endsWith(".wasm")) {
+      coreWasmBytes += contents.byteLength;
+      try {
+        coreModules.set(file, await WebAssembly.compile(contents as BufferSource));
+      } catch (e) {
+        throw wasmCspError(e, `could not compile module '${name}'`) ?? e;
+      }
+    } else if (file.endsWith(".js")) {
+      jsFiles.push(file);
+    }
+  }
+  const t2 = now();
+  const getCoreModule = (relPath: string): WebAssembly.Module => {
+    const mod = coreModules.get(relPath.replace(/^\.\//, ""));
+    if (!mod) throw new Error(`unknown core module requested by bindings: ${relPath}`);
+    return mod;
+  };
+
+  // 3. Load the bindings module. With async instantiation jco emits exactly
+  //    one self-contained JS file (no relative imports); anything else is
+  //    unsupported here.
+  const mainJs = jsFiles.includes(`${name}.js`) ? `${name}.js` : jsFiles[0];
+  if (!mainJs || jsFiles.length !== 1) {
+    throw new Error(
+      `expected exactly one bindings .js from jco for '${name}', got: ` +
+        `${files.map(([f]) => f).join(", ")}`,
+    );
+  }
+  const source = files.find(([f]) => f === mainJs)![1];
+  const { module: bindingsModule, via } = await importInMemoryModule(source);
+  const t3 = now();
+
+  return {
+    name,
+    requiredImports,
+    loadedVia: via,
+    componentBytes: bytes.byteLength,
+    bindingsBytes: source.byteLength,
+    coreWasmBytes,
+    timings: { transpileMs: t1 - t0, compileMs: t2 - t1, importMs: t3 - t2 },
+    instantiate: (imports) => bindingsModule.instantiate(getCoreModule, imports),
+  };
+}
+
 interface ComponentEntry {
   bytes: Uint8Array | null;
   manifest: NormalizedManifest;
@@ -253,11 +339,26 @@ interface InstanceEntry {
   bindings: ModuleBindings;
 }
 
+/**
+ * Whether `e` is a guest trap: the component instance behind it can no
+ * longer be trusted (a Rust panic aborts mid-call, leaving its memory in
+ * whatever state it was). An export that returned `Err(...)` is not a trap —
+ * jco throws a `ComponentError` for that.
+ */
+function isTrap(e: unknown): boolean {
+  return e instanceof WebAssembly.RuntimeError || e instanceof RangeError;
+}
+
 export class JsModuleHost {
   #components = new Map<string, ComponentEntry>();
   #instances = new Map<number, InstanceEntry>();
   #nextId = 1;
   #activeCall: CallContext | null = null;
+  /**
+   * Component instances that trapped, by their bindings object, with what
+   * killed them. Every host instance id sharing those bindings is dead.
+   */
+  #dead = new WeakMap<ModuleBindings, string>();
   readonly #onPrepare: ((info: PrepareInfo) => void) | undefined;
 
   /** This host's storage (backends, quotas). Shared by all its modules. */
@@ -344,75 +445,59 @@ export class JsModuleHost {
     if (!entry.bytes || entry.bytes.length === 0) {
       throw new Error(`no component bytes registered for module: ${name}`);
     }
-    const componentBytes = entry.bytes;
     const t0 = now();
+    const prepared = await prepareComponent(name, entry.bytes);
 
-    // 1. In-memory bindgen (instantiation: async => bindings export
-    //    `instantiate(getCoreModule, imports)`, no sibling-file fetches).
-    const { files, imports: requiredImports } = await transpileComponent(name, componentBytes);
+    // Link-time gate. Throws if the component imports something the
+    // manifest does not grant.
+    const importMap = await this.importMapFor(name, prepared.requiredImports);
     const t1 = now();
-
-    // 2. Link-time gate. Throws if the component imports something the
-    //    manifest does not grant.
-    const importMap = await this.importMapFor(name, requiredImports);
-
-    // 3. Compile the emitted core wasm.
-    const coreModules = new Map<string, WebAssembly.Module>();
-    const jsFiles: string[] = [];
-    let coreWasmBytes = 0;
+    const bindings = await prepared.instantiate(importMap);
     const t2 = now();
-    for (const [file, contents] of files) {
-      if (file.endsWith(".wasm")) {
-        coreWasmBytes += contents.byteLength;
-        try {
-          coreModules.set(file, await WebAssembly.compile(contents as BufferSource));
-        } catch (e) {
-          throw wasmCspError(e, `could not compile module '${name}'`) ?? e;
-        }
-      } else if (file.endsWith(".js")) {
-        jsFiles.push(file);
-      }
-    }
-    const t3 = now();
-    const getCoreModule = (relPath: string): WebAssembly.Module => {
-      const mod = coreModules.get(relPath.replace(/^\.\//, ""));
-      if (!mod) throw new Error(`unknown core module requested by bindings: ${relPath}`);
-      return mod;
-    };
-
-    // 4. Load the bindings module and instantiate. With async
-    //    instantiation jco emits exactly one self-contained JS file (no
-    //    relative imports); anything else is unsupported here.
-    const mainJs = jsFiles.includes(`${name}.js`) ? `${name}.js` : jsFiles[0];
-    if (!mainJs || jsFiles.length !== 1) {
-      throw new Error(
-        `expected exactly one bindings .js from jco for '${name}', got: ` +
-          `${files.map(([f]) => f).join(", ")}`,
-      );
-    }
-    const source = files.find(([f]) => f === mainJs)![1];
-    const { module: bindingsModule, via } = await importInMemoryModule(source);
-    const t4 = now();
-    const bindings: ModuleBindings = await bindingsModule.instantiate(getCoreModule, importMap);
-    const t5 = now();
 
     // Only commit if the entry wasn't replaced (fresh bytes) meanwhile.
     if (this.#components.get(name) === entry) entry.prepared = { bindings };
     this.#onPrepare?.({
       module: name,
-      loadedVia: via,
-      componentBytes: componentBytes.byteLength,
-      bindingsBytes: source.byteLength,
-      coreWasmBytes,
+      loadedVia: prepared.loadedVia,
+      componentBytes: prepared.componentBytes,
+      bindingsBytes: prepared.bindingsBytes,
+      coreWasmBytes: prepared.coreWasmBytes,
       timings: {
-        transpileMs: t1 - t0,
-        compileMs: t3 - t2,
-        importMs: t4 - t3,
-        instantiateMs: t5 - t4,
-        totalMs: t5 - t0,
+        transpileMs: prepared.timings.transpileMs,
+        compileMs: prepared.timings.compileMs,
+        importMs: prepared.timings.importMs,
+        instantiateMs: t2 - t1,
+        totalMs: t2 - t0,
       },
     });
     return this;
+  }
+
+  /**
+   * Instantiate an already {@link prepareComponent}-ed component in THIS
+   * host under `name`: a fresh component instance linked against this
+   * host's storage (partitioned by `name`), ACL context and the grants of
+   * `manifest`. Cheap next to `prepare()` (no transpile, no compile), so a
+   * server prepares each component once and gives every session's host its
+   * own instance. Replaces whatever `name` held; instances already handed
+   * out keep the bindings they were created with.
+   *
+   * Returns the new bindings (hand them to `registerPrepared` to put a
+   * previous set back). Throws — before anything is replaced — when the
+   * component imports an interface `manifest` does not grant.
+   */
+  async instantiatePrepared(
+    name: string,
+    prepared: PreparedComponent,
+    manifest?: ModuleManifest,
+  ): Promise<ModuleBindings> {
+    const normalized = normalizeManifest(manifest);
+    const wasi = await loadWasiImports();
+    const importMap = buildImportMap(name, normalized, prepared.requiredImports, this.#available(name, wasi));
+    const bindings = await prepared.instantiate(importMap);
+    this.#components.set(name, { bytes: null, manifest: normalized, prepared: { bindings } });
+    return bindings;
   }
 
   instantiate(name: string): number {
@@ -434,7 +519,24 @@ export class JsModuleHost {
   #instance(id: number): InstanceEntry {
     const inst = this.#instances.get(id);
     if (!inst) throw new Error(`dead instance ${id}`);
+    const reason = this.#dead.get(inst.bindings);
+    if (reason !== undefined) {
+      throw new Error(`dead instance ${id}: module '${inst.name}' ${reason}`);
+    }
     return inst;
+  }
+
+  /**
+   * Why instance `id` can no longer run — it (or another instance sharing
+   * its component instance) trapped — or `null` while it is usable or
+   * unknown. A dead instance refuses every call; replace the component's
+   * bindings ({@link instantiatePrepared} / `prepare()`) and instantiate
+   * again.
+   */
+  deathReason(id: number): string | null {
+    const inst = this.#instances.get(id);
+    if (!inst) return null;
+    return this.#dead.get(inst.bindings) ?? null;
   }
 
   init(id: number, config: Uint8Array): Uint8Array {
@@ -451,6 +553,9 @@ export class JsModuleHost {
     try {
       return run();
     } catch (e) {
+      if (isTrap(e)) {
+        this.#dead.set(inst.bindings, `trapped: ${e instanceof Error ? e.message : String(e)}`);
+      }
       if (
         !SYNC_WASI_POLL &&
         e instanceof WebAssembly.RuntimeError &&

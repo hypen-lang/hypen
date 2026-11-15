@@ -37,6 +37,12 @@
       "import": "./dist/plugin.js",
       "default": "./dist/plugin.js"
     },
+    "./hosted": {
+      "types": "./dist/hosted/index.d.ts",
+      "bun": "./src/hosted/index.ts",
+      "import": "./dist/hosted/index.js",
+      "default": "./dist/hosted/index.js"
+    },
     "./remote": {
       "types": "./dist/remote/server.d.ts",
       "bun": "./src/remote/server.ts",
@@ -65,13 +71,17 @@
   },
   "peerDependencies": {
     "typescript": "^5",
-    "@hypen-space/web": ">=0.6.0"
+    "@hypen-space/web": ">=0.6.0",
+    "@hypen-space/module-host": ">=0.6.7"
   },
   "peerDependenciesMeta": {
     "typescript": {
       "optional": true
     },
     "@hypen-space/web": {
+      "optional": true
+    },
+    "@hypen-space/module-host": {
       "optional": true
     }
   },

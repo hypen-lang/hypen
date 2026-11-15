@@ -23,6 +23,7 @@ export type {
   GrantableStorage,
   Language,
   ModuleName,
+  PrebuiltModule,
   Project,
   ScopeName,
   StatefulModule,
@@ -30,7 +31,14 @@ export type {
 } from "./wasm/types.js";
 
 export { parseWasmConfig, resolveModuleCapabilities } from "./wasm/config.js";
-export type { ModuleGrants, WasmConfig } from "./wasm/config.js";
+export type { ModuleGrants, PrebuiltDeclaration, WasmConfig } from "./wasm/config.js";
+export {
+  copyPrebuiltModules,
+  declaredPrebuiltNames,
+  prebuiltNames,
+  resolvePrebuiltModules,
+} from "./wasm/prebuilt.js";
+export type { CopiedPrebuilt } from "./wasm/prebuilt.js";
 
 export { detectLanguage, detectProjectLanguage } from "./wasm/discover.js";
 export type { DetectedLanguage } from "./wasm/discover.js";

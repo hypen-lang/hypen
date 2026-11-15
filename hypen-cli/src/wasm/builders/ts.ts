@@ -136,7 +136,7 @@ export const tsBuilder: ModuleBuilder<TsSource, TsPrepared> = {
         const dir = d.hypenPath ? dirname(resolve(project.projectDir, d.hypenPath)) : undefined;
         if (dir !== undefined && dir !== project.componentsDir) {
           const sources = { ...componentSources(d.name, readdirSync(dir)), ts: false };
-          assertNoForeignModule({ name: d.name, dir, sources }, "ts");
+          assertNoForeignModule({ name: d.name, dir, sources }, "ts", project.prebuilt);
         }
         found.stateless.push({ kind: "stateless", name: parseModuleName(d.name), template: d.template });
       }

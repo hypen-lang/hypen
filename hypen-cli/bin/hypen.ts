@@ -811,12 +811,24 @@ async function devServer(options: { port?: number; debug?: boolean; a11y?: boole
       a11y: isDevA11yEnabled(options.a11y, config.a11y)
         ? { ignoreRules: config.a11y?.ignoreRules }
         : undefined,
+      // Prebuilt (WASM) modules declared under `wasm.modules.<Name>.component`.
+      wasm: config.wasm,
+      configFile: resolve("hypen.json"),
     });
   } catch (err: any) {
     // `dev()` throws (DevServerError for expected cases) instead of
     // exiting — terminating the process is the CLI's call, not the
     // library's.
-    console.error(`\n  Error: ${err?.message ?? err}\n`);
+    const { BuildError, formatBuildError } = await import("../src/build-error.js");
+    const { isHostedSetupError, formatHostedSetupError } = await import("../src/dev-hosted.js");
+    if (err instanceof BuildError) {
+      // A prebuilt module's declaration: same shape as a build failure.
+      console.error(`\n${formatBuildError(err).replace("Build failed:", "Error:")}\n`);
+    } else if (isHostedSetupError(err)) {
+      console.error(`\n  Error: ${formatHostedSetupError(err).join("\n  ")}\n`);
+    } else {
+      console.error(`\n  Error: ${err?.message ?? err}\n`);
+    }
     process.exit(1);
   }
 }
@@ -919,6 +931,31 @@ async function buildProject(options: {
     for (const output of result.outputs) {
       console.log(`    ${yellow(output.path)}`);
     }
+    // Prebuilt (WASM) modules declared in hypen.json travel with the
+    // bundle: their files are copied under the output directory at the same
+    // project-relative paths the entry script names them by.
+    try {
+      const { parseWasmConfig, resolvePrebuiltModules, copyPrebuiltModules, declaredPrebuiltNames } =
+        await import("../src/build-wasm.js");
+      if (declaredPrebuiltNames(config.wasm).length > 0) {
+        const modules = resolvePrebuiltModules(parseWasmConfig(config.wasm), process.cwd());
+        const { copied, outside } = copyPrebuiltModules(modules, process.cwd(), outDir);
+        for (const module of copied) {
+          for (const file of module.files) console.log(`    ${yellow(file)} ${dim(`(prebuilt ${module.name})`)}`);
+        }
+        for (const module of outside) {
+          console.warn(
+            `\n  ${yellow("Warning:")} prebuilt module ${module.name} lives outside the project ` +
+              `(${module.files.join(", ")}); it was not copied — ship it with the build yourself.`
+          );
+        }
+      }
+    } catch (err) {
+      const { BuildError, formatBuildError } = await import("../src/build-error.js");
+      if (!(err instanceof BuildError)) throw err;
+      console.error(`\n${formatBuildError(err)}\n`);
+      process.exit(1);
+    }
     console.log();
     return;
   }
@@ -937,10 +974,16 @@ async function buildProject(options: {
       outDir: options.outDir || config.outDir || "dist",
       minify: options.minify ?? true,
       sourcemap: options.sourcemap ?? false,
+      wasm: config.wasm,
     });
   } catch (err: any) {
     if (!(err instanceof BuildError)) throw err;
-    console.error(`\n  Build failed: ${err.message}\n`);
+    if (err.code === "BUILD_FAILED") {
+      console.error(`\n  Build failed: ${err.message}\n`);
+    } else {
+      const { formatBuildError } = await import("../src/build-error.js");
+      console.error(`\n${formatBuildError(err)}\n`);
+    }
     process.exit(1);
   }
 }

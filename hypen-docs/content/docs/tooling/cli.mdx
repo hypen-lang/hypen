@@ -257,6 +257,8 @@ The runtime is deny-by-default: a module can't read or dispatch to other modules
 | `storage` | `"app"`, `"cloud"` | `[]` | Storage tiers beyond `local`, which is always granted |
 | `http` | boolean | `false` | Outbound HTTP |
 
+A module entry can also carry `"component": "<path to a .wasm>"` and `"template": "<path to a .hypen>"`. That declares a **prebuilt** module: it is not compiled but copied into the output as `<Name>.wasm` and `<Name>.hypen` and listed in `app.json` with its grants, and it does not count as a module of another language. A project whose only stateful modules are prebuilt needs no toolchain. The build fails if the file is missing or is not a WebAssembly Component, if the template is missing (declare `template`, or keep a template-only component with that name), or if a source module has the same name. `hypen dev` loads the same declarations; the browser SPA build (`hypen build` without `--target wasm` on a component project) refuses them with `PREBUILT_UNSUPPORTED_TARGET`. See [Prebuilt WASM Modules](/docs/guide/wasm-modules).
+
 Every stateful module is written to `app.json` with all four fields; module names in `reads`/`dispatches` are written lowercased (the runtime's state scopes). An unknown module name, an unknown key or a value of the wrong type fails the build before anything compiles. So do module names that differ only by case (they would share a state scope) or contain `:`.
 
 On failure the build exits 1 and prints the reason, the module, file or `hypen.json` field it concerns, the command and exit code if a tool failed, a stable error code (`CONFIG_INVALID`, `TOOLCHAIN_MISSING`, `TOOL_FAILED`, ...) and a hint with the next step:

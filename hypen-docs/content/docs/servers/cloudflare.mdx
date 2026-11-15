@@ -217,6 +217,19 @@ onStorage: (storage) => {
 See [Persistence](/docs/guide/persistence) for the `StateStore` interface and
 `durableObjectStore`.
 
+## Hosted WASM modules are not supported
+
+[Prebuilt WASM modules](/docs/guide/wasm-modules) (`wasmModule()`) cannot run on
+Cloudflare Workers yet: the module host transpiles a component and loads the
+generated bindings at run time, and Workers allow neither. `defineHypenWorker`
+throws when the app has one:
+
+```
+Hosted WASM modules are not supported on Cloudflare Workers yet (Pricing). ...
+```
+
+Serve such an app with `@hypen-space/server` on Bun or Node instead.
+
 ## Advanced: Bring Your Own Engine
 
 The package root (`@hypen-space/cf`) stays WASM-free so it typechecks and tests

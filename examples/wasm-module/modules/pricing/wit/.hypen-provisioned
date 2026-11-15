@@ -1,0 +1,2 @@
+Provisioned by `hypen build --target wasm`; refreshed whenever the CLI's WIT changes.
+Delete this file to take ownership of wit/ (the CLI will then leave it alone).

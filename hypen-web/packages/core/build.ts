@@ -45,6 +45,7 @@ const entrypoints = [
   "./src/result.ts",
   "./src/retry.ts",
   "./src/engine-base.ts",
+  "./src/hosted-module.ts",
   "./src/portable.ts",
   "./src/diff.ts",
   "./src/patch-expand.ts",

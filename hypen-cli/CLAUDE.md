@@ -149,7 +149,20 @@ both are read from disk at run time, not bundled into the CLI.
 Cargo.toml/go.mod detection; required when both exist) and
 `modules.<Name>.{reads,dispatches,storage,http}` capability grants, emitted
 explicitly on every stateful `app.json` entry (defaults
-`[]`/`[]`/`[]`/`false`; the host is deny-by-default). TS modules are
+`[]`/`[]`/`[]`/`false`; the host is deny-by-default). A `modules.<Name>`
+entry with `component` (path to a `.wasm`) and optionally `template` declares a
+**prebuilt** module (`ModuleGrants.prebuilt`; `wasm/prebuilt.ts` resolves and
+validates the files → `PrebuiltModule`): the wasm build copies it into the
+output and lists it in `app.json` (`placePrebuilt` in `wasm/build.ts`: a
+same-named source module is `MODULE_NAME_COLLISION`, a same-named
+template-only component donates its template, no toolchain is looked up when
+every stateful module is prebuilt, and discovery's `assertNoForeignModule`
+skips declared names via `Project.prebuilt`); `hypen dev` loads it into the
+RemoteServer as a hosted module (`dev-hosted.ts`: `DevPrebuiltModules`
+attaches, prints `HostedModuleFailure`s, watches the files' directories and
+hypen.json, and calls `RemoteServer.reloadWasmModule`); the SPA build throws
+`PREBUILT_UNSUPPORTED_TARGET`; a server-based build copies the files under
+`outDir` (`copyPrebuiltModules`). TS modules are
 componentized with the pinned `@bytecodealliance/jco` (optional peer + dev
 dependency; a project-local `node_modules/.bin/jco` overrides it) against a
 per-module world carrying only the granted storage imports. Rust artifacts

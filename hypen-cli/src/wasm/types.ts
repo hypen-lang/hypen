@@ -108,6 +108,29 @@ export interface Project {
   componentsDir: string;
   /** The entry component's name, as configured (not yet known to exist). */
   entry: string;
+  /**
+   * Names declared PREBUILT in hypen.json (`wasm.modules.<Name>.component`).
+   * Discovery never treats a component directory of one of these as a module
+   * of another language: its module is the declared `.wasm`.
+   */
+  prebuilt?: ReadonlySet<string>;
+}
+
+/**
+ * A module declared prebuilt and resolved against the project: the files
+ * exist, and the component is a WebAssembly Component.
+ */
+export interface PrebuiltModule {
+  kind: "prebuilt";
+  name: ModuleName;
+  /** Absolute path of the `.wasm` Component. */
+  componentPath: string;
+  /** Absolute path of the declared `.hypen` template, if one was declared. */
+  templatePath: string | undefined;
+  /** The declared template's source; `undefined` when none was declared. */
+  template: string | undefined;
+  /** `wasm.modules.<Name>` — where it is declared, for messages. */
+  field: string;
 }
 
 /** A module's compiled component, written into the build's staging dir. */

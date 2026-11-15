@@ -18,6 +18,7 @@ Every example is a complete Hypen app. Most deploy as a Cloudflare Worker and ar
 | [`radio/`](radio/) | Live internet radio from Radio Browser, streamed straight from each station; ICY now-playing, favourites | run locally |
 | [`news/`](news/) | Hacker News lists that re-rank live, threaded comments, Wikipedia's daily featured feed | run locally |
 | [`simple/`](simple/) | The smallest Hypen-on-Cloudflare app: one file, a counter and two routes | run locally |
+| [`wasm-module/`](wasm-module/) | A TypeScript app using a prebuilt Rust module (a WebAssembly Component): grants, cross-module reads and dispatches in both directions | run locally |
 | [`stock-lab/`](stock-lab/) | One template with charts captured on all five renderers (the README hero image) | run locally |
 | [`a11y-demo/`](a11y-demo/) | Every semantics translation the renderers perform, on one screen | run locally |
 | [`device-lab/`](device-lab/) | Exercises the device capability plane against real clients | run locally |

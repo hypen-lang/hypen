@@ -10,6 +10,7 @@ import { DataSourceManager, type DataSourcePlugin, type IDataSourceEngine } from
 import type { StateStore } from "./persistence.js";
 import type { I18n } from "./i18n.js";
 import type { Theme } from "./theme.js";
+import type { HostedModuleSpec } from "./hosted-module.js";
 
 // Interface for engine compatibility (works with both engine.js and engine.browser.js)
 export interface IEngine {
@@ -264,6 +265,12 @@ export interface HypenModuleDefinition<T = unknown> {
    * Set via the `.persist(store)` builder method.
    */
   stateStore?: StateStore<T>;
+  /**
+   * Set on a HOSTED module — one whose logic is a prebuilt WASM Component
+   * (`wasmModule()` in `@hypen-space/server`) rather than the handlers
+   * below, which are then empty. Narrow with `isHostedModuleDefinition`.
+   */
+  readonly hosted?: HostedModuleSpec;
   handlers: {
     onCreated?: LifecycleHandler<T>;
     /**
@@ -773,6 +780,13 @@ export const app = new HypenApp();
  * Module Instance - manages a running module with typed state
  */
 export class HypenModuleInstance<T extends object = any> {
+  /** Discriminates this from a `HostedModuleInstance` (`AnyModuleInstance`). */
+  readonly kind = "inProcess" as const;
+  /**
+   * The action handlers as registered with the engine, by action name —
+   * what `dispatch()` (a direct call from another module) invokes.
+   */
+  private readonly registeredHandlers = new Map<string, (action: Action) => void | Promise<void>>();
   private engine: IEngine;
   private definition: HypenModuleDefinition<T>;
   private state: T;
@@ -914,7 +928,7 @@ export class HypenModuleInstance<T extends object = any> {
     // Register action handlers with flexible parameter support
     for (const [actionName, handler] of definition.handlers.onAction) {
       log.debug(`Registering action handler: ${actionName} for module ${definition.name}`);
-      this.engine.onAction(`__hypen_scoped:${this.moduleKey}:${actionName}`, async (action: Action) => {
+      const registered = async (action: Action) => {
         log.debug(`Action handler fired: ${actionName}`, action);
 
         const actionCtx: ActionContext = {
@@ -1003,7 +1017,9 @@ export class HypenModuleInstance<T extends object = any> {
         } else {
           log.debug(`Action handler completed: ${actionName}`);
         }
-      });
+      };
+      this.registeredHandlers.set(actionName, registered);
+      this.engine.onAction(`__hypen_scoped:${this.moduleKey}:${actionName}`, registered);
     }
 
     // Auto-register __hypen_bind for .bind() two-way binding support
@@ -1583,5 +1599,29 @@ export class HypenModuleInstance<T extends object = any> {
    */
   updateState(patch: Partial<T>): void {
     Object.assign(this.state, patch);
+  }
+
+  /**
+   * Run this module's `onAction(name)` handler directly — a dispatch from
+   * app code or another module (`context.getModule(id).dispatch(...)`), not
+   * from the rendered UI. The handler gets the usual
+   * `{ action, state, context }`; `sender` becomes `action.sender`.
+   *
+   * Deferred by a microtask so it is safe to call from inside another
+   * handler. Rejects when the module is destroyed or has no such handler.
+   */
+  async dispatch(name: string, payload?: unknown, sender?: string): Promise<void> {
+    await Promise.resolve();
+    if (this.isDestroyed) {
+      throw new Error(`Module "${this.definition.name ?? this.moduleKey}" is destroyed`);
+    }
+    const handler = this.registeredHandlers.get(name);
+    if (!handler) {
+      const known = Array.from(this.registeredHandlers.keys()).join(", ") || "none";
+      throw new Error(
+        `Module "${this.definition.name ?? this.moduleKey}" has no handler for action "${name}" (handlers: ${known})`
+      );
+    }
+    await handler({ name, payload, ...(sender !== undefined ? { sender } : {}) } as Action);
   }
 }

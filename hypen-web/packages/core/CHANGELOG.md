@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- Hosted modules — modules whose logic is a prebuilt WebAssembly Component, defined with
+  `wasmModule()` in `@hypen-space/server` — are first-class module definitions. New
+  `hosted-module.ts` (also `@hypen-space/core/hosted-module`): `HostedModuleDefinition`,
+  `isHostedModuleDefinition`, `HostedModuleInstance`, `AnyModuleInstance` (discriminated by
+  `kind`), `HostedModuleFailure`, and the `SessionHost.hostedModules` provider seam
+  (`HostedModuleProvider` / `HostedModuleSession`). `HypenModuleDefinition` gains the optional
+  `hosted` field; `HypenModuleInstance` gains `kind: "inProcess"`. Core stays WASM-free and
+  nothing changes for apps without hosted modules.
+- `ModuleReference` (`context.getModule(id)`) gains `kind` and `dispatch(action, payload?)`:
+  dispatch an action to another module from app code. Works for TypeScript modules (runs the
+  module's `onAction` handler) and hosted ones; always deferred, so it is safe inside a handler.
+  For a hosted module `state` is a frozen snapshot and `setState` throws.
+- `HypenModuleInstance.dispatch(name, payload?, sender?)`.
+- `ManagedRouter` mounts hosted route modules through the new `createHostedInstance` option and
+  drives them like in-process ones (activate / deactivate / persist cache / LRU eviction /
+  `persist: false`). `getActiveInstance()` returns the active module of either kind;
+  `getActiveModule()` and `liveInstances()` keep returning in-process instances only.
+- `RemoteSession`: opens the host's hosted-module session after the handshake, mounts hosted child
+  and route modules, re-instantiates crashed instances before the next client action, and reports
+  a failing hosted action through the provider instead of failing the message. `session.hostedModules`.
+
+### Fixed
+- `BaseEngine.dispatchAction` no longer flattens a `HostedModuleError` (a routed action that
+  failed inside a hosted module) into a generic `HypenError`: the error keeps its `code` and
+  cascade `report`.
+
 ### Security
 - `RemoteSession` no longer passes a client's `dispatchAction` message to the engine verbatim.
   A client action now runs only as a `__hypen_dispatch` envelope addressed to a live node that

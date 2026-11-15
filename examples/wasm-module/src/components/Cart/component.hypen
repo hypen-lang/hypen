@@ -1,0 +1,16 @@
+module Cart {
+    Column {
+        Heading("Cart").level(2)
+        Text("Items: @{state.count}")
+        Text("Discount applied: @{state.discountPercent}%")
+        Text("@{state.discountNote}").color("#666666")
+        Row {
+            Button { Text("Add coffee ($4.50)") }.onClick(@actions.addCoffee)
+            Button { Text("Add grinder ($48.00)") }.onClick(@actions.addGrinder)
+            Button { Text("Clear") }.onClick(@actions.clear)
+        }
+        .gap(8)
+        Button { Text("Ask Pricing for a quote") }.onClick(@actions.requestQuote)
+    }
+    .gap(8)
+}

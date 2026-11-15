@@ -263,6 +263,106 @@ new RemoteServer().app(myApp).listen(3000);
 
 On the browser side, `Hypen` (from `@hypen-space/web-engine`) instantiates one `HypenModuleInstance` per registered module.
 
+## Hosted modules (prebuilt WASM Components)
+
+A module can be a prebuilt WebAssembly Component — a `hypen:module` built from
+Rust, Go or TypeScript — running next to the app's TypeScript modules in the
+same engine. Define one with `wasmModule()` and register it:
+
+```typescript
+import { RemoteServer, wasmModule } from "@hypen-space/server";
+
+await new RemoteServer()
+  .app(myApp)                       // the TypeScript modules
+  .module("App", appModule)
+  .wasmModules(
+    wasmModule({
+      name: "Pricing",                                  // `Pricing {}` in templates; scope "pricing"
+      component: "./modules/pricing/pricing.wasm",      // path, URL or bytes
+      template: "./modules/pricing/Pricing.hypen",      // or `ui: "<source>"`
+      grants: { reads: ["Cart"], dispatches: ["Cart"] }, // deny-by-default
+      config: { currency: "USD" },                      // the module's `init` config
+    })
+  )
+  .listen(3000);
+```
+
+It needs the optional peer dependency `@hypen-space/module-host`
+(`bun add @hypen-space/module-host`). The package is imported only when an
+app has hosted modules; an app without them pays nothing.
+
+A hosted module is a module like any other. `Pricing {}` renders it, a
+`Route` can mount it (activate / deactivate / persist cache / `persist:
+false` all apply), and it is in the global context:
+
+```typescript
+.onAction("checkout", async ({ context }) => {
+  const pricing = context.getModule("pricing");
+  pricing.getState();                // snapshot (its state is read-only from outside)
+  await pricing.dispatch("quote");   // deferred; rejects if the action fails
+})
+```
+
+In the other direction, a hosted module with a `dispatches` grant on a
+TypeScript module reaches that module's ordinary `onAction` handler;
+`action.sender` is the sending module's scope. With a `reads` grant it can
+read the module's state and subscribe to it.
+
+| API | |
+|-----|---|
+| `wasmModule(options)` | Define one hosted module. Validates the name, that the file exists and is a Component, the template and the grants; throws `HostedModuleSetupError` |
+| `loadWasmModules(dirOrAppJson, { only?, config? })` | The modules of a `hypen build --target wasm` output (`app.json` + `<Name>.wasm` + `<Name>.hypen`), with the manifest's grants. Returns `{ entry, dir, modules, templates }` |
+| `server.wasmModules(...definitions)` | Register hosted modules |
+| `server.hostedModules({ storage, storageDir, quotas, onError, maxPendingDelays })` | Storage owners, quotas, the failure hook |
+| `server.reloadWasmModule(definition, { reconnect? })` | Hot reload: swap a new build into every live session, keeping state when the new component accepts it. Returns `{ module, sessions, reloaded, stateReset, kept, failed }` |
+| `server.hostedModuleNames` | Names of the app's hosted modules |
+
+**How it runs.** `prepare()` / `listen()` transpiles and compiles each
+component once. Every session then gets its own module host with its own
+instance of each component (own memory), so sessions cannot affect each
+other, and a module that traps takes down only its own session's instance.
+
+**Storage.** A module's `local` storage is private to it; `app` is shared by
+the modules of one owner. By default every session is its own owner with an
+in-memory store: no user sees another's data, and nothing outlives the
+process. To persist per user:
+
+```typescript
+server.hostedModules({
+  storage: (session) => ({ key: session.props?.userId ?? session.id }),
+  storageDir: "./data/modules",   // one file per owner; omit for in-memory
+});
+```
+
+`storage` may also return a backend (`{ get, set, delete, keys }`, synchronous)
+or `{ storage, cloudStorage }`. Data is shared between sessions only when you
+return the same key or backend for them. `FileHostedStorage` and
+`MemoryHostedStorage` are exported for building your own.
+
+**Failures.** Setup problems throw a `HostedModuleSetupError` from
+`wasmModule()` or `prepare()` with a stable `code` (`COMPONENT_MISSING`,
+`COMPONENT_INVALID`, `TEMPLATE_MISSING`, `PREPARE_FAILED`, `UNGRANTED_IMPORT`,
+`UNKNOWN_GRANT_TARGET`, `DUPLICATE_MODULE`, `ENTRY_HOSTED`,
+`MODULE_HOST_MISSING`, `ENGINE_UNSUPPORTED`, ...), the `module`, `file` and
+`field` concerned, and a `hint`; `formatHostedModuleSetupError(err)` renders
+one. At run time nothing is thrown at the transport: a failing action or
+lifecycle hook, a refused cross-module call, a crash and its recovery are
+passed to `onError` as a `HostedModuleFailure` (`kind`, `module`, `action`,
+`message`, `hint`, `missingGrant`, the engine's cascade `report`) — or logged
+when there is no hook. A crashed instance is replaced before the session's
+next action, with its state reset to what `init` returns.
+
+**Effects.** A module's `navigate` effect goes to the session's router; a
+`delay` effect dispatches the named action to the module later (at most 1024
+pending per module per session, all cancelled when the session ends).
+
+**Limits.** The entry module must be TypeScript. Module handlers are
+synchronous. A hosted module's state is not restored when a client reconnects
+— the new connection's instance starts from `init`; a resumed session keeps
+its storage, so keep durable data there. Hosted modules need
+the server engine build; they are refused by the browser SPA build and by
+`@hypen-space/cf`. Guide: "Prebuilt WASM Modules" in the docs.
+
 ## Bun Plugin
 
 Import `.hypen` files directly in Bun:
@@ -286,6 +386,7 @@ import template from "./Counter.hypen";
 | `@hypen-space/server/discovery` | Filesystem component discovery |
 | `@hypen-space/server/plugin` | Bun plugin for `.hypen` imports |
 | `@hypen-space/server/remote` | RemoteServer for WebSocket streaming |
+| `@hypen-space/server/hosted` | Hosted (WASM-component) modules: `wasmModule`, `loadWasmModules`, storage backends, errors |
 
 ## Requirements
 

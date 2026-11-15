@@ -6,8 +6,13 @@
  * capability contract (declare -> grant -> enforce) and pipeline details.
  */
 
-export { JsModuleHost, buildImportMap } from "./js-module-host.ts";
-export type { JsModuleHostOptions, EngineStateImport, PrepareInfo } from "./js-module-host.ts";
+export { JsModuleHost, buildImportMap, prepareComponent } from "./js-module-host.ts";
+export type {
+  JsModuleHostOptions,
+  EngineStateImport,
+  PrepareInfo,
+  PreparedComponent,
+} from "./js-module-host.ts";
 export type { LoadedVia } from "./loader.ts";
 export {
   HostStorage,

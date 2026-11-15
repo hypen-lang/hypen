@@ -58,6 +58,14 @@ export type BuildErrorCode =
   | "ABI_UNKNOWN"
   /** An author-vendored `wit/` contradicts the crate's ABI. */
   | "WIT_MISMATCH"
+  /** A prebuilt module's `component` file does not exist. */
+  | "PREBUILT_COMPONENT_MISSING"
+  /** A prebuilt module's `component` is empty, not wasm, or a core module. */
+  | "PREBUILT_COMPONENT_INVALID"
+  /** A prebuilt module's `template` file does not exist (or it has none where one is needed). */
+  | "PREBUILT_TEMPLATE_MISSING"
+  /** The build target cannot run prebuilt (hosted) modules. */
+  | "PREBUILT_UNSUPPORTED_TARGET"
   /** A file shipped with the CLI (WIT, shim) is missing: broken install. */
   | "CLI_ASSET_MISSING";
 

@@ -37,6 +37,7 @@ await Bun.build({
     "./src/discovery.ts",
     "./src/plugin.ts",
     "./src/remote/server.ts",
+    "./src/hosted/index.ts",
   ],
   root: "./src",
   outdir: "./dist",
@@ -47,6 +48,8 @@ await Bun.build({
     "../wasm-node/*",
     "@hypen-space/core",
     "@hypen-space/core/*",
+    // Optional peer, imported dynamically only by apps with hosted modules.
+    "@hypen-space/module-host",
   ],
 });
 

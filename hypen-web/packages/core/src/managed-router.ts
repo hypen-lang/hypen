@@ -56,6 +56,12 @@ import { HypenModuleInstance, HypenApp } from "./app.js";
 import type { HypenRouter, RouteState } from "./router.js";
 import type { HypenGlobalContext } from "./context.js";
 import { createLogger } from "./logger.js";
+import {
+  isHostedModuleDefinition,
+  type AnyModuleInstance,
+  type HostedModuleDefinition,
+  type HostedModuleInstance,
+} from "./hosted-module.js";
 import { MAX_BACKGROUND_PINNED_MODULES } from "./remote/device/constants.js";
 
 const log = createLogger("ManagedRouter");
@@ -106,6 +112,15 @@ export interface ManagedRouterOptions {
    * hibernation wake or a hot-reload resume.
    */
   initialStateFor?: (moduleId: string, definition: HypenModuleDefinition) => unknown;
+  /**
+   * Creates the instance of a HOSTED route module (a WASM Component, see
+   * `hosted-module.ts`). The router then drives it exactly like an
+   * in-process one: `activate()` on mount, `deactivate()` on unmount,
+   * `destroy()` when it is not persisted, evicted from the persist cache, or
+   * the router stops. Without it a hosted route module cannot be mounted:
+   * the route renders its template and an error says what is missing.
+   */
+  createHostedInstance?: (moduleId: string, definition: HostedModuleDefinition) => HostedModuleInstance;
 }
 
 export class ManagedRouter {
@@ -114,7 +129,7 @@ export class ManagedRouter {
   private registry: HypenApp;
   private globalContext: HypenGlobalContext;
   private routes: RouteDefinition[] = [];
-  private activeModule: HypenModuleInstance | null = null;
+  private activeModule: AnyModuleInstance | null = null;
   private activeRoute: RouteDefinition | null = null;
   private unsubscribe: (() => void) | null = null;
   /**
@@ -131,7 +146,7 @@ export class ManagedRouter {
    * persist re-inserts it at the MRU end), and persisting past the cap
    * destroys the oldest entry.
    */
-  private persistedModules = new Map<string, HypenModuleInstance>();
+  private persistedModules = new Map<string, AnyModuleInstance>();
   /**
    * Every instance this router constructed that may still be live (active,
    * persisted, or mid-transition between the two). Each destroy path
@@ -139,11 +154,15 @@ export class ManagedRouter {
    * its instance, so destroyed modules — their state, handlers and engine
    * references — are never retained for the connection's lifetime.
    */
-  private createdInstances = new Set<HypenModuleInstance>();
+  private createdInstances = new Set<AnyModuleInstance>();
   private readonly maxPersistedModules: number;
   private readonly maxPinnedModules: number;
   private readonly onModuleCreated?: (instance: HypenModuleInstance, moduleId: string) => void;
   private readonly initialStateFor?: (moduleId: string, definition: HypenModuleDefinition) => unknown;
+  private readonly createHostedInstance?: (
+    moduleId: string,
+    definition: HostedModuleDefinition
+  ) => HostedModuleInstance;
   /**
    * Serialized chain of in-flight route transitions. Because mount /
    * unmount are now async (they await `onActivated` / `onDeactivated`),
@@ -172,6 +191,7 @@ export class ManagedRouter {
     this.maxPinnedModules = pinCap >= 0 ? pinCap : MAX_BACKGROUND_PINNED_MODULES;
     this.onModuleCreated = options.onModuleCreated;
     this.initialStateFor = options.initialStateFor;
+    this.createHostedInstance = options.createHostedInstance;
   }
 
   /**
@@ -290,9 +310,16 @@ export class ManagedRouter {
   }
 
   /**
-   * Get the currently active module instance.
+   * Get the currently active module instance, when it is an in-process
+   * (TypeScript) module. `null` when no module is active or the active one
+   * is hosted — see {@link getActiveInstance}.
    */
   getActiveModule(): HypenModuleInstance | null {
+    return this.activeModule?.kind === "inProcess" ? this.activeModule : null;
+  }
+
+  /** The currently active module instance of either kind. */
+  getActiveInstance(): AnyModuleInstance | null {
     return this.activeModule;
   }
 
@@ -306,7 +333,9 @@ export class ManagedRouter {
     const out: HypenModuleInstance[] = [];
     for (const instance of this.createdInstances) {
       if (instance.destroyed) this.createdInstances.delete(instance);
-      else out.push(instance);
+      // Hosted modules have no device plane to bind (and no observable
+      // state proxy): this list is the in-process ones.
+      else if (instance.kind === "inProcess") out.push(instance);
     }
     return out;
   }
@@ -394,6 +423,11 @@ export class ManagedRouter {
 
     log.debug(`Mounting module: ${namedDef.name} for route: ${route.path}`);
 
+    if (isHostedModuleDefinition(definition)) {
+      await this.mountHosted(route, moduleId, definition);
+      return;
+    }
+
     try {
       const seeded = this.initialStateFor?.(moduleId, namedDef as HypenModuleDefinition);
       if (seeded !== undefined) namedDef.initialState = seeded;
@@ -428,6 +462,35 @@ export class ManagedRouter {
     // Fire `onActivated` after `onCreated` resolves. `activate()` awaits
     // the instance's internal readiness promise, so this is safe even
     // though the constructor kicks off `onCreated` asynchronously.
+    await instance.activate();
+  }
+
+  /**
+   * First mount of a hosted route module: the session's hosted-module
+   * runtime creates the instance; from here on it shares every code path
+   * (persist cache, LRU eviction, teardown) with in-process modules.
+   */
+  private async mountHosted(
+    route: RouteDefinition,
+    moduleId: string,
+    definition: HostedModuleDefinition
+  ): Promise<void> {
+    this.activeRoute = route;
+    if (!this.createHostedInstance) {
+      log.error(
+        `Route "${route.path}": "${definition.name}" is a hosted (WASM) module, but this host cannot run ` +
+          `hosted modules. Serve the app with @hypen-space/server's RemoteServer (or \`hypen dev\`).`
+      );
+      return;
+    }
+    const instance = this.createHostedInstance(moduleId, definition);
+    for (const known of this.createdInstances) {
+      if (known.destroyed) this.createdInstances.delete(known);
+    }
+    this.createdInstances.add(instance);
+    this.globalContext.registerModule(moduleId, instance);
+    this.activeModule = instance;
+    await instance.waitForReady();
     await instance.activate();
   }
 

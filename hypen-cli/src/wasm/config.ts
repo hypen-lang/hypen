@@ -28,6 +28,23 @@ export interface ModuleGrants {
   dispatches: string[];
   storage: GrantableStorage[];
   http: boolean;
+  /**
+   * Present when the entry declares a PREBUILT module (`component`): one
+   * that is loaded as is — by `hypen dev`, and copied by the builds —
+   * instead of being compiled from a source component.
+   */
+  prebuilt?: PrebuiltDeclaration;
+}
+
+/**
+ * `wasm.modules.<Module>.{component,template}` as written: paths relative
+ * to the project root, not yet known to exist (`resolvePrebuiltModules`).
+ */
+export interface PrebuiltDeclaration {
+  /** Path of the module's `.wasm` Component. */
+  component: string;
+  /** Path of its `.hypen` template, when it does not come from the components directory. */
+  template: string | undefined;
 }
 
 /** The parsed `wasm` section. Every field is present; absent input means defaults. */
@@ -74,12 +91,18 @@ function closestKey(key: string, known: readonly string[]): string | undefined {
   );
 }
 
-function unknownKey(path: string, key: string, known: readonly string[]): BuildError {
+function unknownKey(
+  path: string,
+  key: string,
+  known: readonly string[],
+  /** Keys that are valid but not listed in "expected" — still offered as a "did you mean". */
+  alsoValid: readonly string[] = []
+): BuildError {
   const expected =
     known.length === 2
       ? `"${known[0]}" or "${known[1]}"`
       : `${known.slice(0, -1).map((k) => `"${k}"`).join(", ")} or "${known[known.length - 1]}"`;
-  const guess = closestKey(key, known);
+  const guess = closestKey(key, [...known, ...alsoValid]);
   return configError(
     `unknown key "${path}.${key}" (expected ${expected})`,
     `${path}.${key}`,
@@ -133,6 +156,19 @@ function parseStorage(value: unknown, field: string): GrantableStorage[] {
 }
 
 const GRANT_KEYS = ["reads", "dispatches", "storage", "http"] as const;
+/** The keys that declare a prebuilt module, valid beside the grants. */
+const PREBUILT_KEYS = ["component", "template"] as const;
+
+function parsePath(value: unknown, field: string, example: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw configError(
+      `${field} must be a path (a non-empty string)`,
+      field,
+      `e.g. ${JSON.stringify(field.split(".").pop())}: ${JSON.stringify(example)}`
+    );
+  }
+  return value;
+}
 
 function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
   if (!isRecord(raw)) {
@@ -143,8 +179,16 @@ function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
     );
   }
   const grants: ModuleGrants = { reads: [], dispatches: [], storage: [], http: false };
+  let component: string | undefined;
+  let template: string | undefined;
   for (const [key, value] of Object.entries(raw)) {
     switch (key) {
+      case "component":
+        component = parsePath(value, `${at}.component`, "./modules/pricing/pricing.wasm");
+        break;
+      case "template":
+        template = parsePath(value, `${at}.template`, "./modules/pricing/Pricing.hypen");
+        break;
       case "reads":
       case "dispatches":
         grants[key] = parseModuleNames(value, `${at}.${key}`);
@@ -159,8 +203,19 @@ function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
         grants.http = value;
         break;
       default:
-        throw unknownKey(at, key, GRANT_KEYS);
+        throw unknownKey(at, key, GRANT_KEYS, PREBUILT_KEYS);
     }
+  }
+  if (component !== undefined) {
+    grants.prebuilt = { component, template };
+  } else if (template !== undefined) {
+    // `template` only means something next to `component`: a source
+    // component's template is the `.hypen` file beside its module.
+    throw configError(
+      `${at}.template is set without ${at}.component`,
+      `${at}.template`,
+      `add "component": "<path to the module's .wasm>" to load a prebuilt module, or remove "template" (a source component's template is its own .hypen file)`
+    );
   }
   return grants;
 }

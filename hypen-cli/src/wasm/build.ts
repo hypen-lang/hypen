@@ -20,7 +20,7 @@
  * `BuildError`, which `bin/hypen.ts` prints before exiting.
  */
 
-import { existsSync, statSync, writeFileSync } from "fs";
+import { copyFileSync, existsSync, statSync, writeFileSync } from "fs";
 import { join, relative, resolve } from "path";
 import { BuildError } from "../build-error.js";
 import { boldPink, dim, pink, yellow } from "../colors.js";
@@ -41,8 +41,16 @@ import {
   type AppManifestModule,
 } from "./manifest.js";
 import { assertSafeOutput, createStaging, type Staging } from "./output.js";
+import { prebuiltNames, resolvePrebuiltModules } from "./prebuilt.js";
 import { killRunningTools } from "./process.js";
-import type { Language, Project } from "./types.js";
+import {
+  scopeOf,
+  type Discovery,
+  type Language,
+  type PrebuiltModule,
+  type Project,
+  type StatelessComponent,
+} from "./types.js";
 
 export interface BuildWasmOptions {
   /** Path to components directory (e.g. `./src/components`), relative to `root`. */
@@ -69,6 +77,8 @@ interface BuildPlan {
   outWasmDir: string;
   keepTemp: boolean;
   config: WasmConfig;
+  /** The modules hypen.json declares prebuilt, resolved against the project. */
+  prebuilt: PrebuiltModule[];
 }
 
 function assertComponentsDir(componentsDir: string): void {
@@ -112,6 +122,87 @@ async function withInterruptCleanup<T>(cleanup: () => void, body: () => Promise<
   }
 }
 
+/** A prebuilt module with the template it ships with settled. */
+interface PlacedPrebuilt {
+  module: PrebuiltModule;
+  template: string;
+}
+
+/**
+ * Fit the prebuilt modules into what discovery found. A prebuilt module
+ * takes the place of a stateful module of its name, so:
+ *
+ * - a source module of the same name (scope) is a collision — the build
+ *   would have two modules for one scope;
+ * - a template-only component of the same name is the prebuilt module's
+ *   template, unless the declaration brought its own (then: collision);
+ * - a prebuilt module needs a template from one of the two.
+ *
+ * Returns the placed prebuilt modules and the stateless components that
+ * remain stateless.
+ */
+function placePrebuilt<S>(
+  prebuilt: readonly PrebuiltModule[],
+  discovery: Discovery<S>,
+  project: Project
+): { placed: PlacedPrebuilt[]; stateless: StatelessComponent[] } {
+  const placed: PlacedPrebuilt[] = [];
+  let stateless = discovery.stateless;
+  for (const module of prebuilt) {
+    const scope = scopeOf(module.name);
+    const source = discovery.stateful.find((m) => scopeOf(m.name) === scope);
+    if (source !== undefined) {
+      throw new BuildError(
+        `Module "${module.name}" is declared prebuilt (hypen.json ${module.field}.component) but ` +
+          `"${source.name}" is also a source module in ${project.componentsDir}: the build would have two ` +
+          `modules for the state scope "${scope}".`,
+        {
+          code: "MODULE_NAME_COLLISION",
+          module: module.name,
+          file: "hypen.json",
+          field: `${module.field}.component`,
+          hint: `remove "component" from ${module.field} to compile the source module, or remove the source module (keep only its .hypen template) to use the prebuilt one`,
+        }
+      );
+    }
+    const donor = stateless.find((c) => scopeOf(c.name) === scope);
+    if (donor !== undefined && (module.template !== undefined || donor.name !== module.name)) {
+      throw new BuildError(
+        donor.name !== module.name
+          ? `Prebuilt module "${module.name}" and component "${donor.name}" differ only by case: both would use the state scope "${scope}".`
+          : `Prebuilt module "${module.name}" has two templates: hypen.json ${module.field}.template and the ` +
+              `component "${donor.name}" in ${project.componentsDir}.`,
+        {
+          code: "MODULE_NAME_COLLISION",
+          module: module.name,
+          file: "hypen.json",
+          field: donor.name !== module.name ? module.field : `${module.field}.template`,
+          hint:
+            donor.name !== module.name
+              ? "rename one of them (the engine keys modules by lowercased name)"
+              : `keep one: remove "template" from ${module.field}, or remove the ${donor.name} component`,
+        }
+      );
+    }
+    const template = module.template ?? donor?.template;
+    if (template === undefined) {
+      throw new BuildError(
+        `Prebuilt module "${module.name}" has no template: a wasm build ships every module with its .hypen UI.`,
+        {
+          code: "PREBUILT_TEMPLATE_MISSING",
+          module: module.name,
+          file: "hypen.json",
+          field: `${module.field}.template`,
+          hint: `add "template": "<path to ${module.name}.hypen>" to ${module.field}, or put ${module.name}/component.hypen in the components directory`,
+        }
+      );
+    }
+    if (donor !== undefined) stateless = stateless.filter((c) => c !== donor);
+    placed.push({ module, template });
+  }
+  return { placed, stateless };
+}
+
 /** Discover, validate, compile and publish one project with one builder. */
 async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Promise<AppManifest> {
   const { project, outWasmDir } = plan;
@@ -120,14 +211,29 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
   // are template-only building blocks (Header(), Card()) the entry references
   // by name: no wasm, no state scope.
   const discovery = await builder.discover(project);
-  assertBuildable(discovery, project, builder.entryHint(project.entry));
-  const { stateful, stateless } = discovery;
+  const { stateful } = discovery;
+  // Prebuilt modules (hypen.json `wasm.modules.<Name>.component`) are
+  // already compiled: they join the build as stateful modules that only
+  // need copying. Placed before `assertBuildable`, so a project whose only
+  // modules — or whose entry — are prebuilt is a valid build.
+  const { placed: prebuilt, stateless } = placePrebuilt(plan.prebuilt, discovery, project);
+  assertBuildable(
+    {
+      stateful: [
+        ...stateful.map((m) => ({ kind: "stateful" as const, name: m.name, template: m.template, source: null })),
+        ...prebuilt.map((p) => ({ kind: "stateful" as const, name: p.module.name, template: p.template, source: null })),
+      ],
+      stateless,
+    },
+    project,
+    builder.entryHint(project.entry)
+  );
 
   // Grants are checked against what was discovered *before* spending minutes
   // compiling.
   const capabilities = resolveModuleCapabilities(
     plan.config,
-    stateful.map((m) => m.name),
+    [...stateful.map((m) => m.name), ...prebuilt.map((p) => p.module.name)],
     stateless.map((c) => c.name)
   );
 
@@ -141,10 +247,15 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
 
   return withInterruptCleanup(staging.dispose, async () => {
     try {
-      const prepared = await builder.prepare(ctx, stateful);
       const entries: AppManifestModule[] = [];
+      // No source modules (everything stateful is prebuilt): no toolchain
+      // is needed, so none is looked for.
+      const prepared: { value: P } | null =
+        stateful.length > 0 ? { value: await builder.prepare(ctx, stateful) } : null;
 
       for (const module of stateful) {
+        // `prepared` is only null when there is nothing to iterate.
+        if (prepared === null) break;
         const grants = capabilities.get(module.name);
         if (grants === undefined) {
           // resolveModuleCapabilities returns an entry per stateful module.
@@ -154,7 +265,7 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
         const building = notes.building ? ` ${dim(notes.building)}` : "";
         console.log(`  ${pink("building")} ${module.name}${building} ${dim("…")}`);
 
-        await builder.build(ctx, prepared, module, grants);
+        await builder.build(ctx, prepared.value, module, grants);
         writeFileSync(join(staging.stageDir, uiFileName(module.name)), module.template);
         entries.push(statefulEntry(module.name, grants));
 
@@ -162,6 +273,18 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
         console.log(
           `    ${dim("→")} ${wasmFileName(module.name)} ${dim("+")} ${uiFileName(module.name)}${built}`
         );
+      }
+
+      for (const { module, template } of prebuilt) {
+        const grants = capabilities.get(module.name);
+        if (grants === undefined) {
+          throw new Error(`no capabilities resolved for ${module.name}`);
+        }
+        copyFileSync(module.componentPath, join(staging.stageDir, wasmFileName(module.name)));
+        writeFileSync(join(staging.stageDir, uiFileName(module.name)), template);
+        entries.push(statefulEntry(module.name, grants));
+        console.log(`  ${pink("copying")} ${module.name} ${dim("(prebuilt)")}`);
+        console.log(`    ${dim("→")} ${wasmFileName(module.name)} ${dim("+")} ${uiFileName(module.name)}`);
       }
 
       for (const component of stateless) {
@@ -175,8 +298,9 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
       staging.publish();
 
       const statelessNote = stateless.length > 0 ? ` + ${stateless.length} stateless` : "";
+      const prebuiltNote = prebuilt.length > 0 ? ` + ${prebuilt.length} prebuilt` : "";
       console.log(
-        `\n  ${boldPink("Done.")} ${stateful.length} module(s)${statelessNote} → ${dim(outWasmDir)}`
+        `\n  ${boldPink("Done.")} ${stateful.length} module(s)${prebuiltNote}${statelessNote} → ${dim(outWasmDir)}`
       );
       const manifestRel = relative(project.projectDir, join(outWasmDir, MANIFEST_FILE)) || MANIFEST_FILE;
       console.log(`  ${dim("Run it:")} ${yellow(`hypen-runtime --app ${manifestRel}`)}\n`);
@@ -209,6 +333,7 @@ export async function buildWasm(options: BuildWasmOptions): Promise<AppManifest>
     projectDir,
     componentsDir: resolve(projectDir, options.components),
     entry: options.entry,
+    prebuilt: prebuiltNames(config),
   };
   const outDir = resolve(projectDir, options.outDir ?? "dist");
   const outWasmDir = join(outDir, "wasm");
@@ -223,6 +348,8 @@ export async function buildWasm(options: BuildWasmOptions): Promise<AppManifest>
 
   assertComponentsDir(project.componentsDir);
   assertSafeOutput(outWasmDir, project);
+  // Paths and "is it a component" — before discovery loads any module.
+  const prebuilt = resolvePrebuiltModules(config, projectDir);
 
   const plan: BuildPlan = {
     project,
@@ -230,6 +357,7 @@ export async function buildWasm(options: BuildWasmOptions): Promise<AppManifest>
     outWasmDir,
     keepTemp: options.keepTemp ?? false,
     config,
+    prebuilt,
   };
   // One arm per language keeps each builder's source/prepared types intact
   // (a `Record<Language, ModuleBuilder<…>>` lookup would have to erase them).

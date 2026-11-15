@@ -37,6 +37,7 @@
 import { frameworkLoggers } from "./logger.js";
 import { classifyEngineError } from "./result.js";
 import { unwrapProxy } from "./state.js";
+import { isHostedModuleError } from "./types.js";
 import type {
   Patch,
   Action,
@@ -566,6 +567,10 @@ export abstract class BaseEngine {
     try {
       engine.dispatchAction(name, payload ?? null);
     } catch (err) {
+      // A routed action that reached a hosted module and failed there is
+      // already a `HostedModuleError` (stable `code`, cascade `report`):
+      // keep it whole instead of flattening it to its message.
+      if (isHostedModuleError(err)) throw err;
       throw classifyEngineError(err);
     }
   }

@@ -32,7 +32,12 @@
 import type { HypenApp, HypenModuleDefinition } from "@hypen-space/core/app";
 import type { Theme } from "@hypen-space/core/theme";
 import type { UnboundClientActions } from "@hypen-space/core/remote";
-import { HypenDurableObject, type HypenDurableObjectConfig, type DurableObjectState } from "./durable-object.js";
+import {
+  HypenDurableObject,
+  assertNoHostedModules,
+  type HypenDurableObjectConfig,
+  type DurableObjectState,
+} from "./durable-object.js";
 import { createCFEngine, type CFWasmExports } from "./engine.js";
 import { hasDeviceBroker } from "./device-broker.js";
 import type { DurableObjectStorage } from "./durable-object-store.js";
@@ -151,6 +156,9 @@ type WorkerExports = {
 export function defineHypenWorker(opts: DefineHypenWorkerOptions): WorkerExports {
   const doClassName = opts.doClassName ?? "AppDO";
   const binding = opts.binding ?? "HYPEN_DO";
+
+  // Fail at definition (module load), before any request: see the function.
+  assertNoHostedModules({ module: opts.module, ...(opts.app !== undefined ? { app: opts.app } : {}) });
 
   const config: HypenDurableObjectConfig = {
     module: opts.module,

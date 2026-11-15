@@ -1,0 +1,5 @@
+{
+  "components": "./ui",
+  "entry": "Pricing",
+  "wasm": { "language": "rust" }
+}

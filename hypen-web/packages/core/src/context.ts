@@ -2,7 +2,7 @@
  * Global Context - Cross-module communication and state access
  */
 
-import type { HypenModuleInstance } from "./app.js";
+import type { AnyModuleInstance } from "./hosted-module.js";
 import { getStateSnapshot } from "./state.js";
 import { TypedEventEmitter, type HypenFrameworkEvents } from "./events.js";
 import { frameworkLoggers } from "./logger.js";
@@ -23,6 +23,19 @@ export type ModuleReference<T = unknown> = {
    * Unlike `state`, mutations to the returned object are NOT tracked.
    */
   getState: () => T;
+  /**
+   * How the module runs: `"inProcess"` (TypeScript handlers, observable
+   * state) or `"hosted"` (a WASM Component; see `wasmModule()` in
+   * `@hypen-space/server`). A hosted module owns its state: `state` is a
+   * read-only snapshot and `setState` throws — change it with `dispatch`.
+   */
+  kind: "inProcess" | "hosted";
+  /**
+   * Dispatch an action to the module, as app code (not the rendered UI).
+   * Always deferred, so it is safe inside an action handler. Rejects when
+   * the module has no such action or its handling failed.
+   */
+  dispatch: (action: string, payload?: unknown) => Promise<void>;
 };
 
 export type EventHandler = (payload?: unknown) => void;
@@ -33,7 +46,7 @@ export type EventHandler = (payload?: unknown) => void;
  * @template TEvents - Custom event map (extends HypenFrameworkEvents)
  */
 export class HypenGlobalContext<TEvents extends Record<string, unknown> = HypenFrameworkEvents> {
-  private modules = new Map<string, HypenModuleInstance>();
+  private modules = new Map<string, AnyModuleInstance>();
   private typedEvents: TypedEventEmitter<TEvents & Record<string, unknown>>;
   private _i18n: I18n | null = null;
   private _theme: Theme | null = null;
@@ -78,7 +91,7 @@ export class HypenGlobalContext<TEvents extends Record<string, unknown> = HypenF
   /**
    * Register a module instance with an ID
    */
-  registerModule(id: string, instance: HypenModuleInstance) {
+  registerModule(id: string, instance: AnyModuleInstance) {
     if (this.modules.has(id)) {
       log.warn(`Module "${id}" is already registered. Overwriting.`);
     }
@@ -105,10 +118,31 @@ export class HypenGlobalContext<TEvents extends Record<string, unknown> = HypenF
       );
     }
 
+    if (module.kind === "hosted") {
+      return {
+        kind: "hosted",
+        // A hosted module's state lives in the engine and only its own
+        // reducer writes it: what app code sees is a frozen snapshot.
+        get state() {
+          return Object.freeze(module.getState()) as T;
+        },
+        setState: () => {
+          throw new Error(
+            `Module "${id}" is a hosted (WASM) module: its state is owned by the component. ` +
+              `Dispatch an action to it instead: getModule("${id}").dispatch(name, payload)`
+          );
+        },
+        getState: () => module.getState() as T,
+        dispatch: (action: string, payload?: unknown) => module.dispatch(action, payload),
+      };
+    }
+
     return {
+      kind: "inProcess",
       state: module.getLiveState() as T,
       setState: (patch: Partial<T>) => module.updateState(patch),
       getState: () => module.getState() as T,
+      dispatch: (action: string, payload?: unknown) => module.dispatch(action, payload),
     };
   }
 

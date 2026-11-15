@@ -1,0 +1,12 @@
+module App {
+    Column {
+        Heading("Cart + Pricing")
+        Text("Cart is a TypeScript module. Pricing is a prebuilt Rust module (WebAssembly).")
+            .color("#666666")
+        Cart {}
+        Divider()
+        Pricing {}
+    }
+    .padding(24)
+    .gap(16)
+}

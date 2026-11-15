@@ -66,6 +66,7 @@ import type { HypenApp, HypenModule, HypenModuleDefinition } from "@hypen-space/
 import type { Theme } from "@hypen-space/core/theme";
 import { createLogger } from "@hypen-space/core/logger";
 import type { BaseEngine } from "@hypen-space/core/engine-base";
+import { isHostedModuleDefinition } from "@hypen-space/core/hosted-module";
 import type { RemoteClient, RemoteMessage } from "@hypen-space/core/remote";
 import type { UnboundClientActions } from "@hypen-space/core/remote";
 import {
@@ -647,6 +648,7 @@ export abstract class HypenDurableObject {
     if (this._host) return this._host;
 
     const config = this.getConfig();
+    assertNoHostedModules(config);
     const self = this;
     const deviceOn = this.deviceOn();
 
@@ -944,4 +946,28 @@ export function mergeComponentTemplates(
     }
   }
   return merged;
+}
+
+/**
+ * Hosted (WASM-component) modules cannot run on Cloudflare Workers: the
+ * module host transpiles a component and imports the generated bindings at
+ * run time, and Workers allow neither run-time code generation nor dynamic
+ * module loading. Fail when the app is defined, not on the first session.
+ *
+ * @throws when `config.module` or a module on `config.app` is hosted.
+ */
+export function assertNoHostedModules(config: Pick<HypenDurableObjectConfig, "module" | "app">): void {
+  const hosted: string[] = [];
+  if (isHostedModuleDefinition(config.module as HypenModuleDefinition<any>)) {
+    hosted.push((config.module as { name?: string }).name ?? "(entry)");
+  }
+  for (const [name, definition] of config.app?.components ?? []) {
+    if (isHostedModuleDefinition(definition)) hosted.push(name);
+  }
+  if (hosted.length === 0) return;
+  throw new Error(
+    `Hosted WASM modules are not supported on Cloudflare Workers yet (${hosted.join(", ")}). ` +
+      "The module host transpiles components at run time, which Workers do not allow. " +
+      "Serve this app with @hypen-space/server (Node/Bun), or keep hosted modules out of the Worker build."
+  );
 }

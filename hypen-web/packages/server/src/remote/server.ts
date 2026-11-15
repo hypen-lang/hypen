@@ -33,9 +33,8 @@ import type {
   HypenModule,
   HypenModuleDefinition,
   HypenModuleLike,
-  HypenApp,
 } from "@hypen-space/core/app";
-import { resolveModuleDefinition } from "@hypen-space/core/app";
+import { HypenApp, resolveModuleDefinition } from "@hypen-space/core/app";
 import type { I18n } from "@hypen-space/core/i18n";
 import type { Theme } from "@hypen-space/core/theme";
 import type {
@@ -74,6 +73,16 @@ import {
 } from "./web-client.js";
 import { AgentSurface, type AgentOptions } from "./agent-http.js";
 import { AgentHandle } from "./agent-handle.js";
+import {
+  isHostedModuleDefinition,
+  type HostedModuleDefinition,
+} from "@hypen-space/core/hosted-module";
+import { HostedModuleSetupError } from "../hosted/errors.js";
+import {
+  HostedModuleService,
+  type HostedModulesOptions,
+  type HostedReloadResult,
+} from "../hosted/runtime.js";
 
 const log = frameworkLoggers.remote;
 
@@ -255,6 +264,12 @@ export class RemoteServer {
    * are operational data, not something every visitor should read.
    */
   private _statsAccess: "local" | "public" | "off" = "local";
+  /**
+   * Hosted (WASM-component) modules: `null` until `wasmModules()` /
+   * `hostedModules()` is called, so an app without them never touches the
+   * subsystem (no import of `@hypen-space/module-host`, no per-session work).
+   */
+  private _hosted: HostedModuleService | null = null;
 
   /**
    * Build (once) the `SessionHost` adapter that `RemoteSession` consumes.
@@ -294,6 +309,9 @@ export class RemoteServer {
         return server._sessionManager;
       },
       get discoveredComponents() { return server._discoveredComponents; },
+      get hostedModules() {
+        return server._hosted && server._hosted.size > 0 ? server._hosted : null;
+      },
       createEngine() {
         return new Engine();
       },
@@ -365,6 +383,109 @@ export class RemoteServer {
   app(appInstance: HypenApp): this {
     this._app = appInstance;
     return this;
+  }
+
+  /**
+   * Add hosted modules — modules whose logic is a prebuilt WASM Component
+   * (`wasmModule()` / `loadWasmModules()`) — to run next to the app's
+   * TypeScript modules in the same engine. A hosted module is a module like
+   * any other: `Pricing {}` in a template renders it, a `Route` can mount
+   * it, `context.getModule("pricing")` reads its state and dispatches to it.
+   *
+   * Needs the optional package `@hypen-space/module-host`, loaded the first
+   * time `prepare()` / `listen()` runs with hosted modules; components are
+   * transpiled once there, and every session gets its own instances.
+   *
+   * @example
+   * ```typescript
+   * new RemoteServer()
+   *   .source("./src/components")
+   *   .wasmModules(wasmModule({
+   *     name: "Pricing",
+   *     component: "./modules/pricing/pricing.wasm",
+   *     template: "./modules/pricing/Pricing.hypen",
+   *     grants: { reads: ["Cart"] },
+   *   }))
+   *   .listen(3000);
+   * ```
+   */
+  wasmModules(...modules: Array<HostedModuleDefinition | readonly HostedModuleDefinition[]>): this {
+    const flat = modules.flat() as HostedModuleDefinition[];
+    for (const definition of flat) {
+      if (!isHostedModuleDefinition(definition)) {
+        throw new HostedModuleSetupError(
+          "wasmModules() takes hosted module definitions (the result of wasmModule() / loadWasmModules().modules).",
+          {
+            code: "INVALID_OPTIONS",
+            hint: "TypeScript modules go through .app(app) / .source(dir) / .module(name, def)",
+          }
+        );
+      }
+    }
+    this._hosted ??= new HostedModuleService();
+    this._hosted.define(flat);
+    return this;
+  }
+
+  /**
+   * Configure how hosted modules run: whose storage a session's modules use
+   * (`storage`, `storageDir` — by default every session has a private
+   * in-memory store, so no user ever sees another's data), storage `quotas`,
+   * and `onError`, called for every hosted-module failure at run time.
+   *
+   * @example
+   * ```typescript
+   * server.hostedModules({
+   *   // One store per signed-in user, persisted under ./data/modules.
+   *   storage: (session) => ({ key: session.props?.userId ?? session.id }),
+   *   storageDir: "./data/modules",
+   *   onError: (failure) => console.error(failure.module, failure.message, failure.hint),
+   * });
+   * ```
+   */
+  hostedModules(options: HostedModulesOptions): this {
+    if (this._hosted) this._hosted.configure(options);
+    else this._hosted = new HostedModuleService(options);
+    return this;
+  }
+
+  /** The names of the app's hosted modules. */
+  get hostedModuleNames(): string[] {
+    return this._hosted?.list().map((d) => d.name) ?? [];
+  }
+
+  /**
+   * Hot-reload one hosted module from a new definition (same name): the new
+   * component is prepared and swapped into every live session in place —
+   * no client reconnects, and each session's module state is kept when the
+   * new component accepts it. Sessions opened afterwards use it too.
+   *
+   * A changed template is picked up by sessions opened afterwards; pass
+   * `{ reconnect: true }` to also send connected clients through `reload()`
+   * (they reconnect; hosted modules start again from `init`).
+   *
+   * Rejects with a `HostedModuleSetupError` — every session keeps running
+   * the previous instance — when the new component is missing, is not a
+   * component, cannot be prepared, or needs a grant it does not have.
+   */
+  async reloadWasmModule(
+    definition: HostedModuleDefinition,
+    options: { reconnect?: boolean } = {}
+  ): Promise<HostedReloadResult> {
+    if (!this._hosted || !this._hosted.get(definition.name)) {
+      throw new HostedModuleSetupError(
+        `No hosted module named "${definition.name}" to reload (hosted modules: ${
+          this.hostedModuleNames.join(", ") || "none"
+        }).`,
+        { code: "UNKNOWN_MODULE", module: definition.name, hint: "register it with wasmModules() first" }
+      );
+    }
+    this.assertHostedGrants([definition]);
+    const previous = this._hosted.get(definition.name);
+    const result = await this._hosted.reload(definition);
+    this.installHostedDefinitions();
+    if (options.reconnect && previous?.template !== definition.template) await this.reload();
+    return result;
   }
 
   /**
@@ -749,7 +870,28 @@ export class RemoteServer {
         this._app = app;
       }
     }
+    // Hosted modules join the registry before the entry is resolved (so a
+    // hosted module is never picked as the entry by accident) and are
+    // validated against everything else the app has.
+    if (this._hosted && this._hosted.size > 0) {
+      this.installHostedDefinitions();
+    }
     if (!this._module) this.resolveEntryModule();
+    if (this._hosted && this._hosted.size > 0) {
+      if (this._module && isHostedModuleDefinition(this._module)) {
+        throw new HostedModuleSetupError(
+          `The entry module "${this._moduleName}" is a hosted (WASM) module; the entry must be a TypeScript module.`,
+          {
+            code: "ENTRY_HOSTED",
+            module: this._moduleName,
+            hint: `give the app a TypeScript entry (it can be as small as a template that renders \`${this._moduleName} {}\`) and name it with .module(name, def)`,
+          }
+        );
+      }
+      this.assertHostedGrants(this._hosted.list());
+      // The slow step, once: transpile + compile every component.
+      await this._hosted.prepare(() => this.getHost().createEngine());
+    }
     if (!this._ui && this._module?.template) {
       this._ui = this._module.template;
     }
@@ -1141,6 +1283,111 @@ export class RemoteServer {
   }
 
   /**
+   * Put the hosted module definitions where every other module is found:
+   * the `HypenApp` registry (routes, nested mounts, `Pricing {}` resolution)
+   * and, for a hosted module whose template is a discovered `.hypen` file,
+   * the discovery map. Runs after every discovery pass.
+   *
+   * @throws {HostedModuleSetupError} `DUPLICATE_MODULE` when a hosted
+   *   module shares its name (scope) with a TypeScript module.
+   */
+  private installHostedDefinitions(): void {
+    const hosted = this._hosted;
+    if (!hosted || hosted.size === 0) return;
+    // A private registry when the app brought none: hosted definitions
+    // never leak into the process-wide `app` singleton by themselves.
+    this._app ??= new HypenApp();
+    const registry = registryOf(this._app);
+    if (!registry) {
+      throw new HostedModuleSetupError("The app passed to .app() has no module registry.", {
+        code: "INVALID_OPTIONS",
+        hint: "pass a HypenApp (`app` from @hypen-space/core)",
+      });
+    }
+    const duplicate = (definition: HostedModuleDefinition, other: string, what: string): HostedModuleSetupError =>
+      new HostedModuleSetupError(
+        `Module name collision: "${definition.name}" is declared as a hosted (WASM) module (${definition.hosted.declaredAt}) ` +
+          `and ${what} "${other}" — both would use the state scope "${definition.name.toLowerCase()}".`,
+        {
+          code: "DUPLICATE_MODULE",
+          module: definition.name,
+          field: definition.hosted.declaredAt,
+          hint: "rename one of them, or remove the TypeScript module if the component replaces it",
+        }
+      );
+    for (const definition of hosted.list()) {
+      const scope = definition.name.toLowerCase();
+      if (this._module && !isHostedModuleDefinition(this._module) && this._moduleName.toLowerCase() === scope) {
+        throw duplicate(definition, this._moduleName, "the entry module is");
+      }
+      for (const [name, existing] of registry) {
+        if (name.toLowerCase() !== scope || existing === definition) continue;
+        if (isHostedModuleDefinition(existing)) {
+          // An earlier definition of the same hosted module (a reload).
+          if (name !== definition.name) throw duplicate(definition, name, "another hosted module is named");
+          continue;
+        }
+        if (isTemplateOnly(existing)) {
+          // Discovery's stand-in for a `.hypen` file without a `.ts`.
+          registry.delete(name);
+          continue;
+        }
+        throw duplicate(definition, name, "a TypeScript module is named");
+      }
+      let resolved = definition;
+      for (const [name, component] of this._discoveredComponents) {
+        if (name.toLowerCase() !== scope) continue;
+        if (component.module && !isHostedModuleDefinition(component.module) && !isTemplateOnly(component.module)) {
+          throw duplicate(definition, name, "the components directory has a TypeScript module named");
+        }
+        // The components directory holds the module's template: use it
+        // unless the declaration brought its own.
+        if (definition.template === undefined) resolved = { ...definition, template: component.template };
+        this._discoveredComponents.set(name, { template: resolved.template ?? component.template, module: resolved });
+      }
+      registry.set(definition.name, resolved);
+    }
+  }
+
+  /**
+   * Every `reads` / `dispatches` grant must name a module of this app.
+   *
+   * @throws {HostedModuleSetupError} `UNKNOWN_GRANT_TARGET`
+   */
+  private assertHostedGrants(definitions: readonly HostedModuleDefinition[]): void {
+    const known = new Map<string, string>();
+    const add = (name: string) => {
+      if (!name.startsWith("__")) known.set(name.toLowerCase(), name);
+    };
+    add(this._moduleName);
+    for (const name of this._app?.components.keys() ?? []) add(name);
+    for (const [name, component] of this._discoveredComponents) {
+      if (component.module) add(name);
+    }
+    for (const definition of this._hosted?.list() ?? []) add(definition.name);
+    for (const definition of definitions) add(definition.name);
+
+    for (const definition of definitions) {
+      const { grants, grantsAt } = definition.hosted;
+      for (const key of ["reads", "dispatches"] as const) {
+        for (const target of grants[key]) {
+          if (known.has(target)) continue;
+          throw new HostedModuleSetupError(
+            `Hosted module "${definition.name}" is granted ${key} on "${target}", but the app has no such module ` +
+              `(modules: ${[...known.values()].join(", ") || "none"}).`,
+            {
+              code: "UNKNOWN_GRANT_TARGET",
+              module: definition.name,
+              field: `${grantsAt}.${key}`,
+              hint: `use one of the app's module names, or remove "${target}" from ${grantsAt}.${key}`,
+            }
+          );
+        }
+      }
+    }
+  }
+
+  /**
    * Pick the entry module when `.module()` was not called: the module named
    * `"App"` (the scaffold convention and the `.module()` default name) if
    * the app registry or `.source()` discovery has one, otherwise the only
@@ -1151,11 +1398,15 @@ export class RemoteServer {
     const candidates = new Map<string, { module?: HypenModuleDefinition<any>; template?: string }>();
     for (const [name, comp] of this._discoveredComponents) {
       if (name.startsWith("__")) continue;
+      // A hosted module is never the entry (the entry backs the engine's
+      // primary slot, which only a TypeScript module can).
+      if (isHostedModuleDefinition(comp.module)) continue;
       candidates.set(name, { module: comp.module, template: comp.template });
     }
     if (this._app) {
       for (const [name, def] of this._app.components) {
         if (name.startsWith("__")) continue;
+        if (isHostedModuleDefinition(def)) continue;
         const found = candidates.get(name);
         // A registry definition carries the handlers; prefer it over an
         // auto-stateless discovered module, keep the discovered template.
@@ -1266,6 +1517,7 @@ export class RemoteServer {
       // Reset _ui so discoverFromSource picks up the latest entry template
       this._ui = "";
       await this.discoverFromSource();
+      this.installHostedDefinitions();
       // Refresh the primary module definition too — discovery re-imports
       // the entry's .ts (mtime-busted), so edited handlers/initial state
       // apply to resumed sessions without a server restart.
@@ -1375,6 +1627,25 @@ export async function serve(options: {
 }
 
 /** The mutable registry behind a `HypenApp` (discovery bookkeeping only). */
+/**
+ * Whether `definition` is discovery's stand-in for a `.hypen` file with no
+ * `.ts` beside it: no state, no actions, no lifecycle.
+ */
+function isTemplateOnly(definition: HypenModuleDefinition<any>): boolean {
+  const state = definition.initialState;
+  const hasState = state !== null && typeof state === "object" && Object.keys(state as object).length > 0;
+  const handlers = definition.handlers;
+  return (
+    !hasState &&
+    (definition.actions?.length ?? 0) === 0 &&
+    handlers.onAction.size === 0 &&
+    !handlers.onCreated &&
+    !handlers.onActivated &&
+    !handlers.onDeactivated &&
+    !handlers.onDestroyed
+  );
+}
+
 function registryOf(
   appInstance: HypenApp | null
 ): Map<string, HypenModuleDefinition<any>> | null {

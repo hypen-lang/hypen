@@ -86,6 +86,20 @@ export interface DevOptions {
    * Default: off.
    */
   a11y?: DevA11yOptions;
+
+  /**
+   * The raw `wasm` section of hypen.json. Modules it declares prebuilt
+   * (`wasm.modules.<Name>.component`) are loaded into the dev server next
+   * to the discovered TypeScript modules and hot-reloaded when their
+   * `.wasm` / `.hypen` (or their grants) change.
+   */
+  wasm?: unknown;
+
+  /**
+   * Path of hypen.json. When given, it is watched and re-read so a grant
+   * edited there reaches the running prebuilt modules without a restart.
+   */
+  configFile?: string;
 }
 
 /** Configuration for the opt-in dev-loop accessibility pass. */

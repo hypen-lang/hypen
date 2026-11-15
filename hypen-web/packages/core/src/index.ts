@@ -207,6 +207,21 @@ export type { EventHandler, HypenFrameworkEvents } from "./events.js";
 // ============================================================================
 
 export { HypenGlobalContext } from "./context.js";
+export { isHostedModuleDefinition } from "./hosted-module.js";
+export type {
+  HostedModuleDefinition,
+  HostedModuleSpec,
+  HostedModuleGrants,
+  HostedStorageGrant,
+  HostedComponentSource,
+  HostedModuleInstance,
+  AnyModuleInstance,
+  HostedModuleFailure,
+  HostedModuleFailureKind,
+  HostedModuleProvider,
+  HostedModuleSession,
+  HostedSessionContext,
+} from "./hosted-module.js";
 export type { ModuleReference } from "./context.js";
 
 // ============================================================================

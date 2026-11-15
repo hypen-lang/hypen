@@ -83,3 +83,43 @@ export type {
   SessionHost,
   RemoteSessionOptions,
 } from "./remote/session.js";
+
+// ============================================================================
+// HOSTED (WASM-COMPONENT) MODULES
+// ============================================================================
+
+export {
+  wasmModule,
+  loadWasmModules,
+  classifyWasm,
+  HostedModuleSetupError,
+  isHostedModuleSetupError,
+  formatHostedModuleSetupError,
+  HostedModuleService,
+  DEFAULT_MAX_PENDING_DELAYS,
+  MemoryHostedStorage,
+  FileHostedStorage,
+} from "./hosted/index.js";
+export type {
+  WasmModuleOptions,
+  WasmModuleGrants,
+  LoadedWasmModules,
+  LoadWasmModulesOptions,
+  WasmKind,
+  HostedModuleSetupCode,
+  HostedModuleSetupInfo,
+  HostedModulesOptions,
+  HostedReloadResult,
+  HostedStorageQuotas,
+  HostedStorageBackend,
+  HostedStorageBackends,
+  HostedStorageChoice,
+  HostedStorageResolver,
+} from "./hosted/index.js";
+export { isHostedModuleDefinition } from "@hypen-space/core/hosted-module";
+export type {
+  HostedModuleDefinition,
+  HostedModuleFailure,
+  HostedModuleFailureKind,
+  HostedModuleInstance,
+} from "@hypen-space/core/hosted-module";

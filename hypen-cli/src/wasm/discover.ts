@@ -124,8 +124,13 @@ const LANGUAGE_NAMES: Record<Language, string> = { ts: "TypeScript", go: "Go", r
  */
 export function assertNoForeignModule(
   component: { name: string; dir: string; sources: ComponentSources },
-  building: Language
+  building: Language,
+  prebuilt?: ReadonlySet<string>
 ): void {
+  // A component declared prebuilt has its module already (the declared
+  // `.wasm`); sources lying next to its template are how it was built, not
+  // something this build would silently leave out.
+  if (prebuilt?.has(component.name)) return;
   const foreign = (["ts", "go", "rust"] as const).find((l) => l !== building && component.sources[l]);
   if (foreign === undefined) return;
   throw new BuildError(
