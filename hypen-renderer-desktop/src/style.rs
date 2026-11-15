@@ -1254,6 +1254,22 @@ impl Border {
         self.sides != 0 && self.sides != BORDER_SIDES_ALL
     }
 
+    /// The width in device pixels at `scale`, snapped like a CSS border
+    /// width (CSS Values 4 "snap as a border width", what Chrome does): a
+    /// width of at least one device pixel is floored to whole pixels, a
+    /// thinner non-zero one becomes one pixel. A `1.5px` border is 1px at
+    /// 1x (Messages' reaction chips were 1px taller than Chrome's).
+    pub fn device_width(&self, scale: f32) -> f32 {
+        let w = self.width * scale;
+        if w <= 0.0 {
+            0.0
+        } else if w < 1.0 {
+            1.0
+        } else {
+            w.floor()
+        }
+    }
+
     /// Every corner's radius (logical px).
     pub fn radii(&self) -> CornerRadii {
         self.corners.unwrap_or(CornerRadii::uniform(self.radius))

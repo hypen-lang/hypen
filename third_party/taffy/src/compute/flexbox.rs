@@ -949,7 +949,15 @@ fn determine_container_main_size(
                             .iter()
                             .map(|child| {
                                 let padding_border_sum = (child.padding + child.border).main_axis_sum(constants.dir);
+                                // HYPEN PATCH (third_party/taffy/PATCHES.md): each item
+                                // counts with its HYPOTHETICAL main size, i.e. the flex
+                                // base size floored by the RESOLVED minimum (which is the
+                                // automatic `min-size: auto` content minimum when no
+                                // explicit min is set), not the style min alone. A
+                                // `flex: 1` (basis 0) item in an auto-height column
+                                // otherwise counted as 0 and the container collapsed.
                                 (child.flex_basis.maybe_max(child.min_size.main(constants.dir))
+                                    .max(child.resolved_minimum_main_size)
                                     + child.margin.main_axis_sum(constants.dir))
                                 .max(padding_border_sum)
                             })
@@ -1379,9 +1387,25 @@ fn determine_hypothetical_cross_size(
 
         let child_known_main = constants.container_size.main(constants.dir).into();
 
+        // HYPEN PATCH (third_party/taffy/PATCHES.md): an item with an aspect
+        // ratio and an auto cross size takes its cross size from its used
+        // (target) main size through the ratio, as CSS lays the item out at
+        // its used main size with its inherent sizing. The content-size
+        // measure below ignores the ratio, so `flex: 1; aspect-ratio: 1`
+        // placeholder tiles in a Row came out 0px tall.
+        let ratio_cross = child.size.cross(constants.dir).is_none().then(|| {
+            tree.get_flexbox_child_style(child.node).aspect_ratio().map(|ratio| {
+                if constants.is_row {
+                    child.target_size.width / ratio
+                } else {
+                    child.target_size.height * ratio
+                }
+            })
+        });
         let child_cross = child
             .size
             .cross(constants.dir)
+            .or(ratio_cross.flatten())
             .maybe_clamp(child.min_size.cross(constants.dir), child.max_size.cross(constants.dir))
             .maybe_max(padding_border_sum);
 

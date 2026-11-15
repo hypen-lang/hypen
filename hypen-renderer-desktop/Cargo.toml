@@ -178,6 +178,9 @@ dirs = "5"
 # cosmic-text's default `FontSystem::new()` (which indexes every font
 # discoverable on the host). Same version cosmic-text 0.19 pulls in.
 fontdb = "0.23"
+# Font line metrics for CSS `line-height: normal` (`text::normal_line_height`).
+# Same version fontdb 0.23 already links.
+ttf-parser = "0.25"
 
 # Resolve the user's locale so the slim font db matches what cosmic-
 # text would have set internally. Already a transitive dep of cosmic-

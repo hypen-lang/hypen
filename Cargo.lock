@@ -2707,6 +2707,7 @@ dependencies = [
  "tiny-skia 0.12.0",
  "tokio",
  "tokio-tungstenite",
+ "ttf-parser",
  "unicode-linebreak",
  "unicode-segmentation",
  "ureq",

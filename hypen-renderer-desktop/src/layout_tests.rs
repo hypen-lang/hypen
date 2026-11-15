@@ -8422,13 +8422,18 @@ fn patches_from_dsl(source: &str) -> Vec<Patch> {
 
 /// First node of `element_type` in document order.
 fn first_of_type(tree: &Tree, element_type: &str) -> String {
+    first_of_type_under(tree, "root", element_type)
+}
+
+/// The first `element_type` node at or below `under` (pre-order).
+fn first_of_type_under(tree: &Tree, under: &str, element_type: &str) -> String {
     fn walk(tree: &Tree, id: &str, ty: &str) -> Option<String> {
         if tree.get(id).is_some_and(|n| n.element_type == ty) {
             return Some(id.to_string());
         }
         tree.children_of(id).iter().find_map(|c| walk(tree, c, ty))
     }
-    walk(tree, "root", element_type).unwrap_or_else(|| panic!("no {element_type} in tree"))
+    walk(tree, under, element_type).unwrap_or_else(|| panic!("no {element_type} under {under}"))
 }
 
 fn seed_tall_story_photo(src: &str) {
@@ -11638,45 +11643,74 @@ fn shadow_object_defaults_match_the_dom_applicators() {
 }
 
 /// Review follow-up: the fit-content pre-pass carries last frame's
-/// fitted nodes only while the fit actually clamped them. Once the window
-/// is wide enough for the Row's content the node drops out instead of
-/// staying a candidate (and being re-probed) forever.
+/// fitted nodes only while the fit actually clamped them. Once the Row's
+/// content fits again the node drops out instead of staying a candidate
+/// (and being re-probed) forever.
+///
+/// Driven by text updates in a FIXED window, so every frame is an
+/// incremental pass over the same retained Taffy tree: a viewport change
+/// rebuilds the tree, which clears the fit set by itself and would let
+/// this pass without the clamped-only carry-over filter.
 #[test]
 fn fit_content_candidates_drop_out_once_they_fit_again() {
     let mut tree = Tree::new();
-    node(&mut tree, "root", "col", "Column", &[("width", json!("100%"))]);
-    node(&mut tree, "col", "row", "Row", &[]);
-    add_text(&mut tree, "row", "user", "amara_reads");
-    add_text(
-        &mut tree,
-        "row",
-        "caption",
-        "A quiet corner and a book I did not mean to finish today.",
-    );
     let mut state = TaffyState::new();
     let mut text = TextEngine::new();
-    let mut compute = |state: &mut TaffyState, width: u32, gen: u64| {
+    let build = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch("user", "Text", &[("0", json!("amara_reads"))]),
+        insert_patch("row", "user"),
+        create_patch(
+            "caption",
+            "Text",
+            &[("0", json!("A quiet corner and a book I did not mean to finish today."))],
+        ),
+        insert_patch("row", "caption"),
+    ];
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(260.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen: u64| {
         LayoutPass::compute_with_state(
             state,
-            &tree,
-            &mut text,
-            (width, 600),
+            tree,
+            text,
+            (260, 600),
             1.0,
             0.0,
             &HashMap::new(),
             gen,
         )
     };
-    let narrow = compute(&mut state, 260, 1);
+    let set_text = |tree: &mut Tree, state: &mut TaffyState, id: &str, value: &str| {
+        let batch = vec![Patch::SetProp {
+            id: id.into(),
+            name: "0".into(),
+            value: json!(value),
+        }];
+        tree.apply_batch(&batch);
+        assert!(state.apply_patches(&batch, tree, 1.0, vp(260.0)));
+    };
+    let narrow = compute(&mut state, &tree, &mut text, 1);
     assert!(
         find_item(&narrow, "row").rect.w <= 260.5,
         "the Row is clamped to the window: {:?}",
         find_item(&narrow, "row").rect
     );
-    assert_eq!(state.fit_width_override_len(), 1, "fitted while narrow");
-    compute(&mut state, 1200, 2);
-    let wide = compute(&mut state, 1100, 3);
-    assert!(find_item(&wide, "row").rect.w < 1000.0);
+    assert_eq!(state.fit_width_override_len(), 1, "fitted (clamped) while too wide");
+    let rebuilds = state.bulk_rebuilds();
+    // The caption shrinks: the clamped node is re-fitted once, now at its
+    // max-content width (no longer clamped) ...
+    set_text(&mut tree, &mut state, "caption", "Short.");
+    let fits = compute(&mut state, &tree, &mut text, 2);
+    assert!(find_item(&fits, "row").rect.w < 200.0);
+    // ... and on the next layout-affecting frame it is no candidate at all.
+    set_text(&mut tree, &mut state, "user", "amara");
+    let after = compute(&mut state, &tree, &mut text, 3);
+    assert!(find_item(&after, "row").rect.w < 200.0);
+    assert_eq!(state.bulk_rebuilds(), rebuilds, "incremental passes only");
     assert_eq!(
         state.fit_width_override_len(),
         0,
@@ -11970,4 +12004,416 @@ fn cached_css_box_shadows_follow_viewport_units() {
     let a = resolve_box_shadow(plain, Viewport::new(400.0, 800.0)).unwrap();
     let b = resolve_box_shadow(plain, Viewport::new(1000.0, 500.0)).unwrap();
     assert!(std::sync::Arc::ptr_eq(&a, &b), "a px shadow is parsed once and shared");
+}
+
+// ---------------------------------------------------------------------------
+// final-polish regressions
+// ---------------------------------------------------------------------------
+
+/// MovieDB watchlist row: `Row(items-center) { Button(flex-1 p-0) { Row
+/// (flex-1 items-center) { Image w-16 h-24; Column(flex-1) } } ; Button }`.
+/// The Button must be as tall as its poster Row (Chrome centres a 96px
+/// Button in the card); it used to come out 0px tall, centred, with the
+/// poster and text spilling out below the card.
+#[test]
+fn button_wrapping_a_growing_row_is_as_tall_as_its_content() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Row {
+                Button {
+                    Row {
+                        Image(src: "x.png").tw("w-16 h-24 rounded-xl mr-3.5 border border-white/10")
+                        Column {
+                            Text("Inception").tw("text-[15px] font-semibold")
+                            Row {
+                                Text("8.8 · Action, Adventure, Sci-Fi").tw("text-xs ml-1 truncate")
+                            }
+                            .tw("mt-1.5 items-center w-full")
+                            Text("148 min").tw("text-xs mt-1")
+                        }
+                        .tw("flex-1 items-start min-w-0")
+                    }
+                    .tw("flex-1 items-center")
+                }
+                .tw("flex-1 min-w-0 bg-transparent border-0 p-0")
+                Button { Text("x") }
+                    .tw("w-9 h-9 rounded-full border items-center justify-center shrink-0 ml-2")
+            }
+            .tw("mb-3 p-3 rounded-2xl border items-center")
+        }
+        .tw("px-5 pb-8")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let card = tree.children_of(&first_of_type(&tree, "Column"))[0].clone();
+    let card_r = pass.item_by_id(&card).unwrap().rect;
+    let button = tree.children_of(&card)[0].clone();
+    let button_r = pass.item_by_id(&button).unwrap().rect;
+    let image = first_of_type_under(&tree, &button, "Image");
+    let image_r = pass.item_by_id(&image).unwrap().rect;
+    assert!(
+        (button_r.h - 96.0).abs() < 1.0,
+        "the Button hugs its 96px poster row: {button_r:?}"
+    );
+    assert!(
+        (card_r.h - 122.0).abs() < 1.0,
+        "card = poster + padding + border: {card_r:?}"
+    );
+    assert!(
+        image_r.y >= card_r.y && image_r.y + image_r.h <= card_r.y + card_r.h,
+        "the poster stays inside its card: {image_r:?} in {card_r:?}"
+    );
+}
+
+/// Food-ordering restaurant menu: `Grid { MenuItem }` where MenuItem is an
+/// `overflow-hidden` card (`w-full … overflow-hidden`: photo + a padded
+/// body). An `overflow: hidden` item's automatic minimum is 0, but an
+/// auto-height Grid's `auto` rows still grow to the items' max-content
+/// height (CSS: the block-axis free space is indefinite). Rows used to be
+/// capped to a share of the viewport, so each card showed its photo plus
+/// ~24px and the name / description / price / Add button were clipped.
+#[test]
+fn auto_grid_rows_hold_the_full_height_of_overflow_hidden_cards() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Column { Text("Napoli Pizzeria").tw("text-2xl font-bold") }.tw("w-full h-[420px]")
+            Column {
+                Text("Menu").tw("text-xl font-bold px-4 pt-5 pb-4")
+                Grid {
+                    Column {
+                        Image(src: "m1.png").tw("w-full h-36 rounded-2xl bg-stone-100")
+                        Column {
+                            Row { Text("Margherita").tw("text-sm font-semibold ml-1") }.tw("items-center")
+                            Row { Text("Popular").tw("text-xs ml-1 font-medium") }.tw("items-center mt-1")
+                            Text("Tomato, fresh mozzarella, basil, olive oil.").tw("text-xs text-gray-500 mt-1 leading-5")
+                            Row {
+                                Text("$14.50").tw("text-base font-bold flex-1")
+                                Button { Row { Text("Add").tw("text-sm font-bold ml-1") }.tw("items-center") }
+                                    .tw("bg-orange-500 border rounded-full px-4 py-2")
+                            }
+                            .tw("mt-4 items-center")
+                        }
+                        .tw("p-4")
+                    }
+                    .tw("w-full bg-white rounded-2xl border border-gray-100 overflow-hidden")
+                    Column {
+                        Image(src: "m2.png").tw("w-full h-36 rounded-2xl")
+                        Column { Text("Pepperoni").tw("text-sm") Text("Spicy").tw("text-xs mt-1") }.tw("p-4")
+                    }
+                    .tw("w-full rounded-2xl border overflow-hidden")
+                }
+                .gridColumns(1)
+                .fillMaxWidth(true)
+                .gap(18)
+                .tw("w-full px-4 pb-28")
+            }
+            .width("100%")
+        }
+        .scrollable(true)
+        .tw("flex-1 w-full min-h-0")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let grid = first_of_type(&tree, "Grid");
+    let cards = tree.children_of(&grid).to_vec();
+    for card in &cards {
+        let card_r = pass.item_by_id(card).unwrap().rect;
+        let body = tree.children_of(card)[1].clone();
+        let body_r = pass.item_by_id(&body).unwrap().rect;
+        assert!(
+            body_r.y + body_r.h <= card_r.y + card_r.h + 1.5,
+            "the card holds its whole body: body {body_r:?} card {card_r:?}"
+        );
+        assert!(body_r.h > 40.0, "{body_r:?}");
+    }
+    let first = pass.item_by_id(&cards[0]).unwrap().rect;
+    let second = pass.item_by_id(&cards[1]).unwrap().rect;
+    assert!(
+        (second.y - (first.y + first.h) - 18.0).abs() < 1.0,
+        "the next card starts one gap below: {first:?} {second:?}"
+    );
+    // Large enough for: photo 144 + padding 32 + name / popular / description
+    // / price row — well past the ~170px the capped row gave.
+    assert!(first.h > 260.0, "{first:?}");
+}
+
+/// News "On this day" timeline: `Button { … }.tw("p-0 pb-5")` keeps its
+/// declared sides — 0 on top, 20 at the bottom — like the DOM. The sides
+/// used to be averaged into a floor, so the Button got 10px on top as
+/// well: every row 10px taller with its year pushed below the rail dot.
+#[test]
+fn button_declared_padding_is_applied_per_side() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Button { Text("2012").tw("text-[20px] leading-none") }
+                .tw("p-0 pb-5 border-0")
+            Button { Text("left") }.tw("pl-4 border-0")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let b = pass.item_by_id(&kids[0]).unwrap().rect;
+    let t = pass.item_by_id(&tree.children_of(&kids[0])[0]).unwrap().rect;
+    assert!((t.y - b.y).abs() < 0.5, "no top padding: {t:?} in {b:?}");
+    assert!(
+        (b.y + b.h - (t.y + t.h) - 20.0).abs() < 0.5,
+        "20px bottom padding: {t:?} in {b:?}"
+    );
+    let b2 = pass.item_by_id(&kids[1]).unwrap().rect;
+    let t2 = pass.item_by_id(&tree.children_of(&kids[1])[0]).unwrap().rect;
+    assert!((t2.x - b2.x - 16.0).abs() < 0.5, "{t2:?} in {b2:?}");
+    assert!((b2.x + b2.w - (t2.x + t2.w)).abs() < 0.5, "no right padding: {t2:?} in {b2:?}");
+}
+
+/// A Heading without an authored `lineHeight` gets CSS `line-height:
+/// normal` (the DOM `<hN>` sets none), i.e. the face's ascent + descent +
+/// gap — not the Text `<span>`'s `line-height: 1`. News' 30px
+/// "November 15" title was 30px tall on desktop, 35px in Chrome, and
+/// everything below it sat ~5px higher.
+#[test]
+fn heading_line_box_is_css_normal_unless_authored() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Heading("November 15", level: 1).fontSize(30)
+            Text("November 15").fontSize(30)
+            Heading("Tight", level: 1).fontSize(30).lineHeight(1)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let heading = pass.item_by_id(&kids[0]).unwrap().rect;
+    let plain = pass.item_by_id(&kids[1]).unwrap().rect;
+    let tight = pass.item_by_id(&kids[2]).unwrap().rect;
+    let normal = crate::text::normal_line_height(&Default::default(), 700, 30.0);
+    assert!(normal > 31.0, "a real face's normal line height: {normal}");
+    assert!((heading.h - normal).abs() < 1.0, "{heading:?} vs normal {normal}");
+    assert!((plain.h - 30.0).abs() < 1.0, "Text keeps line-height 1: {plain:?}");
+    assert!((tight.h - 30.0).abs() < 1.0, "an authored lineHeight wins: {tight:?}");
+}
+
+/// Social search with no results: `Row(w-full gap-1) { Column.tw("flex-1
+/// aspect-square …") ×3 }` placeholder tiles. A flex item with an aspect
+/// ratio and an auto cross size gets its height from its flexed width (CSS
+/// lays it out at its used main size); desktop drew three 0px-tall tiles —
+/// nothing under "No posts match that search", where Chrome shows squares.
+#[test]
+fn flex_one_aspect_square_tiles_in_a_row_are_square() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("No posts match that search").tw("text-sm text-center pb-4")
+            Row {
+                Column {}.tw("flex-1 aspect-square bg-gray-100 rounded-md")
+                Column {}.tw("flex-1 aspect-square bg-gray-100 rounded-md")
+                Column {}.tw("flex-1 aspect-square bg-gray-100 rounded-md")
+            }
+            .tw("flex-row gap-1 w-full")
+        }
+        .tw("shrink-0 px-4 pt-8 items-center")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let row = first_of_type(&tree, "Row");
+    let tiles = tree.children_of(&row).to_vec();
+    assert_eq!(tiles.len(), 3);
+    for tile in &tiles {
+        let r = pass.item_by_id(tile).unwrap().rect;
+        assert!(r.w > 100.0, "{r:?}");
+        assert!((r.w - r.h).abs() < 1.0, "a square tile: {r:?}");
+    }
+    let row_r = pass.item_by_id(&row).unwrap().rect;
+    let first = pass.item_by_id(&tiles[0]).unwrap().rect;
+    assert!((row_r.h - first.h).abs() < 1.0, "the Row holds the tiles: {row_r:?}");
+}
+
+/// Calories stats: the chart card (`Box { Stack { Column(w-full) {…};
+/// List(w-full flex-row) { bar Column(flex-1) … } } }`) hugs its bars.
+/// Switching from the 7-bar weekly view to the 1-bar daily view (one
+/// `clearChildren` + one new bar) must shrink it like Chrome: the
+/// fit-content probes used to replay Taffy cache entries of the `w-full`
+/// descendants (keyed without the parent size their percentage resolves
+/// against), so the card kept its weekly width.
+#[test]
+fn chart_card_shrinks_when_its_bars_are_replaced() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let bar = |i: usize, label: &str| -> Vec<Patch> {
+        let col = format!("bar{i}");
+        vec![
+            create_patch(
+                &col,
+                "Column",
+                &[
+                    ("flex.0", json!("1")),
+                    ("height.0", json!("100%")),
+                    ("alignItems.0", json!("center")),
+                ],
+            ),
+            insert_patch("list", &col),
+            create_patch(&format!("{col}-v"), "Text", &[("0", json!("614"))]),
+            insert_patch(&col, &format!("{col}-v")),
+            create_patch(&format!("{col}-l"), "Text", &[("0", json!(label))]),
+            insert_patch(&col, &format!("{col}-l")),
+        ]
+    };
+    let mut build = vec![
+        create_patch("page", "Column", &[("width.0", json!("100%"))]),
+        insert_patch("root", "page"),
+        create_patch(
+            "card",
+            "Box",
+            &[("padding.0", json!("0.75rem")), ("height.0", json!("14rem"))],
+        ),
+        insert_patch("page", "card"),
+        create_patch(
+            "stack",
+            "Stack",
+            &[("width.0", json!("100%")), ("height.0", json!("100%"))],
+        ),
+        insert_patch("card", "stack"),
+        create_patch(
+            "goal",
+            "Column",
+            &[
+                ("width.0", json!("100%")),
+                ("height.0", json!("100%")),
+                ("paddingLeft.0", json!("0.5rem")),
+                ("paddingRight.0", json!("0.5rem")),
+                ("justifyContent.0", json!("end")),
+            ],
+        ),
+        insert_patch("stack", "goal"),
+        create_patch(
+            "rule",
+            "Box",
+            &[("width.0", json!("100%")), ("borderTopWidth.0", json!("2px"))],
+        ),
+        insert_patch("goal", "rule"),
+        create_patch(
+            "list",
+            "List",
+            &[
+                ("display.0", json!("flex")),
+                ("flexDirection.0", json!("row")),
+                ("width.0", json!("100%")),
+                ("height.0", json!("100%")),
+                ("alignItems.0", json!("stretch")),
+            ],
+        ),
+        insert_patch("stack", "list"),
+    ];
+    for (i, day) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().enumerate() {
+        build.extend(bar(i, day));
+    }
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(430.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen: u64| {
+        LayoutPass::compute_with_state(
+            state,
+            tree,
+            text,
+            (430, 934),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let weekly = find_item(&compute(&mut state, &tree, &mut text, 1), "card").rect;
+    let mut daily = vec![Patch::ClearChildren { id: "list".into() }];
+    daily.extend(bar(100, "Nov 15"));
+    tree.apply_batch(&daily);
+    assert!(state.apply_patches(&daily, &tree, 1.0, vp(430.0)));
+    let pass = compute(&mut state, &tree, &mut text, 2);
+    let card = find_item(&pass, "card").rect;
+    let (label_w, _) = text.measure("Nov 15", 16.0, None);
+    assert!(weekly.w > card.w + 50.0, "weekly {weekly:?} vs daily {card:?}");
+    assert!(
+        card.w <= label_w + 24.0 + 2.0,
+        "the daily card hugs its single bar ({label_w} + padding): {card:?}"
+    );
+}
+
+/// A single-line Input is one CSS `normal` line of its own font tall (plus
+/// its padding), like the DOM `<input>` that inherits the font with no
+/// padding — 17px at 15px in Chrome — not a fixed 1.3 × 16px.
+#[test]
+fn input_height_is_one_normal_line_of_its_font() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Input(placeholder: "Search for a food").fontSize(15)
+            Input(placeholder: "Padded").fontSize(15).padding(6)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let line = crate::text::normal_line_height(&Default::default(), 400, 15.0);
+    let plain = pass.item_by_id(&kids[0]).unwrap().rect;
+    let padded = pass.item_by_id(&kids[1]).unwrap().rect;
+    assert!((plain.h - line).abs() < 0.5, "{plain:?} vs a {line}px line");
+    assert!(plain.h < 20.0, "shorter than the old fixed 20.8px: {plain:?}");
+    assert!((padded.h - (line + 12.0)).abs() < 0.5, "{padded:?}");
+}
+
+/// A `transparent` border still takes its width in layout, like CSS:
+/// Messages' unselected bubbles are `.border("2px solid transparent")` so
+/// selecting one (a visible 2px border) does not move anything. Desktop
+/// laid them out borderless — every bubble 4px short of Chrome's.
+#[test]
+fn transparent_border_takes_its_width_in_layout() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Column { Text("Morning all!").fontSize(15) }
+                .paddingVertical(7).border("2px solid transparent")
+            Column { Text("Morning all!").fontSize(15) }
+                .paddingVertical(7).border("2px solid #F5F2EA")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let clear = pass.item_by_id(&kids[0]).unwrap().rect;
+    let shown = pass.item_by_id(&kids[1]).unwrap().rect;
+    let clear_text = pass.item_by_id(&tree.children_of(&kids[0])[0]).unwrap().rect;
+    assert!((clear.h - shown.h).abs() < 0.5, "{clear:?} vs {shown:?}");
+    assert!((clear_text.y - clear.y - 9.0).abs() < 0.5, "2px border + 7px padding: {clear_text:?}");
+}
+
+/// Border widths snap like CSS ("snap as a border width", Chrome): floored
+/// to whole device pixels, at least one. Messages' reaction chips
+/// (`paddingVertical(3)`, `border("1.5px solid …")`, a 12px line) are 20px
+/// tall in Chrome at 1x and 22px at 2x (a 3px border), not 21 / 21.
+#[test]
+fn border_widths_snap_to_device_pixels() {
+    let tree = tree_from_dsl(
+        r#"Row {
+            Button { Text("1").fontSize(12) }
+                .paddingHorizontal(8).paddingVertical(3)
+                .border("1.5px solid #3A3648")
+        }"#,
+        json!({}),
+    );
+    let button = first_of_type(&tree, "Button");
+    let mut text = TextEngine::new();
+    let at1 = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    assert!((at1.item_by_id(&button).unwrap().rect.h - 20.0).abs() < 0.5);
+    let at2 = LayoutPass::compute(&tree, &mut text, (860, 1868), 2.0);
+    assert!((at2.item_by_id(&button).unwrap().rect.h - 42.0).abs() < 0.5);
+    let hairline = crate::style::Border { width: 0.25, ..Default::default() };
+    assert_eq!(hairline.device_width(1.0), 1.0);
+    assert_eq!(hairline.device_width(0.0), 0.0);
 }

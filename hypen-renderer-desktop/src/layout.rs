@@ -164,11 +164,21 @@ fn textarea_line_height(raw: Option<f32>, font_size: f32) -> f32 {
 fn text_input_style(node: &crate::tree::Node, vs: &VariantState, scale: f32) -> Style {
     let pad = padding_with(node, vs);
     let border = border_with(node, vs);
+    // A text `<input>`'s content box is one line of CSS `line-height:
+    // normal` at its own font (the DOM Input inherits the font and adds no
+    // padding): 17px at 15px Liberation Sans in Chrome. A fixed 1.3 × 16px
+    // made every Input ~4px taller than Chrome's (the Calories food search
+    // box pushed the whole list down).
+    let font_size = prop_f32_with(node, "fontSize", vs).unwrap_or(DEFAULT_FONT_SIZE_PX);
+    let family = crate::style::prop_str_with(node, "fontFamily", vs)
+        .map(crate::text::FontFamily::from_css)
+        .unwrap_or_default();
+    let line = crate::text::normal_line_height(&family, 400, font_size);
     let mut style = Style {
         display: Display::Flex,
         min_size: Size {
             width: length(DEFAULT_INPUT_MIN_W_PX * scale),
-            height: length((DEFAULT_FONT_SIZE_PX * 1.3 + pad.top + pad.bottom) * scale),
+            height: length((line + pad.top + pad.bottom) * scale),
         },
         padding: Rect_ {
             left: length(pad.left * scale),
@@ -4334,6 +4344,15 @@ where
         };
         let avail = (parent_inner - own_layout.margin.left - own_layout.margin.right).max(0.0);
 
+        // Taffy keys its layout cache on known dimensions and available
+        // space, NOT on the parent size a percentage resolves against.
+        // Under these max-/min-content probes a `w-full` descendant (a
+        // Stack cell, a percent-width bar track) is asked the same cache
+        // key it was asked when the box had other content, and replays the
+        // width it resolved back then: the Calories chart card kept its
+        // 7-bar weekly width after switching to the 1-bar daily view.
+        // Start each candidate's probes from a clean subtree.
+        mark_subtree_dirty(taffy, node);
         // `compute_layout_with_measure` on a subtree root routes through
         // the intrinsic-sizing branch of the flex algorithm, which is the
         // one that honours §9.9.1.
@@ -4694,6 +4713,22 @@ fn collect_fit_candidates(
     }
 }
 
+/// Clear the Taffy layout cache of `node` and every node below it (and,
+/// through `mark_dirty`'s upward walk, of its ancestors). `mark_dirty`
+/// alone only climbs, so a descendant's cache would survive.
+fn mark_subtree_dirty(taffy: &mut TaffyTree<NodeContext>, node: NodeId) {
+    let mut stack = vec![node];
+    while let Some(current) = stack.pop() {
+        let _ = taffy.mark_dirty(current);
+        let n = taffy.child_count(current);
+        for idx in 0..n {
+            if let Ok(child) = taffy.child_at_index(current, idx) {
+                stack.push(child);
+            }
+        }
+    }
+}
+
 /// True when `child`'s border box (plus margins) is wider than
 /// `parent`'s content box in the last computed layout.
 fn overflows_parent_content_box(
@@ -5008,14 +5043,23 @@ fn build_subtree(
             let id = taffy
                 .new_leaf_with_context(
                     style,
-                    NodeContext {
-                        text: Some(content),
-                        font_size,
-                        line_height: resolved_line_height(node, font_size / scale, viewport)
-                            * scale,
-                        max_lines: resolve_max_lines(node, viewport),
-                        font_weight: inherited_text_font_weight(tree, node_id, viewport),
-                        font_family: inherited_text_font_family(tree, node_id, viewport),
+                    {
+                        let font_weight = inherited_text_font_weight(tree, node_id, viewport);
+                        let font_family = inherited_text_font_family(tree, node_id, viewport);
+                        NodeContext {
+                            text: Some(content),
+                            font_size,
+                            line_height: text_leaf_line_height(
+                                node,
+                                font_size / scale,
+                                &font_family,
+                                font_weight,
+                                viewport,
+                            ) * scale,
+                            max_lines: resolve_max_lines(node, viewport),
+                            font_weight,
+                            font_family,
+                        }
                     },
                 )
                 .ok()?;
@@ -5115,10 +5159,19 @@ fn build_subtree(
             // — the launcher's dock icons grew 56pt -> 88pt and four of them
             // overflowed their `max-w-[260px]` container.
             let declares_padding = crate::style::declares_padding(node, &vs);
-            let (pad_x, pad_y) = if declares_padding {
-                ((pad.left + pad.right) * 0.5, (pad.top + pad.bottom) * 0.5)
+            // Declared padding is used per side as authored: averaging the
+            // sides into a floor turned `p-0 pb-5` into 10px top AND bottom
+            // (News' timeline rows sat 10px lower and taller than in Chrome).
+            let pad = if declares_padding {
+                pad
             } else {
-                default_actionable_padding(et)
+                let (x, y) = default_actionable_padding(et);
+                crate::style::Padding {
+                    top: y,
+                    right: x,
+                    bottom: y,
+                    left: x,
+                }
             };
             // Column-direction Button + no implicit centring — see
             // the matching comment in `node_style`'s actionable
@@ -5134,10 +5187,10 @@ fn build_subtree(
                 align_self: Some(AlignSelf::Start),
                 align_items: actionable_default_align_items(et),
                 padding: Rect_ {
-                    left: length(pad.left.max(pad_x) * scale),
-                    right: length(pad.right.max(pad_x) * scale),
-                    top: length(pad.top.max(pad_y) * scale),
-                    bottom: length(pad.bottom.max(pad_y) * scale),
+                    left: length(pad.left * scale),
+                    right: length(pad.right * scale),
+                    top: length(pad.top * scale),
+                    bottom: length(pad.bottom * scale),
                 },
                 margin: margin_to_taffy(margin_with(node, &vs), scale),
                 border: border_to_taffy(border_with(node, &vs), scale),
@@ -5702,10 +5755,19 @@ pub(crate) fn node_style_with(
         // See the matching branch in `node_style_with`: default only when the
         // node declares NO padding, so an explicit `p-0` is honoured.
         let declares_padding = crate::style::declares_padding(node, &vs);
-        let (pad_x, pad_y) = if declares_padding {
-            ((pad.left + pad.right) * 0.5, (pad.top + pad.bottom) * 0.5)
+        // Declared padding is used per side as authored: averaging the
+        // sides into a floor turned `p-0 pb-5` into 10px top AND bottom
+        // (News' timeline rows sat 10px lower and taller than in Chrome).
+        let pad = if declares_padding {
+            pad
         } else {
-            default_actionable_padding(et)
+            let (x, y) = default_actionable_padding(et);
+            crate::style::Padding {
+                top: y,
+                right: x,
+                bottom: y,
+                left: x,
+            }
         };
         Style {
             display: Display::Flex,
@@ -5731,10 +5793,10 @@ pub(crate) fn node_style_with(
             // their intrinsic width). Link / Card keep Taffy's stretch.
             align_items: actionable_default_align_items(et),
             padding: Rect_ {
-                left: length(pad.left.max(pad_x) * scale),
-                right: length(pad.right.max(pad_x) * scale),
-                top: length(pad.top.max(pad_y) * scale),
-                bottom: length(pad.bottom.max(pad_y) * scale),
+                left: length(pad.left * scale),
+                right: length(pad.right * scale),
+                top: length(pad.top * scale),
+                bottom: length(pad.bottom * scale),
             },
             margin: margin_to_taffy(margin_with(node, &vs), scale),
             border: border_to_taffy(border_with(node, &vs), scale),
@@ -6660,6 +6722,9 @@ pub(crate) fn node_context(
             .map(|v| v * scale)
             .unwrap_or(DEFAULT_FONT_SIZE_PX * scale);
         let font_weight = resolve_font_weight(node, viewport);
+        let font_family = crate::style::prop_str_at(node, "fontFamily", viewport)
+            .map(crate::text::FontFamily::from_css)
+            .unwrap_or_default();
         NodeContext {
             text: Some(
                 node.text_content()
@@ -6667,12 +6732,16 @@ pub(crate) fn node_context(
                     .unwrap_or_default(),
             ),
             font_size,
-            line_height: resolved_line_height(node, font_size / scale, viewport) * scale,
+            line_height: text_leaf_line_height(
+                node,
+                font_size / scale,
+                &font_family,
+                font_weight,
+                viewport,
+            ) * scale,
             max_lines: resolve_max_lines(node, viewport),
             font_weight,
-            font_family: crate::style::prop_str_at(node, "fontFamily", viewport)
-                .map(crate::text::FontFamily::from_css)
-                .unwrap_or_default(),
+            font_family,
         }
     } else {
         NodeContext::default()
@@ -6807,6 +6876,8 @@ fn node_context_in_tree(
         return NodeContext::default();
     }
     let font_size = inherited_text_font_size(tree, id, viewport) * scale;
+    let font_weight = inherited_text_font_weight(tree, id, viewport);
+    let font_family = inherited_text_font_family(tree, id, viewport);
     NodeContext {
         text: Some(
             node.text_content()
@@ -6814,10 +6885,16 @@ fn node_context_in_tree(
                 .unwrap_or_default(),
         ),
         font_size,
-        line_height: resolved_line_height(node, font_size / scale, viewport) * scale,
+        line_height: text_leaf_line_height(
+            node,
+            font_size / scale,
+            &font_family,
+            font_weight,
+            viewport,
+        ) * scale,
         max_lines: resolve_max_lines(node, viewport),
-        font_weight: inherited_text_font_weight(tree, id, viewport),
-        font_family: inherited_text_font_family(tree, id, viewport),
+        font_weight,
+        font_family,
     }
 }
 
@@ -7067,6 +7144,28 @@ fn resolved_line_height(node: &crate::tree::Node, font_size: f32, viewport: View
         Some(value) => value.max(font_size),
         None => font_size,
     }
+}
+
+/// The line height (logical px) of a text leaf: an authored `lineHeight`
+/// as [`resolved_line_height`]; otherwise a Text's DOM `line-height: 1`,
+/// and a Heading's `normal` — the DOM `<hN>` sets no line height, so its
+/// line box comes from the face's metrics (`text::normal_line_height`).
+/// Desktop gave a Heading the Text's `1`: a 30px News / Food title was
+/// ~5px shorter than in Chrome and everything under it sat higher.
+fn text_leaf_line_height(
+    node: &crate::tree::Node,
+    font_size: f32,
+    family: &crate::text::FontFamily,
+    weight: u16,
+    viewport: Viewport,
+) -> f32 {
+    let authored = prop_f32_at(node, "lineHeight", viewport)
+        .or_else(|| prop_f32_at(node, "line-height", viewport))
+        .is_some();
+    if !authored && node.element_type.eq_ignore_ascii_case("Heading") {
+        return crate::text::normal_line_height(family, weight, font_size).max(font_size);
+    }
+    resolved_line_height(node, font_size, viewport)
 }
 
 /// The DOM Stack (`components/stack.ts`): a one-cell CSS grid
@@ -8016,10 +8115,13 @@ fn border_to_taffy(b: Border, scale: f32) -> Rect_<LengthPercentage> {
 /// Layout width (physical px) of one border side. A directional border
 /// (`border-t`, `border-b`) only occupies the sides it draws — inflating
 /// all four by the stroke width pushed content 1px in from the
-/// undrawn edges too.
+/// undrawn edges too. The colour does not matter: a `transparent` border
+/// takes its width like in CSS (Messages' unselected bubbles carry `2px
+/// solid transparent` so selecting one does not shift the thread; without
+/// it every bubble was 4px short and its reaction chips overlapped less).
 fn border_side_px(b: Border, side_bit: u8, scale: f32) -> f32 {
-    if b.is_visible() && b.sides & side_bit != 0 {
-        b.width * scale
+    if b.width > 0.0 && b.sides & side_bit != 0 {
+        b.device_width(scale)
     } else {
         0.0
     }
@@ -8440,8 +8542,10 @@ fn emit_items(
                 }
                 _ if is_text_leaf(node) => {
                     let font_size = inherited_text_font_size(tree, rid, viewport);
-                    let line_height = resolved_line_height(node, font_size, viewport);
                     let font_weight = inherited_text_font_weight(tree, rid, viewport);
+                    let font_family = inherited_text_font_family(tree, rid, viewport);
+                    let line_height =
+                        text_leaf_line_height(node, font_size, &font_family, font_weight, viewport);
                     let color = inherited_text_color(tree, rid, viewport);
                     let content = node
                         .text_content()
@@ -8471,7 +8575,7 @@ fn emit_items(
                             max_lines,
                             padding: padding_phys,
                             decoration: inherited_text_decoration(tree, rid, viewport),
-                            font_family: inherited_text_font_family(tree, rid, viewport),
+                            font_family,
                         },
                         rect,
                         action,

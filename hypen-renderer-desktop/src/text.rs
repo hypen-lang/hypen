@@ -1497,6 +1497,73 @@ fn face_is_variable(db: &fontdb::Database, id: fontdb::ID) -> bool {
     .unwrap_or(false)
 }
 
+/// CSS `line-height: normal` in px for `family` at CSS `weight` and
+/// `font_size`, the way Chrome derives it from the face's line metrics
+/// (`hhea`, or `OS/2` typo metrics under `USE_TYPO_METRICS`): ascent,
+/// descent and line gap each rounded to whole pixels and summed. The DOM
+/// Heading (`<h1>`…`<h6>`) sets no `line-height`, so its line box is
+/// `normal` — taller than the `line-height: 1` box of a Text `<span>`.
+/// Resolved against the system fonts (a web font that has not landed in
+/// them falls back like the shaping path's resolution does); `1.2 ×`
+/// the size when no face can be read.
+pub fn normal_line_height(family: &FontFamily, weight: u16, font_size: f32) -> f32 {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    /// (ascent, descent, line gap) in em, per resolved face + weight.
+    type LineMetricsCache = HashMap<(Arc<str>, u16), Option<(f32, f32, f32)>>;
+    static CACHE: OnceLock<Mutex<LineMetricsCache>> = OnceLock::new();
+    let db = system_font_db();
+    let face = match family.list.as_ref() {
+        None => generic_face_family(GenericFamily::SansSerif),
+        Some(list) => match resolve_family_list(list, db) {
+            ResolvedFamily::Named(name) => name,
+            ResolvedFamily::Generic(generic) => generic_face_family(generic),
+        },
+    };
+    let key = (Arc::clone(&face), weight);
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cached = cache.lock().ok().and_then(|c| c.get(&key).copied());
+    let metrics = match cached {
+        Some(hit) => hit,
+        None => {
+            let matched = css_matched_weight(db, &face, weight);
+            let metrics = db
+                .query(&fontdb::Query {
+                    families: &[fontdb::Family::Name(&face)],
+                    weight: fontdb::Weight(matched),
+                    ..Default::default()
+                })
+                .and_then(|id| {
+                    db.with_face_data(id, |data, index| {
+                        let parsed = ttf_parser::Face::parse(data, index).ok()?;
+                        let upem = f32::from(parsed.units_per_em());
+                        (upem > 0.0).then(|| {
+                            (
+                                f32::from(parsed.ascender()) / upem,
+                                -f32::from(parsed.descender()) / upem,
+                                f32::from(parsed.line_gap()).max(0.0) / upem,
+                            )
+                        })
+                    })
+                    .flatten()
+                });
+            if let Ok(mut c) = cache.lock() {
+                if c.len() >= 256 {
+                    c.clear();
+                }
+                c.insert(key, metrics);
+            }
+            metrics
+        }
+    };
+    match metrics {
+        Some((ascent, descent, gap)) => {
+            (ascent * font_size).round() + (descent * font_size).round() + (gap * font_size).round()
+        }
+        None => font_size * 1.2,
+    }
+}
+
 /// What a [`FontFamily`] list resolved to on this host: the first entry
 /// that names an installed family, or a generic keyword.
 #[derive(Clone, Debug, PartialEq, Eq)]
