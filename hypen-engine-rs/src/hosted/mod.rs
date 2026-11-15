@@ -57,6 +57,9 @@ pub(crate) mod report;
 pub(crate) mod snapshots;
 pub(crate) mod subscriptions;
 
+#[cfg(test)]
+mod tests;
+
 pub use names::{ActionSet, InvalidName, ScopeName};
 pub use registry::ModuleGrants;
 pub use report::{
