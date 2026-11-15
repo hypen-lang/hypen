@@ -40,8 +40,9 @@ fn bad(msg: impl std::fmt::Display) -> HypenError {
     HypenError::ModuleHostError(msg.to_string())
 }
 
-/// `{"maxMemoryBytes"?: u64, "maxCallMs"?: u64, "interpreter"?: bool,
-///  "dataDir"?: string}` — all optional.
+/// `{"maxMemoryBytes"?: u64, "maxCallMs"?: u64, "maxStorageValueBytes"?: u64,
+///  "maxStorageBytes"?: u64, "interpreter"?: bool, "dataDir"?: string}` — all
+/// optional (see [`ModuleLimits`] for the defaults).
 fn parse_config(config_json: &str) -> Result<(ModuleLimits, ExecStrategy, Option<String>), HypenError> {
     let v: serde_json::Value = if config_json.trim().is_empty() {
         serde_json::json!({})
@@ -54,6 +55,12 @@ fn parse_config(config_json: &str) -> Result<(ModuleLimits, ExecStrategy, Option
     }
     if let Some(ms) = v["maxCallMs"].as_u64() {
         limits.max_call = Duration::from_millis(ms);
+    }
+    if let Some(b) = v["maxStorageValueBytes"].as_u64() {
+        limits.max_storage_value_bytes = b as usize;
+    }
+    if let Some(b) = v["maxStorageBytes"].as_u64() {
+        limits.max_storage_bytes = b as usize;
     }
     let strategy = if v["interpreter"].as_bool().unwrap_or(false) {
         ExecStrategy::Interpreter

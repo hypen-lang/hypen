@@ -13,7 +13,10 @@
 
 use std::collections::HashMap;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 
+use super::kv::KvBackend;
+use super::wasmtime_host::HostCore;
 use super::{
     ExecStrategy, HostAction, HostError, ModuleHost, ModuleInstanceId, ModuleLimits,
     ModuleManifest, ReducerOutput, SiblingState, WasmtimeHost, WasmtimeHostAsync,
@@ -72,23 +75,30 @@ impl DualHost {
 
     /// Full construction surface: limits + execution strategy (use
     /// [`ExecStrategy::Interpreter`] on JIT-forbidden platforms — iOS) +
-    /// optional persistent-storage directory (one JSON snapshot per ABI
-    /// host, since a v0.1 and v0.2 module are different components even
-    /// when they model the same feature).
+    /// optional persistent-storage directory.
+    ///
+    /// Both ABI hosts run on one core (a single wasmtime engine, epoch-ticker
+    /// thread and runtime, all stopped when the `DualHost` drops) and one
+    /// storage backend: `local` data is private per registered module name
+    /// whichever ABI the module uses, and the `app` scope is shared between
+    /// granted modules across ABIs. With `data_dir`, storage persists to
+    /// `<data_dir>/storage.json`; an unreadable or other-format file there
+    /// is an error.
     pub fn with_options(
         limits: ModuleLimits,
         strategy: ExecStrategy,
         data_dir: Option<&Path>,
     ) -> Result<Self, HostError> {
-        let mut v1 = WasmtimeHost::with_options(limits, strategy)?;
-        let mut v2 = WasmtimeHostAsync::with_options(limits, strategy)?;
-        if let Some(dir) = data_dir {
-            v1.set_storage_path(dir.join("storage-v01.json"))?;
-            v2.set_storage_path(dir.join("storage-v02.json"))?;
-        }
+        let core = HostCore::new(strategy)?;
+        let backend = match data_dir {
+            Some(dir) => KvBackend::file_backed(dir.join("storage.json"))
+                .map_err(|e| HostError::Runtime(e.to_string()))?,
+            None => KvBackend::default(),
+        };
+        let storage = Arc::new(Mutex::new(backend));
         Ok(Self {
-            v1,
-            v2,
+            v1: WasmtimeHost::with_core(limits, Arc::clone(&core), Arc::clone(&storage)),
+            v2: WasmtimeHostAsync::with_core(limits, core, storage),
             routing: HashMap::new(),
         })
     }

@@ -4,16 +4,14 @@
 //!
 //! Run with: `cargo test --features module-loader --test test_module_host`
 
-#![cfg(feature = "module-loader")]
-
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use hypen_engine::dispatch::Action;
 use hypen_engine::ir::{Element, IRNode, Props, Value};
 use hypen_engine::module_host::{
-    ExecStrategy, HostAction, ModuleHost, ModuleLimits, ModuleManifest, ReducerOutput,
-    StorageScope, WasmtimeHost,
+    ExecStrategy, HostAction, HostError, ModuleHost, ModuleInstanceId, ModuleLimits,
+    ModuleManifest, ReducerOutput, StorageScope, WasmtimeHost,
 };
 use hypen_engine::reactive::Binding;
 use hypen_engine::reconcile::Patch;
@@ -578,6 +576,7 @@ fn limits_do_not_hurt_a_well_behaved_dispatch() {
     let mut host = WasmtimeHost::with_limits(ModuleLimits {
         max_memory_bytes: 64 * 1024 * 1024,
         max_call: Duration::from_millis(500),
+        ..Default::default()
     })
     .unwrap();
     host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
@@ -597,6 +596,7 @@ fn runaway_dispatch_is_killed_by_the_timeout() {
     let mut host = WasmtimeHost::with_limits(ModuleLimits {
         max_memory_bytes: 256 * 1024 * 1024,
         max_call: Duration::from_millis(150),
+        ..Default::default()
     })
     .unwrap();
     host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
@@ -621,6 +621,7 @@ fn oversized_allocation_is_denied_by_the_memory_cap() {
     let mut host = WasmtimeHost::with_limits(ModuleLimits {
         max_memory_bytes: 32 * 1024 * 1024,
         max_call: Duration::from_secs(5),
+        ..Default::default()
     })
     .unwrap();
     host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
@@ -742,4 +743,485 @@ fn interpreter_strategy_enforces_the_timeout() {
     let res = host.dispatch(id, &state, HostAction::new("hang", b"{}".to_vec()), &[]);
     assert!(res.is_err(), "an infinite loop must be trapped, got {res:?}");
     assert!(started.elapsed() < Duration::from_secs(5), "killed promptly");
+}
+
+// ── sandbox hardening: deadline covers host calls ───────────────────────────
+
+/// Upper bound for "returned at about `max_call`": generous enough for a
+/// loaded CI box, far below the hour-long sleep / never-answering server
+/// the guest is actually parked on.
+const DEADLINE_SLACK: Duration = Duration::from_secs(3);
+
+fn deadline_host(max_call: Duration) -> WasmtimeHost {
+    WasmtimeHost::with_limits(ModuleLimits {
+        max_call,
+        ..ModuleLimits::default()
+    })
+    .unwrap()
+}
+
+/// A guest parked in a host call (`wasi:io` poll on a day-long timer) never
+/// re-enters guest code, so epoch interruption alone can't stop it. The
+/// wall-clock deadline must cancel the call — and leave the instance dead.
+#[test]
+fn dispatch_blocked_in_a_host_call_is_cancelled_at_the_deadline() {
+    let mut host = deadline_host(Duration::from_millis(300));
+    host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
+    let id = host.instantiate("m").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+
+    let started = Instant::now();
+    let err = host
+        .dispatch(id, &state, HostAction::new("block", Vec::new()), &[])
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(300), "ran its budget: {elapsed:?}");
+    assert!(elapsed < DEADLINE_SLACK, "cancelled at the deadline, took {elapsed:?}");
+    assert!(matches!(err, HostError::Trap(_)), "timeout surfaces as a trap: {err}");
+    assert!(format!("{err}").contains("wall-clock budget"), "{err}");
+
+    // The store is gone: every later call reports a dead instance rather
+    // than touching it.
+    let again = host.dispatch(id, &state, HostAction::new("noop", Vec::new()), &[]);
+    assert!(matches!(again, Err(HostError::DeadInstance)), "{again:?}");
+    assert!(matches!(host.actions(id), Err(HostError::DeadInstance)));
+    assert!(matches!(host.on_destroyed(id, &state), Err(HostError::DeadInstance)));
+    // Destroying a dead instance releases its slot.
+    host.destroy(id).unwrap();
+    assert!(matches!(host.destroy(id), Err(HostError::DeadInstance)));
+
+    // Other instances of the same module are unaffected.
+    let id2 = host.instantiate("m").unwrap();
+    host.init(id2, b"{}").unwrap();
+    host.dispatch(id2, b"{}", HostAction::new("noop", Vec::new()), &[])
+        .unwrap();
+}
+
+/// The deadline covers every entry point, not just `dispatch`: `init`
+/// blocking in a host call is cancelled the same way.
+#[test]
+fn init_blocked_in_a_host_call_is_cancelled_at_the_deadline() {
+    let mut host = deadline_host(Duration::from_millis(300));
+    host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
+    let id = host.instantiate("m").unwrap();
+
+    let started = Instant::now();
+    let err = host.init(id, b"block").unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed < DEADLINE_SLACK, "cancelled at the deadline, took {elapsed:?}");
+    assert!(matches!(err, HostError::Trap(_)), "{err}");
+    assert!(matches!(host.init(id, b"{}"), Err(HostError::DeadInstance)));
+}
+
+/// Same under the Pulley interpreter (the iOS configuration).
+#[test]
+fn interpreter_strategy_cancels_a_blocked_host_call() {
+    let limits = ModuleLimits {
+        max_call: Duration::from_millis(300),
+        ..ModuleLimits::default()
+    };
+    let mut host = WasmtimeHost::with_options(limits, ExecStrategy::Interpreter).unwrap();
+    host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
+    let id = host.instantiate("m").unwrap();
+    let started = Instant::now();
+    let res = host.dispatch(id, b"{}", HostAction::new("block", Vec::new()), &[]);
+    assert!(matches!(res, Err(HostError::Trap(_))), "{res:?}");
+    assert!(started.elapsed() < DEADLINE_SLACK);
+}
+
+/// A TCP server that accepts connections and then never answers. Returns
+/// its port; the listener thread holds every accepted socket open.
+fn black_hole_http() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            held.push(stream);
+        }
+    });
+    port
+}
+
+/// `wasi:http` to a server that never answers: the guest waits on the
+/// response pollable forever, so the wall-clock deadline has to end the call.
+#[test]
+fn http_request_to_a_silent_server_is_cancelled_at_the_deadline() {
+    let port = black_hole_http();
+    let mut host = deadline_host(Duration::from_millis(500));
+    host.register("fetcher", FETCHER, ModuleManifest::all("fetcher"))
+        .unwrap();
+    let id = host.instantiate("fetcher").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+
+    let payload = format!("{{\"url\":\"http://127.0.0.1:{port}/\"}}");
+    let started = Instant::now();
+    let res = host.dispatch(id, &state, HostAction::new("fetch", payload.into_bytes()), &[]);
+    let elapsed = started.elapsed();
+    assert!(matches!(res, Err(HostError::Trap(_))), "{res:?}");
+    assert!(elapsed >= Duration::from_millis(500), "ran its budget: {elapsed:?}");
+    assert!(elapsed < DEADLINE_SLACK, "cancelled at the deadline, took {elapsed:?}");
+    assert!(matches!(host.actions(id), Err(HostError::DeadInstance)));
+}
+
+/// A trap (here: allocation past the memory budget) also kills the instance.
+#[test]
+fn a_trapped_instance_is_dead() {
+    let mut host = WasmtimeHost::with_limits(ModuleLimits {
+        max_memory_bytes: 32 * 1024 * 1024,
+        ..ModuleLimits::default()
+    })
+    .unwrap();
+    host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
+    let id = host.instantiate("m").unwrap();
+    let res = host.dispatch(id, b"{}", HostAction::new("oom", Vec::new()), &[]);
+    assert!(matches!(res, Err(HostError::Trap(_))), "{res:?}");
+    let again = host.dispatch(id, b"{}", HostAction::new("noop", Vec::new()), &[]);
+    assert!(matches!(again, Err(HostError::DeadInstance)), "{again:?}");
+}
+
+/// A module-level `Err(..)` from an export is *not* a trap: the instance
+/// stays usable.
+#[test]
+fn a_module_error_leaves_the_instance_alive() {
+    let mut host = WasmtimeHost::new().unwrap();
+    host.register("m", LIMITS, ModuleManifest::all("m")).unwrap();
+    let id = host.instantiate("m").unwrap();
+    let res = host.dispatch(id, b"{}", HostAction::new("no-such-action", Vec::new()), &[]);
+    assert!(matches!(res, Err(HostError::ModuleError(_))), "{res:?}");
+    host.dispatch(id, b"{}", HostAction::new("noop", Vec::new()), &[])
+        .unwrap();
+}
+
+// ── sandbox hardening: storage isolation + quotas ───────────────────────────
+
+/// Join probe-action fields with the unit separator the limits fixture
+/// splits on (so namespaces / keys can contain anything else verbatim).
+fn probe(fields: &[&str]) -> Vec<u8> {
+    fields.join("\u{1f}").into_bytes()
+}
+
+/// Run a probe action and return the text the fixture reports as its state.
+fn probe_call(host: &mut dyn ModuleHost, id: ModuleInstanceId, action: &str, fields: &[&str]) -> String {
+    let out = host
+        .dispatch(id, b"{}", HostAction::new(action, probe(fields)), &[])
+        .unwrap_or_else(|e| panic!("{action} {fields:?}: {e}"));
+    String::from_utf8(out.state.expect("probe replies via state")).unwrap()
+}
+
+fn probe_instance(host: &mut dyn ModuleHost, name: &str, manifest: ModuleManifest) -> ModuleInstanceId {
+    host.register(name, LIMITS, manifest).unwrap();
+    let id = host.instantiate(name).unwrap();
+    host.init(id, b"{}").unwrap();
+    id
+}
+
+/// `local` storage is private to the registered module: module B, using the
+/// exact same (tier, namespace, key), neither sees nor clobbers A's entry.
+#[test]
+fn local_storage_is_private_to_each_module() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let a = probe_instance(&mut host, "a", ModuleManifest::all("a"));
+    let b = probe_instance(&mut host, "b", ModuleManifest::all("b"));
+
+    assert_eq!(probe_call(&mut host, a, "kv-set", &["local", "prefs", "token", "secret-a"]), "ok");
+    assert_eq!(probe_call(&mut host, b, "kv-get", &["local", "prefs", "token"]), "none");
+
+    assert_eq!(probe_call(&mut host, b, "kv-set", &["local", "prefs", "token", "secret-b"]), "ok");
+    assert_eq!(probe_call(&mut host, a, "kv-get", &["local", "prefs", "token"]), "some:secret-a");
+    assert_eq!(probe_call(&mut host, b, "kv-get", &["local", "prefs", "token"]), "some:secret-b");
+
+    // A second instance of module A shares A's partition (storage is per
+    // module, not per instance).
+    let a2 = host.instantiate("a").unwrap();
+    assert_eq!(probe_call(&mut host, a2, "kv-get", &["local", "prefs", "token"]), "some:secret-a");
+}
+
+/// A module can't forge another module's partition through its own
+/// namespace / key strings, whatever separators it tries.
+#[test]
+fn local_storage_cannot_be_escaped_through_namespace_or_key() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let victim = probe_instance(&mut host, "victim", ModuleManifest::all("victim"));
+    let evil = probe_instance(&mut host, "evil", ModuleManifest::all("evil"));
+    assert_eq!(probe_call(&mut host, victim, "kv-set", &["local", "ns", "k", "v"]), "ok");
+
+    for (ns, key) in [
+        ("victim/ns", "k"),
+        ("../victim/ns", "k"),
+        ("victim", "ns/k"),
+        ("", "victim/persistent/ns/k"),
+        ("Local/Persistent/ns", "k"),
+        ("2:ns", "k"),
+    ] {
+        assert_eq!(probe_call(&mut host, evil, "kv-get", &["local", ns, key]), "none", "{ns:?} {key:?}");
+    }
+}
+
+/// `(namespace, key)` pairs that concatenate to the same string are
+/// distinct entries: ("a/b", "c") is not ("a", "b/c").
+#[test]
+fn namespace_and_key_do_not_collide() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+
+    assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "a/b", "c", "first"]), "ok");
+    assert_eq!(probe_call(&mut host, m, "kv-get", &["local", "a", "b/c"]), "none");
+    assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "a", "b/c", "second"]), "ok");
+    assert_eq!(probe_call(&mut host, m, "kv-get", &["local", "a/b", "c"]), "some:first");
+    assert_eq!(probe_call(&mut host, m, "kv-get", &["local", "a", "b/c"]), "some:second");
+
+    // Same for an empty namespace vs. a key that looks like "ns + key".
+    assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "", "xy", "third"]), "ok");
+    assert_eq!(probe_call(&mut host, m, "kv-get", &["local", "x", "y"]), "none");
+}
+
+/// `app` storage is the deliberately shared scope: modules holding the grant
+/// see each other's entries; a module without it can't even instantiate
+/// (link-time denial), and `app` never aliases `local`.
+#[test]
+fn app_storage_is_shared_only_between_granted_modules() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let a = probe_instance(&mut host, "a", ModuleManifest::all("a"));
+    let b = probe_instance(&mut host, "b", ModuleManifest::all("b"));
+
+    assert_eq!(probe_call(&mut host, a, "kv-set", &["app", "shared", "theme", "dark"]), "ok");
+    assert_eq!(probe_call(&mut host, b, "kv-get", &["app", "shared", "theme"]), "some:dark");
+    // The app entry is not visible through `local`, for either module.
+    assert_eq!(probe_call(&mut host, a, "kv-get", &["local", "shared", "theme"]), "none");
+    assert_eq!(probe_call(&mut host, b, "kv-get", &["local", "shared", "theme"]), "none");
+
+    // No `app` grant → the fixture's `hypen:storage/app` import is unlinked.
+    let ungranted = ModuleManifest {
+        storage: vec![],
+        ..ModuleManifest::all("c")
+    };
+    host.register("c", LIMITS, ungranted).unwrap();
+    let err = host.instantiate("c").unwrap_err();
+    assert!(matches!(err, HostError::Instantiate(_)), "{err}");
+    assert!(format!("{err}").contains("hypen:storage/app"), "names the import: {err}");
+}
+
+/// Writes are bounded: a value over `max_storage_value_bytes`, or a write
+/// that would take the scope over `max_storage_bytes`, gets the WIT's
+/// `quota-exceeded(<bytes over>)` — and the budget is per module for `local`.
+#[test]
+fn storage_writes_are_bounded_by_quota() {
+    let mut host = WasmtimeHost::with_limits(ModuleLimits {
+        max_storage_value_bytes: 1000,
+        max_storage_bytes: 2500,
+        ..ModuleLimits::default()
+    })
+    .unwrap();
+    let a = probe_instance(&mut host, "a", ModuleManifest::all("a"));
+    let b = probe_instance(&mut host, "b", ModuleManifest::all("b"));
+
+    // Per-value cap.
+    assert_eq!(probe_call(&mut host, a, "kv-fill", &["local", "n", "big", "1001"]), "quota-exceeded:1");
+    assert_eq!(probe_call(&mut host, a, "kv-get", &["local", "n", "big"]), "none");
+
+    // Per-scope budget: two 1000-byte values fit, the third does not.
+    assert_eq!(probe_call(&mut host, a, "kv-fill", &["local", "n", "k1", "1000"]), "ok");
+    assert_eq!(probe_call(&mut host, a, "kv-fill", &["local", "n", "k2", "1000"]), "ok");
+    let refused = probe_call(&mut host, a, "kv-fill", &["local", "n", "k3", "1000"]);
+    assert!(refused.starts_with("quota-exceeded:"), "{refused}");
+    assert_eq!(probe_call(&mut host, a, "kv-get", &["local", "n", "k3"]), "none");
+    // Overwriting an existing entry in place stays within budget.
+    assert_eq!(probe_call(&mut host, a, "kv-fill", &["local", "n", "k1", "900"]), "ok");
+
+    // Module B has its own local budget; the shared `app` scope has its own.
+    assert_eq!(probe_call(&mut host, b, "kv-fill", &["local", "n", "k1", "1000"]), "ok");
+    assert_eq!(probe_call(&mut host, a, "kv-fill", &["app", "n", "k1", "1000"]), "ok");
+}
+
+/// With the default limits a 1 MiB value is the largest that fits.
+#[test]
+fn default_quota_caps_values_at_one_mebibyte() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+    assert_eq!(probe_call(&mut host, m, "kv-fill", &["local", "n", "k", "1048576"]), "ok");
+    assert_eq!(probe_call(&mut host, m, "kv-fill", &["local", "n", "k2", "1048577"]), "quota-exceeded:1");
+}
+
+/// Storage hits disk once per module call (not once per write), in a format
+/// that is not the old one; a file in the old format is refused, not wiped.
+#[test]
+fn storage_file_is_flushed_per_call_and_old_formats_are_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let file = dir.path().join("kv.json");
+    {
+        let mut host = WasmtimeHost::new().unwrap();
+        host.set_storage_path(&file).unwrap();
+        let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+        assert!(!file.exists(), "nothing written before a module call stores something");
+        assert_eq!(probe_call(&mut host, m, "kv-set", &["local", "ns", "k", "hello"]), "ok");
+        let text = std::fs::read_to_string(&file).unwrap();
+        // "hello" base64-encoded, under the owning module's partition.
+        assert!(text.contains("aGVsbG8="), "{text}");
+        assert!(text.contains(r#""owner":"m""#), "{text}");
+    }
+    {
+        let mut host = WasmtimeHost::new().unwrap();
+        host.set_storage_path(&file).unwrap();
+        let m = probe_instance(&mut host, "m", ModuleManifest::all("m"));
+        assert_eq!(probe_call(&mut host, m, "kv-get", &["local", "ns", "k"]), "some:hello");
+        let other = probe_instance(&mut host, "other", ModuleManifest::all("other"));
+        assert_eq!(probe_call(&mut host, other, "kv-get", &["local", "ns", "k"]), "none");
+    }
+
+    let old = dir.path().join("old.json");
+    let old_body = r#"{"format":1,"plain":{"Local/Persistent/ns/k":[104,105]}}"#;
+    std::fs::write(&old, old_body).unwrap();
+    let mut host = WasmtimeHost::new().unwrap();
+    let err = host.set_storage_path(&old).unwrap_err();
+    assert!(format!("{err}").contains("format 1"), "{err}");
+    assert_eq!(std::fs::read_to_string(&old).unwrap(), old_body, "left untouched");
+}
+
+// ── sandbox hardening: cross-module request bounds ──────────────────────────
+
+/// One call may queue at most 256 cross-module dispatches / subscriptions,
+/// and no single request may exceed 1 MiB; requests past that are refused
+/// with an error instead of growing host memory.
+#[test]
+fn cross_module_requests_are_bounded_per_call() {
+    let mut host = WasmtimeHost::new().unwrap();
+    let manifest = ModuleManifest {
+        reads: vec!["peer".into()],
+        dispatches: vec!["peer".into()],
+        ..ModuleManifest::all("m")
+    };
+    let id = probe_instance(&mut host, "m", manifest);
+
+    let out = host
+        .dispatch(id, b"{}", HostAction::new("flood-dispatch", probe(&["peer", "300", "8"])), &[])
+        .unwrap();
+    let reply = String::from_utf8(out.state.unwrap()).unwrap();
+    assert!(reply.starts_with("256/300 "), "{reply}");
+    assert!(reply.contains("too many dispatch requests"), "{reply}");
+    assert_eq!(out.cross_dispatch.len(), 256);
+
+    // The bound is per call: the next call starts from an empty queue.
+    let out = host
+        .dispatch(id, b"{}", HostAction::new("flood-dispatch", probe(&["peer", "3", "8"])), &[])
+        .unwrap();
+    assert_eq!(out.cross_dispatch.len(), 3);
+
+    // Oversized payload: refused outright.
+    let out = host
+        .dispatch(id, b"{}", HostAction::new("flood-dispatch", probe(&["peer", "1", "1048577"])), &[])
+        .unwrap();
+    let reply = String::from_utf8(out.state.unwrap()).unwrap();
+    assert!(reply.starts_with("0/1 "), "{reply}");
+    assert!(out.cross_dispatch.is_empty());
+
+    let out = host
+        .dispatch(id, b"{}", HostAction::new("flood-subscribe", probe(&["peer", "300"])), &[])
+        .unwrap();
+    let reply = String::from_utf8(out.state.unwrap()).unwrap();
+    assert!(reply.starts_with("256/300 "), "{reply}");
+    assert_eq!(out.subscribe_requests.len(), 256);
+}
+
+// ── deny-by-default manifests ───────────────────────────────────────────────
+
+/// A manifest that omits a capability does not grant it: `{}` (and
+/// `Default`) mean local-only storage, no cross-module access, no HTTP.
+#[test]
+fn manifest_is_deny_by_default() {
+    for manifest in [
+        serde_json::from_str::<ModuleManifest>(r#"{"name": "m"}"#).unwrap(),
+        serde_json::from_str::<ModuleManifest>("{}").unwrap(),
+        ModuleManifest::default(),
+    ] {
+        assert!(!manifest.grants_http());
+        assert!(manifest.grants_storage(StorageScope::Local));
+        assert!(!manifest.grants_storage(StorageScope::App));
+        assert!(!manifest.grants_storage(StorageScope::Cloud));
+        assert!(manifest.reads.is_empty());
+        assert!(manifest.dispatches.is_empty());
+    }
+    let granted: ModuleManifest =
+        serde_json::from_str(r#"{"name": "m", "storage": ["app"], "http": true}"#).unwrap();
+    assert!(granted.grants_http());
+    assert!(granted.grants_storage(StorageScope::App));
+    assert!(!granted.grants_storage(StorageScope::Cloud));
+
+    // Enforced at link time: an http-importing module registered with a
+    // manifest that merely omits `http` cannot instantiate.
+    let mut host = WasmtimeHost::new().unwrap();
+    let omitted: ModuleManifest = serde_json::from_str(r#"{"name": "fetcher"}"#).unwrap();
+    host.register("fetcher", FETCHER, omitted).unwrap();
+    let err = host.instantiate("fetcher").unwrap_err();
+    assert!(format!("{err}").contains("http"), "{err}");
+}
+
+// ── DualHost: one core for both ABIs ────────────────────────────────────────
+
+#[cfg(target_os = "linux")]
+fn epoch_ticker_threads() -> usize {
+    let mut n = 0;
+    for entry in std::fs::read_dir("/proc/self/task").unwrap() {
+        let comm = std::fs::read_to_string(entry.unwrap().path().join("comm")).unwrap_or_default();
+        // Linux truncates thread names to 15 bytes.
+        if comm.trim() == "hypen-module-ep" {
+            n += 1;
+        }
+    }
+    n
+}
+
+/// A `DualHost` runs both ABI hosts on one epoch-ticker thread, and
+/// dropping it stops that thread. (Runs in its own process-wide check, so
+/// it tolerates tickers owned by tests running in parallel by measuring a
+/// burst of its own hosts.)
+#[cfg(target_os = "linux")]
+#[test]
+fn dual_host_shares_one_epoch_ticker_and_stops_it_on_drop() {
+    use hypen_engine::module_host::DualHost;
+
+    const N: usize = 40;
+    let before = epoch_ticker_threads();
+    let hosts: Vec<DualHost> = (0..N).map(|_| DualHost::new().unwrap()).collect();
+    let during = epoch_ticker_threads();
+    drop(hosts);
+    // Other tests create and drop at most a handful of hosts concurrently;
+    // two tickers per DualHost would show up as ~2N here.
+    assert!(
+        during >= N && during < before + N + N / 2,
+        "one ticker per DualHost: before={before} during={during}"
+    );
+    // Drop joins the ticker, so they are gone immediately.
+    let after = epoch_ticker_threads();
+    assert!(after + N <= during + N / 2, "tickers stopped on drop: during={during} after={after}");
+}
+
+/// `DualHost` puts both ABI hosts on one storage backend: the `app` scope is
+/// shared between a v0.1 and a v0.2 module of the same app, `local` stays
+/// private per module name, and one snapshot file holds both.
+#[test]
+fn dual_host_shares_storage_across_abis() {
+    use hypen_engine::module_host::{detect_abi, DualHost, ModuleAbi};
+    const ASYNC_COUNTER: &[u8] = include_bytes!("fixtures/async_counter_module.wasm");
+    assert_eq!(detect_abi(LIMITS), ModuleAbi::V1Sync);
+    assert_eq!(detect_abi(ASYNC_COUNTER), ModuleAbi::V2Async);
+
+    let dir = tempfile::tempdir().unwrap();
+    let mut host = DualHost::with_options(Default::default(), Default::default(), Some(dir.path())).unwrap();
+    let probe_id = probe_instance(&mut host, "probe", ModuleManifest::all("probe"));
+    host.register("acounter", ASYNC_COUNTER, ModuleManifest::all("acounter"))
+        .unwrap();
+    let async_id = host.instantiate("acounter").unwrap();
+    let state = host.init(async_id, b"{}").unwrap();
+    host.dispatch(async_id, &state, HostAction::new("increment", b"{}".to_vec()), &[])
+        .unwrap();
+
+    // The v0.2 module persisted its count under (persistent, "counter",
+    // "count") in *its* local partition; the v0.1 probe can't see it there.
+    assert_eq!(probe_call(&mut host, probe_id, "kv-get", &["local", "counter", "count"]), "none");
+    assert_eq!(probe_call(&mut host, probe_id, "kv-set", &["app", "shared", "k", "v"]), "ok");
+
+    let text = std::fs::read_to_string(dir.path().join("storage.json")).unwrap();
+    assert!(text.contains(r#""owner":"acounter""#), "{text}");
+    assert!(text.contains(r#""scope":"app""#), "{text}");
 }

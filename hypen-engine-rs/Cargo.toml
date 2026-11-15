@@ -51,10 +51,14 @@ wasmtime-wasi = { version = "46", optional = true }
 # using idiomatic per-language clients (Rust waki/reqwest, Go net/http, etc.)
 # instead of going through a Hypen-shaped descriptor.
 wasmtime-wasi-http = { version = "46", optional = true }
-# Minimal executor driving the CM-async host's `Store::run_concurrent` from
-# the synchronous ModuleHost surface (no tokio needed while the capability
-# impls resolve without real I/O).
-futures-executor = { version = "0.3", optional = true }
+# Current-thread runtime owned by the module hosts: every guest entry runs as
+# an async wasmtime call under `tokio::time::timeout`, so a guest blocked in a
+# host call (wasi:io poll, wasi:http, hypen:time sleep) is cancelled at the
+# per-call deadline (`net` = the I/O driver wasi:http needs). Already a
+# transitive dependency of wasmtime-wasi.
+tokio = { version = "1", default-features = false, features = ["rt", "time", "net"], optional = true }
+# Compact encoding of stored values in the persisted storage snapshot.
+base64 = { version = "0.22", optional = true }
 # Tiny synchronous HTTP server used by the `hypen-runtime --serve` mode.
 # Only the binary needs it (`runtime-bin` feature), not library embeds.
 tiny_http = { version = "0.12", optional = true }
@@ -107,7 +111,7 @@ uniffi-cli = ["uniffi", "uniffi/cli"]
 # `hypen:module` guests on desktop/server/mobile. Native targets only.
 # This is the library surface (`WasmtimeHost` / `WasmtimeHostAsync` /
 # `DualHost`) that UniFFI / mobile / desktop embeds link.
-module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:futures-executor", "dep:thiserror"]
+module-loader = ["dep:wasmtime", "dep:wasmtime-wasi", "dep:wasmtime-wasi-http", "dep:tokio", "dep:base64", "dep:thiserror"]
 # The `hypen-runtime` dev binary: the module loader plus the HTTP server and
 # file watcher that only `--serve` needs. Kept out of `module-loader` so
 # library embeds don't link them.

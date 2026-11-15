@@ -16,19 +16,19 @@
 //!   entrypoints for everything, so the sync `actions` export is lifted
 //!   onto the concurrent path too (`exports: { "actions": async | store }`)
 //!   and instantiation goes through `instantiate_async`.
-//! - No tokio: the host's storage/state impls resolve without real I/O, so
-//!   `futures_executor::block_on` is sufficient to drive the loop. (Linking
-//!   tokio-backed imports — e.g. wasi:http p3 — will need an ambient
-//!   runtime; that lands with p3 HTTP support, which is still
-//!   experimental/semver-exempt in wasmtime 46.)
-//! - wasi:http is intentionally NOT linked here yet: v0.2 modules are
-//!   expected to use `wasi:http/client@0.3.0` once `wasmtime-wasi-http`'s
-//!   p3 surface stabilizes.
+//! - Every call is driven by the host's current-thread tokio runtime under
+//!   the same two deadlines as the v0.1 host (see
+//!   [`super::wasmtime_host`]): epoch interruption for guest CPU, and a
+//!   `tokio::time::timeout` that cancels a call parked in a host call
+//!   (`hypen:time.sleep-ms`, wasi:io poll, wasi:http). A trapped or
+//!   timed-out instance is dead.
+//! - wasi:http is the p2 surface (async host implementation): v0.2 modules
+//!   are expected to move to `wasi:http/client@0.3.0` once
+//!   `wasmtime-wasi-http`'s p3 surface stabilizes.
 
-use std::collections::{HashMap, HashSet};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use slotmap::{new_key_type, Key, SlotMap};
@@ -40,7 +40,7 @@ new_key_type! {
 use wasmtime::component::{
     Accessor, Component, HasData, Linker, Resource, ResourceTable, StreamReader,
 };
-use wasmtime::{Config, Engine as WtEngine, Store, StoreLimits, StoreLimitsBuilder};
+use wasmtime::Store;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 use wasmtime_wasi_http::p2::{WasiHttpCtxView, WasiHttpView};
 use wasmtime_wasi_http::WasiHttpCtx;
@@ -70,18 +70,13 @@ wasmtime::component::bindgen!({
 
 use hypen::storage::types::{EntryInfo, Error as StorageError, Tier};
 
-// ── storage backend (same in-memory model as the sync host) ────────────────
-
-#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-enum Scope {
-    Local,
-    App,
-    Cloud,
-}
+// ── storage backend (shared with the v0.1 host) ────────────────────────────
 
 /// Host type behind every `bucket` resource (all three scopes map here).
 pub struct BucketData {
-    scope: Scope,
+    /// Which partition of the backend this bucket addresses. Derived from the
+    /// scope and the instance's *registered* module name — not guest input.
+    partition: PartitionId,
     tier: Tier,
     namespace: String,
 }
@@ -90,10 +85,23 @@ pub struct BucketData {
 /// `unavailable`).
 pub struct BlobBucketData;
 
-use super::kv::{CloudEntry, KvBackend};
+use super::kv::{entry_key, KvBackend, KvQuota, KvScope, KvWriteError, PartitionId};
+use super::wasmtime_host::{CrossModuleCtx, CrossModuleError, HostCore, TotalMemoryLimiter};
 
-fn composite(b: &BucketData, key: &str) -> String {
-    format!("{:?}/{:?}/{}/{}", b.scope, b.tier, b.namespace, key)
+fn tier_token(tier: Tier) -> &'static str {
+    match tier {
+        Tier::Persistent => "persistent",
+        Tier::Cache => "cache",
+        Tier::Temp => "temp",
+        Tier::Secure => "secure",
+    }
+}
+
+fn storage_error(e: KvWriteError) -> StorageError {
+    match e {
+        KvWriteError::QuotaExceeded(over) => StorageError::QuotaExceeded(over),
+        KvWriteError::VersionMismatch => StorageError::Unavailable("version mismatch".into()),
+    }
 }
 
 // ── hypen:time clock ────────────────────────────────────────────────────────
@@ -131,31 +139,23 @@ impl HostClock {
     }
 }
 
-/// How often the background thread advances wasmtime's epoch counter.
-const EPOCH_TICK: Duration = Duration::from_millis(10);
-
 pub use super::wasmtime_host::ModuleLimits;
 
 struct HostState {
     table: ResourceTable,
-    limits: StoreLimits,
+    /// Per-instance total-memory limiter (see [`ModuleLimits`]).
+    limiter: TotalMemoryLimiter,
     wasi: WasiCtx,
     /// wasi:http config, used only when the manifest grants egress.
     http: WasiHttpCtx,
     kv: Arc<Mutex<KvBackend>>,
+    quota: KvQuota,
+    /// Registered name of the module this instance belongs to — the owner of
+    /// its `local` storage partition.
+    module: String,
     clock: HostClock,
-    /// Cap on one `sleep-ms`, set from the per-call wall-clock budget: the
-    /// epoch deadline would trap the reducer right after a longer sleep
-    /// anyway, so there is no point blocking the host thread past it.
-    max_sleep: Duration,
-
-    // Per-call cross-module context (installed before each dispatch /
-    // on-activated, drained + cleared after), same model as the sync host.
-    sibling_states: HashMap<String, Vec<u8>>,
-    reads_allowed: HashSet<String>,
-    dispatches_allowed: HashSet<String>,
-    xdispatch_queue: Vec<(String, HostAction)>,
-    subscribe_queue: Vec<super::SubscribeRequest>,
+    /// Per-call cross-module context, same model as the v0.1 host.
+    cross: CrossModuleCtx,
 }
 
 impl WasiView for HostState {
@@ -187,66 +187,55 @@ impl HasData for HostCap {
 }
 
 impl HostState {
-    fn open(&mut self, scope: Scope, tier: Tier, namespace: String) -> Resource<BucketData> {
+    fn open(&mut self, scope: KvScope, tier: Tier, namespace: String) -> Result<Resource<BucketData>, StorageError> {
+        let partition = PartitionId::new(scope, &self.module);
         self.table
-            .push(BucketData { scope, tier, namespace })
-            .expect("resource table push")
+            .push(BucketData { partition, tier, namespace })
+            .map_err(|e| StorageError::Backend(e.to_string()))
     }
-    fn b_get(&mut self, res: &Resource<BucketData>, key: &str) -> Option<Vec<u8>> {
-        let b = self.table.get(res).expect("live bucket");
-        let ck = composite(b, key);
+    /// Resolve a bucket handle + guest key to `(partition, entry key)`.
+    fn locate(&self, res: &Resource<BucketData>, key: &str) -> Result<(PartitionId, String), StorageError> {
+        let b = self
+            .table
+            .get(res)
+            .map_err(|e| StorageError::Backend(e.to_string()))?;
+        Ok((b.partition.clone(), entry_key(tier_token(b.tier), &b.namespace, key)))
+    }
+    fn b_get(&mut self, res: &Resource<BucketData>, key: &str) -> Result<Option<Vec<u8>>, StorageError> {
+        let (part, ek) = self.locate(res, key)?;
         let kv = self.kv.lock().unwrap();
-        match b.scope {
-            Scope::Cloud => kv.cloud.get(&ck).map(|e| e.value.clone()),
-            _ => kv.plain.get(&ck).cloned(),
-        }
+        Ok(kv.get(&part, &ek).map(|e| e.value.clone()))
     }
-    fn b_set(&mut self, res: &Resource<BucketData>, key: &str, value: Vec<u8>) {
-        let b = self.table.get(res).expect("live bucket");
-        let ck = composite(b, key);
+    fn b_set(&mut self, res: &Resource<BucketData>, key: &str, value: Vec<u8>) -> Result<(), StorageError> {
+        let (part, ek) = self.locate(res, key)?;
         let mut kv = self.kv.lock().unwrap();
-        match b.scope {
-            Scope::Cloud => {
-                let next = kv.cloud.get(&ck).map(|e| e.version + 1).unwrap_or(1);
-                kv.cloud.insert(ck, CloudEntry { value, version: next });
-            }
-            _ => {
-                kv.plain.insert(ck, value);
-                kv.flush_plain();
-            }
-        }
+        kv.set(&part, ek, value, self.quota).map(|_| ()).map_err(storage_error)
     }
-    fn b_delete(&mut self, res: &Resource<BucketData>, key: &str) -> bool {
-        let b = self.table.get(res).expect("live bucket");
-        let ck = composite(b, key);
+    fn b_delete(&mut self, res: &Resource<BucketData>, key: &str) -> Result<bool, StorageError> {
+        let (part, ek) = self.locate(res, key)?;
+        Ok(self.kv.lock().unwrap().delete(&part, &ek))
+    }
+    fn b_compare_and_set(
+        &mut self,
+        res: &Resource<BucketData>,
+        key: &str,
+        expected: Option<u64>,
+        value: Vec<u8>,
+    ) -> Result<u64, StorageError> {
+        let (part, ek) = self.locate(res, key)?;
         let mut kv = self.kv.lock().unwrap();
-        match b.scope {
-            Scope::Cloud => kv.cloud.remove(&ck).is_some(),
-            _ => {
-                let removed = kv.plain.remove(&ck).is_some();
-                if removed {
-                    kv.flush_plain();
-                }
-                removed
-            }
-        }
+        kv.compare_and_set(&part, ek, expected, value, self.quota)
+            .map_err(storage_error)
     }
-    fn b_info(&mut self, res: &Resource<BucketData>, key: &str) -> Option<EntryInfo> {
-        let b = self.table.get(res).expect("live bucket");
-        let ck = composite(b, key);
+    fn b_info(&mut self, res: &Resource<BucketData>, key: &str) -> Result<Option<EntryInfo>, StorageError> {
+        let (part, ek) = self.locate(res, key)?;
         let kv = self.kv.lock().unwrap();
-        match b.scope {
-            Scope::Cloud => kv.cloud.get(&ck).map(|e| EntryInfo {
-                size: e.value.len() as u64,
-                modified_ms: 0,
-                version: Some(e.version),
-            }),
-            _ => kv.plain.get(&ck).map(|v| EntryInfo {
-                size: v.len() as u64,
-                modified_ms: 0,
-                version: None,
-            }),
-        }
+        Ok(kv.get(&part, &ek).map(|e| EntryInfo {
+            size: e.value.len() as u64,
+            modified_ms: 0,
+            // Versions are a `cloud` concept (concurrent writers).
+            version: (part.scope() == KvScope::Cloud).then_some(e.version),
+        }))
     }
 }
 
@@ -268,14 +257,14 @@ macro_rules! impl_async_kv_bucket {
                     tier: Tier,
                     namespace: String,
                 ) -> Result<Resource<BucketData>, StorageError> {
-                    Ok(accessor.with(|mut a| a.get().open($scope, tier, namespace)))
+                    accessor.with(|mut a| a.get().open($scope, tier, namespace))
                 }
                 async fn get(
                     accessor: &Accessor<HostState, Self>,
                     s: Resource<BucketData>,
                     key: String,
                 ) -> Result<Option<Vec<u8>>, StorageError> {
-                    Ok(accessor.with(|mut a| a.get().b_get(&s, &key)))
+                    accessor.with(|mut a| a.get().b_get(&s, &key))
                 }
                 async fn set(
                     accessor: &Accessor<HostState, Self>,
@@ -283,15 +272,14 @@ macro_rules! impl_async_kv_bucket {
                     key: String,
                     value: Vec<u8>,
                 ) -> Result<(), StorageError> {
-                    accessor.with(|mut a| a.get().b_set(&s, &key, value));
-                    Ok(())
+                    accessor.with(|mut a| a.get().b_set(&s, &key, value))
                 }
                 async fn delete(
                     accessor: &Accessor<HostState, Self>,
                     s: Resource<BucketData>,
                     key: String,
                 ) -> Result<bool, StorageError> {
-                    Ok(accessor.with(|mut a| a.get().b_delete(&s, &key)))
+                    accessor.with(|mut a| a.get().b_delete(&s, &key))
                 }
                 async fn keys(
                     _accessor: &Accessor<HostState, Self>,
@@ -306,7 +294,7 @@ macro_rules! impl_async_kv_bucket {
                     s: Resource<BucketData>,
                     key: String,
                 ) -> Result<Option<EntryInfo>, StorageError> {
-                    Ok(accessor.with(|mut a| a.get().b_info(&s, &key)))
+                    accessor.with(|mut a| a.get().b_info(&s, &key))
                 }
                 async fn clear(
                     _accessor: &Accessor<HostState, Self>,
@@ -378,8 +366,8 @@ macro_rules! impl_async_blob_bucket {
     };
 }
 
-impl_async_kv_bucket!(hypen::storage::local, Scope::Local);
-impl_async_kv_bucket!(hypen::storage::app, Scope::App);
+impl_async_kv_bucket!(hypen::storage::local, KvScope::Local);
+impl_async_kv_bucket!(hypen::storage::app, KvScope::App);
 impl_async_blob_bucket!(hypen::storage::local);
 impl_async_blob_bucket!(hypen::storage::app);
 impl_async_blob_bucket!(hypen::storage::cloud);
@@ -391,14 +379,14 @@ impl hypen::storage::cloud::HostBucketWithStore<HostState> for HostCap {
         tier: Tier,
         namespace: String,
     ) -> Result<Resource<BucketData>, StorageError> {
-        Ok(accessor.with(|mut a| a.get().open(Scope::Cloud, tier, namespace)))
+        accessor.with(|mut a| a.get().open(KvScope::Cloud, tier, namespace))
     }
     async fn get(
         accessor: &Accessor<HostState, Self>,
         s: Resource<BucketData>,
         key: String,
     ) -> Result<Option<Vec<u8>>, StorageError> {
-        Ok(accessor.with(|mut a| a.get().b_get(&s, &key)))
+        accessor.with(|mut a| a.get().b_get(&s, &key))
     }
     async fn set(
         accessor: &Accessor<HostState, Self>,
@@ -406,15 +394,14 @@ impl hypen::storage::cloud::HostBucketWithStore<HostState> for HostCap {
         key: String,
         value: Vec<u8>,
     ) -> Result<(), StorageError> {
-        accessor.with(|mut a| a.get().b_set(&s, &key, value));
-        Ok(())
+        accessor.with(|mut a| a.get().b_set(&s, &key, value))
     }
     async fn delete(
         accessor: &Accessor<HostState, Self>,
         s: Resource<BucketData>,
         key: String,
     ) -> Result<bool, StorageError> {
-        Ok(accessor.with(|mut a| a.get().b_delete(&s, &key)))
+        accessor.with(|mut a| a.get().b_delete(&s, &key))
     }
     async fn keys(
         _accessor: &Accessor<HostState, Self>,
@@ -429,7 +416,7 @@ impl hypen::storage::cloud::HostBucketWithStore<HostState> for HostCap {
         s: Resource<BucketData>,
         key: String,
     ) -> Result<Option<EntryInfo>, StorageError> {
-        Ok(accessor.with(|mut a| a.get().b_info(&s, &key)))
+        accessor.with(|mut a| a.get().b_info(&s, &key))
     }
     async fn compare_and_set(
         accessor: &Accessor<HostState, Self>,
@@ -438,24 +425,7 @@ impl hypen::storage::cloud::HostBucketWithStore<HostState> for HostCap {
         expected: Option<u64>,
         value: Vec<u8>,
     ) -> Result<u64, StorageError> {
-        accessor.with(|mut a| {
-            let host = a.get();
-            let b = host.table.get(&s).expect("live bucket");
-            let ck = composite(b, &key);
-            let mut kv = host.kv.lock().unwrap();
-            let current = kv.cloud.get(&ck).map(|e| e.version);
-            let matches = match (expected, current) {
-                (None, None) => true,
-                (Some(e), Some(c)) => e == c,
-                _ => false,
-            };
-            if !matches {
-                return Err(StorageError::Unavailable("version mismatch".into()));
-            }
-            let next = current.unwrap_or(0) + 1;
-            kv.cloud.insert(ck, CloudEntry { value, version: next });
-            Ok(next)
-        })
+        accessor.with(|mut a| a.get().b_compare_and_set(&s, &key, expected, value))
     }
 }
 impl hypen::storage::cloud::HostBucket for HostState {
@@ -471,22 +441,25 @@ impl hypen::storage::cloud::Host for HostState {}
 impl hypen::storage::types::Host for HostState {}
 impl hypen::module::types::Host for HostState {}
 
+impl From<CrossModuleError> for hypen::engine::state::Error {
+    fn from(e: CrossModuleError) -> Self {
+        match e {
+            CrossModuleError::NotFound => Self::NotFound,
+            CrossModuleError::PermissionDenied(grant) => Self::PermissionDenied(grant.into()),
+            // The WIT has no dedicated "limit" case; `module-error` carries
+            // the human-readable reason.
+            CrossModuleError::Limit(why) => Self::ModuleError(why),
+        }
+    }
+}
+
 // Cross-module state capability — async in v0.2, same call-time ACL model.
 impl hypen::engine::state::HostWithStore<HostState> for HostCap {
     async fn read(
         accessor: &Accessor<HostState, Self>,
         module: String,
     ) -> Result<Vec<u8>, hypen::engine::state::Error> {
-        accessor.with(|mut a| {
-            let host = a.get();
-            if !host.reads_allowed.contains(&module) {
-                return Err(hypen::engine::state::Error::PermissionDenied("reads".into()));
-            }
-            host.sibling_states
-                .get(&module)
-                .cloned()
-                .ok_or(hypen::engine::state::Error::NotFound)
-        })
+        Ok(accessor.with(|mut a| a.get().cross.read(&module))?)
     }
 
     async fn dispatch(
@@ -494,17 +467,8 @@ impl hypen::engine::state::HostWithStore<HostState> for HostCap {
         module: String,
         action: hypen::engine::state::Action,
     ) -> Result<(), hypen::engine::state::Error> {
-        accessor.with(|mut a| {
-            let host = a.get();
-            if !host.dispatches_allowed.contains(&module) {
-                return Err(hypen::engine::state::Error::PermissionDenied(
-                    "dispatches".into(),
-                ));
-            }
-            host.xdispatch_queue
-                .push((module, HostAction { name: action.name, payload: action.payload }));
-            Ok(())
-        })
+        let action = HostAction { name: action.name, payload: action.payload };
+        Ok(accessor.with(|mut a| a.get().cross.dispatch(module, action))?)
     }
 
     async fn subscribe(
@@ -513,19 +477,7 @@ impl hypen::engine::state::HostWithStore<HostState> for HostCap {
         path: String,
         on_change: String,
     ) -> Result<(), hypen::engine::state::Error> {
-        accessor.with(|mut a| {
-            let host = a.get();
-            // Observing state is a read: gate on the same `reads` grant.
-            if !host.reads_allowed.contains(&module) {
-                return Err(hypen::engine::state::Error::PermissionDenied("reads".into()));
-            }
-            host.subscribe_queue.push(super::SubscribeRequest {
-                target: module,
-                path,
-                on_change,
-            });
-            Ok(())
-        })
+        Ok(accessor.with(|mut a| a.get().cross.subscribe(module, path, on_change))?)
     }
 }
 impl hypen::engine::state::Host for HostState {}
@@ -545,19 +497,16 @@ impl hypen::time::clock::Host for HostState {
 
 impl hypen::time::clock::HostWithStore<HostState> for HostCap {
     async fn sleep_ms(accessor: &Accessor<HostState, Self>, ms: u64) {
-        let (clock, cap) = accessor.with(|mut a| {
-            let host = a.get();
-            (host.clock.clone(), host.max_sleep)
-        });
+        let clock = accessor.with(|mut a| a.get().clock.clone());
         match clock {
             HostClock::Virtual(c) => {
                 c.fetch_add(ms, Ordering::Relaxed);
             }
             HostClock::Real { .. } => {
-                // Blocking the executor thread is fine here: one guest call
-                // is in flight per host call, and the sleep is capped by the
-                // same budget the epoch deadline enforces.
-                std::thread::sleep(Duration::from_millis(ms).min(cap));
+                // Suspends the guest task on the host's runtime (the host
+                // thread is not parked). No cap needed: the per-call timeout
+                // cancels the call if the sleep outlives the budget.
+                tokio::time::sleep(Duration::from_millis(ms)).await;
             }
         }
     }
@@ -620,25 +569,16 @@ struct InstanceData {
 
 /// Native host for `hypen:module@0.2.0` CM-async components. Sync-facing
 /// ([`ModuleHost`]); each call pumps the store's concurrent event loop to
-/// completion.
+/// completion on the host's runtime, under the per-call deadline.
 pub struct WasmtimeHostAsync {
-    engine: WtEngine,
+    core: Arc<HostCore>,
     modules: HashMap<String, RegisteredModule>,
-    instances: SlotMap<InstKey, InstanceData>,
+    /// `None` marks an instance that trapped or timed out: its store is gone
+    /// and every further call on it returns [`HostError::DeadInstance`].
+    instances: SlotMap<InstKey, Option<InstanceData>>,
     kv: Arc<Mutex<KvBackend>>,
     clock: HostClock,
     limits: ModuleLimits,
-    epoch_stop: Arc<AtomicBool>,
-    ticker: Option<JoinHandle<()>>,
-}
-
-impl Drop for WasmtimeHostAsync {
-    fn drop(&mut self) {
-        self.epoch_stop.store(true, Ordering::Relaxed);
-        if let Some(t) = self.ticker.take() {
-            let _ = t.join();
-        }
-    }
 }
 
 fn key_to_id(k: InstKey) -> ModuleInstanceId {
@@ -654,8 +594,8 @@ impl WasmtimeHostAsync {
         Self::with_limits(ModuleLimits::default())
     }
 
-    /// Create a host with explicit resource limits (memory + per-call
-    /// wall-clock, enforced the same two ways as the sync host).
+    /// Create a host with explicit resource limits (enforced the same way as
+    /// the v0.1 host).
     pub fn with_limits(limits: ModuleLimits) -> Result<Self, HostError> {
         Self::with_options(limits, super::ExecStrategy::default())
     }
@@ -667,49 +607,33 @@ impl WasmtimeHostAsync {
         limits: ModuleLimits,
         strategy: super::ExecStrategy,
     ) -> Result<Self, HostError> {
-        let mut config = Config::new();
-        config.wasm_component_model(true);
-        // CM-async is default-enabled with the `component-model-async`
-        // cargo feature; set it explicitly for self-documentation.
-        config.wasm_component_model_async(true);
-        config.epoch_interruption(true);
-        if strategy == super::ExecStrategy::Interpreter {
-            config
-                .target(super::wasmtime_host::pulley_triple())
-                .map_err(|e| HostError::Runtime(format!("pulley target: {e}")))?;
-        }
-        let engine = WtEngine::new(&config).map_err(|e| HostError::Runtime(e.to_string()))?;
-
-        let epoch_stop = Arc::new(AtomicBool::new(false));
-        let ticker = {
-            let engine = engine.clone();
-            let stop = Arc::clone(&epoch_stop);
-            std::thread::Builder::new()
-                .name("hypen-module-epoch-async".into())
-                .spawn(move || {
-                    while !stop.load(Ordering::Relaxed) {
-                        std::thread::sleep(EPOCH_TICK);
-                        engine.increment_epoch();
-                    }
-                })
-                .map_err(|e| HostError::Runtime(format!("epoch ticker: {e}")))?
-        };
-
-        Ok(Self {
-            engine,
-            modules: HashMap::new(),
-            instances: SlotMap::with_key(),
-            kv: Arc::new(Mutex::new(KvBackend::default())),
-            clock: HostClock::real(),
-            limits,
-            epoch_stop,
-            ticker: Some(ticker),
-        })
+        let storage = Arc::new(Mutex::new(KvBackend::default()));
+        Ok(Self::with_core(limits, HostCore::new(strategy)?, storage))
     }
 
-    /// Back `local`/`app` storage with a write-through JSON file at `path`,
-    /// loading anything a previous process persisted there. Call before
-    /// instantiating modules. `cloud` stays in-memory (sync-service sim).
+    /// Create a host on an existing [`HostCore`] (engine + ticker + runtime)
+    /// and storage backend, so [`super::DualHost`] runs both ABIs on one of
+    /// each.
+    pub(crate) fn with_core(
+        limits: ModuleLimits,
+        core: Arc<HostCore>,
+        storage: Arc<Mutex<KvBackend>>,
+    ) -> Self {
+        Self {
+            core,
+            modules: HashMap::new(),
+            instances: SlotMap::with_key(),
+            kv: storage,
+            clock: HostClock::real(),
+            limits,
+        }
+    }
+
+    /// Back `local`/`app` storage with a JSON snapshot file at `path`,
+    /// loading anything a previous process persisted there (an unreadable or
+    /// other-format file is an error; it is never overwritten). Changes are
+    /// flushed at the end of each module call. Call before instantiating
+    /// modules. `cloud` stays in-memory (sync-service sim).
     pub fn set_storage_path(&mut self, path: impl Into<std::path::PathBuf>) -> Result<(), HostError> {
         let backend =
             KvBackend::file_backed(path.into()).map_err(|e| HostError::Runtime(e.to_string()))?;
@@ -727,13 +651,15 @@ impl WasmtimeHostAsync {
     }
 
     fn build_linker(&self, manifest: &ModuleManifest) -> Result<Linker<HostState>, HostError> {
-        let mut linker: Linker<HostState> = Linker::new(&self.engine);
+        let mut linker: Linker<HostState> = Linker::new(&self.core.engine);
         // p2 WASI coexists with CM-async imports in one linker: wasip2-built
-        // guests still import wasi:io / wasi:cli @0.2.x.
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)
+        // guests still import wasi:io / wasi:cli @0.2.x. The async variant
+        // suspends blocking operations (`poll`, blocking streams) back to
+        // the host's runtime, where the call timeout can cancel them.
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)
             .map_err(|e| HostError::Instantiate(e.to_string()))?;
 
-        // Same link-time capability denial as the sync host.
+        // Same link-time capability denial as the v0.1 host.
         hypen::storage::local::add_to_linker::<HostState, HostCap>(&mut linker, |s| s)
             .map_err(|e| HostError::Instantiate(e.to_string()))?;
         if manifest.grants_storage(StorageScope::App) {
@@ -752,115 +678,128 @@ impl WasmtimeHostAsync {
         hypen::time::clock::add_to_linker::<HostState, HostCap>(&mut linker, |s| s)
             .map_err(|e| HostError::Instantiate(e.to_string()))?;
 
-        // `wasi:http` for async modules, same manifest gate as the sync host.
-        // The p2 sync surface coexists with CM-async imports in one linker
-        // (the wrappers run the request on their own tokio runtime via
-        // `in_tokio`, so no ambient runtime is required) — an async Rust
-        // module blocks its task on the p2 poll while fetching, which is the
+        // `wasi:http` for async modules, same manifest gate as the v0.1
+        // host. The p2 surface coexists with CM-async imports in one linker:
+        // an async Rust module blocks its task on the p2 poll while fetching
+        // (suspending to the host's runtime), which is the
         // constrained-data-access shape until wasi:http p3 stabilizes.
         if manifest.grants_http() {
-            wasmtime_wasi_http::p2::add_only_http_to_linker_sync(&mut linker)
+            wasmtime_wasi_http::p2::add_only_http_to_linker_async(&mut linker)
                 .map_err(|e| HostError::Instantiate(e.to_string()))?;
         }
         Ok(linker)
     }
 
-    fn fresh_store(&self) -> Store<HostState> {
-        let limits = StoreLimitsBuilder::new()
-            .memory_size(self.limits.max_memory_bytes)
-            .build();
+    fn fresh_store(&self, module: &str) -> Store<HostState> {
         let mut store = Store::new(
-            &self.engine,
+            &self.core.engine,
             HostState {
                 table: ResourceTable::new(),
-                limits,
+                limiter: TotalMemoryLimiter::new(self.limits.max_memory_bytes),
                 wasi: WasiCtxBuilder::new().build(),
                 http: WasiHttpCtx::new(),
                 kv: Arc::clone(&self.kv),
+                quota: self.limits.kv_quota(),
+                module: module.to_string(),
                 clock: self.clock.clone(),
-                max_sleep: self.limits.max_call,
-                sibling_states: HashMap::new(),
-                reads_allowed: HashSet::new(),
-                dispatches_allowed: HashSet::new(),
-                xdispatch_queue: Vec::new(),
-                subscribe_queue: Vec::new(),
+                cross: CrossModuleCtx::default(),
             },
         );
-        store.limiter(|s| &mut s.limits);
+        store.limiter(|s| &mut s.limiter);
         store.set_epoch_deadline(self.limits.deadline_ticks());
         store
     }
 
-    fn inst(&mut self, id: ModuleInstanceId) -> Result<&mut InstanceData, HostError> {
-        self.instances
-            .get_mut(id_to_key(id))
-            .ok_or(HostError::DeadInstance)
-    }
-
-    /// Look up an instance and arm its per-call timeout (fresh epoch budget).
-    fn arm(&mut self, id: ModuleInstanceId) -> Result<&mut InstanceData, HostError> {
-        let ticks = self.limits.deadline_ticks();
-        let inst = self.inst(id)?;
-        inst.store.set_epoch_deadline(ticks);
-        Ok(inst)
+    /// Shared tail of every export call: flush storage the call wrote and,
+    /// if it trapped or timed out, kill the instance (drop its store) so
+    /// later calls get [`HostError::DeadInstance`].
+    fn finish<R>(
+        &mut self,
+        id: ModuleInstanceId,
+        result: Result<wasmtime::Result<wasmtime::Result<R>>, super::wasmtime_host::DeadlineExceeded>,
+    ) -> Result<R, HostError> {
+        self.kv.lock().unwrap().flush();
+        let failure = match result {
+            Ok(Ok(Ok(value))) => return Ok(value),
+            Ok(Ok(Err(trap))) | Ok(Err(trap)) => trap.to_string(),
+            Err(deadline) => deadline.to_string(),
+        };
+        if let Some(slot) = self.instances.get_mut(id_to_key(id)) {
+            *slot = None;
+        }
+        Err(HostError::Trap(failure))
     }
 
     /// Install the per-call cross-module context from the instance's
-    /// manifest, mirroring the sync host.
+    /// manifest, mirroring the v0.1 host.
     fn install_call_context(&mut self, id: ModuleInstanceId, siblings: &[SiblingState]) -> Result<(), HostError> {
-        let type_name = self.inst(id)?.type_name.clone();
-        let (reads_allowed, dispatches_allowed) = self
+        let inst = self
+            .instances
+            .get_mut(id_to_key(id))
+            .and_then(Option::as_mut)
+            .ok_or(HostError::DeadInstance)?;
+        let manifest = &self
             .modules
-            .get(&type_name)
-            .map(|m| {
-                (
-                    m.manifest.reads.iter().cloned().collect::<HashSet<_>>(),
-                    m.manifest.dispatches.iter().cloned().collect::<HashSet<_>>(),
-                )
-            })
-            .unwrap_or_default();
-        let inst = self.inst(id)?;
-        let data = inst.store.data_mut();
-        data.sibling_states = siblings.iter().cloned().collect();
-        data.reads_allowed = reads_allowed;
-        data.dispatches_allowed = dispatches_allowed;
-        data.xdispatch_queue.clear();
-        data.subscribe_queue.clear();
+            .get(&inst.type_name)
+            .ok_or_else(|| HostError::UnknownModule(inst.type_name.clone()))?
+            .manifest;
+        inst.store.data_mut().cross.install(manifest, siblings);
         Ok(())
     }
 
-    /// Drain the per-call queues into `output` and clear the context.
-    fn drain_call_context(&mut self, id: ModuleInstanceId, output: &mut super::ReducerOutput) -> Result<(), HostError> {
-        let inst = self.inst(id)?;
-        let data = inst.store.data_mut();
-        output.cross_dispatch = std::mem::take(&mut data.xdispatch_queue);
-        output.subscribe_requests = std::mem::take(&mut data.subscribe_queue);
-        data.sibling_states.clear();
-        data.reads_allowed.clear();
-        data.dispatches_allowed.clear();
-        Ok(())
+    /// Clear the per-call context and, on success, drain the queued
+    /// cross-module requests into the output.
+    fn finish_with_siblings(
+        &mut self,
+        id: ModuleInstanceId,
+        result: Result<Result<hypen::module::types::ReducerOutput, String>, HostError>,
+    ) -> Result<super::ReducerOutput, HostError> {
+        // The instance is gone if the call killed it.
+        let Some(Some(inst)) = self.instances.get_mut(id_to_key(id)) else {
+            return Err(result.err().unwrap_or(HostError::DeadInstance));
+        };
+        let cross = &mut inst.store.data_mut().cross;
+        match result.and_then(|r| r.map_err(HostError::ModuleError)) {
+            Ok(out) => {
+                let mut output = from_wit_output(out);
+                cross.drain_into(&mut output);
+                Ok(output)
+            }
+            Err(e) => {
+                cross.clear();
+                Err(e)
+            }
+        }
     }
 }
 
-/// Drive one concurrent export call to completion on `inst`'s store.
+/// Drive one concurrent export call to completion on instance `$id`.
 ///
 /// `run_concurrent` runs the store's component event loop while polling the
-/// closure; our capability impls resolve without real I/O, so a plain
-/// `block_on` (no tokio) pumps everything, including the guest's suspension
-/// points. Epoch-deadline traps surface as errors from the awaited call.
+/// closure, all on the host's runtime under the per-call deadline: epoch
+/// interruption traps guest code still running at the deadline, and the
+/// timeout cancels a call whose guest task is parked in a host call.
+/// Evaluates to `Result<R, HostError>`; a trap or timeout kills the instance.
 macro_rules! drive {
-    ($inst:expr, |$acc:ident, $bindings:ident| $call:expr) => {{
-        let inst: &mut InstanceData = $inst;
-        // Split borrows: the store is pumped mutably while the closure only
-        // reads the bindings.
-        let $bindings = &inst.bindings;
-        futures_executor::block_on(async {
-            inst.store
-                .run_concurrent(async |$acc| $call.await)
-                .await
-                .map_err(|e| HostError::Trap(e.to_string()))?
-                .map_err(|e| HostError::Trap(e.to_string()))
-        })
+    ($host:expr, $id:expr, |$acc:ident, $bindings:ident| $call:expr) => {{
+        let host: &mut WasmtimeHostAsync = $host;
+        let id: ModuleInstanceId = $id;
+        let budget = host.limits.max_call;
+        let ticks = host.limits.deadline_ticks();
+        match host.instances.get_mut(id_to_key(id)).and_then(Option::as_mut) {
+            None => Err(HostError::DeadInstance),
+            Some(inst) => {
+                inst.store.set_epoch_deadline(ticks);
+                // Split borrows: the store is pumped mutably while the
+                // closure only reads the bindings.
+                let $bindings = &inst.bindings;
+                let store = &mut inst.store;
+                let result = host
+                    .core
+                    .run(budget, store.run_concurrent(async |$acc| $call.await));
+                host.finish(id, result)
+            }
+        }
     }};
 }
 
@@ -871,7 +810,7 @@ impl ModuleHost for WasmtimeHostAsync {
         component_bytes: &[u8],
         manifest: ModuleManifest,
     ) -> Result<(), HostError> {
-        let component = Component::from_binary(&self.engine, component_bytes)
+        let component = Component::from_binary(&self.core.engine, component_bytes)
             .map_err(|e| HostError::Instantiate(e.to_string()))?;
         let linker = self.build_linker(&manifest)?;
         self.modules
@@ -884,24 +823,30 @@ impl ModuleHost for WasmtimeHostAsync {
             .modules
             .get(name)
             .ok_or_else(|| HostError::UnknownModule(name.to_string()))?;
-        let mut store = self.fresh_store();
+        let mut store = self.fresh_store(name);
         // CM-async imports make the store async-required, so instantiation
-        // goes through the async entrypoint (still driven by block_on).
-        let bindings = futures_executor::block_on(ModuleX::instantiate_async(
-            &mut store,
-            &reg.component,
-            &reg.linker,
-        ))
-        .map_err(|e| HostError::Instantiate(e.to_string()))?;
-        let key = self.instances.insert(InstanceData {
+        // goes through the async entrypoint — under the same deadline as an
+        // export call, since component start runs guest code.
+        let started = self.core.run(
+            self.limits.max_call,
+            ModuleX::instantiate_async(&mut store, &reg.component, &reg.linker),
+        );
+        // Persist anything the component's start wrote, even if it failed.
+        self.kv.lock().unwrap().flush();
+        let bindings = started
+            .map_err(|deadline| HostError::Instantiate(deadline.to_string()))?
+            .map_err(|e| HostError::Instantiate(e.to_string()))?;
+        let key = self.instances.insert(Some(InstanceData {
             store,
             bindings,
             type_name: name.to_string(),
-        });
+        }));
         Ok(key_to_id(key))
     }
 
     fn destroy(&mut self, id: ModuleInstanceId) -> Result<(), HostError> {
+        // A dead (trapped / timed-out) instance still occupies its slot until
+        // destroyed, so destroying it succeeds.
         self.instances
             .remove(id_to_key(id))
             .ok_or(HostError::DeadInstance)?;
@@ -910,8 +855,7 @@ impl ModuleHost for WasmtimeHostAsync {
 
     fn init(&mut self, id: ModuleInstanceId, config: &[u8]) -> Result<Vec<u8>, HostError> {
         let config = config.to_vec();
-        let inst = self.arm(id)?;
-        drive!(inst, |acc, bindings| bindings.call_init(acc, config.clone()))?
+        drive!(self, id, |acc, bindings| bindings.call_init(acc, config))?
             .map_err(HostError::ModuleError)
     }
 
@@ -925,17 +869,8 @@ impl ModuleHost for WasmtimeHostAsync {
         self.install_call_context(id, siblings)?;
         let state = state.to_vec();
         let wit_action = ActionWit { name: action.name, payload: action.payload };
-        let inst = self.arm(id)?;
-        let out = drive!(inst, |acc, bindings| bindings.call_dispatch(
-            acc,
-            state.clone(),
-            wit_action.clone()
-        ))?
-        .map_err(HostError::ModuleError)?;
-
-        let mut output = from_wit_output(out);
-        self.drain_call_context(id, &mut output)?;
-        Ok(output)
+        let result = drive!(self, id, |acc, bindings| bindings.call_dispatch(acc, state, wit_action));
+        self.finish_with_siblings(id, result)
     }
 
     fn on_activated(
@@ -946,35 +881,27 @@ impl ModuleHost for WasmtimeHostAsync {
     ) -> Result<super::ReducerOutput, HostError> {
         self.install_call_context(id, siblings)?;
         let state = state.to_vec();
-        let inst = self.arm(id)?;
-        let out = drive!(inst, |acc, bindings| bindings.call_on_activated(acc, state.clone()))?
-            .map_err(HostError::ModuleError)?;
-
-        let mut output = from_wit_output(out);
-        self.drain_call_context(id, &mut output)?;
-        Ok(output)
+        let result = drive!(self, id, |acc, bindings| bindings.call_on_activated(acc, state));
+        self.finish_with_siblings(id, result)
     }
 
     fn on_deactivated(&mut self, id: ModuleInstanceId, state: &[u8]) -> Result<super::ReducerOutput, HostError> {
         let state = state.to_vec();
-        let inst = self.arm(id)?;
-        let out = drive!(inst, |acc, bindings| bindings.call_on_deactivated(acc, state.clone()))?
+        let out = drive!(self, id, |acc, bindings| bindings.call_on_deactivated(acc, state))?
             .map_err(HostError::ModuleError)?;
         Ok(from_wit_output(out))
     }
 
     fn on_destroyed(&mut self, id: ModuleInstanceId, state: &[u8]) -> Result<(), HostError> {
         let state = state.to_vec();
-        let inst = self.arm(id)?;
-        drive!(inst, |acc, bindings| bindings.call_on_destroyed(acc, state.clone()))?
+        drive!(self, id, |acc, bindings| bindings.call_on_destroyed(acc, state))?
             .map_err(HostError::ModuleError)
     }
 
     fn actions(&mut self, id: ModuleInstanceId) -> Result<Vec<String>, HostError> {
-        let inst = self.arm(id)?;
         // `actions` is sync in the WIT but lifted onto the concurrent path
         // (`exports: { "actions": async | store }`) because the store is
         // async-required once CM-async imports are linked.
-        drive!(inst, |acc, bindings| bindings.call_actions(acc))
+        drive!(self, id, |acc, bindings| bindings.call_actions(acc))
     }
 }

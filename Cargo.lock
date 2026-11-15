@@ -2958,10 +2958,10 @@ dependencies = [
 name = "hypen-engine"
 version = "0.6.7"
 dependencies = [
+ "base64",
  "console_error_panic_hook",
  "criterion",
  "exprimo",
- "futures-executor",
  "hypen-parser",
  "hypen-tailwind-parse",
  "im",
@@ -2979,6 +2979,7 @@ dependencies = [
  "tempfile",
  "thiserror 1.0.69",
  "tiny_http",
+ "tokio",
  "uniffi",
  "wasm-bindgen",
  "wasmtime",

@@ -78,8 +78,12 @@ What each module does:
   (`config_seeds_init_from_module_declaration_args`).
 - **effects-module** — emits engine-native effects (`Navigate`, `Delay`) to
   exercise host effect handling.
-- **limits-module** — deliberately misbehaves (spins / grows memory) to
-  verify the epoch timeout and memory cap.
+- **limits-module** — deliberately misbehaves to verify the sandbox
+  (`module-x` world; imports `hypen:storage/app`, so it needs the `app`
+  grant): spins / grows memory (epoch timeout, total-memory cap), `block`
+  and `init("block")` block in a host call (wall-clock deadline),
+  `kv-set` / `kv-fill` / `kv-get` (storage quotas),
+  `flood-dispatch` / `flood-subscribe` (cross-module request bounds).
 - **xmod-module** — cross-module fixture (`module-x` world): `pull` reads
   the sibling `counter`'s state, `bump` dispatches to it, `watch` /
   `on-activated` subscribe to it.

@@ -16,13 +16,11 @@
 //!
 //! Run with: `cargo test --features module-loader --test test_module_host_async`
 
-#![cfg(feature = "module-loader")]
-
 use std::time::{Duration, Instant};
 
 use hypen_engine::module_host::{
-    HostAction, ModuleHost, ModuleLimits, ModuleManifest, ReducerOutput, StorageScope,
-    WasmtimeHostAsync,
+    HostAction, HostError, ModuleHost, ModuleLimits, ModuleManifest, ReducerOutput,
+    StorageScope, WasmtimeHostAsync,
 };
 
 const ASYNC_COUNTER: &[u8] = include_bytes!("fixtures/async_counter_module.wasm");
@@ -462,4 +460,155 @@ fn async_storage_survives_host_via_file() {
     let id = host.instantiate("counter").unwrap();
     let restored = host.init(id, b"{}").unwrap();
     assert_eq!(count(&restored), 3, "state came back from disk");
+}
+
+// ── sandbox hardening (same properties as the v0.1 host) ────────────────────
+
+/// Upper bound for "returned at about `max_call`".
+const DEADLINE_SLACK: Duration = Duration::from_secs(3);
+
+/// `hypen:time.sleep-ms` suspends the guest task on the host's runtime; a
+/// sleep far past the per-call budget is cancelled at the deadline (it is
+/// not capped-then-resumed, and it does not park the host thread for an
+/// hour). The instance is dead afterwards.
+#[test]
+fn async_sleep_past_the_deadline_is_cancelled() {
+    let limits = ModuleLimits {
+        max_call: Duration::from_millis(300),
+        ..ModuleLimits::default()
+    };
+    let mut host = WasmtimeHostAsync::with_limits(limits).unwrap();
+    host.register("counter", ASYNC_COUNTER, ModuleManifest::all("counter"))
+        .unwrap();
+    let id = host.instantiate("counter").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+
+    let started = Instant::now();
+    let err = host
+        .dispatch(id, &state, HostAction::new("tick", br#"{"ms":3600000}"#.to_vec()), &[])
+        .unwrap_err();
+    let elapsed = started.elapsed();
+    assert!(elapsed >= Duration::from_millis(300), "ran its budget: {elapsed:?}");
+    assert!(elapsed < DEADLINE_SLACK, "cancelled at the deadline, took {elapsed:?}");
+    assert!(matches!(err, HostError::Trap(_)), "{err}");
+    assert!(format!("{err}").contains("wall-clock budget"), "{err}");
+
+    let again = host.dispatch(id, &state, HostAction::new("increment", b"{}".to_vec()), &[]);
+    assert!(matches!(again, Err(HostError::DeadInstance)), "{again:?}");
+    assert!(matches!(host.actions(id), Err(HostError::DeadInstance)));
+    host.destroy(id).unwrap();
+
+    // A fresh instance of the same module works.
+    let id2 = host.instantiate("counter").unwrap();
+    let state = host.init(id2, b"{}").unwrap();
+    host.dispatch(id2, &state, HostAction::new("increment", b"{}".to_vec()), &[])
+        .unwrap();
+}
+
+/// The virtual clock still resumes instantly, however long the sleep.
+#[test]
+fn async_virtual_clock_sleep_does_not_wait() {
+    let limits = ModuleLimits {
+        max_call: Duration::from_secs(2),
+        ..ModuleLimits::default()
+    };
+    let mut host = WasmtimeHostAsync::with_limits(limits).unwrap();
+    let clock = host.set_virtual_clock(1_000);
+    host.register("counter", ASYNC_COUNTER, ModuleManifest::all("counter"))
+        .unwrap();
+    let id = host.instantiate("counter").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+
+    let started = Instant::now();
+    let out = host
+        .dispatch(id, &state, HostAction::new("tick", br#"{"ms":3600000}"#.to_vec()), &[])
+        .unwrap();
+    assert!(started.elapsed() < Duration::from_secs(2));
+    let v: serde_json::Value = serde_json::from_slice(&out.state.unwrap()).unwrap();
+    assert_eq!(v["slept_ms"], 3_600_000);
+    assert_eq!(clock.load(std::sync::atomic::Ordering::Relaxed), 3_601_000);
+}
+
+/// `wasi:http` to a server that accepts and never answers: the async
+/// reducer's fetch is cancelled at the deadline instead of hanging the host.
+#[test]
+fn async_http_request_to_a_silent_server_is_cancelled_at_the_deadline() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut held = Vec::new();
+        while let Ok((stream, _)) = listener.accept() {
+            held.push(stream);
+        }
+    });
+
+    let limits = ModuleLimits {
+        max_call: Duration::from_millis(500),
+        ..ModuleLimits::default()
+    };
+    let mut host = WasmtimeHostAsync::with_limits(limits).unwrap();
+    host.register("counter", ASYNC_COUNTER, ModuleManifest::all("counter"))
+        .unwrap();
+    let id = host.instantiate("counter").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+
+    let payload = format!("{{\"url\":\"http://127.0.0.1:{port}/data\"}}");
+    let started = Instant::now();
+    let res = host.dispatch(id, &state, HostAction::new("fetch", payload.into_bytes()), &[]);
+    let elapsed = started.elapsed();
+    assert!(matches!(res, Err(HostError::Trap(_))), "{res:?}");
+    assert!(elapsed >= Duration::from_millis(500), "ran its budget: {elapsed:?}");
+    assert!(elapsed < DEADLINE_SLACK, "cancelled at the deadline, took {elapsed:?}");
+    assert!(matches!(host.actions(id), Err(HostError::DeadInstance)));
+}
+
+/// `local` storage is private to the registered module on the async host
+/// too: the same component registered under two names keeps two counts,
+/// although both use the identical (tier, namespace, key).
+#[test]
+fn async_local_storage_is_private_to_each_module() {
+    let mut host = WasmtimeHostAsync::new().unwrap();
+    host.register("a", ASYNC_COUNTER, ModuleManifest::all("a")).unwrap();
+    host.register("b", ASYNC_COUNTER, ModuleManifest::all("b")).unwrap();
+
+    let a = host.instantiate("a").unwrap();
+    let mut state = host.init(a, b"{}").unwrap();
+    for _ in 0..3 {
+        state = host
+            .dispatch(a, &state, HostAction::new("increment", b"{}".to_vec()), &[])
+            .unwrap()
+            .state
+            .unwrap();
+    }
+    assert_eq!(count(&state), 3);
+
+    // Module B warm-starts from *its own* (empty) local storage.
+    let b = host.instantiate("b").unwrap();
+    assert_eq!(count(&host.init(b, b"{}").unwrap()), 0, "b must not see a's count");
+    // ...while another instance of A sees A's persisted count.
+    let a2 = host.instantiate("a").unwrap();
+    assert_eq!(count(&host.init(a2, b"{}").unwrap()), 3);
+}
+
+/// Storage quotas apply on the async host: with a budget too small for the
+/// counter's persisted state, the awaited `set` fails with `quota-exceeded`
+/// (surfaced by the module as its error) and the instance stays alive.
+#[test]
+fn async_storage_writes_are_bounded_by_quota() {
+    let limits = ModuleLimits {
+        max_storage_value_bytes: 4,
+        ..ModuleLimits::default()
+    };
+    let mut host = WasmtimeHostAsync::with_limits(limits).unwrap();
+    host.register("counter", ASYNC_COUNTER, ModuleManifest::all("counter"))
+        .unwrap();
+    let id = host.instantiate("counter").unwrap();
+    let state = host.init(id, b"{}").unwrap();
+    let err = host
+        .dispatch(id, &state, HostAction::new("increment", b"{}".to_vec()), &[])
+        .unwrap_err();
+    assert!(matches!(err, HostError::ModuleError(_)), "{err}");
+    assert!(format!("{err}").contains("QuotaExceeded"), "{err}");
+    // A module error is not a trap: the instance is still callable.
+    host.actions(id).unwrap();
 }
