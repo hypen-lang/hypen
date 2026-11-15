@@ -26,6 +26,13 @@ authors = ["Hypen Contributors"]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 
+# rav1d (the desktop renderer's AVIF decoder) unoptimised takes seconds
+# per wallpaper-sized image; dev builds decode with it optimised.
+[profile.dev.package.rav1d]
+opt-level = 3
+debug-assertions = false
+overflow-checks = false
+
 [profile.release]
 opt-level = "z"
 lto = true

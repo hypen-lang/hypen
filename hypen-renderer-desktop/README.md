@@ -29,9 +29,16 @@ the `video` feature, Video `src`) resolve by mode:
   with nested `<image>` references disabled for the same reason.
 
 SVG sources (`data:image/svg+xml;utf8,…`, base64, or `.svg` URLs) are
-rasterised with resvg. AVIF needs the opt-in `avif` feature (system dav1d:
-`apt install libdav1d-dev` / `brew install dav1d`); without it an AVIF source
-keeps its placeholder or background colour.
+rasterised with resvg; their `<text>` uses the renderer's own system font
+index (generic `serif` / `sans-serif` / `monospace` and `font-weight` resolve
+as in the app's text). AVIF decodes through the default `avif` feature —
+pure Rust (`avif-parse` + `rav1d`), no system library; `avif-asm` enables
+rav1d's assembly (needs `nasm`). With `default-features = false` and no
+`avif`, an AVIF source keeps its placeholder or background colour.
+
+Text honours `fontFamily` lists the CSS way (`"Georgia, 'Times New Roman',
+serif"`: the first installed family wins; `serif`, `sans-serif`,
+`monospace`, `system-ui` map to the platform's generic faces).
 
 ## Screenshots
 

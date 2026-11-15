@@ -1213,13 +1213,17 @@ pub(crate) struct Decoded {
     pub(crate) natural: (f32, f32),
 }
 
-/// Render an SVG document with resvg into a premultiplied pixmap. No
-/// font database and no external resources are loaded: an image source
-/// can't make the renderer read local files through `<image href>` /
-/// `@font-face`, which matters in remote mode (see the policy above).
+/// Render an SVG document with resvg into a premultiplied pixmap.
+/// `<text>` is shaped with the renderer's own system font index
+/// ([`crate::text::svg_font_db`], shared, not rescanned). No external
+/// resources are loaded: an image source can't make the renderer read
+/// local files through `<image href>` / `@font-face` — usvg only ever
+/// picks from the faces it is handed — which matters in remote mode
+/// (see the policy above).
 fn rasterize_svg(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
     let opts = resvg::usvg::Options {
         resources_dir: None,
+        fontdb: crate::text::svg_font_db(),
         // Refuse every nested `<image>` reference rather than resolving
         // it against the filesystem.
         image_href_resolver: resvg::usvg::ImageHrefResolver {
@@ -1275,6 +1279,16 @@ fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
     if looks_like_svg(bytes) {
         return rasterize_svg(bytes, debug_label);
     }
+    #[cfg(feature = "avif")]
+    if super::avif::looks_like_avif(bytes) {
+        return match super::avif::decode_rgba8(bytes) {
+            Ok((w, h, data)) => premultiplied_pixmap(w, h, data),
+            Err(e) => {
+                log::warn!("image: failed decoding {}: {e}", truncate_label(debug_label));
+                None
+            }
+        };
+    }
     let img = match image::load_from_memory(bytes) {
         Ok(d) => d,
         Err(e) => {
@@ -1284,8 +1298,12 @@ fn decode_bytes(bytes: &[u8], debug_label: &str) -> Option<Decoded> {
     };
     let rgba = img.to_rgba8();
     let (w, h) = rgba.dimensions();
+    premultiplied_pixmap(w, h, rgba.into_raw())
+}
+
+/// Straight-alpha RGBA8 → the premultiplied pixmap the painters draw.
+fn premultiplied_pixmap(w: u32, h: u32, mut data: Vec<u8>) -> Option<Decoded> {
     let size = IntSize::from_wh(w, h)?;
-    let mut data = rgba.into_raw();
     // image gives us straight alpha; tiny-skia wants premultiplied.
     for px in data.chunks_exact_mut(4) {
         let a = px[3] as u32;
@@ -1743,6 +1761,34 @@ mod tests {
         let svg = br#"<svg xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink" width="8" height="8"><image href="/etc/hostname" width="8" height="8"/></svg>"#;
         let pm = decode_bytes(svg, "test://nested-image.svg").expect("still renders").pixmap;
         assert!(pm.pixels().iter().all(|p| p.alpha() == 0), "nested href must not load");
+    }
+
+    /// Ink coverage of an SVG `<text>` glyph, rendered through the same
+    /// path as an `Image` source.
+    fn svg_text_ink(family: &str, weight: u16, glyph: &str) -> usize {
+        let svg = format!(
+            r##"<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128"><rect width="128" height="128" fill="#000"/><text x="64" y="100" text-anchor="middle" font-family="{family}" font-size="96" font-weight="{weight}" fill="#fff">{glyph}</text></svg>"##
+        );
+        let pm = decode_bytes(svg.as_bytes(), "test://text.svg").expect("renders").pixmap;
+        pm.pixels().iter().filter(|p| p.red() > 128).count()
+    }
+
+    /// movie-discovery's poster monogram and radio's station tiles are
+    /// SVG `<text>`; resvg was built without text support, so only the
+    /// shapes around the letters were drawn.
+    #[test]
+    fn svg_text_is_drawn_with_the_renderer_fonts() {
+        let ink = svg_text_ink("Georgia, 'Times New Roman', serif", 700, "I");
+        assert!(ink > 200, "the monogram letter must be inked, got {ink} px");
+        let ink = svg_text_ink("system-ui,-apple-system,Segoe UI,sans-serif", 700, "R");
+        assert!(ink > 200, "the station tile letter must be inked, got {ink} px");
+    }
+
+    #[test]
+    fn svg_text_honours_font_weight() {
+        let regular = svg_text_ink("serif", 400, "W");
+        let bold = svg_text_ink("serif", 700, "W");
+        assert!(bold > regular, "bold must pick the bold face: {bold} vs {regular}");
     }
 
     #[test]
