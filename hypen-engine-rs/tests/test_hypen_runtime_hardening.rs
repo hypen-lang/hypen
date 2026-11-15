@@ -879,6 +879,42 @@ fn a_slow_but_timely_body_is_accepted() {
     assert_eq!(r.json()["state"]["count"], 1);
 }
 
+/// A chunked body declares no length; it is read under the same deadline.
+#[test]
+fn chunked_bodies_are_accepted_and_timed_like_any_other() {
+    let s = Server::start(&[COUNTER, "--grant-storage", "cloud", "--request-timeout-ms", "400"]);
+    let head = format!(
+        "POST /dispatch HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\
+         Content-Type: application/json\r\nTransfer-Encoding: chunked\r\n\r\n",
+        s.host()
+    );
+    let body = r#"{"action":"increment"}"#;
+    let (first, rest) = body.split_at(8);
+    let chunk = |data: &str| format!("{:x}\r\n{data}\r\n", data.len());
+    let read_reply = |mut stream: TcpStream| {
+        stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+        let mut raw = Vec::new();
+        let _ = stream.read_to_end(&mut raw);
+        Response::parse(&raw)
+    };
+
+    // Sent promptly, in two chunks: dispatched.
+    let mut prompt = TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+    prompt.write_all(format!("{head}{}{}0\r\n\r\n", chunk(first), chunk(rest)).as_bytes()).unwrap();
+    let r = read_reply(prompt);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["state"]["count"], 1);
+
+    // Stalled after the first chunk until past the deadline: 408, not run.
+    let mut slow = TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+    slow.write_all(format!("{head}{}", chunk(first)).as_bytes()).unwrap();
+    std::thread::sleep(Duration::from_millis(1200));
+    assert_eq!(s.get("/state").status, 200, "others are served meanwhile");
+    slow.write_all(format!("{}0\r\n\r\n", chunk(rest)).as_bytes()).unwrap();
+    read_reply(slow).error(408, "request_timeout");
+    assert_eq!(count(&s), json!(1));
+}
+
 /// Refusing a request must not wait for a body the client never sends, on
 /// the accept loop or in a slot: refused uploads that stall — more of them
 /// than there are slots — are answered at once and leave the server free.

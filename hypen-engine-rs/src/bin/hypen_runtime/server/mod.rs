@@ -336,7 +336,9 @@ fn head_of(request: &tiny_http::Request) -> RequestHead {
 }
 
 /// How many declared body bytes `tiny_http` has not yet read for `request`
-/// — what dropping it would wait for (see the module docs).
+/// — what dropping it would wait for (see the module docs). A chunked body
+/// declares no length and is not drained on drop, so it counts as none here;
+/// *reading* one can still block (see [`read_body_within`]).
 fn unread_body(request: &tiny_http::Request) -> usize {
     let declared = request.body_length().unwrap_or(0);
     let expects_continue = request.headers().iter().any(|h| h.field.equiv("Expect"));
@@ -434,6 +436,14 @@ fn reason_phrase(status: u16) -> &'static str {
 /// deadline passed; the request stays with the helper thread, which answers
 /// `408` when its read returns, and the caller has nothing to answer.
 fn read_body_within(mut request: tiny_http::Request, timeout: Duration) -> Option<BodyResult> {
+    // The common case — a small body `tiny_http` already holds, or none —
+    // cannot wait on the client, and needs no helper thread.
+    let chunked = request.headers().iter().any(|h| h.field.equiv("Transfer-Encoding"));
+    if unread_body(&request) == 0 && !chunked {
+        let body = request::read_body(request.as_reader(), request::MAX_BODY_BYTES);
+        return Some((request, body));
+    }
+
     // Rendezvous channel: the helper's `send` succeeds only if the handler
     // is still waiting, so the request is always owned by exactly one side —
     // it can neither be answered twice nor dropped unanswered.
