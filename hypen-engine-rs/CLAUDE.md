@@ -71,11 +71,23 @@ hypen-engine-rs/src/
 │   └── tests.rs              # Subsystem tests: HostedModules + bare EngineCore + scripted host, no Engine
 │
 ├── module_host/              # WASM Component module hosting (`hypen:module`, see /wit/ENGINE_INTEGRATION.md)
-│   ├── mod.rs                # ModuleHost trait + value types (always compiled; `hosted::HostedModules` holds Option<Box<dyn ModuleHost>>)
+│   ├── mod.rs                # ModuleHost trait + value types (always compiled; `hosted::HostedModules` holds Option<Box<dyn ModuleHost>>) + re-exports
 │   ├── registry.rs           # ModuleRegistry / BundledRegistry
-│   ├── kv.rs                 # Storage backend shared by the wasmtime hosts: per-module `local` partitions, quotas, per-call flush (module-loader)
-│   ├── wasmtime_host.rs      # WasmtimeHost: v0.1 sync world; also ModuleLimits, HostCore (engine + epoch ticker + tokio runtime), TotalMemoryLimiter (module-loader, native only)
-│   ├── wasmtime_host_async.rs # WasmtimeHostAsync: v0.2 CM-async world (module-loader, native only)
+│   ├── kv.rs                 # Storage backend of the wasmtime hosts: ModuleName, per-module `local` partitions, typed entry keys, quotas, per-call flush (module-loader)
+│   ├── wasmtime/             # The native hosts (module-loader, native only): one implementation, generic over the module ABI
+│   │   ├── mod.rs            # Sandbox model (module docs); WasmtimeHost = Host<V01>, WasmtimeHostAsync = Host<V02>
+│   │   ├── host.rs           # Host<A: Abi> + its ModuleHost impl; the Abi trait (what a bindgen! world must supply)
+│   │   ├── core.rs           # HostCore (engine + epoch ticker + tokio runtime), Deadline, ExecStrategy
+│   │   ├── limits.rs         # ModuleLimits, TotalMemoryLimiter, host-side bounds (handles, request sizes)
+│   │   ├── store.rs          # HostState: per-instance store data shared by both ABIs, WASI ctx, HostClock
+│   │   ├── linker.rs         # Capability, import inspection, manifest-gated linker construction
+│   │   ├── storage.rs        # `hypen:storage` bucket operations over KvBackend
+│   │   ├── cross_module.rs   # `hypen:engine/state`: ACL-checked read/dispatch/subscribe, request bounds
+│   │   ├── instances.rs      # Instance table, InstanceSlot::{Live, Dead { reason }}, id tagging
+│   │   ├── error.rs          # Every failure → HostError mapping (module + export + cause)
+│   │   ├── wit_glue.rs       # Generated-type ⇄ neutral-type conversions (one macro, invoked per ABI)
+│   │   ├── v01.rs            # hypen:module@0.1.0: bindgen! + forwarding impls + Abi adapter
+│   │   └── v02.rs            # hypen:module@0.2.0 (CM-async): same, plus hypen:time
 │   ├── dual.rs               # DualHost: sniffs a component's ABI and routes to the matching host
 │   └── bridged_host.rs       # BridgedHost: delegates to a JS host (module-loader-bridged, wasm32 only)
 │
@@ -235,14 +247,30 @@ cargo test --test test_module_host_cascade   # reducer-output fold (ACLs, cascad
 cargo test --lib hosted::                    # the subsystem without an Engine: bad paths, failure report, names, snapshots, paths
 ```
 
-Module-host sandbox (both wasmtime hosts; details in the `wasmtime_host.rs` / `kv.rs` module docs):
-every guest entry is an async wasmtime call on the host's own current-thread tokio runtime, bounded
-by `ModuleLimits::max_call` twice over — epoch interruption for guest CPU, `tokio::time::timeout`
-for time parked in host calls (wasi:io poll, wasi:http, `hypen:time.sleep-ms`). A trapped or
-timed-out instance is dead (`HostError::DeadInstance` afterwards). `max_memory_bytes` is a total
-over all of an instance's memories and tables. `local` storage is partitioned by registered module
-name, `app`/`cloud` are shared by grant; writes are quota-checked. Manifests are deny-by-default
-(`ModuleManifest::all` is the explicit grant-everything constructor).
+Module-host sandbox (one implementation for both ABIs; the model is stated in the
+`module_host/wasmtime/mod.rs` module docs, storage in `kv.rs`):
+- **Link time**: manifests are deny-by-default (`ModuleManifest::all` is the explicit
+  grant-everything constructor). An ungranted storage scope or `wasi:http` is not linked; the
+  instantiation error names the import and the missing grant. `register` rejects bytes that are
+  not a component of the host's world and says which (not wasm / core module / other ABI version
+  / unlinkable imports / missing exports).
+- **Call time**: every guest entry is an async wasmtime call on the host's own current-thread
+  tokio runtime, bounded by `ModuleLimits::max_call` twice over — epoch interruption for guest
+  CPU, `tokio::time::timeout` for time parked in host calls (wasi:io poll, wasi:http,
+  `hypen:time.sleep-ms`). `max_memory_bytes` is a total over all of an instance's memories and
+  tables. Open bucket handles, namespace length, the resource table and cross-module requests
+  are bounded host-side.
+- **Death**: a trapped or timed-out instance is dead — `HostError::DeadInstance` afterwards,
+  `death_reason(id)` says what killed it. An export returning `Err(string)` is a `ModuleError`
+  and kills nothing. Errors name the module and the export (`error.rs` has the mapping table).
+- **Storage**: `local` is partitioned by registered module name, `app`/`cloud` are shared by
+  grant; writes are quota-checked and flushed once per call. A failed flush is logged with its
+  path and retried; it never costs the caller the guest's result (`flush_storage()` surfaces it).
+- **Re-register**: live instances keep the code and manifest they were created with; ids come
+  from a process-wide counter, so a stale or foreign id can only miss.
+
+A fix to quota logic, ACL checks, the deadline policy or dead-instance handling belongs in the
+shared files, never in `v01.rs` / `v02.rs` (those are `bindgen!` glue).
 
 `Engine::dispatch_action` is the renderer-facing entry: its input is client-controlled, and with or
 without a module instance wired it is resolved by `route_ui_action` first (a `__hypen_dispatch`
