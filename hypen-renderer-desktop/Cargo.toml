@@ -103,9 +103,10 @@ futures-util = "0.3"
 rfd = "0.17"
 sha2 = "0.10"
 
-# Phase 13: Image / Icon element decoding. PNG + JPEG cover the
-# example apps; everything else is a placeholder until we wire HTTP.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Phase 13: Image / Icon element decoding. PNG + JPEG + WebP cover the
+# example apps' own assets; ICO, GIF and BMP are what third-party
+# favicons (Radio's station art) come as.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "ico", "gif", "bmp"] }
 
 # Feature `avif`: pure-Rust AVIF (see the feature comment above). rav1d's
 # default features include its assembly, which needs `nasm`; the

@@ -152,10 +152,14 @@ fn cache() -> &'static ImageCache {
     static CACHE: OnceLock<ImageCache> = OnceLock::new();
     CACHE.get_or_init(|| {
         let (work_tx, work_rx) = mpsc::channel::<String>();
-        std::thread::Builder::new()
-            .name("hypen-image-fetch".into())
-            .spawn(move || run_image_worker(work_rx))
-            .expect("spawn hypen-image-fetch worker");
+        let work_rx = Arc::new(Mutex::new(work_rx));
+        for i in 0..IMAGE_FETCH_WORKERS {
+            let rx = Arc::clone(&work_rx);
+            std::thread::Builder::new()
+                .name(format!("hypen-image-fetch-{i}"))
+                .spawn(move || run_image_worker(&rx))
+                .expect("spawn hypen-image-fetch worker");
+        }
         ImageCache {
             entries: Mutex::new(IndexMap::new()),
             work_tx,
@@ -1140,8 +1144,26 @@ fn resolve_source(src: &str) -> CacheEntry {
     }
 }
 
-fn run_image_worker(rx: mpsc::Receiver<String>) {
-    while let Ok(src) = rx.recv() {
+/// How many sources are fetched / decoded at once. One worker meant one
+/// slow server stalled every image queued behind it: Radio's station art
+/// (`/art/<uuid>`) is resolved upstream per station, a cold one can take
+/// the worker's full 6 s upstream timeout, and a 40-row result list then
+/// filled in one tile at a time — rows below the first slow favicon stayed
+/// blank for tens of seconds while Chrome, fetching ~6 at a time per host,
+/// showed them all. Four keeps a slow response from serialising the rest
+/// while bounding peak decode memory (each decode may be large; see
+/// [`DECODED_CACHE_MAX_BYTES`]).
+const IMAGE_FETCH_WORKERS: usize = 4;
+
+fn run_image_worker(rx: &Mutex<mpsc::Receiver<String>>) {
+    loop {
+        // Only one idle worker waits on the channel at a time; it drops
+        // the lock as soon as it has a job, so the others can take the
+        // next one while it fetches.
+        let next = rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+        let Ok(src) = next else {
+            break;
+        };
         let entry = resolve_source(&src);
         {
             let mut entries = cache().entries.lock().expect("image cache poisoned");
@@ -1837,6 +1859,89 @@ mod tests {
                 1,
                 "{label}: first paint and layout don't decode again"
             );
+        }
+    }
+
+    /// One slow server must not hold up every other image: with a single
+    /// fetch worker, Radio rows below a cold `/art/<uuid>` favicon stayed
+    /// blank until it answered. A fast source queued AFTER a slow one now
+    /// lands while the slow one is still in flight.
+    #[test]
+    fn a_slow_source_does_not_block_the_sources_queued_behind_it() {
+        use std::io::Write;
+        use std::net::TcpListener;
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().unwrap().port();
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let release_server = Arc::clone(&release);
+        std::thread::spawn(move || {
+            for stream in listener.incoming().take(2) {
+                let mut stream = stream.unwrap();
+                let release = Arc::clone(&release_server);
+                std::thread::spawn(move || {
+                    let mut buf = [0u8; 1024];
+                    let n = stream.read(&mut buf).unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]).to_string();
+                    if req.starts_with("GET /slow") {
+                        // Held until the test has seen the fast one land.
+                        release.wait();
+                    }
+                    let body = tiny_png_bytes();
+                    let head = format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: image/png\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                        body.len()
+                    );
+                    let _ = stream.write_all(head.as_bytes());
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+        let slow = format!("http://127.0.0.1:{port}/slow.png");
+        let fast = format!("http://127.0.0.1:{port}/fast.png");
+        ensure_loaded(&slow);
+        // Give the first worker time to pick the slow job up.
+        std::thread::sleep(Duration::from_millis(100));
+        ensure_loaded(&fast);
+        let state = |src: &str| match cache().entries.lock().unwrap().get(src) {
+            Some(CacheEntry::Loaded(_)) => "loaded",
+            Some(CacheEntry::Loading) => "loading",
+            Some(CacheEntry::Failed) => "failed",
+            None => "evicted",
+        };
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while state(&fast) == "loading" && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(state(&fast), "loaded", "the fast image landed");
+        assert_eq!(state(&slow), "loading", "while the slow one is still in flight");
+        release.wait();
+        let deadline = std::time::Instant::now() + Duration::from_secs(8);
+        while state(&slow) == "loading" && std::time::Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(state(&slow), "loaded");
+    }
+
+    /// Station favicons come in whatever format the station uploaded:
+    /// `.ico` (the classic favicon), GIF and BMP decode alongside PNG /
+    /// JPEG / WebP.
+    #[test]
+    fn favicon_formats_decode() {
+        let img = image::DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
+            16,
+            12,
+            image::Rgba([0x10, 0x80, 0xf0, 0xff]),
+        ));
+        for format in [
+            image::ImageFormat::Ico,
+            image::ImageFormat::Gif,
+            image::ImageFormat::Bmp,
+        ] {
+            let mut buf = std::io::Cursor::new(Vec::new());
+            img.write_to(&mut buf, format).expect("encode");
+            let decoded = decode_bytes(buf.get_ref(), &format!("test://favicon.{format:?}"))
+                .unwrap_or_else(|| panic!("{format:?} must decode"));
+            assert_eq!(decoded.natural, (16.0, 12.0), "{format:?}");
         }
     }
 
