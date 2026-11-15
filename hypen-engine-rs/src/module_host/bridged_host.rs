@@ -13,16 +13,25 @@
 //!
 //! Capability grants ride on the manifest wire object passed to
 //! `register` (see [`ManifestWire`]): `storage` lists the granted
-//! scopes and `http` says whether `wasi:http` egress is granted. The
-//! shim enforces both — for `http: false` it withholds its fetch-backed
-//! `wasi:http` shim, mirroring the native hosts' link-time gate.
+//! scopes, `http` says whether HTTP egress is granted and `httpHosts`
+//! which hosts it is limited to. The shim enforces them — for
+//! `http: false` it withholds its `wasi:http` shim and its
+//! `hypen:http/deferred` import, mirroring the native hosts' link-time
+//! gate.
+//!
+//! Deferred HTTP: the shim's `hypen:http/deferred.send` only collects the
+//! requests of a call and returns them as `httpRequests` on the reducer
+//! output (see [`HttpRequestWire`]). It should validate and allowlist-check
+//! at `send` so the guest gets a synchronous error, but need not be trusted
+//! to: the engine re-checks every request when it folds the output.
 
 use serde::{Deserialize, Serialize};
 use wasm_bindgen::prelude::*;
 
 use super::{
-    Effect, HostAction, HostError, LogLevel, ModuleHost, ModuleInstanceId, ModuleManifest,
-    ReducerOutput, SiblingState, StorageScope, SubscribeRequest,
+    Effect, HostAction, HostError, HttpRequest, LogLevel, ModuleHost, ModuleInstanceId,
+    ModuleManifest, QueuedHttpRequest, ReducerOutput, SiblingState, StorageScope,
+    SubscribeRequest,
 };
 
 #[wasm_bindgen]
@@ -33,7 +42,8 @@ extern "C" {
     pub type JsModuleHost;
 
     /// `manifest` is a plain JS object shaped like [`ManifestWire`]
-    /// (`name`, `version`, `storage`, `reads`, `dispatches`, `http`).
+    /// (`name`, `version`, `storage`, `reads`, `dispatches`, `http`,
+    /// `httpHosts`).
     /// Capability gating is the shim's job: it must only expose the
     /// storage scopes listed in `storage`, and must withhold its
     /// `wasi:http` (fetch) shim when `http` is `false` — the browser
@@ -97,6 +107,13 @@ struct ManifestWire<'a> {
     /// wire; a shim reading a manifest that lacks it (older engine) should
     /// treat absence as `true`, matching `ModuleManifest`'s serde default.
     http: bool,
+    /// The `http` allowlist as pattern strings (`api.example.com`,
+    /// `*.example.com`, either with `:port`); empty = any host. Always
+    /// present; a shim that ignores it is still safe for deferred requests
+    /// (the engine enforces the allowlist) but not for its own `wasi:http`
+    /// shim, which only it can gate.
+    #[serde(rename = "httpHosts")]
+    http_hosts: Vec<String>,
 }
 
 fn scope_str(s: StorageScope) -> &'static str {
@@ -133,6 +150,34 @@ struct ReducerOutputWire {
     cross_dispatch: Vec<CrossDispatchWire>,
     #[serde(default, rename = "subscribeRequests")]
     subscribe_requests: Vec<SubscribeWire>,
+    /// Absent = none.
+    #[serde(default, rename = "httpRequests")]
+    http_requests: Vec<HttpRequestWire>,
+}
+
+/// A `hypen:http/deferred.send(req, then, tag)` call the reducer made, as
+/// captured by the JS shim host:
+/// `{ request: { method, url, headers?, body?, timeoutMs? }, then, tag? }` —
+/// `headers` an array of `[name, value]` pairs, `body` a `Uint8Array` (or
+/// `null`/absent for none).
+#[derive(Deserialize)]
+struct HttpRequestWire {
+    request: HttpRequestFieldsWire,
+    then: String,
+    #[serde(default)]
+    tag: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct HttpRequestFieldsWire {
+    method: String,
+    url: String,
+    #[serde(default)]
+    headers: Vec<(String, String)>,
+    #[serde(default)]
+    body: Option<Vec<u8>>,
+    #[serde(default, rename = "timeoutMs")]
+    timeout_ms: Option<u32>,
 }
 
 #[derive(Deserialize)]
@@ -309,6 +354,21 @@ fn decode_output(raw: JsValue) -> Result<ReducerOutput, HostError> {
                 on_change: s.on_change,
             })
             .collect(),
+        http_requests: wire
+            .http_requests
+            .into_iter()
+            .map(|h| QueuedHttpRequest {
+                request: HttpRequest {
+                    method: h.request.method,
+                    url: h.request.url,
+                    headers: h.request.headers,
+                    body: h.request.body,
+                    timeout_ms: h.request.timeout_ms,
+                },
+                then: h.then,
+                tag: h.tag,
+            })
+            .collect(),
     })
 }
 
@@ -344,6 +404,7 @@ impl ModuleHost for BridgedHost {
             reads: &manifest.reads,
             dispatches: &manifest.dispatches,
             http: manifest.grants_http(),
+            http_hosts: manifest.http_hosts.iter().map(ToString::to_string).collect(),
         };
         let manifest_js = to_js(&wire)?;
         self.js

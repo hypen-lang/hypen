@@ -17,7 +17,7 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use crate::module_host::{
-    DualHost, Effect, ExecStrategy, HostAction, HostConfig, HostError, InstanceStatus,
+    DualHost, Effect, ExecStrategy, HostAction, HostConfig, HostError, HttpRequest, InstanceStatus,
     ManifestGrant, ModuleHost, ModuleInstanceId, ModuleManifest, ReducerOutput, SiblingState,
     StorageScope,
 };
@@ -95,6 +95,15 @@ fn output_to_json(out: &ReducerOutput) -> serde_json::Value {
             Effect::Log { level, message } => {
                 serde_json::json!({ "type": "log", "level": format!("{level:?}").to_lowercase(), "message": message })
             }
+            // Never in a reducer output (the engine creates it on admission);
+            // rendered for completeness so the match stays exhaustive.
+            Effect::Http(http) => serde_json::json!({
+                "type": "http",
+                "id": http.id.0,
+                "request": http_request_to_json(&http.request),
+                "then": http.then,
+                "tag": http.tag,
+            }),
         })
         .collect();
     serde_json::json!({
@@ -111,6 +120,33 @@ fn output_to_json(out: &ReducerOutput) -> serde_json::Value {
             .iter()
             .map(|s| serde_json::json!({ "module": s.target, "path": s.path, "onChange": s.on_change }))
             .collect::<Vec<_>>(),
+        // Deferred HTTP requests the reducer queued (`hypen:http/deferred`),
+        // already validated and allowlist-checked by the host. The embedder
+        // performs each and dispatches `then` with the completion payload
+        // documented in `wit/deps/hypen-http/http.wit`.
+        "httpRequests": out
+            .http_requests
+            .iter()
+            .map(|q| {
+                let mut request = http_request_to_json(&q.request);
+                request["then"] = serde_json::json!(q.then);
+                request["tag"] = serde_json::json!(q.tag);
+                request
+            })
+            .collect::<Vec<_>>(),
+    })
+}
+
+/// `{ method, url, headers: [[name, value]], bodyBase64: string | null,
+/// timeoutMs: number }`. The body is base64 because this surface speaks JSON
+/// strings; `timeoutMs` is the effective budget (defaulted and clamped).
+fn http_request_to_json(request: &HttpRequest) -> serde_json::Value {
+    serde_json::json!({
+        "method": request.method,
+        "url": request.url,
+        "headers": request.headers,
+        "bodyBase64": request.body.as_deref().map(crate::module_host::base64_encode),
+        "timeoutMs": request.effective_timeout_ms(),
     })
 }
 

@@ -43,10 +43,12 @@ use crate::dispatch::Action;
 use crate::engine_core::EngineCore;
 use crate::error::EngineError;
 use crate::hosted::{
-    ClosureActions, EngineCtx, HostedModules, LifecycleHook, ModuleGrants, PatchOutlet, ScopeName,
+    ClosureActions, EngineCtx, HostedModules, HttpCompletionError, HttpDelivery, LifecycleHook,
+    ModuleGrants, PatchOutlet, ScopeName,
 };
 use crate::module_host::{
-    describe_js_error, BridgedHost, Effect, HostError, JsModuleHost, ModuleInstanceId,
+    describe_js_error, BridgedHost, Effect, HostError, HttpEffect, HttpFailure, HttpFailureKind,
+    HttpOutcome, HttpRequestId, HttpResponse, HttpUrl, JsModuleHost, ModuleInstanceId,
     ModuleManifest,
 };
 use crate::reconcile::Patch;
@@ -92,6 +94,7 @@ pub(super) struct HostedRecord {
 /// | `invalidState` | `init` returned something that is not a JSON object | `scope`, `stage` |
 /// | `moduleCallFailed` | the root call of a cascade failed; nothing was applied | `scope`, `report` |
 /// | `cascadeIncomplete` | the root ran, some follow-ups failed; applied state stands | `scope`, `report` |
+/// | `unknownHttpRequest` | `completeHttpRequest` with an id that is not in flight (never issued, or already completed) | |
 /// | `moduleError` | anything else the engine refused | `scope` |
 struct Thrown {
     code: &'static str,
@@ -195,7 +198,8 @@ fn config_bytes(config: JsValue) -> Result<Vec<u8>, Thrown> {
 }
 
 /// A manifest object (`{ name?, version?, storage?, reads?, dispatches?,
-/// http? }`); nothing at all is the deny-everything default.
+/// http?, httpHosts? }`); nothing at all is the deny-everything default. A
+/// malformed `httpHosts` pattern is an `invalidArgument` naming it.
 fn manifest_arg(manifest: JsValue) -> Result<Option<ModuleManifest>, Thrown> {
     if manifest.is_undefined() || manifest.is_null() {
         return Ok(None);
@@ -276,18 +280,15 @@ unsafe impl Sync for JsEffectHandler {}
 impl JsEffectHandler {
     fn call(&self, scope: &str, effect: &Effect) {
         let effect_js = match effect {
-            Effect::Navigate(path) => serde_json::json!({ "type": "navigate", "path": path }),
+            Effect::Navigate(path) => plain(&serde_json::json!({ "type": "navigate", "path": path })),
             Effect::Delay { ms, then } => {
-                serde_json::json!({ "type": "delay", "ms": ms, "then": then })
+                plain(&serde_json::json!({ "type": "delay", "ms": ms, "then": then }))
             }
+            Effect::Http(http) => http_effect_js(http),
             // Handled engine-side; never forwarded.
             Effect::Log { .. } => return,
         };
-        if let Err(thrown) = self.0.call2(
-            &JsValue::NULL,
-            &JsValue::from_str(scope),
-            &plain(&effect_js),
-        ) {
+        if let Err(thrown) = self.0.call2(&JsValue::NULL, &JsValue::from_str(scope), &effect_js) {
             crate::logger::log(
                 crate::logger::LogLevel::Warn,
                 crate::logger::LogScope::Engine,
@@ -296,6 +297,164 @@ impl JsEffectHandler {
                     describe_js_error(&thrown)
                 ),
             );
+        }
+    }
+}
+
+/// An `Effect::Http` as the JS effect handler receives it:
+///
+/// ```text
+/// { type: "http", id: number,
+///   request: { method: string, url: string, headers: [string, string][],
+///              body: Uint8Array | null, timeoutMs: number },
+///   then: string, tag: string | null,
+///   allowedHosts: string[] | null }
+/// ```
+///
+/// `timeoutMs` is the effective budget (defaulted and clamped).
+/// `allowedHosts` is the module's `httpHosts` allowlist (`null` = any host):
+/// the handler must not follow a redirect to a host outside it —
+/// `httpRedirectAllowed(id, url)` answers that per hop. The body is the one
+/// copy made of it (into the `Uint8Array`).
+fn http_effect_js(http: &HttpEffect) -> JsValue {
+    let set = |object: &js_sys::Object, key: &str, value: JsValue| {
+        // Setting a property on a fresh plain object cannot fail.
+        let _ = js_sys::Reflect::set(object, &JsValue::from_str(key), &value);
+    };
+    let text = |value: &Option<String>| value.as_deref().map_or(JsValue::NULL, JsValue::from_str);
+
+    let request = js_sys::Object::new();
+    set(&request, "method", JsValue::from_str(&http.request.method));
+    set(&request, "url", JsValue::from_str(&http.request.url));
+    set(&request, "headers", plain(&http.request.headers));
+    let body = http
+        .request
+        .body
+        .as_deref()
+        .map_or(JsValue::NULL, |bytes| js_sys::Uint8Array::from(bytes).into());
+    set(&request, "body", body);
+    set(
+        &request,
+        "timeoutMs",
+        JsValue::from_f64(f64::from(http.request.effective_timeout_ms())),
+    );
+
+    let effect = js_sys::Object::new();
+    set(&effect, "type", JsValue::from_str("http"));
+    // Ids are issued sequentially from 1: exact as a JS number.
+    set(&effect, "id", JsValue::from_f64(http.id.0 as f64));
+    set(&effect, "request", request.into());
+    set(&effect, "then", JsValue::from_str(&http.then));
+    set(&effect, "tag", text(&http.tag));
+    let allowed: Option<Vec<String>> = http
+        .grant
+        .patterns()
+        .map(|patterns| patterns.iter().map(ToString::to_string).collect());
+    set(&effect, "allowedHosts", plain(&allowed));
+    effect.into()
+}
+
+/// The id of a request in flight, from the number the effect carried.
+fn http_request_id(id: f64) -> Result<HttpRequestId, Thrown> {
+    const MAX_SAFE_INTEGER: f64 = 9_007_199_254_740_991.0;
+    if id.is_finite() && id >= 0.0 && id.fract() == 0.0 && id <= MAX_SAFE_INTEGER {
+        Ok(HttpRequestId(id as u64))
+    } else {
+        Err(invalid("id", "expected the `id` of an http effect"))
+    }
+}
+
+/// A `completeHttpRequest` result:
+/// `{ ok: true, status, headers?, body? }` or
+/// `{ ok: false, error: { kind, message? } }`.
+///
+/// `headers` is a plain object (`{ name: value }`, a value may be a string
+/// or an array of strings) or an array of `[name, value]` pairs — both
+/// `Object.fromEntries(response.headers)` and `[...response.headers]` work.
+/// `body` is a `Uint8Array`, an `ArrayBuffer` or a string (sent as its UTF-8
+/// bytes); absent or `null` is an empty body.
+fn http_outcome_arg(result: &JsValue) -> Result<HttpOutcome, Thrown> {
+    let bad = |why: &str| invalid("result", why);
+    if !result.is_object() {
+        return Err(bad("expected an object with a boolean `ok`"));
+    }
+    let get = |object: &JsValue, key: &str| {
+        js_sys::Reflect::get(object, &JsValue::from_str(key)).unwrap_or(JsValue::UNDEFINED)
+    };
+    let missing = |value: &JsValue| value.is_undefined() || value.is_null();
+
+    match get(result, "ok").as_bool() {
+        None => Err(bad("`ok` must be true or false")),
+        Some(false) => {
+            let error = get(result, "error");
+            let kind = get(&error, "kind").as_string().unwrap_or_default();
+            let Some(kind) = HttpFailureKind::from_wire(&kind) else {
+                return Err(bad(
+                    "`error.kind` must be one of \"network\", \"timeout\", \"denied\", \
+                     \"too-large\", \"invalid-response\"",
+                ));
+            };
+            let message = get(&error, "message").as_string().unwrap_or_default();
+            Ok(HttpOutcome::Failure(HttpFailure::new(kind, message)))
+        }
+        Some(true) => {
+            let status = get(result, "status")
+                .as_f64()
+                .filter(|s| s.fract() == 0.0 && (0.0..=f64::from(u16::MAX)).contains(s))
+                .ok_or_else(|| bad("`status` must be an integer HTTP status"))?
+                as u16;
+
+            let headers_js = get(result, "headers");
+            let mut headers: Vec<(String, String)> = Vec::new();
+            let bad_headers = || {
+                bad("`headers` must be an object of strings or an array of [name, value] pairs")
+            };
+            if missing(&headers_js) {
+                // No headers.
+            } else if js_sys::Array::is_array(&headers_js) {
+                for pair in js_sys::Array::from(&headers_js).iter() {
+                    let pair: (String, String) =
+                        serde_wasm_bindgen::from_value(pair).map_err(|_| bad_headers())?;
+                    headers.push(pair);
+                }
+            } else if headers_js.is_object() {
+                let entries = js_sys::Object::entries(headers_js.unchecked_ref());
+                for entry in entries.iter() {
+                    let entry = js_sys::Array::from(&entry);
+                    let name = entry.get(0).as_string().ok_or_else(bad_headers)?;
+                    let value = entry.get(1);
+                    if let Some(value) = value.as_string() {
+                        headers.push((name, value));
+                    } else if js_sys::Array::is_array(&value) {
+                        for value in js_sys::Array::from(&value).iter() {
+                            let value = value.as_string().ok_or_else(bad_headers)?;
+                            headers.push((name.clone(), value));
+                        }
+                    } else {
+                        return Err(bad_headers());
+                    }
+                }
+            } else {
+                return Err(bad_headers());
+            }
+
+            let body_js = get(result, "body");
+            let body = if missing(&body_js) {
+                Vec::new()
+            } else if let Some(text) = body_js.as_string() {
+                text.into_bytes()
+            } else if body_js.is_instance_of::<js_sys::Uint8Array>() {
+                js_sys::Uint8Array::from(body_js).to_vec()
+            } else if body_js.is_instance_of::<js_sys::ArrayBuffer>() {
+                js_sys::Uint8Array::new(&body_js).to_vec()
+            } else {
+                return Err(bad("`body` must be a Uint8Array, an ArrayBuffer or a string"));
+            };
+            Ok(HttpOutcome::Response(HttpResponse {
+                status,
+                headers,
+                body,
+            }))
         }
     }
 }
@@ -817,13 +976,93 @@ impl WasmEngine {
             .last_report()
             .map_or(JsValue::NULL, |report| plain(&report.to_json()))
     }
+    /// Complete a deferred HTTP request (`hypen:http/deferred`): report how
+    /// the request an `{ type: "http", id, … }` effect asked for ended, and
+    /// run the module's completion action with it.
+    ///
+    /// `result` is `{ ok: true, status, headers?, body? }` (any status — a
+    /// 404 is a completed exchange) or `{ ok: false, error: { kind, message? } }`
+    /// with `kind` one of `"network"`, `"timeout"`, `"denied"`,
+    /// `"too-large"`, `"invalid-response"`. `headers` is an object or an
+    /// array of `[name, value]` pairs; `body` a `Uint8Array`, `ArrayBuffer`
+    /// or string.
+    ///
+    /// Returns `true` when the completion action ran, `false` when the
+    /// module was destroyed or reloaded while the request was in flight (the
+    /// result is dropped). Call it exactly once per effect, and not from
+    /// inside the effect handler (the engine is busy there): perform the
+    /// request asynchronously and complete it when it settles.
+    ///
+    /// Throws `invalidArgument` (nothing consumed: the request stays in
+    /// flight), `unknownHttpRequest`, and — when the completion action ran
+    /// and failed — `moduleCallFailed` / `cascadeIncomplete` with `report`.
+    #[wasm_bindgen(js_name = completeHttpRequest)]
+    pub fn complete_http_request(&mut self, id: f64, result: JsValue) -> Result<bool, JsValue> {
+        let id = http_request_id(id)?;
+        let outcome = http_outcome_arg(&result)?;
+        let mut delivery = None;
+        let mut unknown = false;
+        self.cascade_call(
+            None,
+            |hosted, ctx| match hosted.complete_http(ctx, id, outcome) {
+                Ok(delivered) => {
+                    delivery = Some(delivered);
+                    Ok(())
+                }
+                Err(HttpCompletionError::UnknownRequest(_)) => {
+                    unknown = true;
+                    Ok(())
+                }
+                Err(HttpCompletionError::Cascade(error)) => Err(error),
+            },
+            |error| Thrown::new("moduleError", error.to_string()).into(),
+        )?;
+        if unknown {
+            return Err(Thrown::new(
+                "unknownHttpRequest",
+                HttpCompletionError::UnknownRequest(id).to_string(),
+            )
+            .into());
+        }
+        Ok(delivery == Some(HttpDelivery::Delivered))
+    }
+
+    /// Whether the deferred HTTP request in flight under `id` may be sent on
+    /// to `url` — the allowlist check an effect handler makes before it
+    /// follows a redirect (use `redirect: "manual"` and ask per hop). `false`
+    /// for a URL the module may not request, one that is not a valid
+    /// `http(s)` URL, or an id that is not in flight.
+    #[wasm_bindgen(js_name = httpRedirectAllowed)]
+    pub fn http_redirect_allowed(&self, id: f64, url: &str) -> bool {
+        let (Ok(id), Ok(url)) = (http_request_id(id), HttpUrl::parse(url)) else {
+            return false;
+        };
+        matches!(self.hosted.http_redirect_check(id, &url), Some(Ok(())))
+    }
+
+    /// How many deferred HTTP requests one hosted module may have in flight.
+    #[wasm_bindgen(js_name = moduleHttpInFlightLimit)]
+    pub fn module_http_in_flight_limit(&self) -> u32 {
+        u32::try_from(self.hosted.http_in_flight_limit()).unwrap_or(u32::MAX)
+    }
+
+    /// Set the per-module in-flight cap for deferred HTTP (at least 1).
+    #[wasm_bindgen(js_name = setModuleHttpInFlightLimit)]
+    pub fn set_module_http_in_flight_limit(&mut self, limit: u32) {
+        self.hosted.set_http_in_flight_limit(limit as usize);
+    }
+
 
     /// Install (or, with `null` / `undefined`, remove) the handler for the
     /// effects a hosted reducer returns that only the embedder can perform.
     /// Called as `handler(scope, effect)` with
-    /// `{ type: "navigate", path }` or `{ type: "delay", ms, then }` (after
-    /// `ms`, dispatch `then` to `scope` with `dispatchModuleAction`). `log`
-    /// effects go to the engine's logger and never reach it.
+    /// `{ type: "navigate", path }`, `{ type: "delay", ms, then }` (after
+    /// `ms`, dispatch `then` to `scope` with `dispatchModuleAction`) or
+    /// `{ type: "http", id, request, then, tag, allowedHosts }` (perform the
+    /// request, then report it with `completeHttpRequest(id, result)`; the
+    /// shape is documented on `http_effect_js`). `log` effects go to the
+    /// engine's logger and never reach it. Without a handler, deferred HTTP
+    /// requests are refused and completed to the module as `denied`.
     ///
     /// The handler runs while the engine call that produced the effect is
     /// still in progress: it must not call the engine synchronously.
