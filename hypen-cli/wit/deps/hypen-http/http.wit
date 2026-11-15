@@ -48,9 +48,10 @@
 //       "error": {
 //         "kind": "network"            // DNS, connect, TLS, I/O
 //               | "timeout"            // the request's time budget ran out
-//               | "denied"             // refused by policy after it was
-//                                      // queued: a redirect to a host outside
-//                                      // `httpHosts`, the in-flight limit, …
+//               | "denied"             // refused after `send` accepted it:
+//                                      // a redirect to a host outside
+//                                      // `httpHosts`, the in-flight limit,
+//                                      // a host that performs no requests
 //               | "too-large"          // the response body exceeds the host's
 //                                      // limit
 //               | "invalid-response",  // not HTTP, or a malformed response
@@ -98,7 +99,8 @@ interface deferred {
         /// The request may not be made. Payload says why and names what to
         /// change: the URL's host when it is outside the manifest's
         /// `httpHosts`, or `http` when called where requests cannot be queued
-        /// (outside `dispatch` / `on-activated`).
+        /// (`init`, `on-destroyed`, `actions`: exports that return no
+        /// reducer output to carry one).
         permission-denied(string),
         /// The request is malformed: bad method, URL, header or timeout, or
         /// `then` is not an action name. Payload says which part and why.
@@ -118,6 +120,7 @@ interface deferred {
     /// `then` must be one of the module's own actions (its `actions` export);
     /// a request naming any other action is refused when the reducer returns.
     /// Requests queued by a reducer that then returns an error are discarded.
+    /// Callable from `dispatch`, `on-activated` and `on-deactivated`.
     ///
     /// Bounds (per call unless noted): 16 requests; URL 8 KiB; 64 headers and
     /// 16 KiB of header names + values; body 1 MiB; `then` and `tag` 256 bytes

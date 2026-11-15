@@ -16,8 +16,12 @@ exist to anchor design discussion and codegen targets.
 wit/
 ├── hypen-module.wit              package hypen:module@0.1.0
 └── deps/
-    └── hypen-storage/
-        └── storage.wit           package hypen:storage@0.1.0
+    ├── hypen-storage/
+    │   └── storage.wit           package hypen:storage@0.1.0
+    ├── hypen-engine/
+    │   └── state.wit             package hypen:engine@0.1.0  (cross-module state)
+    └── hypen-http/
+        └── http.wit              package hypen:http@0.1.0    (deferred HTTP)
 ```
 
 ### One source of truth
@@ -58,6 +62,61 @@ Validated end-to-end:
   (`hypen_storage_local` / `_app` / `_cloud`) and a C header + canonical-ABI
   object file. Capability-as-interface scoping survives codegen across
   three guest languages.
+
+## HTTP: deferred requests (`hypen:http/deferred`)
+
+A reducer is synchronous, so it cannot wait for a response. `hypen:http` lets
+it *queue* one instead — the same "do X, then dispatch Y" pattern as the
+`delay` effect:
+
+```wit
+send: func(req: request, then: string, tag: option<string>) -> result<_, error>;
+```
+
+`send` returns as soon as the request is queued. The host performs it after
+the reducer returns and dispatches the module's own action `then` with the
+outcome as its JSON payload (`tag` is echoed back):
+
+```jsonc
+// a response was read — any status; 404 and 500 are completed exchanges
+{ "ok": true, "status": 200, "headers": { "content-type": "text/plain" },
+  "body": "…", "bodyEncoding": "utf8" /* or "base64" */, "tag": "t-1" }
+// no response
+{ "ok": false, "error": { "kind": "timeout", "message": "…" }, "tag": "t-1" }
+```
+
+`error.kind` is one of `network`, `timeout`, `denied`, `too-large`,
+`invalid-response`. Every request `send` accepted gets exactly one completion
+(unless the module is destroyed or reloaded first). The normative text —
+payload, header rules, bounds — is the comment block at the top of
+[`deps/hypen-http/http.wit`](deps/hypen-http/http.wit).
+
+**Grant.** The manifest's `http: true` (the same switch as blocking
+`wasi:http`); importing the interface without it is a link-time denial.
+`httpHosts` optionally narrows the grant to a list of host patterns —
+`api.example.com`, `*.example.com` (subdomains, not the apex),
+either with `:port`, or an IP literal; empty or absent means any host. The
+scheme is always `http` or `https`. The allowlist is checked when a request
+is queued (`permission-denied` names the host), again by the engine before
+any embedder sees the request, and by the embedder on every redirect hop. On
+the native host it also applies to blocking `wasi:http` requests.
+
+| Bound | Value |
+|---|---|
+| requests queued per reducer call | 16 |
+| requests in flight per module | 32 (`Engine::set_module_http_in_flight_limit`) |
+| URL | 8 KiB, ASCII, no credentials |
+| request headers | 64, 16 KiB of names + values; `host`, `content-length`, `connection`, `transfer-encoding`, `keep-alive`, `upgrade`, `te`, `trailer`, `expect`, `proxy-*` refused |
+| request body | 1 MiB |
+| `then`, `tag` | 256 bytes each |
+| time budget | default 30 s, capped at 120 s |
+| response body | 4 MiB (`too-large` beyond) |
+| redirects followed | 5 |
+
+It is declared in the `module-x` world of both contract versions
+(`hypen:http@0.1.0` / `@0.2.0`; `send` is a plain sync func in both). When to
+use it rather than `wasi:http`: [AUTHORING_MODEL.md, "HTTP: blocking vs
+deferred"](AUTHORING_MODEL.md#http-blocking-vs-deferred).
 
 ## Scope model
 

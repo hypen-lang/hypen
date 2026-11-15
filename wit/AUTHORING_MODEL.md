@@ -614,6 +614,90 @@ Three follow-ups to the async promotion, one commit series:
   host. (The wasm32 engine-build verify remains blocked on the `getrandom`
   toolchain issue.)
 
+### HTTP: blocking vs deferred
+
+A module has two ways to make an HTTP request. Both need the manifest's
+`http: true`; they differ in *who waits*.
+
+| | Blocking — `wasi:http` | Deferred — `hypen:http/deferred` |
+|---|---|---|
+| Shape | the reducer calls its language's HTTP client and gets the response inline | the reducer calls `send(request, then, tag)` and returns; the response arrives later as the action `then` |
+| Native host (wasmtime: `hypen-runtime`, Kotlin/Swift embeds) | works — the guest is suspended while the host does the I/O | works |
+| Browser / JS host (jco) | **does not work**: a synchronous reducer cannot be suspended, the call traps | works |
+| TypeScript-authored modules | unavailable (the TS build disables `wasi:http`) | the way to do HTTP (once the CLI's per-module world lists the import) |
+| Engine while the request is in flight | held for the whole exchange (bounded by the per-call deadline, 5 s by default) | free — only the two reducer runs hold it |
+| Longest request | the per-call deadline | the request's own budget (default 30 s, max 120 s) |
+| Response handling | whatever the client library does (streaming, any size the module can hold) | whole body, at most 4 MiB, as text or base64 in the action payload |
+| Redirects | the guest's client issues each hop itself | followed by the host (up to 5) |
+
+Rule of thumb: use **deferred** for anything that must run in a browser host
+or from TypeScript, and for anything slow; use **blocking** when the module
+only ever runs on a native host and wants the response inline (or streamed).
+
+**The completion payload** is the contract of the deferred form (normative
+text: the header of `wit/deps/hypen-http/http.wit`):
+
+```jsonc
+{ "ok": true,  "status": 404, "headers": { "content-type": "text/plain" },
+  "body": "not found", "bodyEncoding": "utf8", "tag": "user-42" }
+{ "ok": false, "error": { "kind": "timeout", "message": "…" }, "tag": "user-42" }
+```
+
+`ok: true` means an HTTP response was read, whatever its status; `ok: false`
+means there is none, and `error.kind` says why (`network`, `timeout`,
+`denied`, `too-large`, `invalid-response`). Header names are lowercased and
+repeats joined with `", "`. `bodyEncoding` is `"utf8"` when the bytes are
+valid UTF-8, else `"base64"`. Every accepted `send` gets exactly one
+completion — a request refused after it was queued (a redirect to a host
+outside the allowlist, the in-flight cap) completes as `denied` — so a
+handler can always pair requests and answers by `tag`. A completion handler
+is an ordinary reducer and may queue the next request.
+
+```rust
+// Rust guest (world `module-x`)
+"load" => {
+    http::send(&Request { method: "GET".into(), url, headers: vec![], body: None,
+                          timeout_ms: None }, "loaded", Some("profile"))
+        .map_err(|e| format!("{e:?}"))?;   // refused synchronously: bad URL, host not allowed, …
+    state["loading"] = json!(true);
+}
+"loaded" => {
+    let done: Value = serde_json::from_slice(&action.payload)?;
+    state["loading"] = json!(false);
+    if done["ok"] == true && done["status"] == 200 { state["profile"] = done["body"].clone(); }
+    else { state["error"] = json!(done["error"]["kind"].as_str().unwrap_or("http status")); }
+}
+```
+
+**The allowlist.** `httpHosts` in the manifest (`app.json`, or
+`--grant-http-host` in single-module mode) limits `http` to hosts matching
+one of its patterns: an exact host (`api.example.com`), a wildcard for
+subdomains (`*.example.com` — any depth, not `example.com` itself), either
+with a port (`localhost:8080`; no port = any port), or an IP literal. Absent
+or empty = any host. It is enforced
+
+1. by the host at `send` — the guest gets `permission-denied` naming the host;
+2. by the engine when it folds the reducer's output, whatever the host did
+   (`FailureCause::HttpDenied { host }`, code `httpDenied`);
+3. by the embedder on every redirect hop (the request then completes as
+   `denied`);
+4. on the native host, for blocking `wasi:http` requests too (the request
+   fails with `HTTP-request-denied`). A JS host's own `wasi:http` shim is
+   only as strict as that shim: where it matters, grant `http` only to
+   modules that use the deferred form.
+
+URLs are parsed once, by the engine, with a deliberately strict grammar
+(ASCII only, no `user:pass@`, no numeric-host spellings other than a dotted
+quad), and the embedder connects to that parse — so the host that was checked
+is the host that is contacted.
+
+Implementation map: `hypen-engine-rs/src/module_host/http.rs` (types, bounds,
+allowlist, payload), `module_host/wasmtime/deferred_http.rs` (native `send`
++ the `wasi:http` hook), `hosted/http.rs` (admission, requests in flight,
+`Engine::complete_http_request`), `bin/hypen_runtime/http.rs` (the reference
+client and worker pool). Tests: `test_module_host_http.rs`,
+`test_hypen_runtime_http.rs`, `src/hosted/http_tests.rs`.
+
 ### wasmtime 37 → 46 bump — now landed (2026-07)
 
 The prep-plan bump is in: the native host runs on wasmtime 46.0.1 (still WASI
