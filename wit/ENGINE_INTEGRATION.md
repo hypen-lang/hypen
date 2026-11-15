@@ -24,11 +24,13 @@ Status: **draft v0.2 — core implemented.** Sibling document to
 >   wasm32 it cannot embed wasmtime, so module loading is delegated to a
 >   JS shim (jco-based) via wasm-bindgen. Proven by the web-host spike's
 >   `bridged-test.mjs` (spike since removed; the JS host and its bridged
->   test now live in `@hypen-space/module-host`): `engine.wasm`'s
->   `WasmHostedEngine.dispatchAction("increment")` ×3 reaches the
->   jco-loaded counter through the bridge and the engine reports
->   `{count: 3}` — same `ModuleHost` trait, different impl, no embedded
->   runtime in wasm.
+>   test now live in `@hypen-space/module-host`). The bridge is part of
+>   the one JS engine class: server builds of `WasmEngine`
+>   (`js,device-broker,module-loader-bridged`) gain `setModuleHost` /
+>   `registerHostedModule` / `dispatchModuleAction`, so hosted modules run
+>   next to in-process JS modules in the same engine — same `ModuleHost`
+>   trait, different impl, no embedded runtime in wasm
+>   (`hypen-web/packages/module-host/tests/e2e-engine.test.ts`).
 >
 > Packaged for end users via the **`hypen-runtime` binary**
 > (`src/bin/hypen_runtime/`, gated behind `runtime-bin`): a tiny CLI

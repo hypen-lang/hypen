@@ -33,13 +33,13 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build WASM (nodejs)
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       # Cloudflare (@hypen-space/cf) runs the device broker from the
       # web-target build; the browser bundle carries no broker.
       - name: Build WASM (web, Cloudflare)
-        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (browser, no device broker)

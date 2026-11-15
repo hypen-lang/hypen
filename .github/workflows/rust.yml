@@ -117,6 +117,7 @@ jobs:
           set -o pipefail
           : > clippy-bindings.log
           cargo clippy --all-targets --features uniffi --message-format=short 2>&1 | tee -a clippy-bindings.log
+          cargo clippy --lib --target wasm32-unknown-unknown --features js,device-broker,module-loader-bridged --message-format=short 2>&1 | tee -a clippy-bindings.log
           cargo clippy --lib --target wasm32-unknown-unknown --features js,device-broker --message-format=short 2>&1 | tee -a clippy-bindings.log
           cargo clippy --lib --target wasm32-unknown-unknown --features js --message-format=short 2>&1 | tee -a clippy-bindings.log
           cargo clippy --lib --target wasm32-wasip1 --features wasi --message-format=short 2>&1 | tee -a clippy-bindings.log
@@ -287,15 +288,15 @@ jobs:
       # Server JS builds carry the device broker (RFC 001); the browser build
       # must not (see build-wasm.sh).
       - name: Build WASM (bundler)
-        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js,device-broker
+        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (nodejs)
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (web)
-        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (browser, no device broker)
@@ -354,7 +355,7 @@ jobs:
       - name: Runtime feature sets do not depend on wasmtime
         run: |
           set -euo pipefail
-          for features in "" js js,device-broker wasi uniffi module-loader-bridged; do
+          for features in "" js js,device-broker wasi uniffi module-loader-bridged js,device-broker,module-loader-bridged; do
             cargo tree -p hypen-engine -e normal --target all ${features:+--features "$features"} > tree.txt
             if grep -q wasmtime tree.txt; then
               echo "::error::hypen-engine features '${features:-default}' depend on wasmtime"

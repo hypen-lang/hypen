@@ -164,17 +164,17 @@ jobs:
 
       # JS targets
       - name: Build WASM (bundler)
-        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js,device-broker
+        run: wasm-pack build --target bundler --out-dir pkg/bundler --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (nodejs)
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       # pkg/web (Cloudflare's `hypen-engine`) carries the device broker;
       # pkg/browser (@hypen-space/web-engine) leaves it out (RFC 001).
       - name: Build WASM (web)
-        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (browser, no device broker)

@@ -59,15 +59,15 @@ hypen-engine-rs/src/
 │   └── remote.rs             # Initial tree & incremental patch serialization
 │
 ├── hosted/                   # Engine-side half of module hosting: everything `Engine` keeps for hosted (WASM-backed) scopes
-│   ├── mod.rs                # HostedModules (owned by Engine) + EngineCtx (the engine parts it works on); contract docs; register/rewire/destroy, UI + trusted dispatch, host-write notification
+│   ├── mod.rs                # HostedModules (owned by Engine and by the JS WasmEngine) + EngineCtx (the engine parts it works on: core, ClosureActions, PatchOutlet); contract docs; register/rewire/destroy, UI + trusted dispatch, host-write notification
 │   ├── names.rs              # ScopeName (lowercased, validated once), ActionSet (Named | Wildcard, `accepts`)
 │   ├── registry.rs           # Instance table, ModuleGrants (public) -> Grants (normalized), wire/unwire of the core's routing records
-│   ├── cascade.rs            # Work queue, depth cap + budget, drain loop, the host call (`invoke`)
+│   ├── cascade.rs            # Work queue (hosted reducers + in-process handlers reached by cross-dispatch), depth cap + budget, drain loop, the host call (`invoke`)
 │   ├── fold.rs               # Applying one ReducerOutput: state -> subscriptions -> effects -> follow-ups
 │   ├── subscriptions.rs      # Cross-module subscriptions, who a change notifies
 │   ├── snapshots.rs          # Encoded-state cache lent to host calls (Weak-identity invalidation)
 │   ├── paths.rs              # Changed-path collection (replace / merge / sparse) + paths_overlap
-│   ├── report.rs             # CascadeReport / CascadeFailure / FailureCause / Origin and their rendering
+│   ├── report.rs             # CascadeReport / CascadeFailure / FailureCause / Origin, their rendering and `to_json` (the shape bindings hand out)
 │   └── tests.rs              # Subsystem tests: HostedModules + bare EngineCore + scripted host, no Engine
 │
 ├── module_host/              # WASM Component module hosting (`hypen:module`, see /wit/ENGINE_INTEGRATION.md)
@@ -101,7 +101,7 @@ hypen-engine-rs/src/
 │   ├── device_binding.rs     # Device broker JSON shapes + WASI framing shared by JS/WASI/UniFFI
 │   ├── js.rs                 # wasm-bindgen JS bindings (js feature)
 │   ├── js_device.rs          # WasmDeviceBroker / WasmRetainedBytesPool / device* helpers (js feature)
-│   ├── js_hosted.rs          # WasmHostedEngine: `Engine` + BridgedHost for JS (module-loader-bridged feature)
+│   ├── js_modules.rs         # Hosted modules on WasmEngine: setModuleHost / registerHostedModule / dispatchModuleAction / … (module-loader-bridged feature)
 │   ├── wasi.rs               # WASI C FFI (wasi feature)
 │   └── wasi_device.rs        # hypen_device_* C ABI (wasi feature; also compiled for native tests)
 │
@@ -129,7 +129,7 @@ SAME JSON shapes (config, open spec, outputs, info — documented at the top of
 
 | Surface | Type | Consumers | Artifact |
 |---|---|---|---|
-| wasm-bindgen (`js,device-broker`) | `WasmDeviceBroker` (incl. `revision()`), `WasmRetainedBytesPool`, `deviceNegotiate`/`deviceSelectAck`/`deviceValidateHello`/`deviceValidateAck`/`deviceServerConsumes`/… | `@hypen-space/server`, `@hypen-space/cf` | `hypen-web/packages/server/wasm-node/`, `pkg/nodejs`, `pkg/bundler`, `pkg/web` (Cloudflare's `hypen-engine`) |
+| wasm-bindgen (`js,device-broker`; shipped as `js,device-broker,module-loader-bridged`) | `WasmDeviceBroker` (incl. `revision()`), `WasmRetainedBytesPool`, `deviceNegotiate`/`deviceSelectAck`/`deviceValidateHello`/`deviceValidateAck`/`deviceServerConsumes`/… | `@hypen-space/server`, `@hypen-space/cf` | `hypen-web/packages/server/wasm-node/`, `pkg/nodejs`, `pkg/bundler`, `pkg/web` (Cloudflare's `hypen-engine`) |
 | WASI C ABI (`wasi`, implies `device-broker`) | `hypen_device_broker_*` handles, `hypen_device_pool_*`, `hypen_device_*` helpers; poll output framed `[u32 LE header_len][JSON array][payload]` with `offset`/`len` | Go SDK (wazero) | `hypen-golang/hypen_engine.wasm` |
 | UniFFI (`uniffi`, implies `device-broker`) | `DeviceBroker`, `DeviceRetainedBytesPool`, `DeviceOutput`/`DeviceOutcome`/`DeviceOpenResult`, `device*` functions | Kotlin SDK, Swift server | `../target/release/libhypen_engine.so` + generated `hypen_engine.kt` / `hypen_engine.swift` / `hypen_engineFFI.h` |
 
@@ -159,8 +159,8 @@ rustup target add wasm32-unknown-unknown wasm32-wasip1
 Piecewise:
 
 ```bash
-wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker  # then cp pkg/nodejs/hypen_engine* ../hypen-web/packages/server/wasm-node/
-wasm-pack build --target web --out-dir pkg/web --features js,device-broker        # Cloudflare (`hypen-engine` file: dep of the examples)
+wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker,module-loader-bridged  # then cp pkg/nodejs/hypen_engine* ../hypen-web/packages/server/wasm-node/
+wasm-pack build --target web --out-dir pkg/web --features js,device-broker,module-loader-bridged        # Cloudflare (`hypen-engine` file: dep of the examples)
 wasm-pack build --target web --out-dir pkg/browser --features js                  # then cp pkg/browser/hypen_engine* ../hypen-web/packages/web-engine/wasm-browser/
 cargo build --target wasm32-wasip1 --release --features wasi && cp ../target/wasm32-wasip1/release/hypen_engine.wasm ../hypen-golang/
 cargo build --release --features uniffi && bash ../scripts/generate-bindings.sh   # Kotlin + Swift bindings
@@ -170,7 +170,8 @@ Binding tests (all run in CI):
 - Rust: `cargo test --lib wasm::` (shapes + the C ABI driven natively) and
   `cargo test --features uniffi --lib` (the UniFFI objects; rust.yml runs it, since plain
   `cargo test` does not compile `src/uniffi/`). rust.yml also clippy-gates the uniffi, `js`,
-  `js,device-broker` and `wasi` builds, which the default clippy run never compiles.
+  `js,device-broker`, `js,device-broker,module-loader-bridged` and `wasi` builds, which the
+  default clippy run never compiles.
 - The shipped artifacts through each SDK's real binding code:
   `cd ../hypen-web && bun test tests/device-wasm-broker-binding.test.ts` (wasm-node broker, and
   Cloudflare's `pkg/web` glue — copied by `build-wasm.sh` into `tests/fixtures/wasm-web-glue/`
@@ -233,7 +234,7 @@ Crate always builds as both `cdylib` and `rlib`. Feature flags control which bin
 | `uniffi` | Kotlin/Swift | Android, iOS |
 | `module-loader` | none (adds `WasmtimeHost`/`WasmtimeHostAsync`/`DualHost`) | Hosting `hypen:module` WASM Components natively (wasmtime 46; native targets only). The library surface UniFFI/mobile/desktop embeds link |
 | `runtime-bin` | none (implies `module-loader`; adds the `hypen-runtime` bin and its `tiny_http` / file-watcher deps) | The dev runtime binary (`--serve`, hot reload) |
-| `module-loader-bridged` | wasm-bindgen `WasmHostedEngine` (implies `js`) | Engine in wasm32 delegating module hosting to a JS host |
+| `module-loader-bridged` | more methods on wasm-bindgen `WasmEngine` (implies `js`) | Hosted modules in the JS engine, run by a JS module host (`@hypen-space/module-host`) next to in-process modules. Server builds only |
 
 `module-loader` links wasmtime into every test binary (~0.5 GB each with debuginfo), so run the
 feature's tests targeted rather than as the whole suite:
@@ -316,8 +317,61 @@ Trusted embedder code (REPL, timers, tests) addresses a hosted scope with
 
 The hosted-module subsystem is `src/hosted/` (`HostedModules`, one field of `Engine`; the `Engine`
 module-instance methods are delegations). It never takes `&mut Engine`: each call gets an `EngineCtx`
-(`&mut EngineCore`, the closure `ActionDispatcher`, a `PatchSink`), so it is driven in unit tests
-(`src/hosted/tests.rs`) with a scripted `ModuleHost` and no `Engine`.
+(`&mut EngineCore`, the in-process handlers as `&dyn ClosureActions`, the renderer as
+`&mut dyn PatchOutlet`), so it is driven in unit tests (`src/hosted/tests.rs`) with a scripted
+`ModuleHost` and no `Engine` — and composed a second time by the JS binding (below), with the JS
+handler map and the JS render callback behind the same two traits.
+
+**In-process scopes are part of the cross-module contract.** A grant may name a scope that is not
+hosted (an SDK module: closures / JS handlers + host-written state). `reads` on it hands its state
+over as a sibling snapshot and allows subscribing (a host `update_state*` notifies). `dispatches`
+on it lets a reducer cross-dispatch to the handler registered under the scope's wire name
+(`__hypen_scoped:<scope>:<action>`): queued in the same FIFO, same ACL check, depth cap, budget and
+failure reporting; the handler gets the decoded payload and the sending scope as `sender`. Reserved
+`__hypen_*` actions are never deliverable that way (`__hypen_bind` writes an arbitrary state path),
+nor is a target/name containing `:`. A handler that fails is `FailureCause::Handler`.
+
+### Hosted modules in the JS engine (`module-loader-bridged`)
+
+There is ONE JS engine class. In server builds (`js,device-broker,module-loader-bridged`: `pkg/nodejs`,
+`pkg/bundler`, `pkg/web`) `WasmEngine` composes `HostedModules` with its `EngineCore` exactly as the
+native `Engine` does (`src/wasm/js_modules.rs`), so hosted modules and ordinary JS-handler modules
+run side by side. The browser bundle (`pkg/browser`, `js` alone) has none of it; `build-wasm.sh`
+fails if the methods leak into it.
+
+| JS method | Does |
+|---|---|
+| `setModuleHost(host)` | install a `JsModuleHost` (`@hypen-space/module-host`); components are `prepare()`d there (async) first |
+| `registerHostedModule(scope, component?, manifest?, config?, actions?)` | host `register` → `instantiate` → `init` → `actions`, then wire; returns `{scope, component, instanceId, actions, wildcard}` |
+| `reloadHostedModule(scope, component?, manifest?, actions?)` | new instance, state kept (rewire), old instance destroyed |
+| `activateHostedModule` / `deactivateHostedModule` / `destroyHostedModule(scope)` | lifecycle; `false` when the scope hosts nothing |
+| `dispatchModuleAction(scope, name, payload)` | trusted dispatch (`Engine::dispatch_module_action`) |
+| `hostedModules()` / `isHostedModule(scope)` / `getModuleState(scope)` | introspection; `getModuleState` is the trusted whole-state read (`getStateAt` is the guarded external one) |
+| `lastModuleCascadeReport()` | `CascadeReport::to_json()` or `null` |
+| `setModuleEffectHandler(fn)` | `fn(scope, {type:"navigate",path} \| {type:"delay",ms,then})` |
+| `moduleDispatchBudget()` / `setModuleDispatchBudget(n)` | the cascade budget |
+
+Existing methods gained hooks, all behind `#[cfg(feature)]` and a no-hosted-module fast path:
+`dispatchAction` (routed action owned by a hosted module drives it, else the JS handlers exactly as
+before), `updateState` / `updateStateSparse` / `updateStateSparseJson` (host-write subscriber
+notification), `unregisterModule` (a hosted scope gets the full teardown), `reset` (hosted
+instances released).
+
+Errors of the hosted methods are JS `Error`s with `type: "moduleError"`, a stable `code`
+(table on `Thrown` in `js_modules.rs`) and, for `moduleCallFailed` / `cascadeIncomplete`, the
+`report`. `dispatchAction` keeps its `{type: "actionError", message}` objects for routing refusals.
+
+Re-entrancy: every engine→JS callback (module host, in-process handler reached by cross-dispatch,
+effect handler, render callback) runs inside a `&mut self` call, and wasm-bindgen refuses a call
+back into the same `WasmEngine` at the re-entrant caller ("recursive use of an object…"; nothing
+runs, nothing is corrupted). If the callback lets that escape it is recorded like any failing
+callback, with the message rewritten by `bridged_host::describe_js_error`. JS that needs the engine
+from a callback defers the call (`queueMicrotask`).
+
+Test: `cd ../hypen-web && bun test packages/module-host/tests/e2e-engine.test.ts` (the shipped
+wasm-node engine + `JsModuleHost` + the committed fixture components, hosted and in-process modules
+in one engine, every cross-boundary direction, bad paths, re-entrancy, and that the browser build
+has no hosted surface).
 
 Folding a reducer output (`dispatch`, `on_activated`, `on_deactivated`) never routes by string:
 `emit` stays in the emitting scope, cross-dispatch and `subscribe` are re-checked against the

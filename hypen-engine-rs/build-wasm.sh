@@ -48,31 +48,52 @@ echo ""
 echo "=== JavaScript Runtime Builds (wasm-bindgen) ==="
 echo ""
 
-# Server-side JS builds carry the device broker (RFC 001: `WasmDeviceBroker`
-# + `device*` helpers) via the `device-broker` feature: Node/Bun
-# (@hypen-space/server) and Cloudflare (@hypen-space/cf, which imports the
-# web-target `hypen-engine` package from pkg/web). The browser bundle
-# (pkg/browser -> @hypen-space/web-engine) never brokers device requests and
-# is built with `js` alone, keeping the broker, SHA-256 and the device payload
-# validators (~0.5 MB raw) out of what browsers download.
+# Server-side JS builds carry two features the browser bundle does not:
+#
+# - `device-broker`: the device broker (RFC 001: `WasmDeviceBroker` +
+#   `device*` helpers).
+# - `module-loader-bridged`: hosted (WASM-component) modules on `WasmEngine`
+#   (`setModuleHost`, `registerHostedModule`, ...), run through a JS module
+#   host (`@hypen-space/module-host`) next to ordinary in-process modules.
+#
+# They are: Node/Bun (@hypen-space/server, pkg/nodejs), the bundler target
+# (pkg/bundler) and Cloudflare (@hypen-space/cf, which imports the web-target
+# `hypen-engine` package from pkg/web). pkg/web and pkg/nodejs are built from
+# the same Rust with the same features on purpose: their wasm is then
+# byte-identical and the Cloudflare glue fixture reuses wasm-node's (see
+# copy-wasm-artifacts.sh).
+#
+# The browser bundle (pkg/browser -> @hypen-space/web-engine) never brokers
+# device requests and hosts no modules; it is built with `js` alone, keeping
+# all of that (~0.5 MB raw of broker, SHA-256 and payload validators, plus the
+# hosted-module subsystem and its bridge) out of what browsers download.
+SERVER_FEATURES="js,device-broker,module-loader-bridged"
 
 # Build for web (bundler)
 echo "Building for web (bundler)..."
-wasm-pack build --target bundler --out-dir pkg/bundler --features js,device-broker
+wasm-pack build --target bundler --out-dir pkg/bundler --features "$SERVER_FEATURES"
 
 # Build for node.js
 echo "Building for Node.js..."
-wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+wasm-pack build --target nodejs --out-dir pkg/nodejs --features "$SERVER_FEATURES"
 
 # Build for web (no bundler; Cloudflare Workers / Durable Objects)
-echo "Building for web (no bundler, with device broker)..."
-wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+echo "Building for web (no bundler, server features)..."
+wasm-pack build --target web --out-dir pkg/web --features "$SERVER_FEATURES"
 
-# Build for browser (web target, no device broker)
-echo "Building for browser (no device broker)..."
+# Build for browser (web target, no device broker, no hosted modules)
+echo "Building for browser (no device broker, no hosted modules)..."
 wasm-pack build --target web --out-dir pkg/browser --features js
 if grep -q "WasmDeviceBroker" pkg/browser/hypen_engine.d.ts; then
   echo "error: the browser build must not include the device broker" >&2
+  exit 1
+fi
+if grep -q "registerHostedModule\|setModuleHost" pkg/browser/hypen_engine.d.ts; then
+  echo "error: the browser build must not include hosted-module support" >&2
+  exit 1
+fi
+if ! grep -q "registerHostedModule" pkg/nodejs/hypen_engine.d.ts; then
+  echo "error: the Node build must include hosted-module support" >&2
   exit 1
 fi
 
@@ -288,8 +309,8 @@ echo ""
 echo "JavaScript builds (wasm-bindgen):"
 echo "  - Bundler: pkg/bundler/"
 echo "  - Node.js: pkg/nodejs/"
-echo "  - Web: pkg/web/ (with device broker; Cloudflare)"
-echo "  - Browser: pkg/browser/ (no device broker)"
+echo "  - Web: pkg/web/ (with device broker + hosted modules; Cloudflare)"
+echo "  - Browser: pkg/browser/ (no device broker, no hosted modules)"
 echo ""
 echo "WASI build (C FFI):"
 echo "  - WASI: pkg/wasi/"

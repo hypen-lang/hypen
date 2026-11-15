@@ -69,11 +69,11 @@ jobs:
       # (`@hypen-space/cf`) through the web-target build. The browser bundle
       # is built without the broker (build-wasm.sh).
       - name: Build WASM (nodejs)
-        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker
+        run: wasm-pack build --target nodejs --out-dir pkg/nodejs --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (web, Cloudflare)
-        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker
+        run: wasm-pack build --target web --out-dir pkg/web --features js,device-broker,module-loader-bridged
         working-directory: hypen-engine-rs
 
       - name: Build WASM (browser, no device broker)
