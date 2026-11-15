@@ -1271,6 +1271,9 @@ pub struct TaffyState {
     /// per-edge over these.
     platform_safe_area: crate::style::Padding,
     image_load_generation: u64,
+    /// `TextEngine::font_generation` this state's measures were taken
+    /// with; a change (web fonts landed) forces a re-measure.
+    font_generation: u64,
     /// Every media source a resolved style asked the decoded-image cache
     /// about, with the answer it got (`true` = natural size available).
     /// Filled from `MEDIA_SIZE_PROBES` at the top of each compute. When
@@ -1319,6 +1322,7 @@ impl TaffyState {
             safe_area: SafeAreaInsets::default(),
             platform_safe_area: DESKTOP_SAFE_AREA_DEFAULT,
             image_load_generation: crate::paint::image::image_load_generation(),
+            font_generation: 0,
             media_size_probes: HashMap::new(),
             #[cfg(test)]
             bulk_rebuilds: 0,
@@ -3020,7 +3024,12 @@ impl LayoutPass {
         if !image_intrinsics_changed {
             state.image_load_generation = image_load_generation;
         }
-        let needs_rebuild = state.needs_bulk_rebuild || image_intrinsics_changed;
+        // Faces landed (web fonts): every text measure Taffy cached is
+        // stale, so rebuild like a cold start.
+        text.sync_web_fonts();
+        let fonts_changed = text.font_generation() != state.font_generation;
+        state.font_generation = text.font_generation();
+        let needs_rebuild = state.needs_bulk_rebuild || image_intrinsics_changed || fonts_changed;
         // The build / restyle paths read `state.interaction`; clone it
         // up front so the `&mut state.tree` borrow during the bulk
         // rebuild doesn't conflict with the immutable read.

@@ -85,6 +85,14 @@ pub struct TextEngine {
     /// Like `family`, a scoped setting ([`Self::replace_align`]) that is
     /// part of every draw-cache key; measuring ignores it.
     align: TextAlign,
+    /// How many web-font faces ([`crate::web_fonts`]) this engine's font
+    /// database already holds, and the fetcher generation it last saw.
+    web_faces_merged: usize,
+    web_font_generation: u64,
+    /// Bumped whenever the font database gains faces, so anything that
+    /// cached shaped text outside this engine (layout measures, encoded
+    /// scene fragments) knows to drop it.
+    font_generation: u64,
     /// How many times [`Self::line_runs`] actually shaped (cache misses).
     #[cfg(test)]
     pub(crate) line_runs_shapes: usize,
@@ -103,6 +111,9 @@ impl TextEngine {
             family_resolution: Default::default(),
             weight_resolution: Default::default(),
             align: TextAlign::Start,
+            web_faces_merged: 0,
+            web_font_generation: crate::web_fonts::generation(),
+            font_generation: 0,
             #[cfg(test)]
             line_runs_shapes: 0,
         }
@@ -139,6 +150,38 @@ impl TextEngine {
     /// with a restoring one.
     pub fn replace_family(&mut self, family: FontFamily) -> FontFamily {
         std::mem::replace(&mut self.family, family)
+    }
+
+    /// Merge web-font faces that landed since the last call into this
+    /// engine's font database. Returns `true` (and drops every cached
+    /// measure / tile / resolution) when faces were added: the caller
+    /// must lay text out again. Cheap when nothing landed (one atomic
+    /// load), so layout calls it every pass.
+    pub fn sync_web_fonts(&mut self) -> bool {
+        let generation = crate::web_fonts::generation();
+        if generation == self.web_font_generation {
+            return false;
+        }
+        self.web_font_generation = generation;
+        let faces = crate::web_fonts::faces_since(self.web_faces_merged);
+        if faces.is_empty() {
+            return false;
+        }
+        self.web_faces_merged += faces.len();
+        let db = self.fonts.db_mut();
+        for face in faces {
+            db.push_face_info(face);
+        }
+        self.clear_measure_cache();
+        self.family_resolution.clear();
+        self.weight_resolution.clear();
+        self.font_generation += 1;
+        true
+    }
+
+    /// See the `font_generation` field.
+    pub fn font_generation(&self) -> u64 {
+        self.font_generation
     }
 
     /// Set the `text-align` every draw / line-layout call positions
@@ -1265,7 +1308,7 @@ fn blit_glyph(
     }
 }
 
-/// CSS generic families (plus the `system-ui` / `ui-*` keywords), each
+/// CSS generic families (plus `system-ui`), each
 /// mapped to the face family the font database is configured with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GenericFamily {
@@ -1284,16 +1327,21 @@ enum GenericFamily {
 impl GenericFamily {
     fn from_css(name: &str) -> Option<Self> {
         Some(match name.to_ascii_lowercase().as_str() {
-            "serif" | "ui-serif" => Self::Serif,
+            // Not the `ui-serif` / `ui-sans-serif` / `ui-monospace` /
+            // `ui-rounded` keywords: only Safari implements them, and
+            // Chrome — the reference — skips them like a missing name
+            // (Radio's `ui-monospace, 'SF Mono', 'JetBrains Mono', …`
+            // draws in JetBrains Mono there).
+            "serif" => Self::Serif,
             "sans-serif" => Self::SansSerif,
-            "system-ui" | "ui-sans-serif" | "ui-rounded" => Self::SystemUi,
+            "system-ui" => Self::SystemUi,
             // Apple's system-font keywords name nothing elsewhere: a
             // browser on Linux / Windows skips them like any missing
             // family and goes on down the list.
             "-apple-system" | "blinkmacsystemfont" if cfg!(target_os = "macos") => {
                 Self::SystemUi
             }
-            "monospace" | "ui-monospace" => Self::Monospace,
+            "monospace" => Self::Monospace,
             "cursive" => Self::Cursive,
             "fantasy" => Self::Fantasy,
             _ => return None,
@@ -1422,6 +1470,10 @@ fn resolve_family_list(list: &str, db: &fontdb::Database) -> ResolvedFamily {
                 return ResolvedFamily::Named(found);
             }
         }
+        // Not installed: like the DOM renderer, fetch it as a web font
+        // (when enabled); until it lands the list goes on, as with
+        // `font-display: swap`.
+        crate::web_fonts::request(name);
     }
     ResolvedFamily::Generic(GenericFamily::SansSerif)
 }
@@ -1947,8 +1999,14 @@ mod tests {
             serif
         );
         assert_eq!(
-            resolve_family_list("\"Nope\" , ui-monospace", &empty),
+            resolve_family_list("\"Nope\" , monospace", &empty),
             ResolvedFamily::Generic(GenericFamily::Monospace)
+        );
+        // Chrome does not implement the Safari-only `ui-*` keywords: a
+        // list of nothing else falls to the default.
+        assert_eq!(
+            resolve_family_list("ui-monospace", &empty),
+            ResolvedFamily::Generic(GenericFamily::SansSerif)
         );
         // `system-ui` is its own generic (the platform UI face), not
         // `sans-serif` — Chrome on Linux draws the two in different faces.
@@ -1975,14 +2033,15 @@ mod tests {
     #[test]
     fn tailwind_family_lists_resolve_to_their_generic() {
         // `font-sans` / `font-serif` / `font-mono` as tailwind-parse
-        // expands them: the leading `ui-*` keyword decides on every host,
-        // installed fonts or not.
+        // expands them. Like Chrome, the leading Safari-only `ui-*`
+        // keyword is skipped and the rest of the list decides.
         let empty = fontdb::Database::new();
         for db in [&empty, system_font_db()] {
             assert_eq!(
                 resolve_family_list("ui-serif, Georgia, serif", db),
-                ResolvedFamily::Generic(GenericFamily::Serif)
+                resolve_family_list("Georgia, serif", db)
             );
+
             assert_eq!(
                 resolve_family_list("ui-monospace, monospace", db),
                 ResolvedFamily::Generic(GenericFamily::Monospace)

@@ -432,6 +432,14 @@ impl DesktopApp {
         // Background image-fetch worker uses the same proxy to wake
         // the renderer when an HTTP avatar finishes decoding.
         crate::paint::image::set_waker(proxy.clone());
+        // `fontFamily` lists naming a web font fetch it like the DOM
+        // renderer does; a landed family wakes the loop to relayout.
+        {
+            let proxy = proxy.clone();
+            crate::web_fonts::enable(move || {
+                let _ = proxy.send_event(crate::window::AppEvent::Wake);
+            });
+        }
         // Feature `video`: playback pipelines wake the loop the same
         // way — once per decoded frame and per EOS / error event.
         #[cfg(feature = "video")]

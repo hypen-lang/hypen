@@ -144,6 +144,8 @@ pub struct VelloPainter {
     /// the user resized the window (which dropped the cache as a
     /// side-effect of the viewport change).
     last_image_load_gen: u64,
+    /// `TextEngine::font_generation` the subtree cache was encoded with.
+    last_font_gen: u64,
     /// Sources `draw_image` (or the Video poster path) looked up and
     /// missed while the current subtree fragment was being encoded.
     /// Cleared at the start of a cache-miss encode and moved into the
@@ -216,6 +218,7 @@ impl VelloPainter {
             subtree_cache: indexmap::IndexMap::new(),
             last_viewport: None,
             last_image_load_gen: 0,
+            last_font_gen: 0,
             encoding_awaits: Vec::new(),
             structural_epoch: 0,
             #[cfg(feature = "dev-overlay")]
@@ -372,6 +375,12 @@ impl VelloPainter {
                     .any(|src| crate::paint::image::loaded_source(src).is_some())
             });
             self.last_image_load_gen = load_gen;
+        }
+        // New font faces (web fonts) change every glyph run: no encoded
+        // fragment survives them.
+        if self.text.font_generation() != self.last_font_gen {
+            self.subtree_cache.clear();
+            self.last_font_gen = self.text.font_generation();
         }
 
         let viewport_rect = LayoutRect {
