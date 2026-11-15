@@ -474,6 +474,18 @@ impl Engine {
     /// - `Some(name)` → named module registered via [`register_module`]
     ///
     /// Skips rendering if the patch produces no actual state change.
+    ///
+    /// # Hosted subscribers
+    ///
+    /// When the write changes a named scope that hosted modules subscribe to
+    /// (`hypen:engine/state.subscribe`), each matching subscription's
+    /// `on_change` runs afterwards in its subscriber, through the same cascade
+    /// (budget, depth cap, failure collection) as a reducer-output fold, with
+    /// the same path matching. The host write counts as a foreign writer, so
+    /// every subscriber of the scope is notified — a module subscribed to its
+    /// own scope included, exactly as a fold notifies it. The state write
+    /// itself always stands; notification failures are logged (`Warn`), not
+    /// returned. With no subscriptions this costs one emptiness check.
     pub fn update_state(&mut self, scope: Option<&str>, state_patch: serde_json::Value) {
         self.update_state_with_animation(scope, state_patch, None)
     }
@@ -495,13 +507,22 @@ impl Engine {
         state_patch: serde_json::Value,
         animation: Option<serde_json::Value>,
     ) {
+        // Matched against the pre-write state (the patch is moved into the
+        // merge below, and no state snapshot may be held across it).
+        let notify = self.host_write_subscribers(scope, |state, changed| {
+            collect_merge_changes(state, &state_patch, &mut String::new(), changed)
+        });
         if self.core.update_state(scope, state_patch, animation) {
             self.render_dirty();
+            if let Some((scope, notify)) = notify {
+                self.notify_host_write(&scope, notify);
+            }
         }
     }
 
     /// Apply a sparse state patch (path-value pairs) and re-render affected nodes.
-    /// See [`update_state`] for `scope` semantics.
+    /// See [`update_state`] for `scope` semantics and hosted-subscriber
+    /// notification.
     pub fn update_state_sparse(
         &mut self,
         scope: Option<&str>,
@@ -522,12 +543,82 @@ impl Engine {
         values: &serde_json::Value,
         animation: Option<serde_json::Value>,
     ) {
+        let notify = self.host_write_subscribers(scope, |state, changed| {
+            if let serde_json::Value::Object(map) = values {
+                for path in paths {
+                    if let Some(value) = map.get(path) {
+                        collect_sparse_changes(state, path, value, changed);
+                    }
+                }
+            }
+        });
         if self
             .core
             .update_state_sparse(scope, paths, values, animation)
         {
             self.render_dirty();
+            if let Some((scope, notify)) = notify {
+                self.notify_host_write(&scope, notify);
+            }
         }
+    }
+
+    /// The `(subscriber, on_change)` pairs a host write to `scope` would
+    /// notify, given `collect` — which pushes the paths at which the write
+    /// changes the scope's current state. Paths are matched exactly as
+    /// [`fold_output`](Self::fold_output) matches a reducer's changes.
+    ///
+    /// `None` (and no path work at all) when there are no subscriptions, the
+    /// write targets the primary slot (never a subscription target), nothing
+    /// watches `scope`, or a cascade is draining: a write applied while a
+    /// reducer output is being folded is notified by that fold.
+    fn host_write_subscribers(
+        &self,
+        scope: Option<&str>,
+        collect: impl FnOnce(&serde_json::Value, &mut Vec<String>),
+    ) -> Option<(String, Vec<(String, String)>)> {
+        if self.subscriptions.is_empty() || self.cascade_active {
+            return None;
+        }
+        let scope = scope.filter(|s| !s.is_empty())?.to_lowercase();
+        if !self.subscriptions.iter().any(|s| s.target == scope) {
+            return None;
+        }
+        let state = self.core.get_module_state(&scope)?;
+        let mut changed = Vec::new();
+        collect(state, &mut changed);
+        if changed.is_empty() {
+            return None;
+        }
+        let notify: Vec<(String, String)> = self
+            .subscriptions
+            .iter()
+            .filter(|s| s.target == scope)
+            .filter(|s| changed.iter().any(|p| paths_overlap(p, &s.path)))
+            .map(|s| (s.subscriber.clone(), s.on_change.clone()))
+            .collect();
+        (!notify.is_empty()).then_some((scope, notify))
+    }
+
+    /// Run the `on_change` notifications of a host write to `scope` as one
+    /// cascade (the host write is its depth-1 root). Failures are logged by
+    /// the drain; the host-facing update APIs return nothing, so they are not
+    /// surfaced further.
+    fn notify_host_write(&mut self, scope: &str, notify: Vec<(String, String)>) {
+        if self.cascade_active {
+            return;
+        }
+        self.cascade_active = true;
+        let mut cascade = Cascade::default();
+        for (subscriber, on_change) in notify {
+            let action = HostAction::new(on_change, b"null".to_vec());
+            self.enqueue_follow_up(scope, "notify", &subscriber, action, 1, &mut cascade);
+        }
+        let budget = self.module_dispatch_budget.max(1);
+        let root_label = format!("[{scope}] <host state update>");
+        // Already logged failure by failure inside the drain.
+        let _ = self.drain_queue(&root_label, cascade, budget);
+        self.cascade_active = false;
     }
 
     /// Install a WASM module host. Once installed, modules registered via
@@ -909,14 +1000,24 @@ impl Engine {
     fn drain_cascade(&mut self, scope: String, call: ModuleCall) -> Result<(), EngineError> {
         let root_label = format!("[{scope}] {}", call.label());
         let mut cascade = Cascade::default();
-        let mut budget = self.module_dispatch_budget.max(1);
+        let budget = self.module_dispatch_budget.max(1);
 
         // Root: any failure is the caller's error and nothing is applied.
         let output = self.invoke(&scope, call)?;
-        budget -= 1;
+        let budget = budget - 1;
         self.fold_output(&scope, output, 1, &mut cascade)?;
+        self.drain_queue(&root_label, cascade, budget)
+    }
 
-        // Follow-ups: FIFO, each failure recorded, the queue always drained.
+    /// Drain `cascade`'s follow-ups — FIFO, each failure recorded, the queue
+    /// always emptied — within `budget` reducer invocations, then log and
+    /// summarize the failures as one `ModuleError` labelled `root_label`.
+    fn drain_queue(
+        &mut self,
+        root_label: &str,
+        mut cascade: Cascade,
+        mut budget: usize,
+    ) -> Result<(), EngineError> {
         while let Some(item) = cascade.queue.pop_front() {
             if budget == 0 {
                 let dropped = cascade.queue.len() + 1;
@@ -1545,9 +1646,101 @@ fn collect_changed_paths(
     }
 }
 
+/// The changed paths (as [`collect_changed_paths`] reports them) that
+/// deep-merging `patch` into `target` — `ModuleInstance::update_state`'s
+/// merge — would produce, without performing it: objects merge key by key,
+/// anything else replaces the target value.
+fn collect_merge_changes(
+    target: &serde_json::Value,
+    patch: &serde_json::Value,
+    prefix: &mut String,
+    out: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    let (Value::Object(target_map), Value::Object(patch_map)) = (target, patch) else {
+        collect_changed_paths(target, patch, prefix, out);
+        return;
+    };
+    let mut parent_changed = false;
+    for (key, value) in patch_map {
+        let addressable = !key.is_empty() && !key.contains('.');
+        match (target_map.get(key), addressable) {
+            (Some(old), true) => {
+                let len = prefix.len();
+                if len > 0 {
+                    prefix.push('.');
+                }
+                prefix.push_str(key);
+                collect_merge_changes(old, value, prefix, out);
+                prefix.truncate(len);
+            }
+            (None, true) => {
+                let mut path = prefix.clone();
+                if !path.is_empty() {
+                    path.push('.');
+                }
+                path.push_str(key);
+                out.push(path);
+            }
+            // Not addressable by a dotted path: report the parent, as
+            // `collect_changed_paths` does.
+            (Some(old), false) => {
+                let mut scratch = Vec::new();
+                collect_merge_changes(old, value, &mut String::new(), &mut scratch);
+                parent_changed |= !scratch.is_empty();
+            }
+            (None, false) => parent_changed = true,
+        }
+    }
+    if parent_changed {
+        out.push(prefix.clone());
+    }
+}
+
+/// The changed paths writing `value` at the dotted `path` of `state` —
+/// `ModuleInstance::update_state_sparse`'s auto-vivifying write — would
+/// produce, without performing it. A missing or non-container segment
+/// reports the path down to that segment (that is what gets created or
+/// replaced); a present value is compared like [`collect_changed_paths`].
+fn collect_sparse_changes(
+    state: &serde_json::Value,
+    path: &str,
+    value: &serde_json::Value,
+    out: &mut Vec<String>,
+) {
+    use serde_json::Value;
+    let mut current = state;
+    let mut end: usize = 0;
+    for segment in path.split('.') {
+        let index = match current {
+            Value::Array(_) => segment.parse::<usize>().ok(),
+            _ => None,
+        };
+        let next = match (current, index) {
+            (Value::Object(map), _) => map.get(segment),
+            (Value::Array(items), Some(index)) => items.get(index),
+            // A scalar (or an array addressed by a non-index key) in the way
+            // is replaced by an object holding the rest.
+            _ => {
+                out.push(path[..end.saturating_sub(1)].to_string());
+                return;
+            }
+        };
+        end += segment.len() + 1;
+        match next {
+            Some(next) => current = next,
+            None => {
+                out.push(path[..end - 1].to_string());
+                return;
+            }
+        }
+    }
+    collect_changed_paths(current, value, &mut path.to_string(), out);
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{collect_changed_paths, paths_overlap};
+    use super::{collect_changed_paths, collect_merge_changes, collect_sparse_changes, paths_overlap};
     use serde_json::{json, Value};
 
     fn changed(old: Value, new: Value) -> Vec<String> {
@@ -1605,5 +1798,45 @@ mod tests {
         // At the root the parent is the whole state.
         assert_eq!(changed(json!({ "a.b": 1 }), json!({ "a.b": 2 })), [""]);
         assert!(changed(json!({ "a.b": 1 }), json!({ "a.b": 1 })).is_empty());
+    }
+
+    #[test]
+    fn merge_changes_preview_the_deep_merge_without_deletions() {
+        fn merged(target: serde_json::Value, patch: serde_json::Value) -> Vec<String> {
+            let mut out = Vec::new();
+            collect_merge_changes(&target, &patch, &mut String::new(), &mut out);
+            out
+        }
+        let state = json!({ "user": { "name": "a", "age": 1 }, "items": [1, 2], "n": 0 });
+        // Keys absent from the patch are kept, not reported as removed.
+        assert_eq!(merged(state.clone(), json!({ "user": { "name": "b" } })), ["user.name"]);
+        assert!(merged(state.clone(), json!({ "user": { "name": "a" }, "n": 0 })).is_empty());
+        // New keys, replaced arrays and type changes report like the fold.
+        assert_eq!(merged(state.clone(), json!({ "user": { "x": 1 } })), ["user.x"]);
+        assert_eq!(merged(state.clone(), json!({ "items": [1, 3] })), ["items.1"]);
+        assert_eq!(merged(state.clone(), json!({ "items": [1] })), ["items"]);
+        assert_eq!(merged(state.clone(), json!({ "n": { "deep": 1 } })), ["n"]);
+        // Non-addressable keys report their parent.
+        assert_eq!(merged(state, json!({ "user": { "a.b": 1 } })), ["user"]);
+    }
+
+    #[test]
+    fn sparse_changes_preview_the_auto_vivifying_write() {
+        fn sparse(state: serde_json::Value, path: &str, value: serde_json::Value) -> Vec<String> {
+            let mut out = Vec::new();
+            collect_sparse_changes(&state, path, &value, &mut out);
+            out
+        }
+        let state = json!({ "user": { "name": "a" }, "items": [{ "t": 1 }], "n": 0 });
+        assert_eq!(sparse(state.clone(), "user.name", json!("b")), ["user.name"]);
+        assert!(sparse(state.clone(), "user.name", json!("a")).is_empty());
+        assert_eq!(sparse(state.clone(), "items.0.t", json!(2)), ["items.0.t"]);
+        assert_eq!(sparse(state.clone(), "user", json!({ "name": "b" })), ["user.name"]);
+        // Created segments report the first one created.
+        assert_eq!(sparse(state.clone(), "a.b.c", json!(1)), ["a"]);
+        assert_eq!(sparse(state.clone(), "items.3", json!(1)), ["items.3"]);
+        // A scalar or non-index array segment in the way is replaced.
+        assert_eq!(sparse(state.clone(), "n.x", json!(1)), ["n"]);
+        assert_eq!(sparse(state, "items.key", json!(1)), ["items"]);
     }
 }

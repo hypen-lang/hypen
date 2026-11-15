@@ -1057,3 +1057,160 @@ fn subscriptions_per_module_are_bounded_and_idempotent() {
     engine.dispatch_module_action("b", "set", Value::Null).unwrap();
     assert_eq!(calls(&log), vec![(1, "set".into()), (0, "changed".into())]);
 }
+
+// ── D8: host state writes notify hosted subscribers ──────────────────────────
+
+/// `w` subscribes to `paths` of `t` on `watch`; `t` is written only by the host
+/// (`update_state` / `update_state_sparse`), never by a reducer.
+fn host_written(paths: &'static [&'static str]) -> (Engine, Log) {
+    let (mut engine, log) = engine_with(vec![
+        spec("w", &["watch", "changed"]).grants(&["t"], &[]).reducer(move |call| {
+            Ok(match call.action.as_str() {
+                "watch" => ReducerOutput {
+                    subscribe_requests: paths.iter().map(|p| subscribe("t", p, "changed")).collect(),
+                    ..Default::default()
+                },
+                _ => ReducerOutput::default(),
+            })
+        }),
+        spec("t", &["set"])
+            .state(json!({ "user": { "name": "a", "age": 1 }, "items": [{ "t": 1 }], "n": 0 })),
+    ]);
+    engine.dispatch_module_action("w", "watch", Value::Null).unwrap();
+    log.lock().unwrap().clear();
+    (engine, log)
+}
+
+fn notified(log: &Log) -> usize {
+    let n = calls(log).iter().filter(|(id, a)| *id == 0 && a == "changed").count();
+    log.lock().unwrap().clear();
+    n
+}
+
+#[test]
+fn a_host_update_on_a_watched_path_notifies_the_subscriber_once() {
+    let (mut engine, log) = host_written(&["n"]);
+    engine.update_state(Some("T"), json!({ "n": 1 }));
+    assert_eq!(calls(&log), vec![(0, "changed".into())]);
+    // The subscriber saw the already-written state through its `reads` grant.
+    assert_eq!(log.lock().unwrap()[0].siblings[0].1["n"], json!(1));
+    assert_eq!(engine.get_module_state("t").unwrap()["n"], json!(1));
+    log.lock().unwrap().clear();
+
+    // A no-op write (same value) changes nothing and notifies nobody.
+    engine.update_state(Some("t"), json!({ "n": 1 }));
+    assert_eq!(notified(&log), 0);
+}
+
+#[test]
+fn a_host_update_on_an_unrelated_path_does_not_notify() {
+    let (mut engine, log) = host_written(&["n"]);
+    engine.update_state(Some("t"), json!({ "user": { "name": "b" } }));
+    engine.update_state_sparse(Some("t"), &["items.0.t".to_string()], &json!({ "items.0.t": 9 }));
+    assert_eq!(engine.get_module_state("t").unwrap()["user"]["name"], json!("b"));
+    assert_eq!(notified(&log), 0);
+    // Writes to other scopes and to the primary slot never match either.
+    engine.update_state(Some("w"), json!({ "n": 5 }));
+    engine.update_state(None, json!({ "n": 5 }));
+    assert_eq!(notified(&log), 0);
+}
+
+#[test]
+fn a_sparse_host_update_notifies_the_subscriber() {
+    let (mut engine, log) = host_written(&["user.name"]);
+    engine.update_state_sparse(
+        Some("t"),
+        &["user.name".to_string(), "n".to_string()],
+        &json!({ "user.name": "b", "n": 3 }),
+    );
+    assert_eq!(notified(&log), 1);
+    // Only the listed paths count: a value under an unlisted key is ignored.
+    engine.update_state_sparse(Some("t"), &["n".to_string()], &json!({ "n": 4, "user.name": "c" }));
+    assert_eq!(notified(&log), 0);
+    // Unchanged value: nothing.
+    engine.update_state_sparse(Some("t"), &["user.name".to_string()], &json!({ "user.name": "b" }));
+    assert_eq!(notified(&log), 0);
+}
+
+#[test]
+fn host_updates_match_nested_and_overlapping_paths_like_the_fold() {
+    // Watches: an ancestor of the written leaf, a descendant of a replaced
+    // value, a sibling leaf, and an array element.
+    let (mut engine, log) = host_written(&["user"]);
+    engine.update_state(Some("t"), json!({ "user": { "age": 2 } }));
+    assert_eq!(notified(&log), 1, "ancestor watch sees a descendant change");
+
+    let (mut engine, log) = host_written(&["user.name"]);
+    engine.update_state(Some("t"), json!({ "user": { "age": 2 } }));
+    assert_eq!(notified(&log), 0, "sibling leaf: the merge keeps user.name");
+    engine.update_state_sparse(Some("t"), &["user".to_string()], &json!({ "user": { "name": "z" } }));
+    assert_eq!(notified(&log), 1, "a write at an ancestor that changes the leaf");
+
+    let (mut engine, log) = host_written(&["items.0.t"]);
+    engine.update_state(Some("t"), json!({ "items": [{ "t": 1 }, { "t": 2 }] }));
+    assert_eq!(notified(&log), 0, "an appended element leaves items.0 alone");
+    engine.update_state(Some("t"), json!({ "items": [] }));
+    assert_eq!(notified(&log), 1, "a shrunk array reports the array itself");
+
+    let (mut engine, log) = host_written(&[""]);
+    engine.update_state(Some("t"), json!({ "brand_new": true }));
+    assert_eq!(notified(&log), 1, "a whole-state watch sees any change");
+
+    // Two held subscriptions that both match notify once each, as in a fold.
+    let (mut engine, log) = host_written(&["user", "user.name"]);
+    engine.update_state(Some("t"), json!({ "user": { "name": "q" } }));
+    assert_eq!(notified(&log), 2);
+}
+
+#[test]
+fn host_updates_without_subscriptions_never_call_the_host() {
+    let (mut engine, log) = engine_with(vec![
+        spec("a", &["x"]).grants(&["b"], &[]).reducer(counter()),
+        spec("b", &["x"]).reducer(counter()),
+    ]);
+    engine.update_state(Some("b"), json!({ "n": 1 }));
+    engine.update_state_sparse(Some("b"), &["n".to_string()], &json!({ "n": 2 }));
+    engine.update_state(Some("a"), json!({ "n": 1 }));
+    assert!(calls(&log).is_empty());
+    assert_eq!(engine.get_module_state("b").unwrap()["n"], json!(2));
+}
+
+#[test]
+fn a_reducer_fold_is_not_double_notified_and_host_writes_keep_cascade_rules() {
+    // `t`'s reducer writes the watched path; the fold notifies, exactly once.
+    let (mut engine, log) = engine_with(vec![
+        spec("w", &["watch", "changed"]).grants(&["t"], &[]).reducer(|call| {
+            Ok(match call.action.as_str() {
+                "watch" => ReducerOutput {
+                    subscribe_requests: vec![subscribe("t", "n", "changed")],
+                    ..Default::default()
+                },
+                // The notification itself writes `w`'s state and fails a
+                // follow-up: the host write still stands, the failure is
+                // logged, not returned.
+                _ => ReducerOutput {
+                    emit: vec![action("missing")],
+                    ..with_state(json!({ "seen": call.siblings[0].1["n"].clone() }))
+                },
+            })
+        }),
+        spec("t", &["bump"]).grants(&[], &[]).reducer(counter()),
+    ]);
+    engine.dispatch_module_action("w", "watch", Value::Null).unwrap();
+    log.lock().unwrap().clear();
+
+    let message = module_error(engine.dispatch_module_action("t", "bump", Value::Null));
+    assert!(message.contains("missing"), "{message}");
+    assert_eq!(calls(&log), vec![(1, "bump".into()), (0, "changed".into())]);
+    log.lock().unwrap().clear();
+
+    engine.update_state(Some("t"), json!({ "n": 10 }));
+    assert_eq!(calls(&log), vec![(0, "changed".into())]);
+    assert_eq!(engine.get_module_state("t").unwrap()["n"], json!(10));
+    assert_eq!(engine.get_module_state("w").unwrap()["seen"], json!(10));
+
+    // The engine is not left mid-cascade: a regular dispatch still runs.
+    log.lock().unwrap().clear();
+    engine.dispatch_module_action("t", "bump", Value::Null).unwrap_err();
+    assert_eq!(calls(&log), vec![(1, "bump".into()), (0, "changed".into())]);
+}
