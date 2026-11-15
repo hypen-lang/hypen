@@ -137,6 +137,8 @@ pub enum RequestError {
     PayloadTooLarge { limit: usize },
     #[error("request body could not be read: {message}")]
     BodyRead { message: String },
+    #[error("request body was not received within {} ms", limit.as_millis())]
+    BodyTimeout { limit: std::time::Duration },
     #[error("request body is not valid JSON for this endpoint: {message}")]
     InvalidJson { message: String },
     #[error("{message}")]
@@ -156,6 +158,7 @@ impl RequestError {
             | RequestError::InvalidRequest { .. } => 400,
             RequestError::ForbiddenHost { .. } | RequestError::ForbiddenOrigin { .. } => 403,
             RequestError::NotFound { .. } => 404,
+            RequestError::BodyTimeout { .. } => 408,
             RequestError::MethodNotAllowed { .. } => 405,
             RequestError::PayloadTooLarge { .. } => 413,
             RequestError::UnsupportedMediaType { .. } => 415,
@@ -175,6 +178,7 @@ impl RequestError {
             RequestError::UnsupportedMediaType { .. } => "unsupported_media_type",
             RequestError::PayloadTooLarge { .. } => "payload_too_large",
             RequestError::BodyRead { .. } => "invalid_body",
+            RequestError::BodyTimeout { .. } => "request_timeout",
             RequestError::InvalidJson { .. } => "invalid_json",
             RequestError::InvalidRequest { .. } => "invalid_request",
             RequestError::Busy { .. } => "server_busy",
@@ -190,6 +194,11 @@ impl RequestError {
             RequestError::UnsupportedMediaType { .. } => {
                 Some("send the header `Content-Type: application/json`".to_string())
             }
+            RequestError::BodyTimeout { .. } => Some(
+                "send the whole body promptly, or start the server with a larger \
+                 --request-timeout-ms"
+                    .to_string(),
+            ),
             _ => None,
         }
     }

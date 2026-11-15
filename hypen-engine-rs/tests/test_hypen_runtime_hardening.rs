@@ -739,7 +739,7 @@ fn single_module_mode_grants_nothing_by_default() {
     assert_eq!(code, 1);
     assert!(stderr.contains("error: module `fetcher`: instantiate failed"), "{stderr}");
     assert!(stderr.contains("hint: ") && stderr.contains("\"http\": true"), "{stderr}");
-    assert!(stderr.contains("`fetcher` entry in app.json"), "{stderr}");
+    assert!(stderr.contains("`Fetcher` entry in app.json"), "{stderr}");
 }
 
 #[test]
@@ -781,4 +781,440 @@ fn startup_failures_exit_nonzero_with_a_rendered_error_never_a_panic() {
         run(&[COUNTER, "--grant-storage", "cloud", "--serve", &s.port.to_string()]);
     assert_eq!(code, 1, "{stderr}");
     assert!(stderr.contains(&format!("error: cannot listen on 127.0.0.1:{}", s.port)), "{stderr}");
+}
+
+// ── slow request bodies release their slot ──────────────────────────────────
+
+/// Gap between the connections of a test that opens many at once. tiny_http
+/// hands a new connection to an idle pool thread if it believes one exists,
+/// and a burst can outrun that bookkeeping: connections then queue behind
+/// the ones already being read. These tests are about what the server does
+/// with requests it has been given, so they do not open them in a burst.
+const CONNECT_PACE: Duration = Duration::from_millis(10);
+
+/// More stalled uploads than the server handles at once: after the body
+/// timeout each has given its slot back, so other clients are served instead
+/// of getting 503 — and a stalled client that finally sends its body is told
+/// it was too late.
+#[test]
+fn stalled_request_bodies_stop_counting_against_the_in_flight_limit() {
+    let s = Server::start(&[COUNTER, "--grant-storage", "cloud", "--request-timeout-ms", "400"]);
+    // Larger than the 1024 bytes tiny_http reads on its own before handing a
+    // request over: these requests are admitted with their body outstanding.
+    let padded = format!(r#"{{"action":"increment"{}}}"#, " ".repeat(2000));
+    let body = padded.as_str();
+    let (sent, held_back) = body.split_at(10);
+    let mut stalled = Vec::new();
+    // 80 > the 64 requests handled at once.
+    for _ in 0..80 {
+        let mut stream = TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST /dispatch HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\
+                     Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{sent}",
+                    s.host(),
+                    body.len()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        stalled.push(stream); // …and hold the rest back
+        // The first one gets a head start, so it is certainly being handled.
+        std::thread::sleep(if stalled.len() == 1 { Duration::from_millis(300) } else { CONNECT_PACE });
+    }
+    // Let every stalled request be admitted and then run out its deadline.
+    std::thread::sleep(Duration::from_millis(1500));
+
+    for expected in 1..=5 {
+        let r = s.dispatch(body);
+        assert_eq!(r.status, 200, "served despite 80 stalled uploads: {}", r.body);
+        assert_eq!(r.json()["state"]["count"], expected);
+    }
+
+    // The first stalled client was admitted long ago (it connected alone,
+    // before the others). When it finally sends its body it is told it was
+    // too late, and the action it carried does not run.
+    let mut late = stalled.swap_remove(0);
+    late.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    late.write_all(held_back.as_bytes()).unwrap();
+    let mut raw = Vec::new();
+    let _ = late.read_to_end(&mut raw);
+    let error = Response::parse(&raw).error(408, "request_timeout");
+    assert!(error["message"].as_str().unwrap().contains("within 400 ms"), "{error}");
+    assert!(error["hint"].as_str().unwrap().contains("--request-timeout-ms"), "{error}");
+    assert_eq!(count(&s), 5, "the timed-out request was not dispatched");
+    drop(stalled);
+    assert_eq!(s.get("/state").status, 200);
+}
+
+/// A body that arrives within the deadline — even slowly, in pieces — is
+/// handled normally.
+#[test]
+fn a_slow_but_timely_body_is_accepted() {
+    let s = Server::start(&[COUNTER, "--grant-storage", "cloud", "--request-timeout-ms", "5000"]);
+    let padded = format!(r#"{{"action":"increment"{}}}"#, " ".repeat(2000));
+    let body = padded.as_str();
+    let mut stream = TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+    stream.set_read_timeout(Some(Duration::from_secs(30))).unwrap();
+    stream
+        .write_all(
+            format!(
+                "POST /dispatch HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\
+                 Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                s.host(),
+                body.len()
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+    for chunk in body.as_bytes().chunks(500) {
+        std::thread::sleep(Duration::from_millis(100));
+        stream.write_all(chunk).unwrap();
+    }
+    let mut raw = Vec::new();
+    let _ = stream.read_to_end(&mut raw);
+    let r = Response::parse(&raw);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["state"]["count"], 1);
+}
+
+/// Refusing a request must not wait for a body the client never sends, on
+/// the accept loop or in a slot: refused uploads that stall — more of them
+/// than there are slots — are answered at once and leave the server free.
+#[test]
+fn refused_requests_with_a_stalled_body_are_answered_without_holding_a_slot() {
+    let s = counter_server();
+    let mut stalled = Vec::new();
+    for i in 0..80 {
+        let mut stream = TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        // Half are refused for their declared size, half for their origin.
+        let (length, origin) =
+            if i % 2 == 0 { (2 * 1024 * 1024, "") } else { (4096, "Origin: https://evil.example\r\n") };
+        stream
+            .write_all(
+                format!(
+                    "POST /dispatch HTTP/1.1\r\nHost: {}\r\n{origin}\
+                     Content-Type: application/json\r\nContent-Length: {length}\r\n\r\n{{",
+                    s.host()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        stalled.push(stream);
+        std::thread::sleep(CONNECT_PACE);
+    }
+    // Each is answered although its body never arrives…
+    for (i, stream) in stalled.iter_mut().enumerate() {
+        let mut head = [0u8; 12];
+        stream.read_exact(&mut head).unwrap_or_else(|e| panic!("request {i} got no reply: {e}"));
+        let expected: &[u8] = if i % 2 == 0 { b"HTTP/1.1 413" } else { b"HTTP/1.1 403" };
+        assert_eq!(&head, expected, "request {i}");
+    }
+    // …and with all 80 connections still open, the server serves others.
+    for expected in 1..=3 {
+        let r = s.dispatch(r#"{"action":"increment"}"#);
+        assert_eq!(r.status, 200, "{}", r.body);
+        assert_eq!(r.json()["state"]["count"], expected);
+    }
+    drop(stalled);
+}
+
+/// A declared length no machine can allocate used to take the whole process
+/// down (tiny_http allocates the declared remainder when a request is
+/// dropped). It is a 413 like any other oversized body, and the server lives.
+#[test]
+fn an_absurd_content_length_is_refused_and_does_not_kill_the_server() {
+    let mut s = counter_server();
+    for length in ["281474976710656", "18446744073709551615", "17179869184"] {
+        let mut stream = TcpStream::connect(("127.0.0.1", s.port)).unwrap();
+        stream.set_read_timeout(Some(Duration::from_secs(20))).unwrap();
+        stream
+            .write_all(
+                format!(
+                    "POST /dispatch HTTP/1.1\r\nHost: {}\r\nContent-Type: application/json\r\n\
+                     Content-Length: {length}\r\n\r\n{{\"action\":",
+                    s.host()
+                )
+                .as_bytes(),
+            )
+            .unwrap();
+        // The reply is complete and framed (after an interim response that
+        // HTTP clients skip), so the client need not wait for a close.
+        let mut raw = Vec::new();
+        let mut buf = [0u8; 4096];
+        let reply = loop {
+            let n = stream.read(&mut buf).unwrap_or_else(|e| panic!("length {length}: no reply: {e}"));
+            assert!(n > 0, "length {length}: connection closed early: {:?}", String::from_utf8_lossy(&raw));
+            raw.extend_from_slice(&buf[..n]);
+            let text = String::from_utf8_lossy(&raw).to_string();
+            let Some(at) = text.find("HTTP/1.1 413") else { continue };
+            let Some((head, body)) = text[at..].split_once("\r\n\r\n") else { continue };
+            let declared: usize = head
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or_else(|| panic!("no Content-Length in {head:?}"));
+            if body.len() >= declared {
+                break body[..declared].to_string();
+            }
+        };
+        let error: Value = serde_json::from_str(&reply).unwrap_or_else(|e| panic!("{e}: {reply:?}"));
+        assert_eq!(error["error"]["code"], "payload_too_large", "{reply}");
+
+        assert!(s.child.try_wait().unwrap().is_none(), "the server died. stderr:\n{}", s.stderr());
+        assert_eq!(s.dispatch(r#"{"action":"increment"}"#).status, 200);
+    }
+    s.wait_for_log("abandoned its connection");
+    assert_eq!(count(&s), 3);
+}
+
+// ── ambiguous / unknown actions are 4xx with candidates ─────────────────────
+
+#[test]
+fn ambiguous_and_unknown_actions_are_client_errors_that_list_candidates() {
+    let s = Server::start(&["--app", APP]);
+
+    // `App` and `Counter` both export `increment`.
+    let r = s.dispatch(r#"{"action":"increment"}"#);
+    let error = r.error(409, "ambiguous_action");
+    assert_eq!(error["candidates"], json!(["app:increment", "counter:increment"]), "{error}");
+    let message = error["message"].as_str().unwrap();
+    assert!(message.contains("`app:increment`, `counter:increment`"), "{message}");
+    assert_eq!(r.json()["states"]["counter"]["count"], 0, "nothing ran");
+
+    // Either candidate works as written.
+    let r = s.dispatch(r#"{"action":"counter:increment"}"#);
+    assert_eq!(r.status, 200, "{}", r.body);
+    assert_eq!(r.json()["states"]["counter"]["count"], 1);
+
+    // Unknown action in a known scope: that scope's actions.
+    let r = s.dispatch(r#"{"action":"Counter:frobnicate"}"#);
+    let error = r.error(404, "action_not_found");
+    let candidates: Vec<&str> =
+        error["candidates"].as_array().unwrap().iter().filter_map(Value::as_str).collect();
+    assert!(candidates.contains(&"counter:increment"), "{error}");
+    assert!(candidates.iter().all(|c| c.starts_with("counter:")), "{error}");
+    assert!(error["message"].as_str().unwrap().contains("did you mean"), "{error}");
+
+    // Unknown scope: the scopes that do export the action.
+    let r = s.dispatch(r#"{"action":"ghost:increment"}"#);
+    let error = r.error(404, "action_not_found");
+    assert_eq!(error["candidates"], json!(["app:increment", "counter:increment"]), "{error}");
+
+    // The server is unharmed.
+    assert_eq!(s.get("/state").status, 200);
+}
+
+// ── a crash says what killed the module ─────────────────────────────────────
+
+#[test]
+fn a_crash_reports_the_hosts_reason() {
+    let s = Server::start(&[LIMITS, "--grant-storage", "app", "--call-timeout-ms", "400"]);
+    let r = s.dispatch(r#"{"action":"hang"}"#);
+    let error = r.error(500, "module_crashed");
+    let reason = error["reasons"][0].as_str().unwrap_or_else(|| panic!("no reason: {error}"));
+    assert!(
+        reason.contains("module 'limits_module' export `dispatch` exceeded its 400 ms CPU budget"),
+        "{reason}"
+    );
+    assert!(error["message"].as_str().unwrap().contains("exceeded its 400 ms CPU budget"), "{error}");
+    s.wait_for_log("CRASHED (module 'limits_module' export `dispatch` exceeded its 400 ms CPU budget");
+
+    // A trap is told apart from a timeout.
+    assert_eq!(s.dispatch(r#"{"action":"noop"}"#).status, 200);
+    let error = s.dispatch(r#"{"action":"trap"}"#).error(500, "module_crashed");
+    let reason = error["reasons"][0].as_str().unwrap_or_else(|| panic!("no reason: {error}"));
+    assert!(reason.contains("export `dispatch` trapped"), "{reason}");
+
+    // A reducer that merely returns an error is not a crash and has no reason.
+    assert_eq!(s.dispatch(r#"{"action":"noop"}"#).status, 200);
+    let r = s.dispatch(r#"{"action":"kv-set"}"#);
+    let error = r.error(500, "module_error");
+    assert!(error.get("reasons").is_none(), "{error}");
+}
+
+// ── capability hints name every missing grant ───────────────────────────────
+
+#[test]
+fn a_denied_module_is_told_every_grant_it_lacks() {
+    const FETCHER: &str = "tests/fixtures/fetcher_module.wasm";
+    let (code, _, stderr) = run(&[FETCHER]);
+    assert_eq!(code, 1, "{stderr}");
+    let hint = stderr.lines().find(|l| l.starts_with("  hint: ")).unwrap_or_else(|| panic!("{stderr}"));
+    assert!(hint.contains("wasi:http") && hint.contains("--grant-http"), "{hint}");
+    // Whatever the host listed as denied is in the hint — nothing is left for
+    // a second failed start to reveal.
+    let cause = stderr.lines().find(|l| l.starts_with("  caused by: ")).unwrap();
+    for scope in ["app", "cloud"] {
+        let imported = cause.contains(&format!("hypen:storage/{scope}@"));
+        assert_eq!(hint.contains(&format!("hypen:storage/{scope}")), imported, "{stderr}");
+    }
+    // Granting exactly what the hint says starts the module.
+    let flags: Vec<&str> = hint
+        .split("; pass ")
+        .nth(1)
+        .unwrap_or_else(|| panic!("{hint}"))
+        .split_whitespace()
+        .collect();
+    let mut args = vec![FETCHER];
+    args.extend(flags);
+    let (code, stdout, stderr) = run(&args);
+    assert_eq!(code, 0, "{args:?}: {stderr}");
+    assert!(stdout.contains("ready:"), "{stdout}");
+}
+
+// ── --cache-dir ─────────────────────────────────────────────────────────────
+
+#[test]
+fn cache_dir_is_opt_in_reused_and_must_be_private() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cache = tmp.path().join("cache");
+    let cache_arg = cache.to_string_lossy().to_string();
+    let data = tmp.path().join("data");
+    let data_arg = data.to_string_lossy().to_string();
+
+    // Without the flag nothing is cached — not even next to --data-dir.
+    let (code, _, stderr) = run(&[COUNTER, "--grant-storage", "cloud", "--data-dir", &data_arg]);
+    assert_eq!(code, 0, "{stderr}");
+    assert!(!cache.exists());
+    let entries: Vec<_> = std::fs::read_dir(&data).unwrap().map(|e| e.unwrap().file_name()).collect();
+    assert!(entries.iter().all(|name| name == "storage.json"), "{entries:?}");
+
+    fn files(dir: &Path) -> usize {
+        std::fs::read_dir(dir)
+            .map(|entries| {
+                entries
+                    .map(|e| e.unwrap().path())
+                    .map(|p| if p.is_dir() { files(&p) } else { 1 })
+                    .sum()
+            })
+            .unwrap_or(0)
+    }
+    for round in 0..2 {
+        let (code, stdout, stderr) =
+            run(&[COUNTER, "--grant-storage", "cloud", "--cache-dir", &cache_arg]);
+        assert_eq!(code, 0, "round {round}: {stderr}");
+        assert!(stdout.contains(r#"ready: {"count":0}"#), "round {round}: {stdout}");
+    }
+    let cached = files(&cache);
+    assert!(cached >= 1, "the compiled module was stored");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&cache).unwrap().permissions().mode() & 0o777, 0o700);
+    }
+
+    // A directory other users can write to is refused, with the fix.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let shared = tmp.path().join("shared");
+        std::fs::create_dir(&shared).unwrap();
+        std::fs::set_permissions(&shared, std::fs::Permissions::from_mode(0o777)).unwrap();
+        let (code, _, stderr) =
+            run(&[COUNTER, "--grant-storage", "cloud", "--cache-dir", &shared.to_string_lossy()]);
+        assert_eq!(code, 1, "{stderr}");
+        assert!(stderr.contains("error: the module host could not start"), "{stderr}");
+        assert!(stderr.contains("shared") && stderr.contains("writable by other users"), "{stderr}");
+        assert_eq!(files(&shared), 0, "nothing was written to it");
+    }
+    // Not a directory.
+    let file = tmp.path().join("file");
+    std::fs::write(&file, "x").unwrap();
+    let (code, _, stderr) =
+        run(&[COUNTER, "--grant-storage", "cloud", "--cache-dir", &file.to_string_lossy()]);
+    assert_eq!(code, 1, "{stderr}");
+    assert!(stderr.contains("is not a directory"), "{stderr}");
+}
+
+// ── hot reload: rename-replaced .wasm, retired usages, re-seeded config ─────
+
+/// Build tools write `module.wasm.tmp` and rename it over `module.wasm`. The
+/// path then names a new inode; every such rebuild must still be noticed.
+#[test]
+fn a_wasm_replaced_by_rename_is_reloaded_every_time() {
+    let tmp = tempfile::tempdir().unwrap();
+    let wasm = tmp.path().join("seeded.wasm");
+    std::fs::copy(fixture(SEEDED), &wasm).unwrap();
+    let s = Server::start_paths(&[wasm.clone(), "--scope".into(), "seeded".into()]);
+    s.wait_for_log("[reload] watching");
+    assert_eq!(s.dispatch(r#"{"action":"increment"}"#).status, 200);
+
+    for round in 1..=3 {
+        let staged = tmp.path().join(format!("seeded.wasm.tmp{round}"));
+        std::fs::copy(fixture(SEEDED), &staged).unwrap();
+        std::fs::rename(&staged, &wasm).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(20);
+        while s.stderr().matches("[reload] seeded reloaded").count() < round {
+            assert!(
+                Instant::now() < deadline,
+                "rebuild {round} (rename over the watched file) was not reloaded. stderr:\n{}",
+                s.stderr()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        // Past the debounce window, so the next rename is its own event.
+        std::thread::sleep(Duration::from_millis(400));
+    }
+    assert_eq!(s.stderr().matches("[reload] seeded reloaded").count(), 3, "{}", s.stderr());
+    assert_eq!(count(&s), json!(1), "state survived three swaps");
+}
+
+#[test]
+fn removing_a_usage_retires_its_instance_and_a_ui_config_edit_reseeds() {
+    // App mode: a usage scope comes and goes with the template.
+    let tmp = tempfile::tempdir().unwrap();
+    std::fs::copy(fixture(SEEDED), tmp.path().join("seeded.wasm")).unwrap();
+    let app_hypen = |extra: &str| {
+        format!("module App {{\n Column {{\n  Text(\"App: @{{state.count}}\")\n  Seeded()\n{extra} }}\n}}\n")
+    };
+    std::fs::write(tmp.path().join("app.hypen"), app_hypen("  Seeded(start: 5)\n")).unwrap();
+    std::fs::write(
+        tmp.path().join("seeded.hypen"),
+        "module Seeded {\n Text(\"Seeded: @{state.count}\")\n}\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("app.json"),
+        r#"{ "entry": "App", "modules": [
+            { "name": "App", "wasm": "seeded.wasm", "ui": "app.hypen" },
+            { "name": "Seeded", "wasm": "seeded.wasm", "ui": "seeded.hypen" } ] }"#,
+    )
+    .unwrap();
+    let s = Server::start_paths(&[PathBuf::from("--app"), tmp.path().join("app.json")]);
+    s.wait_for_log("[reload] watching");
+    assert_eq!(s.get("/state").json()["states"]["seeded__a"]["count"], 5);
+
+    std::fs::write(tmp.path().join("app.hypen"), app_hypen("")).unwrap();
+    s.wait_for_log("retired usage scope `seeded__a`");
+    let states = s.get("/state").json()["states"].clone();
+    assert!(states.get("seeded__a").is_none(), "{states}");
+    assert!(states.get("seeded").is_some() && states.get("app").is_some(), "{states}");
+    assert!(!s.get("/patches").body.contains("Seeded: 5"));
+    s.dispatch(r#"{"action":"seeded__a:increment"}"#).error(404, "action_not_found");
+    drop(s);
+
+    // Single-module mode: the --ui declaration is the init config.
+    let ui = tmp.path().join("ui.hypen");
+    std::fs::write(&ui, "module seeded(start: 7) { Text(\"N: @{state.count}\") }").unwrap();
+    let s = Server::start_paths(&[
+        tmp.path().join("seeded.wasm"),
+        "--scope".into(),
+        "seeded".into(),
+        "--ui".into(),
+        ui.clone(),
+    ]);
+    s.wait_for_log("[reload] watching");
+    assert_eq!(s.dispatch(r#"{"action":"increment"}"#).json()["state"]["count"], 8);
+
+    std::fs::write(&ui, "module seeded(start: 7) { Text(\"Now: @{state.count}\") }").unwrap();
+    s.wait_for_log("[reload] ui re-rendered");
+    assert_eq!(count(&s), json!(8), "markup-only edit keeps the state");
+
+    std::fs::write(&ui, "module seeded(start: 40) { Text(\"Now: @{state.count}\") }").unwrap();
+    s.wait_for_log("`seeded` re-initialised");
+    assert_eq!(count(&s), json!(40));
+    assert!(s.get("/patches").body.contains("Now: 40"));
 }

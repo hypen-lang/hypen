@@ -22,9 +22,14 @@
 //! host answers every later call with `HostError::DeadInstance`. Policy:
 //!
 //! 1. The dispatch that killed it fails with [`RuntimeError::ModuleCrashed`]
-//!    naming the scope(s). (Detected by probing the instances after a failed
-//!    dispatch — the engine reports host failures as text, the host's typed
-//!    `DeadInstance` answer to the probe is what we trust.)
+//!    naming the scope(s) and what the host says killed each. Detection
+//!    makes no guest call and reads no message text: after a failed dispatch
+//!    the host is asked for each instance's
+//!    [`InstanceStatus`](hypen_engine::module_host::InstanceStatus) — its own
+//!    bookkeeping. A host that does not track health answers `Unknown`; for
+//!    those the engine's structured cascade report of that same dispatch is
+//!    consulted instead (a failure whose cause is the host's typed
+//!    `Trap` / `DeadInstance`).
 //! 2. The **next action** (any dispatch or timer) first re-instantiates each
 //!    crashed module from its registered component and re-runs `init` with
 //!    its original config. The crashed instance's state is lost; this is
@@ -37,13 +42,15 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, MutexGuard};
+use std::time::{Duration, Instant};
 
 use hypen_engine::dispatch::Action;
 use hypen_engine::ir::ResolvedComponent;
 use hypen_engine::module_host::{
-    DualHost, Effect, ExecStrategy, HostError, ModuleHost, ModuleInstanceId, ModuleLimits,
-    ModuleManifest,
+    ComponentCompiler, DualHost, Effect, HostConfig, HostError, InstanceStatus, ModuleHost,
+    ModuleInstanceId, ModuleManifest,
 };
+use hypen_engine::hosted::FailureCause;
 use hypen_engine::{Engine, EngineError, ModuleGrants, Patch};
 use serde_json::{json, Map, Value};
 
@@ -141,6 +148,9 @@ pub(crate) enum Health {
 #[derive(Clone)]
 pub(crate) struct InstanceSpec {
     pub scope: String,
+    /// Where this instance's grants are written, for hints: the app.json
+    /// module entry backing it, or the scope itself in single-module mode.
+    pub entry: String,
     pub wasm: PathBuf,
     pub manifest: ModuleManifest,
     /// The config passed to `init`.
@@ -154,6 +164,39 @@ pub(crate) struct HostedModule {
     /// The action names currently routed to the instance.
     pub actions: Vec<String>,
     pub health: Health,
+    /// What the host said killed the instance, while `health` is `Crashed`.
+    pub crash_reason: Option<String>,
+}
+
+impl HostedModule {
+    /// Whether the instance is routed `action` (a `"*"` entry takes any name).
+    fn handles(&self, action: &str) -> bool {
+        self.actions.iter().any(|a| a == action || a == "*")
+    }
+}
+
+/// Which of the three addressing forms produced a dispatch's result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RoutedBy {
+    /// The sender node resolved the owning scope.
+    Sender,
+    /// `scope:action`, to a hosted scope.
+    Scope,
+    /// The name as given, resolved by the engine's bare-name rules.
+    Name,
+}
+
+/// How long a component registration may take before the runtime says so
+/// (and, without a compilation cache, how to avoid it next time).
+const SLOW_REGISTER: Duration = Duration::from_secs(5);
+
+/// Most candidate `scope:action` forms listed in an error.
+const MAX_CANDIDATES: usize = 12;
+
+/// A module whose instance is dead, and what the host said killed it.
+struct Crash {
+    scope: String,
+    reason: Option<String>,
 }
 
 /// A started (instantiated + initialised) instance not yet wired to the
@@ -224,6 +267,9 @@ pub(crate) struct Core {
     pub ui: Option<Ui>,
     /// Where grants come from, for capability hints.
     pub surface: GrantSurface,
+    /// Whether compiled components persist across runs (`--cache-dir`), for
+    /// the slow-compilation notice.
+    pub disk_cache: bool,
 }
 
 impl Core {
@@ -233,54 +279,103 @@ impl Core {
             .ok_or(RuntimeError::Internal("no module host installed"))
     }
 
-    fn module_error(&self, scope: &str, stage: ModuleStage, source: HostError) -> RuntimeError {
-        RuntimeError::Module { scope: scope.to_string(), stage, surface: self.surface, source }
+    /// A host failure while bringing `spec`'s module up. For a refused
+    /// instantiation the host is asked which capabilities it denied, so the
+    /// hint can name the exact grants.
+    pub fn module_error(
+        &mut self,
+        spec: &InstanceSpec,
+        stage: ModuleStage,
+        source: HostError,
+    ) -> RuntimeError {
+        let denied = match (stage, self.engine.module_host_mut()) {
+            (ModuleStage::Instantiate, Some(host)) => host.denied_capabilities(&spec.scope),
+            _ => Vec::new(),
+        };
+        RuntimeError::Module {
+            scope: spec.scope.clone(),
+            stage,
+            surface: self.surface,
+            entry: spec.entry.clone(),
+            denied,
+            source,
+        }
+    }
+
+    /// (Re-)register a module's component from `bytes` (the contents of its
+    /// `.wasm`). Compilation happens here unless the host already holds the
+    /// same bytes compiled (another scope of the same file, or a precompile).
+    pub fn register_bytes(&mut self, spec: &InstanceSpec, bytes: &[u8]) -> Result<(), RuntimeError> {
+        let manifest = spec.manifest.clone();
+        let started = Instant::now();
+        let registered = self.host()?.register(&spec.scope, bytes, manifest);
+        let took = started.elapsed();
+        if registered.is_ok() && took >= SLOW_REGISTER {
+            eprintln!(
+                "[modules] preparing `{}` ({}) took {:.1} s{}",
+                spec.scope,
+                spec.wasm.display(),
+                took.as_secs_f64(),
+                if self.disk_cache {
+                    ""
+                } else {
+                    "; pass --cache-dir DIR to keep compiled modules across runs"
+                },
+            );
+        }
+        registered.map_err(|e| self.module_error(spec, ModuleStage::Register, e))
     }
 
     /// (Re-)register a module's component bytes from its `.wasm` file.
     pub fn register_component(&mut self, spec: &InstanceSpec) -> Result<(), RuntimeError> {
         let bytes = std::fs::read(&spec.wasm)
             .map_err(|e| RuntimeError::io("read", &spec.wasm, e))?;
-        let manifest = spec.manifest.clone();
-        self.host()?
-            .register(&spec.scope, &bytes, manifest)
-            .map_err(|e| self.module_error(&spec.scope, ModuleStage::Register, e))
+        self.register_bytes(spec, &bytes)
     }
 
     /// Instantiate `scope`'s registered component and run `init`. If anything
     /// after `instantiate` fails, the half-started instance is destroyed
     /// rather than leaked.
     fn start_instance(&mut self, spec: &InstanceSpec) -> Result<Started, RuntimeError> {
-        let surface = self.surface;
         let scope = spec.scope.as_str();
-        let fail = |stage, source| RuntimeError::Module {
-            scope: scope.to_string(),
-            stage,
-            surface,
-            source,
+        let id = match self.host()?.instantiate(scope) {
+            Ok(id) => id,
+            Err(e) => return Err(self.module_error(spec, ModuleStage::Instantiate, e)),
         };
-        let host = self.host()?;
-        let id = host.instantiate(scope).map_err(|e| fail(ModuleStage::Instantiate, e))?;
 
-        let started = (|| {
-            let config = serde_json::to_vec(&spec.config)
-                .map_err(|source| RuntimeError::InitState { scope: scope.to_string(), source })?;
-            let state_bytes = host.init(id, &config).map_err(|e| fail(ModuleStage::Init, e))?;
-            let state: Value = serde_json::from_slice(&state_bytes)
-                .map_err(|source| RuntimeError::InitState { scope: scope.to_string(), source })?;
-            let actions = match &spec.actions {
-                ActionSource::Override(list) => list.clone(),
-                ActionSource::Discover => {
-                    host.actions(id).map_err(|e| fail(ModuleStage::QueryActions, e))?
-                }
-            };
-            Ok(Started { id, state, actions })
-        })();
+        let started = self.init_instance(spec, id);
         if started.is_err() {
             // Best effort: the instance may already be dead (init trapped).
-            let _ = host.destroy(id);
+            if let Ok(host) = self.host() {
+                let _ = host.destroy(id);
+            }
         }
         started
+    }
+
+    /// Run `init` on a fresh instance and learn its actions.
+    fn init_instance(
+        &mut self,
+        spec: &InstanceSpec,
+        id: ModuleInstanceId,
+    ) -> Result<Started, RuntimeError> {
+        let scope = spec.scope.as_str();
+        let config = serde_json::to_vec(&spec.config)
+            .map_err(|source| RuntimeError::InitState { scope: scope.to_string(), source })?;
+        let state_bytes = match self.host()?.init(id, &config) {
+            Ok(bytes) => bytes,
+            Err(e) => return Err(self.module_error(spec, ModuleStage::Init, e)),
+        };
+        let state: Value = serde_json::from_slice(&state_bytes)
+            .map_err(|source| RuntimeError::InitState { scope: scope.to_string(), source })?;
+        let actions = match &spec.actions {
+            ActionSource::Override(list) => list.clone(),
+            ActionSource::Discover => match self.host()?.actions(id) {
+                Ok(actions) => actions,
+                Err(e) => return Err(self.module_error(spec, ModuleStage::QueryActions, e)),
+            },
+        };
+        Ok(Started { id, state, actions })
     }
 
     /// Start an instance and wire it into the engine under its scope,
@@ -312,7 +407,12 @@ impl Core {
     pub fn mint(&mut self, spec: InstanceSpec) -> Result<(), RuntimeError> {
         self.register_component(&spec)?;
         let actions = self.start_and_wire(&spec)?;
-        self.modules.push(HostedModule { spec, actions, health: Health::Running });
+        self.modules.push(HostedModule {
+            spec,
+            actions,
+            health: Health::Running,
+            crash_reason: None,
+        });
         Ok(())
     }
 
@@ -354,6 +454,7 @@ impl Core {
         if let Some(module) = self.modules.get_mut(index) {
             module.actions = actions;
             module.health = Health::Running;
+            module.crash_reason = None;
         }
         if let Some(old) = old_id {
             if let Ok(host) = self.host() {
@@ -365,23 +466,27 @@ impl Core {
         Ok(())
     }
 
-    /// Restart every crashed module. Returns the scopes that are *still*
+    /// Restart every crashed module. Returns the ones that are *still*
     /// crashed because their restart failed.
-    fn revive_crashed(&mut self) -> Vec<String> {
-        let mut revived = Vec::new();
+    fn revive_crashed(&mut self) -> Vec<Crash> {
+        let mut revived = false;
         let mut still_crashed = Vec::new();
         for index in 0..self.modules.len() {
-            if self.modules[index].health != Health::Crashed {
+            let Some(module) = self.modules.get(index) else {
+                break;
+            };
+            if module.health != Health::Crashed {
                 continue;
             }
-            let scope = self.modules[index].spec.scope.clone();
+            let scope = module.spec.scope.clone();
+            let reason = module.crash_reason.clone();
             match self.restart(index) {
                 Ok(()) => {
                     eprintln!(
                         "[crash] module `{scope}` was RESTARTED from its initial config — \
                          the state it held before crashing is lost"
                     );
-                    revived.push(scope);
+                    revived = true;
                 }
                 Err(e) => {
                     eprintln!(
@@ -389,11 +494,11 @@ impl Core {
                          next action): {}",
                         crate::error::one_line(&e)
                     );
-                    still_crashed.push(scope);
+                    still_crashed.push(Crash { scope, reason });
                 }
             }
         }
-        if !revived.is_empty() {
+        if revived {
             // Show the re-initialised state in the UI.
             if let Err(e) = self.render_entry() {
                 eprintln!("[crash] re-render after restart failed: {e}");
@@ -402,32 +507,73 @@ impl Core {
         still_crashed
     }
 
-    /// Probe every running instance; mark and return the ones the host says
-    /// are dead.
-    fn detect_crashes(&mut self) -> Vec<String> {
+    /// Find the running instances a failed dispatch left dead; mark and
+    /// return them. `failure` is that dispatch's error.
+    ///
+    /// The host's [`InstanceStatus`] is authoritative and costs no guest
+    /// call. Only for a host that answers `Unknown` is the engine's cascade
+    /// report consulted — and only if it is the report *of this failure*
+    /// (it renders to the same error), since a dispatch refused before any
+    /// module ran leaves the previous cascade's report in place.
+    fn detect_crashes(&mut self, failure: &EngineError) -> Vec<Crash> {
         let mut crashed = Vec::new();
         for index in 0..self.modules.len() {
-            if self.modules[index].health != Health::Running {
+            let Some(module) = self.modules.get(index) else {
+                break;
+            };
+            if module.health != Health::Running {
                 continue;
             }
-            let scope = self.modules[index].spec.scope.clone();
+            let scope = module.spec.scope.clone();
             let Some(id) = self.engine.module_instance_id(&scope) else {
                 continue;
             };
-            let dead = match self.host() {
-                Ok(host) => matches!(host.actions(id), Err(HostError::DeadInstance)),
-                Err(_) => false,
+            let status = match self.engine.module_host_mut() {
+                Some(host) => host.instance_status(id),
+                None => InstanceStatus::Unknown,
             };
-            if dead {
-                self.modules[index].health = Health::Crashed;
-                crashed.push(scope);
+            let reason = match status {
+                InstanceStatus::Live => continue,
+                InstanceStatus::Dead { reason } => reason,
+                InstanceStatus::Gone => {
+                    Some("the module host no longer has this instance".to_string())
+                }
+                // `InstanceStatus` is non-exhaustive: a status this runtime
+                // does not know is treated like `Unknown`.
+                _ => match self.reported_death(&scope, failure) {
+                    Some(reason) => Some(reason),
+                    None => continue,
+                },
+            };
+            if let Some(module) = self.modules.get_mut(index) {
+                module.health = Health::Crashed;
+                module.crash_reason = reason.clone();
             }
+            crashed.push(Crash { scope, reason });
         }
         crashed
     }
 
-    /// Route one request to the engine (see [`ActionTarget`]).
-    fn route(&mut self, request: &DispatchRequest) -> Result<(), EngineError> {
+    /// The host error that killed `scope`'s instance according to the
+    /// engine's structured report of the cascade that produced `failure`.
+    fn reported_death(&self, scope: &str, failure: &EngineError) -> Option<String> {
+        let report = self.engine.last_module_cascade_report()?;
+        if report.to_engine_error() != *failure {
+            return None;
+        }
+        report.failures().iter().find_map(|f| match &f.cause {
+            FailureCause::Host(e @ (HostError::Trap(_) | HostError::DeadInstance))
+                if f.scope == scope =>
+            {
+                Some(e.to_string())
+            }
+            _ => None,
+        })
+    }
+
+    /// Route one request to the engine (see [`ActionTarget`]), reporting
+    /// which addressing form its result came from.
+    fn route(&mut self, request: &DispatchRequest) -> (RoutedBy, Result<(), EngineError>) {
         if let Some(node) = &request.sender {
             let envelope = json!({
                 "node": node,
@@ -439,43 +585,135 @@ impl Core {
                 // The node is not owned by a scope that handles the action:
                 // fall back to the sender-less forms below.
                 Err(EngineError::ActionNotFound(_)) => {}
-                other => return other,
+                other => return (RoutedBy::Sender, other),
             }
         }
         if let ActionTarget::Scoped { scope, action } = &request.target {
             if self.engine.module_instance_id(scope).is_some() {
-                return self.engine.dispatch_module_action(scope, action, request.payload.clone());
+                let result =
+                    self.engine.dispatch_module_action(scope, action, request.payload.clone());
+                return (RoutedBy::Scope, result);
             }
         }
-        self.engine
-            .dispatch_action(Action::new(request.name.as_str()).with_payload(request.payload.clone()))
+        let action = Action::new(request.name.as_str()).with_payload(request.payload.clone());
+        (RoutedBy::Name, self.engine.dispatch_action(action))
     }
 
-    /// Classify an engine dispatch failure, detecting crashed instances.
+    /// The `scope:action` forms of every hosted module that handles `action`.
+    fn handlers_of(&self, action: &str) -> Vec<String> {
+        self.modules
+            .iter()
+            .filter(|m| m.handles(action))
+            .map(|m| format!("{}:{action}", m.spec.scope))
+            .collect()
+    }
+
+    /// What to suggest for a request no module handled: the same action in
+    /// the scopes that do export it, else the addressed scope's own actions,
+    /// else everything there is. Capped at [`MAX_CANDIDATES`].
+    fn candidates_for(&self, request: &DispatchRequest) -> Vec<String> {
+        let (scope, action) = match &request.target {
+            ActionTarget::Scoped { scope, action } => (Some(scope.as_str()), action.as_str()),
+            ActionTarget::Named => (None, request.name.as_str()),
+        };
+        let mut candidates = self.handlers_of(action);
+        // Never suggest the very form that just failed.
+        candidates.retain(|c| Some(c.as_str()) != scope.map(|s| format!("{s}:{action}")).as_deref());
+        if candidates.is_empty() {
+            candidates = self
+                .modules
+                .iter()
+                .filter(|m| scope.is_none_or(|s| m.spec.scope == s))
+                .flat_map(|m| {
+                    m.actions.iter().filter(|a| *a != "*").map(|a| format!("{}:{a}", m.spec.scope))
+                })
+                .collect();
+        }
+        candidates.truncate(MAX_CANDIDATES);
+        candidates
+    }
+
+    /// Turn an engine dispatch result into the runtime's: a crash, an
+    /// ambiguous or unknown action, or the engine's own error.
+    ///
     /// `still_crashed` are modules whose restart just failed — a module
     /// failure with those around is reported as a crash too.
     fn classify(
         &mut self,
-        result: Result<(), EngineError>,
-        mut still_crashed: Vec<String>,
+        request: Option<&DispatchRequest>,
+        routed: (RoutedBy, Result<(), EngineError>),
+        mut still_crashed: Vec<Crash>,
     ) -> Result<(), RuntimeError> {
-        match result {
-            Ok(()) => Ok(()),
-            Err(source @ EngineError::ModuleError(_)) => {
-                let newly = self.detect_crashes();
-                for scope in &newly {
+        let (routed_by, result) = routed;
+        let source = match result {
+            Ok(()) => return Ok(()),
+            Err(source) => source,
+        };
+
+        // A bare name is refused by the engine when several modules export
+        // it — as `ModuleError` by the hosted pre-check or `ActionNotFound`
+        // by the core's routing, depending on how they are wired. Either way
+        // no module ran. The runtime's own module table says who the
+        // candidates are.
+        let bare = request.filter(|r| {
+            routed_by == RoutedBy::Name
+                && r.target == ActionTarget::Named
+                && !r.name.starts_with("__hypen_")
+        });
+        if let Some(request) = bare {
+            let candidates = self.handlers_of(&request.name);
+            if candidates.len() > 1
+                && matches!(source, EngineError::ModuleError(_) | EngineError::ActionNotFound(_))
+            {
+                return Err(RuntimeError::AmbiguousAction {
+                    action: request.name.clone(),
+                    candidates,
+                });
+            }
+        }
+
+        match source {
+            source @ EngineError::ModuleError(_) => {
+                let newly = self.detect_crashes(&source);
+                for crash in &newly {
                     eprintln!(
-                        "[crash] module `{scope}` CRASHED ({source}). Its state is lost; it \
-                         will be re-instantiated and re-initialised on the next action."
+                        "[crash] module `{}` CRASHED ({}). Its state is lost; it will be \
+                         re-instantiated and re-initialised on the next action.",
+                        crash.scope,
+                        crash.reason.as_deref().unwrap_or("the host gave no reason"),
                     );
                 }
                 still_crashed.extend(newly);
                 if still_crashed.is_empty() {
                     return Err(RuntimeError::Dispatch(source));
                 }
-                Err(RuntimeError::ModuleCrashed { scopes: still_crashed, source })
+                let reasons = still_crashed
+                    .iter()
+                    .filter_map(|c| c.reason.as_ref().map(|r| (still_crashed.len(), &c.scope, r)))
+                    .map(|(n, scope, reason)| {
+                        // The host's reason already names the module; add the
+                        // scope only when several are listed.
+                        if n > 1 {
+                            format!("`{scope}`: {reason}")
+                        } else {
+                            reason.clone()
+                        }
+                    })
+                    .collect();
+                let scopes = still_crashed.into_iter().map(|c| c.scope).collect();
+                Err(RuntimeError::ModuleCrashed { scopes, reasons, source })
             }
-            Err(other) => Err(RuntimeError::Dispatch(other)),
+            source @ EngineError::ActionNotFound(_) => match request {
+                Some(request) if !request.name.starts_with("__hypen_") => {
+                    Err(RuntimeError::UnknownAction {
+                        name: request.name.clone(),
+                        candidates: self.candidates_for(request),
+                        engine: source,
+                    })
+                }
+                _ => Err(RuntimeError::Dispatch(source)),
+            },
+            other => Err(RuntimeError::Dispatch(other)),
         }
     }
 
@@ -511,6 +749,9 @@ impl Core {
 
 /// See the module docs.
 pub struct Runtime {
+    /// Compiles components without the engine lock (hot reload). `None` on
+    /// hosts that have no such handle (the unit tests' fake).
+    compiler: Option<ComponentCompiler>,
     core: Mutex<Core>,
     hub: Arc<PatchHub>,
     outbox: Arc<EffectOutbox>,
@@ -528,21 +769,34 @@ pub struct Booted {
 impl Runtime {
     /// Boot what `options` describes on the real wasmtime host.
     pub fn boot(options: &Options) -> Result<Booted, RuntimeError> {
-        let mut limits = ModuleLimits::default();
+        let mut config = HostConfig::default();
         if let Some(max_call) = options.call_timeout {
-            limits.max_call = max_call;
+            config.limits.max_call = max_call;
         }
+        config.data_dir = options.data_dir.clone();
+        config.cache_dir = options.cache_dir.clone();
         // Dual-ABI host: v0.1 sync and v0.2 CM-async components both boot
         // here; `register` sniffs which world the bytes target.
-        let host = DualHost::with_options(limits, ExecStrategy::default(), options.data_dir.as_deref())
+        let host = DualHost::with_config(&config)
             .map_err(|source| RuntimeError::HostStart { source })?;
-        Self::boot_with_host(&options.source, Box::new(host))
+        let compiler = host.compiler();
+        Self::boot_on(&options.source, Box::new(host), Some(compiler), options.cache_dir.is_some())
     }
 
     /// Boot on any [`ModuleHost`] (tests use a fake one).
+    #[cfg_attr(not(test), allow(dead_code))]
     pub fn boot_with_host(
         source: &Source,
         host: Box<dyn ModuleHost>,
+    ) -> Result<Booted, RuntimeError> {
+        Self::boot_on(source, host, None, false)
+    }
+
+    fn boot_on(
+        source: &Source,
+        host: Box<dyn ModuleHost>,
+        compiler: Option<ComponentCompiler>,
+        disk_cache: bool,
     ) -> Result<Booted, RuntimeError> {
         let hub = Arc::new(PatchHub::new());
         let outbox = Arc::new(EffectOutbox::default());
@@ -560,7 +814,7 @@ impl Runtime {
             Source::Module(_) => GrantSurface::CommandLine,
             Source::App { .. } => GrantSurface::AppManifest,
         };
-        let mut core = Core { engine, modules: Vec::new(), ui: None, surface };
+        let mut core = Core { engine, modules: Vec::new(), ui: None, surface, disk_cache };
         let entry_scope = match source {
             Source::Module(module) => boot_module(&mut core, module)?,
             Source::App { manifest } => boot_app(&mut core, manifest)?,
@@ -579,8 +833,13 @@ impl Runtime {
         let initial = capture.finish();
         let initial_patches = core.ui.is_some().then_some(initial);
 
-        let runtime = Runtime { core: Mutex::new(core), hub, outbox, entry_scope };
+        let runtime = Runtime { compiler, core: Mutex::new(core), hub, outbox, entry_scope };
         Ok(Booted { runtime, initial_patches })
+    }
+
+    /// The handle hot reload compiles with, outside the engine lock.
+    pub(crate) fn compiler(&self) -> Option<&ComponentCompiler> {
+        self.compiler.as_ref()
     }
 
     pub(crate) fn core(&self) -> MutexGuard<'_, Core> {
@@ -600,7 +859,7 @@ impl Runtime {
         let capture = self.hub.capture();
         let still_crashed = core.revive_crashed();
         let routed = core.route(request);
-        let result = core.classify(routed, still_crashed);
+        let result = core.classify(Some(request), routed, still_crashed);
         let patches = capture.finish();
         let effects = self.outbox.drain();
         let state = core.state_view(&self.entry_scope);
@@ -612,9 +871,14 @@ impl Runtime {
     /// Returns the effects the delayed dispatch emitted in turn.
     pub fn fire_timer(&self, scope: &str, action: &str) -> HostEffects {
         let mut core = self.core();
+        if !core.modules.iter().any(|m| m.spec.scope == scope) {
+            // Scheduled by a usage scope a template edit has since retired.
+            eprintln!("[timers] dropped {scope}:{action}: scope `{scope}` no longer exists");
+            return self.outbox.drain();
+        }
         let still_crashed = core.revive_crashed();
         let fired = core.engine.dispatch_module_action(scope, action, Value::Null);
-        if let Err(e) = core.classify(fired, still_crashed) {
+        if let Err(e) = core.classify(None, (RoutedBy::Scope, fired), still_crashed) {
             eprintln!("[timers] {scope}:{action} failed: {}", crate::error::one_line(&e));
         }
         self.outbox.drain()
@@ -673,6 +937,7 @@ fn boot_module(core: &mut Core, module: &ModuleSource) -> Result<String, Runtime
 
     core.mint(InstanceSpec {
         scope: scope.clone(),
+        entry: scope.clone(),
         wasm: canonical(&module.wasm),
         manifest: module.grants.to_manifest(&module.scope),
         config: Value::Object(config),
@@ -765,6 +1030,7 @@ pub(crate) fn instance_spec(
     };
     Ok(InstanceSpec {
         scope: instance.scope.clone(),
+        entry: instance.backing.clone(),
         wasm: wasm.clone(),
         manifest: capabilities.to_manifest(&instance.scope),
         config: instance.config.clone(),

@@ -65,8 +65,8 @@ fn run(options: Options) -> Result<(), RuntimeError> {
     let booted = Runtime::boot(&options)?;
     match options.mode {
         Mode::Repl => repl::run(booted, std::io::stdin().lock(), std::io::stdout().lock()),
-        Mode::Serve { port, allow_origins } => {
-            server::serve(Arc::new(booted.runtime), port, allow_origins)
+        Mode::Serve { port, allow_origins, body_timeout } => {
+            server::serve(Arc::new(booted.runtime), port, allow_origins, body_timeout)
         }
     }
 }

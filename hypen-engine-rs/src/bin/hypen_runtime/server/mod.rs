@@ -19,10 +19,62 @@
 //! `tiny_http` parses request heads on its own threads and hands requests to
 //! the accept loop below, which does no I/O of its own: each request is
 //! handled on a short-lived thread (bounded by [`MAX_IN_FLIGHT`]; beyond it
-//! the server answers 503). A client that stalls mid-body therefore ties up
-//! one handler thread, never the accept loop or other requests, and bodies
-//! are read through a hard [`MAX_BODY_BYTES`](request::MAX_BODY_BYTES) cap.
-//! A panic in a handler is caught and answered with a 500.
+//! the server answers 503). Bodies are read through a hard
+//! [`MAX_BODY_BYTES`](request::MAX_BODY_BYTES) cap. A panic in a handler is
+//! caught and answered with a 500.
+//!
+//! ## Request bodies the client controls
+//!
+//! `tiny_http` 0.12 exposes neither the socket nor a read timeout (there is
+//! no server-level setting either), and it has two behaviours this server
+//! has to work around rather than configure:
+//!
+//! 1. Reading a body blocks until the client sends it.
+//! 2. **Dropping a request whose body was not read to the end blocks too**,
+//!    and worse: `tiny_http` first allocates a buffer the size of the
+//!    *declared* remainder (its `EqualReader`), then reads until that many
+//!    bytes arrive or the client goes away. Answering a request counts as
+//!    dropping it. A `Content-Length` beyond what the machine can allocate
+//!    aborts the process; one in the gigabytes blocks whoever answers.
+//!
+//! (A body of at most [`PRE_READ_BODY_BYTES`] without `Expect` is read by
+//! `tiny_http` itself, on its connection thread, before the request is handed
+//! over — such a request is never seen until its body is complete.)
+//!
+//! So nothing that can block on the client runs on the accept loop or while
+//! holding an in-flight slot:
+//!
+//! - **Reading** the `/dispatch` body happens on a helper thread
+//!   ([`read_body_within`]) while the handler waits for at most the body
+//!   timeout (`--request-timeout-ms`, default [`DEFAULT_BODY_TIMEOUT`] — a
+//!   deadline for the **whole** body, so a slow drip does not reset it).
+//!   When it passes, the handler gives up and **releases its slot**; the
+//!   helper keeps the connection and answers `408` when its read returns.
+//! - **Answering** a request with body bytes still outstanding
+//!   ([`finish`]) — a refusal, a 503, a route that takes no body — happens
+//!   on a detached thread when the outstanding part is at most
+//!   [`MAX_DRAIN_BYTES`], so the wait for the client is nobody else's.
+//!   Beyond that the request is never dropped at all ([`abandon`]): the
+//!   reply is written and the connection is deliberately leaked, because
+//!   letting `tiny_http` free it would make the oversized allocation.
+//!
+//! What this bounds: a stalled or oversized upload cannot hold one of the
+//! [`MAX_IN_FLIGHT`] slots past the body timeout, cannot stall the accept
+//! loop, and cannot crash the process with a declared length.
+//!
+//! What remains, precisely:
+//! - each stalled connection still parks **one thread** (plus a buffer of at
+//!   most [`MAX_DRAIN_BYTES`]) until the client finishes or disconnects — as
+//!   does any client that stalls while sending its request *head* or a small
+//!   pre-read body, which `tiny_http` reads on its own per-connection thread
+//!   before this server sees anything. Neither count is bounded here; the
+//!   listener is loopback-only, so the peer is a local process;
+//! - each [`abandon`]ed request leaks its connection (one socket, one parked
+//!   `tiny_http` thread) until the process exits, and is logged;
+//! - the `408` cannot be sent *at* the deadline, only once the blocked read
+//!   returns, because a request owns both halves of its connection;
+//! - writing a response to a client that does not read is not timed
+//!   (responses other than `/patches` snapshots fit the socket buffer).
 
 pub mod request;
 
@@ -46,6 +98,20 @@ const CLIENT_HTML: &str = include_str!("../client.html");
 
 /// Most requests being handled at once.
 const MAX_IN_FLIGHT: usize = 64;
+
+/// How long a client may take to send a request body, unless
+/// `--request-timeout-ms` says otherwise.
+pub const DEFAULT_BODY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// `tiny_http` reads a declared body up to this size itself before handing
+/// the request over (unless the client sent `Expect`). Its constant, not
+/// ours: `content_length <= 1024` in `tiny_http::request::new_request`.
+const PRE_READ_BODY_BYTES: usize = 1024;
+
+/// The most outstanding body bytes a request may have and still be dropped
+/// normally: `tiny_http` allocates that much to drain it. Past this, see
+/// [`abandon`].
+const MAX_DRAIN_BYTES: usize = 16 * 1024 * 1024;
 
 /// How often an idle SSE stream sends a comment, so dead connections are
 /// noticed and their subscriber slot freed.
@@ -145,7 +211,11 @@ impl Reply {
 fn status_and_code(error: &RuntimeError) -> (u16, &'static str) {
     match error {
         RuntimeError::Request(e) => (e.status(), e.code()),
-        RuntimeError::Dispatch(EngineError::ActionNotFound(_)) => (404, "action_not_found"),
+        RuntimeError::Dispatch(EngineError::ActionNotFound(_))
+        | RuntimeError::UnknownAction { .. } => (404, "action_not_found"),
+        // The request is well-formed and names real modules; it just does
+        // not pick one. 409: the caller resolves it by addressing a scope.
+        RuntimeError::AmbiguousAction { .. } => (409, "ambiguous_action"),
         RuntimeError::Dispatch(EngineError::NotDeclared(_)) => (403, "not_declared"),
         RuntimeError::Dispatch(EngineError::ModuleError(_)) => (500, "module_error"),
         RuntimeError::Dispatch(_) => (500, "engine_error"),
@@ -161,8 +231,16 @@ fn error_object(error: &RuntimeError) -> Value {
     if let Some(hint) = error.hint() {
         object["hint"] = Value::String(hint);
     }
-    if let RuntimeError::ModuleCrashed { scopes, .. } = error {
-        object["scopes"] = json!(scopes);
+    match error {
+        RuntimeError::ModuleCrashed { scopes, reasons, .. } => {
+            object["scopes"] = json!(scopes);
+            object["reasons"] = json!(reasons);
+        }
+        RuntimeError::AmbiguousAction { candidates, .. }
+        | RuntimeError::UnknownAction { candidates, .. } => {
+            object["candidates"] = json!(candidates);
+        }
+        _ => {}
     }
     object
 }
@@ -171,6 +249,7 @@ struct Context {
     runtime: Arc<Runtime>,
     policy: Policy,
     timers: TimerHandle,
+    body_timeout: Duration,
 }
 
 /// Run the server until the process is killed.
@@ -178,6 +257,7 @@ pub fn serve(
     runtime: Arc<Runtime>,
     port: u16,
     allow_origins: Vec<Origin>,
+    body_timeout: Option<Duration>,
 ) -> Result<(), RuntimeError> {
     let addr = format!("127.0.0.1:{port}");
     let server = tiny_http::Server::http(&addr)
@@ -207,12 +287,16 @@ pub fn serve(
         runtime,
         policy: Policy::new(port, allow_origins),
         timers: timers.handle(),
+        body_timeout: body_timeout.unwrap_or(DEFAULT_BODY_TIMEOUT),
     });
     let limiter = Limiter::new(MAX_IN_FLIGHT);
 
     for request in server.incoming_requests() {
         let Some(permit) = limiter.acquire() else {
-            send(request, Reply::error(&RequestError::Busy { what: "requests" }.into()));
+            // `finish`, not `send`: the accept loop must not wait for the
+            // body of a request it is turning away.
+            let unread = unread_body(&request);
+            finish(request, Reply::error(&RequestError::Busy { what: "requests" }.into()), unread);
             continue;
         };
         let context = Arc::clone(&context);
@@ -251,13 +335,148 @@ fn head_of(request: &tiny_http::Request) -> RequestHead {
     }
 }
 
+/// How many declared body bytes `tiny_http` has not yet read for `request`
+/// — what dropping it would wait for (see the module docs).
+fn unread_body(request: &tiny_http::Request) -> usize {
+    let declared = request.body_length().unwrap_or(0);
+    let expects_continue = request.headers().iter().any(|h| h.field.equiv("Expect"));
+    if declared <= PRE_READ_BODY_BYTES && !expects_continue {
+        0
+    } else {
+        declared
+    }
+}
+
+/// Answer `request`, which still has `unread` body bytes outstanding,
+/// without letting the wait for those bytes land on the caller (see the
+/// module docs, "Request bodies the client controls").
+fn finish(request: tiny_http::Request, reply: Reply, unread: usize) {
+    if unread == 0 {
+        return send(request, reply);
+    }
+    if unread > MAX_DRAIN_BYTES {
+        return abandon(request, reply, unread);
+    }
+    let detached = std::thread::Builder::new()
+        .name("hypen-drain".into())
+        .spawn(move || send(request, reply));
+    if let Err(e) = detached {
+        // The request went down with the closure, on this thread: answered
+        // with tiny_http's own 500, after waiting for its body.
+        eprintln!("[serve] cannot start a drain thread: {e}");
+    }
+}
+
+/// Answer a request that declared more body than is safe to let `tiny_http`
+/// drain, and then leak it rather than drop it.
+///
+/// The only way to get at the connection without dropping the body reader
+/// is [`tiny_http::Request::upgrade`], which insists on printing a response
+/// of its own first; that is given an interim `100`, and the real reply is
+/// written after it by hand. Clients skip interim responses.
+fn abandon(request: tiny_http::Request, reply: Reply, unread: usize) {
+    eprintln!(
+        "[serve] a request declared a {unread}-byte body; answered {} and abandoned its \
+         connection (it stays open until this process exits)",
+        reply.status
+    );
+    let mut stream = request.upgrade("hypen-refused", tiny_http::Response::empty(100));
+    let mut head = format!(
+        "HTTP/1.1 {} {}\r\nContent-Type: {}\r\nContent-Length: {}\r\nConnection: close\r\n\
+         X-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\n",
+        reply.status,
+        reason_phrase(reply.status),
+        reply.content_type,
+        reply.body.len(),
+    );
+    for (name, value) in &reply.headers {
+        // Values are constants or a validated origin; one that could break
+        // the header block is dropped rather than written.
+        if !value.contains(['\r', '\n']) {
+            head.push_str(&format!("{name}: {value}\r\n"));
+        }
+    }
+    head.push_str("\r\n");
+    let written = stream
+        .write_all(head.as_bytes())
+        .and_then(|()| stream.write_all(&reply.body))
+        .and_then(|()| stream.flush());
+    if let Err(e) = written {
+        eprintln!("[serve] respond error: {e}");
+    }
+    // Dropping the stream drops tiny_http's body reader, which is exactly
+    // the allocation this function exists to avoid.
+    std::mem::forget(stream);
+}
+
+fn reason_phrase(status: u16) -> &'static str {
+    match status {
+        200 => "OK",
+        204 => "No Content",
+        400 => "Bad Request",
+        403 => "Forbidden",
+        404 => "Not Found",
+        405 => "Method Not Allowed",
+        408 => "Request Timeout",
+        409 => "Conflict",
+        413 => "Payload Too Large",
+        415 => "Unsupported Media Type",
+        503 => "Service Unavailable",
+        _ => "Error",
+    }
+}
+
+/// What became of a request whose body was read under a deadline.
+enum BodyRead {
+    /// The body (or the reason it could not be read) arrived in time; the
+    /// request is back with the caller to be answered.
+    Done(tiny_http::Request, Result<Vec<u8>, RequestError>),
+    /// The deadline passed. The request stays with the helper thread, which
+    /// answers `408` when its read returns; the caller has nothing to answer.
+    Abandoned,
+}
+
+/// Read `request`'s body, waiting at most `timeout` for all of it (see the
+/// module docs, "Request bodies the client controls").
+fn read_body_within(mut request: tiny_http::Request, timeout: Duration) -> BodyRead {
+    // Rendezvous channel: the helper's `send` succeeds only if the handler
+    // is still waiting, so the request is always owned by exactly one side —
+    // it can neither be answered twice nor dropped unanswered.
+    let (done, wait) = std::sync::mpsc::sync_channel::<BodyResult>(0);
+    let helper = std::thread::Builder::new().name("hypen-body".into()).spawn(move || {
+        let body = request::read_body(request.as_reader(), request::MAX_BODY_BYTES);
+        if let Err(std::sync::mpsc::SendError((request, body))) = done.send((request, body)) {
+            // The handler gave up on us. Tell the client, if it still
+            // listens; this thread is already the one that waits.
+            let timeout = RuntimeError::from(RequestError::BodyTimeout { limit: timeout });
+            let unread = if body.is_ok() { 0 } else { unread_body(&request) };
+            finish(request, Reply::error(&timeout), unread);
+        }
+    });
+    if let Err(e) = helper {
+        // The request went down with the closure; tiny_http answers a
+        // dropped request with a 500 itself.
+        eprintln!("[serve] cannot start a body-reader thread: {e}");
+        return BodyRead::Abandoned;
+    }
+    match wait.recv_timeout(timeout) {
+        Ok((request, body)) => BodyRead::Done(request, body),
+        // Timed out (dropping `wait` makes the helper's send fail), or the
+        // helper died without sending.
+        Err(_) => BodyRead::Abandoned,
+    }
+}
+
+type BodyResult = (tiny_http::Request, Result<Vec<u8>, RequestError>);
+
 /// Handle one request on its own thread.
-fn handle(context: &Context, mut request: tiny_http::Request, permit: Permit) {
+fn handle(context: &Context, request: tiny_http::Request, permit: Permit) {
     let head = head_of(&request);
+    let unread = unread_body(&request);
     let (route, cors) = match context.policy.admit(&head) {
-        Err(e) => return send(request, Reply::error(&e.into())),
+        Err(e) => return finish(request, Reply::error(&e.into()), unread),
         Ok(Admission::Preflight { cors }) => {
-            return send(request, Reply::preflight().with_cors(Some(&cors)));
+            return finish(request, Reply::preflight().with_cors(Some(&cors)), unread);
         }
         Ok(Admission::Route { route, cors }) => (route, cors),
     };
@@ -266,30 +485,53 @@ fn handle(context: &Context, mut request: tiny_http::Request, permit: Permit) {
         // A long-lived stream is bounded by the subscriber cap, not the
         // request limiter.
         drop(permit);
+        if unread > 0 {
+            // Taking over the connection would wait for (and allocate) the
+            // body first.
+            let refused = RequestError::InvalidRequest {
+                message: "GET /events takes no request body".to_string(),
+            };
+            return finish(request, Reply::error(&refused.into()).with_cors(cors.as_ref()), unread);
+        }
         return stream_events(context, request, cors.as_ref());
     }
 
-    let reply = catch_unwind(AssertUnwindSafe(|| respond(context, route, &mut request)))
+    // The only route with a body. Reading it is a step whose duration the
+    // client controls, so it runs under a deadline.
+    let (request, body, unread) = if route == Route::Dispatch {
+        match read_body_within(request, context.body_timeout) {
+            // Read to its end: nothing is outstanding.
+            BodyRead::Done(request, Ok(body)) => (request, body, 0),
+            BodyRead::Done(request, Err(e)) => {
+                let unread = unread_body(&request);
+                return finish(request, Reply::error(&e.into()).with_cors(cors.as_ref()), unread);
+            }
+            // Returning drops `permit`: the stalled client stops counting
+            // against the in-flight limit.
+            BodyRead::Abandoned => return,
+        }
+    } else {
+        (request, Vec::new(), unread)
+    };
+
+    let reply = catch_unwind(AssertUnwindSafe(|| respond(context, route, &body)))
         .unwrap_or_else(|_| {
             eprintln!("[serve] a request handler panicked; answering 500 and carrying on");
             Err(RequestError::HandlerPanicked.into())
         })
         .unwrap_or_else(|e| Reply::error(&e));
-    send(request, reply.with_cors(cors.as_ref()));
+    finish(request, reply.with_cors(cors.as_ref()), unread);
 }
 
-fn respond(
-    context: &Context,
-    route: Route,
-    request: &mut tiny_http::Request,
-) -> Result<Reply, RuntimeError> {
+/// Answer an admitted one-shot request. `body` is the request body (empty
+/// for the routes that have none).
+fn respond(context: &Context, route: Route, body: &[u8]) -> Result<Reply, RuntimeError> {
     match route {
         Route::Index => Ok(Reply::html(CLIENT_HTML)),
         Route::State => Ok(Reply::json(200, &context.runtime.state_envelope())),
         Route::Patches => Ok(Reply::json(200, &patches_json(&context.runtime.tree_snapshot())?)),
         Route::Dispatch => {
-            let body = request::read_body(request.as_reader(), request::MAX_BODY_BYTES)?;
-            let dispatch = request::parse_dispatch(&body)?;
+            let dispatch = request::parse_dispatch(body)?;
             let outcome = context.runtime.dispatch(&dispatch);
             // Delays go on the timer thread; navigations ride the response.
             outcome.effects.schedule_delays(&context.timers);
@@ -443,24 +685,85 @@ mod tests {
             (
                 RuntimeError::ModuleCrashed {
                     scopes: vec!["limits".into()],
+                    reasons: Vec::new(),
                     source: EngineError::ModuleError("module trapped".into()),
                 },
                 500,
                 "module_crashed",
             ),
             (RuntimeError::Internal("x"), 500, "internal_error"),
+            (
+                RuntimeError::AmbiguousAction {
+                    action: "increment".into(),
+                    candidates: vec!["app:increment".into(), "counter:increment".into()],
+                },
+                409,
+                "ambiguous_action",
+            ),
+            (
+                RuntimeError::UnknownAction {
+                    name: "ghost:increment".into(),
+                    candidates: vec!["app:increment".into()],
+                    engine: EngineError::ActionNotFound("ghost:increment".into()),
+                },
+                404,
+                "action_not_found",
+            ),
+            (
+                RequestError::BodyTimeout { limit: Duration::from_millis(250) }.into(),
+                408,
+                "request_timeout",
+            ),
         ];
         for (error, status, code) in cases {
             assert_eq!(status_and_code(&error), (status, code), "{error}");
         }
         let crashed = RuntimeError::ModuleCrashed {
             scopes: vec!["limits".into()],
+            reasons: vec!["module 'limits' export `dispatch` trapped: unreachable".into()],
             source: EngineError::ModuleError("module trapped".into()),
         };
         let object = error_object(&crashed);
         assert_eq!(object["scopes"], json!(["limits"]));
+        assert_eq!(
+            object["reasons"],
+            json!(["module 'limits' export `dispatch` trapped: unreachable"])
+        );
+        assert!(object["message"].as_str().unwrap().contains("export `dispatch` trapped"));
         assert!(object["message"].as_str().unwrap().contains("module trapped"));
         assert!(object["hint"].as_str().unwrap().contains("next action"));
+    }
+
+    /// An ambiguous or unknown action is the caller's mistake, answered with
+    /// a 4xx whose body lists the `scope:action` forms that would work.
+    #[test]
+    fn ambiguous_and_unknown_actions_are_client_errors_listing_candidates() {
+        let ambiguous = RuntimeError::AmbiguousAction {
+            action: "increment".into(),
+            candidates: vec!["app:increment".into(), "counter:increment".into()],
+        };
+        let reply = Reply::error(&ambiguous);
+        assert_eq!(reply.status, 409);
+        let body = body_of(&reply);
+        assert_eq!(body["error"]["code"], "ambiguous_action");
+        assert_eq!(body["error"]["candidates"], json!(["app:increment", "counter:increment"]));
+        let message = body["error"]["message"].as_str().unwrap();
+        assert!(message.contains("`app:increment`, `counter:increment`"), "{message}");
+        assert!(body["error"]["hint"].as_str().unwrap().contains("sender"));
+
+        let unknown = RuntimeError::UnknownAction {
+            name: "counter:frob".into(),
+            candidates: vec!["counter:increment".into()],
+            engine: EngineError::ActionNotFound("frob".into()),
+        };
+        let body = body_of(&Reply::error(&unknown));
+        assert_eq!(body["error"]["candidates"], json!(["counter:increment"]));
+        assert!(body["error"]["message"].as_str().unwrap().contains("did you mean `counter:increment`?"));
+
+        let timeout: RuntimeError = RequestError::BodyTimeout { limit: Duration::from_millis(250) }.into();
+        let body = body_of(&Reply::error(&timeout));
+        assert!(body["error"]["message"].as_str().unwrap().contains("within 250 ms"));
+        assert!(body["error"]["hint"].as_str().unwrap().contains("--request-timeout-ms"));
     }
 
     #[test]

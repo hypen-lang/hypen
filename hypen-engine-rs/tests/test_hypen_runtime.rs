@@ -850,7 +850,8 @@ fn app_composes_a_nested_module_with_its_own_scope() {
     // engine refuses it rather than guessing — the operator must say which
     // scope they mean.
     assert!(
-        stdout.contains("exported by multiple modules"),
+        stdout.contains("handled by more than one module")
+            && stdout.contains("`app:increment`, `counter:increment`"),
         "bare ambiguous action is rejected with guidance. stdout:\n{stdout}"
     );
 }

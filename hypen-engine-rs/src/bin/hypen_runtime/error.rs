@@ -10,7 +10,7 @@
 use std::fmt;
 use std::path::PathBuf;
 
-use hypen_engine::module_host::{HostError, StorageScope};
+use hypen_engine::module_host::{DeniedCapability, HostError, ManifestGrant, StorageScope};
 use hypen_engine::EngineError;
 
 use crate::manifest::ManifestProblem;
@@ -23,6 +23,8 @@ pub enum ModuleStage {
     Instantiate,
     Init,
     QueryActions,
+    /// Freeing the host instance of a retired scope.
+    Destroy,
 }
 
 impl fmt::Display for ModuleStage {
@@ -32,6 +34,7 @@ impl fmt::Display for ModuleStage {
             ModuleStage::Instantiate => "instantiate",
             ModuleStage::Init => "init",
             ModuleStage::QueryActions => "query actions",
+            ModuleStage::Destroy => "destroy",
         })
     }
 }
@@ -46,61 +49,72 @@ pub enum GrantSurface {
     CommandLine,
 }
 
-/// A capability import a module needs but was not granted, recognised from a
-/// link-time instantiation failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MissingCapability {
-    Http,
-    Storage(StorageScope),
-}
-
-impl MissingCapability {
-    /// Recognise the ungranted import named in a host instantiation error.
-    /// The hosts deny capabilities by not linking the interface, so the
-    /// linker's message names the interface that was missing.
-    pub fn detect(error: &HostError) -> Option<Self> {
-        let HostError::Instantiate(message) = error else {
-            return None;
-        };
-        if message.contains("wasi:http") {
-            Some(MissingCapability::Http)
-        } else if message.contains("hypen:storage/cloud") {
-            Some(MissingCapability::Storage(StorageScope::Cloud))
-        } else if message.contains("hypen:storage/app") {
-            Some(MissingCapability::Storage(StorageScope::App))
-        } else {
-            None
-        }
-    }
-
-    fn hint(self, scope: &str, surface: GrantSurface) -> String {
-        let storage_name = |s: StorageScope| match s {
-            StorageScope::Local => "local",
-            StorageScope::App => "app",
-            StorageScope::Cloud => "cloud",
-        };
-        match (self, surface) {
-            (MissingCapability::Http, GrantSurface::AppManifest) => format!(
-                "the module imports wasi:http but is not granted network access; \
-                 add `\"http\": true` to the `{scope}` entry in app.json"
-            ),
-            (MissingCapability::Http, GrantSurface::CommandLine) => {
-                "the module imports wasi:http but is not granted network access; \
-                 pass --grant-http"
-                    .to_string()
+/// How to grant what a module was refused at link time: one sentence naming
+/// every missing import and the exact grant for each, phrased for where
+/// grants are written. `denied` is the host's structured answer
+/// (`ModuleHost::denied_capabilities`), not parsed from an error message.
+/// `None` when nothing was denied (the failure had another cause).
+pub fn grant_hint(denied: &[DeniedCapability], entry: &str, surface: GrantSurface) -> Option<String> {
+    let storage_name = |s: StorageScope| match s {
+        StorageScope::Local => "local",
+        StorageScope::App => "app",
+        StorageScope::Cloud => "cloud",
+    };
+    let mut http = false;
+    let mut storage: Vec<&'static str> = Vec::new();
+    let mut imports: Vec<String> = Vec::new();
+    for capability in denied {
+        match capability.grant {
+            ManifestGrant::Http if !http => {
+                http = true;
+                imports.push("wasi:http".to_string());
             }
-            (MissingCapability::Storage(s), GrantSurface::AppManifest) => format!(
-                "the module imports hypen:storage/{0} but is not granted it; \
-                 add `\"storage\": [\"{0}\"]` to the `{scope}` entry in app.json",
-                storage_name(s)
-            ),
-            (MissingCapability::Storage(s), GrantSurface::CommandLine) => format!(
-                "the module imports hypen:storage/{0} but is not granted it; \
-                 pass --grant-storage {0}",
-                storage_name(s)
-            ),
+            ManifestGrant::Storage(scope) if !storage.contains(&storage_name(scope)) => {
+                storage.push(storage_name(scope));
+                imports.push(format!("hypen:storage/{}", storage_name(scope)));
+            }
+            // A repeated capability, or one this runtime has no flag or
+            // manifest field for yet: named by the host's own message.
+            _ => {}
         }
     }
+    if imports.is_empty() {
+        return None;
+    }
+
+    let mut grants: Vec<String> = Vec::new();
+    match surface {
+        GrantSurface::AppManifest => {
+            if http {
+                grants.push("`\"http\": true`".to_string());
+            }
+            if !storage.is_empty() {
+                let list: Vec<String> = storage.iter().map(|s| format!("\"{s}\"")).collect();
+                grants.push(format!("`\"storage\": [{}]`", list.join(", ")));
+            }
+        }
+        GrantSurface::CommandLine => {
+            if http {
+                grants.push("--grant-http".to_string());
+            }
+            if !storage.is_empty() {
+                grants.push(format!("--grant-storage {}", storage.join(",")));
+            }
+        }
+    }
+    let what = if imports.len() == 1 { "it" } else { "them" };
+    let imports = imports.join(" and ");
+    Some(match surface {
+        GrantSurface::AppManifest => format!(
+            "the module imports {imports} but is not granted {what}; add {} to the `{entry}` \
+             entry in app.json",
+            grants.join(" and ")
+        ),
+        GrantSurface::CommandLine => format!(
+            "the module imports {imports} but is not granted {what}; pass {}",
+            grants.join(" ")
+        ),
+    })
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -151,6 +165,13 @@ pub enum RuntimeError {
         scope: String,
         stage: ModuleStage,
         surface: GrantSurface,
+        /// Where the module's grants are written: its app.json entry name
+        /// (which differs from `scope` for a per-usage instance), or the
+        /// scope itself in single-module mode.
+        entry: String,
+        /// The capabilities the host refused to link, when that is why
+        /// instantiation failed (empty otherwise).
+        denied: Vec<DeniedCapability>,
         #[source]
         source: HostError,
     },
@@ -176,10 +197,34 @@ pub enum RuntimeError {
     #[error(transparent)]
     Dispatch(EngineError),
 
-    /// A dispatch killed (trapped / timed out) one or more module instances.
-    #[error("module {} crashed", quoted(scopes))]
+    /// A bare action name more than one module handles: refused, never
+    /// guessed. `candidates` are the `scope:action` forms that address one.
+    #[error(
+        "action `{action}` is handled by more than one module; address one of them: {}",
+        quoted(candidates)
+    )]
+    AmbiguousAction { action: String, candidates: Vec<String> },
+
+    /// No module handles the action as addressed. The summary is the
+    /// engine's own (`engine`, always `ActionNotFound`) followed by
+    /// `candidates`: the nearest `scope:action` forms that do exist
+    /// (possibly none).
+    #[error("{engine}{}", did_you_mean(candidates))]
+    UnknownAction {
+        /// The action name as given.
+        name: String,
+        candidates: Vec<String>,
+        engine: EngineError,
+    },
+
+    /// A dispatch killed (trapped / timed out) one or more module instances,
+    /// or found one still dead because its restart failed.
+    #[error("module {} crashed{}", quoted(scopes), crash_reasons(reasons))]
     ModuleCrashed {
         scopes: Vec<String>,
+        /// What the host says killed each instance it has a reason for
+        /// (`ModuleHost::instance_status`), in `scopes` order.
+        reasons: Vec<String>,
         #[source]
         source: EngineError,
     },
@@ -222,6 +267,22 @@ pub enum RuntimeError {
     Internal(&'static str),
 }
 
+fn did_you_mean(candidates: &[String]) -> String {
+    if candidates.is_empty() {
+        String::new()
+    } else {
+        format!("; did you mean {}?", quoted(candidates))
+    }
+}
+
+fn crash_reasons(reasons: &[String]) -> String {
+    if reasons.is_empty() {
+        String::new()
+    } else {
+        format!(" ({})", reasons.join("; "))
+    }
+}
+
 fn quoted(scopes: &[String]) -> String {
     scopes
         .iter()
@@ -242,9 +303,14 @@ impl RuntimeError {
     /// Something concrete the user can do about this error, if anything.
     pub fn hint(&self) -> Option<String> {
         match self {
-            RuntimeError::Module { scope, stage: ModuleStage::Instantiate, surface, source } => {
-                MissingCapability::detect(source).map(|c| c.hint(scope, *surface))
+            RuntimeError::Module { entry, surface, denied, .. } => {
+                grant_hint(denied, entry, *surface)
             }
+            RuntimeError::AmbiguousAction { .. } => Some(
+                "a UI client can instead send the `sender` node id with the bare name: the \
+                 owning module is then resolved from the rendered tree"
+                    .to_string(),
+            ),
             RuntimeError::Manifest { problem, .. } => problem.hint(),
             RuntimeError::ModuleCrashed { .. } => Some(
                 "the crashed instance's state is lost; the next action re-instantiates the \
@@ -285,8 +351,8 @@ pub fn one_line(error: &RuntimeError) -> String {
 ///
 /// ```text
 /// error: module `fetcher`: instantiate failed
-///   caused by: instantiation failed: component imports instance `wasi:http/types@0.2.6`, …
-///   hint: the module imports wasi:http but is not granted network access; add `"http": true` …
+///   caused by: instantiation failed: module 'fetcher' imports wasi:http/types@0.2.6 but its manifest …
+///   hint: the module imports wasi:http but is not granted it; add `"http": true` to the `Fetcher` entry …
 /// ```
 pub fn render(error: &RuntimeError) -> String {
     let mut out = format!("error: {error}");
@@ -305,45 +371,135 @@ pub fn render(error: &RuntimeError) -> String {
 mod tests {
     use super::*;
 
-    #[test]
-    fn render_shows_summary_cause_chain_and_hint() {
-        let e = RuntimeError::Module {
-            scope: "fetcher".into(),
+    fn denied(import: &str, grant: ManifestGrant) -> DeniedCapability {
+        DeniedCapability { import: import.into(), grant }
+    }
+
+    fn instantiate_error(
+        scope: &str,
+        entry: &str,
+        surface: GrantSurface,
+        denied: Vec<DeniedCapability>,
+    ) -> RuntimeError {
+        RuntimeError::Module {
+            scope: scope.into(),
             stage: ModuleStage::Instantiate,
-            surface: GrantSurface::AppManifest,
+            surface,
+            entry: entry.into(),
+            denied,
             source: HostError::Instantiate(
-                "component imports instance `wasi:http/types@0.2.6`, but a matching \
-                 implementation was not found in the linker"
+                "module 'fetcher' imports wasi:http/types@0.2.6 but its manifest does not \
+                 grant `http`"
                     .into(),
             ),
-        };
+        }
+    }
+
+    #[test]
+    fn render_shows_summary_cause_chain_and_hint() {
+        let e = instantiate_error(
+            "fetcher",
+            "Fetcher",
+            GrantSurface::AppManifest,
+            vec![denied("wasi:http/types@0.2.6", ManifestGrant::Http)],
+        );
         let text = render(&e);
         let lines: Vec<&str> = text.lines().collect();
         assert_eq!(lines[0], "error: module `fetcher`: instantiate failed");
-        assert!(lines[1].starts_with("  caused by: instantiation failed: component imports"));
-        assert!(lines[2].starts_with("  hint: "));
-        assert!(lines[2].contains("\"http\": true"), "{text}");
-        assert!(lines[2].contains("`fetcher` entry in app.json"), "{text}");
+        assert!(lines[1].starts_with("  caused by: instantiation failed: module 'fetcher' imports"));
+        assert_eq!(
+            lines[2],
+            "  hint: the module imports wasi:http but is not granted it; add `\"http\": true` \
+             to the `Fetcher` entry in app.json"
+        );
     }
 
     #[test]
     fn capability_hint_follows_the_grant_surface() {
-        let storage = HostError::Instantiate("missing `hypen:storage/cloud@0.1.0`".into());
-        let e = RuntimeError::Module {
-            scope: "counter".into(),
-            stage: ModuleStage::Instantiate,
-            surface: GrantSurface::CommandLine,
-            source: storage,
-        };
-        assert!(e.hint().unwrap().contains("--grant-storage cloud"));
-
-        let app = HostError::Instantiate("missing `hypen:storage/app@0.1.0`".into());
+        let cloud = || vec![denied("hypen:storage/cloud@0.1.0", ManifestGrant::Storage(StorageScope::Cloud))];
+        let e = instantiate_error("counter", "counter", GrantSurface::CommandLine, cloud());
         assert_eq!(
-            MissingCapability::detect(&app),
-            Some(MissingCapability::Storage(StorageScope::App))
+            e.hint().unwrap(),
+            "the module imports hypen:storage/cloud but is not granted it; pass \
+             --grant-storage cloud"
         );
-        // Only link-time failures carry a capability hint.
-        assert_eq!(MissingCapability::detect(&HostError::Trap("wasi:http".into())), None);
+        // A per-usage scope's grants live in its backing module's entry.
+        let e = instantiate_error("counter__a", "Counter", GrantSurface::AppManifest, cloud());
+        assert_eq!(
+            e.hint().unwrap(),
+            "the module imports hypen:storage/cloud but is not granted it; add \
+             `\"storage\": [\"cloud\"]` to the `Counter` entry in app.json"
+        );
+    }
+
+    /// Every missing grant is named, each once, in one hint per surface.
+    #[test]
+    fn capability_hint_names_every_missing_grant() {
+        let all = || {
+            vec![
+                denied("hypen:storage/app@0.1.0", ManifestGrant::Storage(StorageScope::App)),
+                denied("hypen:storage/cloud@0.1.0", ManifestGrant::Storage(StorageScope::Cloud)),
+                denied("wasi:http/types@0.2.10", ManifestGrant::Http),
+                denied("wasi:http/outgoing-handler@0.2.10", ManifestGrant::Http),
+            ]
+        };
+        let e = instantiate_error("ts", "ts", GrantSurface::CommandLine, all());
+        assert_eq!(
+            e.hint().unwrap(),
+            "the module imports hypen:storage/app and hypen:storage/cloud and wasi:http but \
+             is not granted them; pass --grant-http --grant-storage app,cloud"
+        );
+        let e = instantiate_error("ts", "Ts", GrantSurface::AppManifest, all());
+        assert_eq!(
+            e.hint().unwrap(),
+            "the module imports hypen:storage/app and hypen:storage/cloud and wasi:http but \
+             is not granted them; add `\"http\": true` and `\"storage\": [\"app\", \"cloud\"]` \
+             to the `Ts` entry in app.json"
+        );
+    }
+
+    /// The hint comes from the host's structured denial only: an error whose
+    /// text merely mentions an interface gets none.
+    #[test]
+    fn no_denial_no_capability_hint() {
+        let e = instantiate_error("m", "m", GrantSurface::CommandLine, Vec::new());
+        assert_eq!(e.hint(), None);
+        let e = RuntimeError::Module {
+            scope: "m".into(),
+            stage: ModuleStage::Init,
+            surface: GrantSurface::CommandLine,
+            entry: "m".into(),
+            denied: Vec::new(),
+            source: HostError::Trap("wasi:http exploded".into()),
+        };
+        assert_eq!(e.hint(), None);
+    }
+
+    #[test]
+    fn ambiguous_and_unknown_actions_list_their_candidates() {
+        let e = RuntimeError::AmbiguousAction {
+            action: "increment".into(),
+            candidates: vec!["app:increment".into(), "counter:increment".into()],
+        };
+        assert_eq!(
+            e.to_string(),
+            "action `increment` is handled by more than one module; address one of them: \
+             `app:increment`, `counter:increment`"
+        );
+        assert!(e.hint().unwrap().contains("`sender` node id"));
+
+        let engine = || EngineError::ActionNotFound("frobnicate".into());
+        let e = RuntimeError::UnknownAction {
+            name: "counter:frobnicate".into(),
+            candidates: vec!["counter:increment".into()],
+            engine: engine(),
+        };
+        assert_eq!(
+            one_line(&e),
+            "No handler registered for action: frobnicate; did you mean `counter:increment`?"
+        );
+        let e = RuntimeError::UnknownAction { name: "x".into(), candidates: vec![], engine: engine() };
+        assert_eq!(e.to_string(), "No handler registered for action: frobnicate");
     }
 
     #[test]
@@ -368,6 +524,7 @@ mod tests {
     fn crashed_modules_are_named_with_a_recovery_hint() {
         let e = RuntimeError::ModuleCrashed {
             scopes: vec!["limits".into()],
+            reasons: Vec::new(),
             source: EngineError::ModuleError("module trapped: deadline".into()),
         };
         assert_eq!(
@@ -375,5 +532,17 @@ mod tests {
             "module `limits` crashed: Module error: module trapped: deadline"
         );
         assert!(e.hint().unwrap().contains("re-instantiates"));
+
+        // With the host's death reason, the summary says what killed it.
+        let e = RuntimeError::ModuleCrashed {
+            scopes: vec!["limits".into()],
+            reasons: vec!["module 'limits' export `dispatch` exceeded its 100 ms CPU budget".into()],
+            source: EngineError::ModuleError("x".into()),
+        };
+        assert_eq!(
+            e.to_string(),
+            "module `limits` crashed (module 'limits' export `dispatch` exceeded its 100 ms \
+             CPU budget)"
+        );
     }
 }

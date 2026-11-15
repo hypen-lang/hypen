@@ -206,8 +206,12 @@ fn scoped_bare_and_sender_addressing() {
     // A bare name two scopes handle is ambiguous — refused, never a guess.
     let outcome = app.runtime.dispatch(&request("increment"));
     let err = outcome.result.expect_err("ambiguous");
-    assert!(matches!(err, RuntimeError::Dispatch(_)), "{err}");
-    assert!(err.to_string().contains("exported by multiple modules"), "{err}");
+    assert!(
+        matches!(err, RuntimeError::AmbiguousAction { ref action, ref candidates }
+            if action == "increment" && candidates == &["app:increment", "counter:increment"]),
+        "{err}"
+    );
+    assert!(err.to_string().contains("`app:increment`, `counter:increment`"), "{err}");
     assert_eq!((app.count("app"), app.count("counter")), (json!(0), json!(1)));
 
     // A sender node id resolves the owning scope: the only Button is the
@@ -234,9 +238,31 @@ fn scoped_bare_and_sender_addressing() {
 
     // Unknown scope / action.
     let outcome = app.runtime.dispatch(&request("ghost:increment"));
-    assert!(matches!(outcome.result, Err(RuntimeError::Dispatch(EngineError::ActionNotFound(_)))));
+    let err = outcome.result.expect_err("unknown scope");
+    assert!(
+        matches!(err, RuntimeError::UnknownAction {
+            ref candidates, engine: EngineError::ActionNotFound(_), ..
+        } if candidates == &["app:increment", "counter:increment"]),
+        "{err}"
+    );
     let outcome = app.runtime.dispatch(&request("Counter:frobnicate"));
-    assert!(matches!(outcome.result, Err(RuntimeError::Dispatch(EngineError::ActionNotFound(_)))));
+    let err = outcome.result.expect_err("unknown action");
+    assert!(
+        matches!(err, RuntimeError::UnknownAction {
+            ref candidates, engine: EngineError::ActionNotFound(_), ..
+        } if candidates.contains(&"counter:increment".to_string())
+            && candidates.iter().all(|c| c.starts_with("counter:"))),
+        "{err}"
+    );
+    assert!(err.to_string().contains("'frobnicate'; did you mean `counter:"), "{err}");
+    // A bare name nobody exports: everything there is, capped.
+    let outcome = app.runtime.dispatch(&request("frobnicate"));
+    let err = outcome.result.expect_err("unknown bare action");
+    assert!(
+        matches!(err, RuntimeError::UnknownAction { ref candidates, .. }
+            if candidates.len() == 10 && candidates[0] == "app:increment"),
+        "{err}"
+    );
 }
 
 #[test]
@@ -532,6 +558,255 @@ fn hot_reloading_a_crashed_module_restarts_it_from_the_new_bytes() {
     assert_eq!(app.count("counter"), 0);
     assert!(app.runtime.dispatch(&request("Counter:reset")).result.is_ok());
     assert_eq!(app.host.instance_count(), 2);
+}
+
+/// A host that tracks instance health is simply asked: the crash is found
+/// without any further guest call, and the host's reason is surfaced.
+#[test]
+fn a_crash_is_read_from_the_hosts_instance_status_without_probing_the_guest() {
+    let app = boot_app();
+    app.host.report_status();
+    assert!(app.runtime.dispatch(&request("Counter:increment")).result.is_ok());
+
+    let before = app.host.guest_calls();
+    let outcome = app.runtime.dispatch(&request("Counter:crash"));
+    assert_eq!(app.host.guest_calls() - before, 1, "the crashing dispatch and nothing else");
+    let err = outcome.result.expect_err("crash is an error");
+    match &err {
+        RuntimeError::ModuleCrashed { scopes, reasons, .. } => {
+            assert_eq!(scopes, &["counter"]);
+            assert_eq!(reasons, &["fake: export `dispatch` trapped"]);
+        }
+        other => panic!("expected ModuleCrashed, got {other}"),
+    }
+    assert!(err.to_string().contains("crashed (fake: export `dispatch` trapped)"), "{err}");
+
+    // A reducer error on a status-reporting host is still not a crash.
+    let outcome = app.runtime.dispatch(&request("App:fail"));
+    assert!(matches!(outcome.result, Err(RuntimeError::Dispatch(EngineError::ModuleError(_)))));
+    assert_eq!(app.count("counter"), 0, "…and that action restarted the crashed module");
+}
+
+/// A host that answers `Unknown` is not probed either: the crash is read from
+/// the engine's typed report of the failed dispatch.
+#[test]
+fn without_instance_status_the_crash_is_read_from_the_cascade_report() {
+    let app = boot_app();
+    let before = app.host.guest_calls();
+    let err = app.runtime.dispatch(&request("Counter:crash")).result.expect_err("crash");
+    assert_eq!(app.host.guest_calls() - before, 1, "no liveness probe");
+    match &err {
+        RuntimeError::ModuleCrashed { scopes, reasons, .. } => {
+            assert_eq!(scopes, &["counter"]);
+            assert_eq!(reasons, &["module trapped: wasm trap: unreachable"]);
+        }
+        other => panic!("expected ModuleCrashed, got {other}"),
+    }
+
+    // While it cannot restart, later failures still name it — with the
+    // reason remembered from when it died.
+    app.host.fail_init("counter", true);
+    let err = app.runtime.dispatch(&request("App:fail")).result.expect_err("still crashed");
+    assert!(
+        matches!(err, RuntimeError::ModuleCrashed { ref scopes, ref reasons, .. }
+            if scopes == &["counter"] && reasons == &["module trapped: wasm trap: unreachable"]),
+        "{err}"
+    );
+}
+
+// ── retiring usage scopes; re-seeding ───────────────────────────────────────
+
+#[test]
+fn a_usage_removed_by_a_template_edit_retires_its_instance() {
+    let app = boot_app();
+    app.edit("app.hypen", &app_ui("    Counter(start: 5)\n"));
+    assert_eq!(app.host.instance_count(), 3);
+    assert!(app.runtime.dispatch(&request("counter__a:increment")).result.is_ok());
+    assert!(app.runtime.watch_paths().iter().all(|p| !p.ends_with("counter__a")));
+
+    // Remove the usage again.
+    let events = app.edit("app.hypen", &app_ui(""));
+    let retired_at = events
+        .iter()
+        .position(|e| matches!(e, ReloadEvent::ScopeRetired { scope } if scope == "counter__a"))
+        .unwrap_or_else(|| panic!("{events:?}"));
+    let rendered_at = events
+        .iter()
+        .position(|e| matches!(e, ReloadEvent::Rerendered { .. }))
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert!(rendered_at < retired_at, "retired only once nothing rendered references it");
+
+    assert_eq!(app.host.destroyed_hooks(), ["counter__a"], "on_destroyed ran, once");
+    assert_eq!(app.host.instance_count(), 2, "the host instance is gone");
+    assert_eq!(app.host.instances_of("counter__a"), 0);
+    let envelope = app.runtime.state_envelope();
+    assert!(envelope["states"].get("counter__a").is_none(), "{envelope}");
+    assert!(!text(&app.runtime.tree_snapshot()).contains("Counter: 6"));
+
+    // Nothing routes to it any more — a dispatch or a pending timer.
+    let err = app.runtime.dispatch(&request("counter__a:increment")).result.expect_err("gone");
+    assert!(matches!(err, RuntimeError::UnknownAction { .. }), "{err}");
+    app.runtime.fire_timer("counter__a", "increment");
+    // The modules that stayed are untouched.
+    assert!(app.runtime.dispatch(&request("Counter:increment")).result.is_ok());
+    assert_eq!(app.count("counter"), 1);
+
+    // Bringing the usage back mints a fresh instance from its config.
+    let events = app.edit("app.hypen", &app_ui("    Counter(start: 5)\n"));
+    assert!(events.iter().any(|e| matches!(e, ReloadEvent::ScopeMinted { .. })), "{events:?}");
+    assert_eq!(app.count("counter__a"), 5);
+}
+
+#[test]
+fn a_scope_is_kept_while_the_edit_that_drops_it_does_not_render() {
+    let app = boot_app();
+    app.edit("app.hypen", &app_ui("    Counter(start: 5)\n"));
+    assert!(app.runtime.dispatch(&request("counter__a:increment")).result.is_ok());
+
+    // An edit that drops the usage but does not parse: the old tree (which
+    // shows counter__a) is still on screen, so its instance stays.
+    let events = app.edit("app.hypen", "module App {");
+    assert!(events.iter().any(|e| matches!(e, ReloadEvent::RerenderFailed { .. })), "{events:?}");
+    assert!(
+        !events.iter().any(|e| matches!(e, ReloadEvent::ScopeRetired { .. })),
+        "{events:?}"
+    );
+    assert_eq!(app.host.instance_count(), 3);
+    assert_eq!(app.count("counter__a"), 6);
+
+    // The fixed edit renders, and then retires it.
+    let events = app.edit("app.hypen", &app_ui(""));
+    assert!(events.iter().any(|e| matches!(e, ReloadEvent::ScopeRetired { .. })), "{events:?}");
+    assert_eq!(app.host.instance_count(), 2);
+}
+
+#[test]
+fn a_failing_on_destroyed_is_reported_and_the_scope_is_retired_anyway() {
+    let app = boot_app();
+    app.edit("app.hypen", &app_ui("    Counter(start: 5)\n"));
+    app.host.fail_on_destroyed("counter__a");
+    let events = app.edit("app.hypen", &app_ui(""));
+    let error = events
+        .iter()
+        .find_map(|e| match e {
+            ReloadEvent::ScopeRetiredWithError { scope, error } if scope == "counter__a" => {
+                Some(crate::error::one_line(error))
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("{events:?}"));
+    assert!(error.contains("module `counter__a`: on_destroyed failed"), "{error}");
+    assert!(error.contains("on_destroyed refused"), "{error}");
+    assert_eq!(app.host.instance_count(), 2, "torn down regardless");
+    assert!(app.runtime.state_envelope()["states"].get("counter__a").is_none());
+
+    // A crashed usage scope retires cleanly too (its hook cannot run).
+    app.edit("app.hypen", &app_ui("    Counter(start: 7)\n"));
+    assert!(app.runtime.dispatch(&request("counter__a:crash")).result.is_err());
+    let events = app.edit("app.hypen", &app_ui(""));
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ReloadEvent::ScopeRetired { .. } | ReloadEvent::ScopeRetiredWithError { .. }
+        )),
+        "{events:?}"
+    );
+    assert_eq!(app.host.instance_count(), 2);
+    assert!(app.runtime.dispatch(&request("App:increment")).result.is_ok(), "nothing left crashed");
+}
+
+/// Single-module mode: boot `ui` over one fake module.
+fn boot_single(ui: &str) -> (tempfile::TempDir, FakeHandle, Runtime) {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("m.wasm"), b"v1").unwrap();
+    std::fs::write(dir.path().join("ui.hypen"), ui).unwrap();
+    let source = Source::Module(ModuleSource {
+        wasm: dir.path().join("m.wasm"),
+        scope: ScopeName::new("seeded").unwrap(),
+        ui: Some(dir.path().join("ui.hypen")),
+        actions: ActionSource::Discover,
+        grants: Grants::default(),
+    });
+    let (host, handle) = fake_host();
+    let booted = Runtime::boot_with_host(&source, host).unwrap();
+    (dir, handle, booted.runtime)
+}
+
+#[test]
+fn a_ui_edit_that_changes_the_declaration_config_reseeds_the_single_module() {
+    let (dir, host, runtime) = boot_single("module seeded(start: 7) { Text(\"N: @{state.count}\") }");
+    let ui = std::fs::canonicalize(dir.path()).unwrap().join("ui.hypen");
+    let edit = |contents: &str| {
+        std::fs::write(&ui, contents).unwrap();
+        runtime.files_changed(std::slice::from_ref(&ui))
+    };
+    assert!(runtime.dispatch(&request("increment")).result.is_ok());
+    assert_eq!(runtime.module_state("seeded"), json!({ "count": 8 }));
+
+    // Same config, different markup: the instance and its state stay.
+    let events = edit("module seeded(start: 7) { Text(\"Now: @{state.count}\") }");
+    assert!(!events.iter().any(|e| matches!(e, ReloadEvent::ModuleReseeded { .. })), "{events:?}");
+    assert_eq!(runtime.module_state("seeded"), json!({ "count": 8 }));
+    assert!(text(&runtime.tree_snapshot()).contains("Now: 8"));
+
+    // A new config re-runs init with it, on a fresh instance.
+    let events = edit("module seeded(start: 40) { Text(\"Now: @{state.count}\") }");
+    assert!(
+        events.iter().any(|e| matches!(
+            e,
+            ReloadEvent::ModuleReseeded { scope, config } if scope == "seeded" && config == &json!({ "start": 40 })
+        )),
+        "{events:?}"
+    );
+    assert_eq!(runtime.module_state("seeded"), json!({ "count": 40 }));
+    assert_eq!(host.instance_count(), 1, "the old instance was destroyed");
+    assert!(text(&runtime.tree_snapshot()).contains("Now: 40"));
+    assert!(runtime.dispatch(&request("increment")).result.is_ok());
+
+    // If the module cannot start with the new config it keeps running with
+    // the old one, and the next edit tries again.
+    host.fail_init("seeded", true);
+    let events = edit("module seeded(start: 50) { Text(\"Now: @{state.count}\") }");
+    assert!(
+        events.iter().any(|e| matches!(e, ReloadEvent::ModuleReseedFailed { scope, .. } if scope == "seeded")),
+        "{events:?}"
+    );
+    assert_eq!(runtime.module_state("seeded"), json!({ "count": 41 }));
+    assert_eq!(host.instance_count(), 1);
+    host.fail_init("seeded", false);
+    let events = edit("module seeded(start: 50) { Text(\"Again: @{state.count}\") }");
+    assert!(events.iter().any(|e| matches!(e, ReloadEvent::ModuleReseeded { .. })), "{events:?}");
+    assert_eq!(runtime.module_state("seeded"), json!({ "count": 50 }));
+}
+
+#[test]
+fn a_wasm_that_cannot_be_read_fails_the_reload_of_each_of_its_scopes() {
+    let app = boot_app();
+    assert!(app.runtime.dispatch(&request("Counter:increment")).result.is_ok());
+    let wasm = app.path("a.wasm");
+    std::fs::remove_file(&wasm).unwrap();
+    let events = app.runtime.files_changed(std::slice::from_ref(&wasm));
+    let failed: Vec<&str> = events
+        .iter()
+        .filter_map(|e| match e {
+            ReloadEvent::ModuleReloadFailed { scope, error: RuntimeError::Io { action: "read", .. } } => {
+                Some(scope.as_str())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failed, ["app", "counter"], "{events:?}");
+    // The running instances are untouched.
+    assert_eq!(app.host.registered("counter").as_deref(), Some(&b"v1"[..]));
+    assert!(app.runtime.dispatch(&request("Counter:increment")).result.is_ok());
+    assert_eq!(app.count("counter"), 2);
+}
+
+#[test]
+fn watching_covers_the_directories_of_every_module_and_template() {
+    let app = boot_app();
+    let root = std::fs::canonicalize(app.dir.path()).unwrap();
+    assert_eq!(app.runtime.watch_dirs(), vec![root], "one directory holds all three files");
 }
 
 // ── requests ────────────────────────────────────────────────────────────────
