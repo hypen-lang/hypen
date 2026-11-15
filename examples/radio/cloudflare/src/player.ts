@@ -57,6 +57,8 @@ export const EMPTY_STATION: Station = {
   clicks: 0,
   playable: false,
   unplayableReason: "",
+  tint: "#221E17",
+  glow: "#FF5126",
 };
 
 const MAX_RECENTS = 20;

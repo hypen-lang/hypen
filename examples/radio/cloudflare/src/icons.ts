@@ -37,5 +37,7 @@ export const resources: Record<string, string> = {
   x: svg(stroke("M18 6L6 18") + stroke("M6 6l12 12")),
   clock: svg(stroke("M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z") + stroke("M12 6v6l4 2")),
   alert: svg(stroke("M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z") + stroke("M12 8v4") + stroke("M12 16h.01")),
+  info: svg(stroke("M12 22a10 10 0 1 0 0-20 10 10 0 0 0 0 20z") + stroke("M12 16v-4") + stroke("M12 8h.01")),
+  "arrow-right": svg(stroke("M5 12h14") + stroke("M12 5l7 7-7 7")),
   music: svg(stroke("M9 18V5l12-2v13") + stroke("M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z") + stroke("M18 19a3 3 0 1 0 0-6 3 3 0 0 0 0 6z")),
 };
