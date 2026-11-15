@@ -53,6 +53,7 @@ pub mod tree;
 /// slots. Mirrors `hypen-web/packages/core/src/types.ts`.
 pub mod video_v2;
 pub mod virt;
+pub(crate) mod web_fonts;
 pub mod window;
 
 pub use app::DesktopApp;

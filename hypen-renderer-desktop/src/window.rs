@@ -3445,6 +3445,11 @@ impl ApplicationHandler<AppEvent> for App {
                 } else {
                     // Background worker (image fetch, future async work)
                     // finished and wants the renderer to repaint.
+                    // Web-font faces landing change every text measure:
+                    // drop the cached layout so this frame re-lays out.
+                    if self.painter.text_engine_mut().sync_web_fonts() {
+                        self.layout = None;
+                    }
                     self.request_redraw_full();
                 }
             }

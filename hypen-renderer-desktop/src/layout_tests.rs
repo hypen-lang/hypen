@@ -10054,3 +10054,109 @@ fn tailwind_font_family_classes_reach_text() {
         assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
     }
 }
+
+/// `letter-spacing` and `text-transform` inherit like CSS and reach the
+/// Text's shaping settings; `em` resolves against the declaring node's
+/// font size, a bare number is px.
+#[test]
+fn letter_spacing_and_text_transform_inherit_to_text_items() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("7-day forecast").fontSize(12)
+            Text("kicker").tw("text-[10px] tracking-widest")
+            Text("Plain").textTransform("none").letterSpacing("normal")
+        }.letterSpacing(0.8).textTransform("uppercase")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let family = |id: &str| match &pass.item_by_id(id).unwrap().kind {
+        ItemKind::Text { font_family, .. } => font_family.clone(),
+        other => panic!("expected Text, got {other:?}"),
+    };
+    let kids = tree.children_of(&first_of_type(&tree, "Column"));
+    let inherited = family(&kids[0]);
+    assert_eq!(inherited.transform(), crate::text::TextTransform::Uppercase);
+    assert!((inherited.letter_spacing_em() - 0.8 / 12.0).abs() < 1e-6);
+    let kicker = family(&kids[1]);
+    assert!((kicker.letter_spacing_em() - 0.1).abs() < 1e-6, "tracking-widest = 0.1em");
+    assert_eq!(kicker.transform(), crate::text::TextTransform::Uppercase);
+    let plain = family(&kids[2]);
+    assert_eq!(plain.transform(), crate::text::TextTransform::None);
+    assert_eq!(plain.letter_spacing_em(), 0.0);
+    for key in ["letterSpacing", "letter-spacing.0", "textTransform", "text-transform"] {
+        assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
+    }
+    // The transform is a shaping input: an uppercased string measures
+    // wider than the lowercase source.
+    let upper = pass.item_by_id(&kids[2]).unwrap().rect.w;
+    assert!(upper > 0.0);
+}
+
+/// A caption beside a username in a Row (Social's post caption) wraps
+/// inside the Row's width like a CSS flex item, instead of overflowing
+/// the card on one line.
+#[test]
+fn text_beside_a_label_in_a_row_wraps_within_the_row() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Row {
+                Text("amara_reads").tw("text-sm font-semibold pr-1")
+                Text("A quiet corner and a book I did not mean to finish today.").tw("text-sm")
+            }.tw("py-1 px-4")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let row = first_of_type(&tree, "Row");
+    let kids = tree.children_of(&row);
+    let row_rect = pass.item_by_id(&row).map(|i| i.rect);
+    let caption = pass.item_by_id(&kids[1]).unwrap().rect;
+    let right = row_rect.map_or(430.0, |r| r.x + r.w - 16.0);
+    assert!(
+        caption.x + caption.w <= right + 0.5,
+        "caption {caption:?} overflows the row content edge {right}"
+    );
+    let col = pass.item_by_id(&first_of_type(&tree, "Column")).map(|i| i.rect);
+    let user = pass.item_by_id(&kids[0]).map(|i| i.rect);
+    assert!(
+        caption.h > 30.0,
+        "caption should wrap to two lines: {caption:?} row {row_rect:?} col {col:?} user {user:?}"
+    );
+}
+
+/// A Text with its own `text-center` fills its vertical parent's width
+/// (the DOM's text fill), so a centred title over a wider sibling sits
+/// in the middle; the parent stays content-sized (text fill is not
+/// width demand), and Row parents keep the Text intrinsic.
+#[test]
+fn text_with_its_own_center_alignment_fills_its_column() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Column {
+                Text("Inception").tw("text-center")
+                Text("A considerably longer line of plain body text")
+            }
+            Row { Text("Row title").tw("text-center") }
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let outer = first_of_type(&tree, "Column");
+    let inner = tree.children_of(&outer)[0].clone();
+    let kids = tree.children_of(&inner);
+    let rect = |id: &str| pass.item_by_id(id).unwrap().rect;
+    let (title, body) = (rect(&kids[0]), rect(&kids[1]));
+    assert!(
+        (title.w - body.w).abs() < 0.5 && (title.x - body.x).abs() < 0.5,
+        "centred title {title:?} should span the column like {body:?}"
+    );
+    let column_w = pass.item_by_id(&inner).map(|i| i.rect.w).unwrap_or(body.w);
+    assert!(column_w < 400.0, "the column stays content-sized: {column_w}");
+    let row = first_of_type(&tree, "Row");
+    let row_title = rect(&tree.children_of(&row)[0]);
+    let (natural, _) = text.measure("Row title", 16.0, None);
+    assert!(row_title.w <= natural + 1.0, "Row keeps the Text intrinsic: {row_title:?}");
+}

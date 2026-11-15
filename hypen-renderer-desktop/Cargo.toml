@@ -183,6 +183,15 @@ fontdb = "0.23"
 # text 0.19; pinned here for direct use.
 sys-locale = "0.3"
 
+# Text shaping tailoring (`src/text.rs`): UAX #14 break opportunities, so
+# the shaper's breaks can be narrowed to the ones a browser takes (no
+# break after `/` inside a URL), and the Unicode emoji properties that
+# decide which clusters use the colour-emoji face. Both are already in the
+# build (cosmic-text pulls unicode-linebreak; url → idna pulls
+# icu_properties with its compiled data).
+unicode-linebreak = "0.1.5"
+icu_properties = "2"
+
 # Process CPU/RSS sampling for the opt-in development HUD. Keep only the
 # system feature: disk, network, users, and hardware sensors are irrelevant.
 sysinfo = { version = "0.38.3", optional = true, default-features = false, features = ["system"] }

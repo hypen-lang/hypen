@@ -1271,6 +1271,9 @@ pub struct TaffyState {
     /// per-edge over these.
     platform_safe_area: crate::style::Padding,
     image_load_generation: u64,
+    /// `TextEngine::font_generation` this state's measures were taken
+    /// with; a change (web fonts landed) forces a re-measure.
+    font_generation: u64,
     /// Every media source a resolved style asked the decoded-image cache
     /// about, with the answer it got (`true` = natural size available).
     /// Filled from `MEDIA_SIZE_PROBES` at the top of each compute. When
@@ -1319,6 +1322,7 @@ impl TaffyState {
             safe_area: SafeAreaInsets::default(),
             platform_safe_area: DESKTOP_SAFE_AREA_DEFAULT,
             image_load_generation: crate::paint::image::image_load_generation(),
+            font_generation: 0,
             media_size_probes: HashMap::new(),
             #[cfg(test)]
             bulk_rebuilds: 0,
@@ -2578,6 +2582,44 @@ impl TaffyState {
             renderer_for_taffy,
             ..
         } = self;
+        // Text fill (the DOM's `data-hypen-text-fill`): a Text whose own
+        // `textAlign` is center / right / end / justify takes the full
+        // width of a vertical parent, so the alignment has room to act —
+        // at its intrinsic width a centred title in a content-sized
+        // Column stayed flush left. Row / Center / Badge parents keep it
+        // intrinsic, as on the web. Not width DEMAND: the parent stays
+        // content-sized (see the demand walk below).
+        for (tid, rid) in renderer_for_taffy.iter() {
+            let Some(node) = tree.get(rid) else { continue };
+            if !text_fills_parent_width(node) {
+                continue;
+            }
+            let Some(parent) = taffy.parent(*tid) else { continue };
+            let vertical_parent = taffy.style(parent).is_ok_and(|style| {
+                style.display == Display::Flex
+                    && matches!(
+                        style.flex_direction,
+                        FlexDirection::Column | FlexDirection::ColumnReverse
+                    )
+            });
+            let excluded_parent = renderer_for_taffy
+                .get(&parent)
+                .and_then(|prid| tree.get(prid))
+                .is_some_and(|p| {
+                    ["Row", "Center", "Badge"]
+                        .iter()
+                        .any(|t| p.element_type.eq_ignore_ascii_case(t))
+                });
+            if !vertical_parent || excluded_parent {
+                continue;
+            }
+            let Ok(style) = taffy.style(*tid) else { continue };
+            if style.align_self.is_none() && style.size.width.is_auto() {
+                let mut style = style.clone();
+                style.align_self = Some(AlignSelf::Stretch);
+                let _ = taffy.set_style(*tid, style);
+            }
+        }
         // Fixpoint: promoting one node to `Stretch` can make its parent
         // demand width too. Converges in a couple of rounds in practice;
         // the bound is a backstop, and the `changed` early-out is what
@@ -2604,9 +2646,14 @@ impl TaffyState {
                     .unwrap_or_default()
                     .iter()
                     .any(|child| {
+                        let text_fill = renderer_for_taffy
+                            .get(child)
+                            .and_then(|crid| tree.get(crid))
+                            .is_some_and(text_fills_parent_width);
                         taffy.style(*child).is_ok_and(|child_style| {
                             child_style.size.width.into_raw().uses_percentage()
-                                || child_style.align_self == Some(AlignSelf::Stretch)
+                                || (child_style.align_self == Some(AlignSelf::Stretch)
+                                    && !text_fill)
                         })
                     });
                 if demands_width {
@@ -3020,7 +3067,12 @@ impl LayoutPass {
         if !image_intrinsics_changed {
             state.image_load_generation = image_load_generation;
         }
-        let needs_rebuild = state.needs_bulk_rebuild || image_intrinsics_changed;
+        // Faces landed (web fonts): every text measure Taffy cached is
+        // stale, so rebuild like a cold start.
+        text.sync_web_fonts();
+        let fonts_changed = text.font_generation() != state.font_generation;
+        state.font_generation = text.font_generation();
+        let needs_rebuild = state.needs_bulk_rebuild || image_intrinsics_changed || fonts_changed;
         // The build / restyle paths read `state.interaction`; clone it
         // up front so the `&mut state.tree` borrow during the bulk
         // rebuild doesn't conflict with the immutable read.
@@ -4080,6 +4132,9 @@ where
     // Undo last frame's overrides so candidate detection sees the
     // authored (auto-width) style again. Skip nodes whose width has
     // since been replaced by a real authored value or a restyle.
+    // Remember them: the layout read below still reflects their
+    // clamped width, so an overflow check alone would drop them.
+    let previous: Vec<NodeId> = overrides.keys().copied().collect();
     for (node, width) in std::mem::take(overrides) {
         let Ok(style) = taffy.style(node) else {
             continue;
@@ -4093,7 +4148,7 @@ where
     }
 
     let mut candidates = Vec::new();
-    collect_fit_candidates(taffy, root, &mut candidates);
+    collect_fit_candidates(taffy, root, &mut candidates, &previous);
     if candidates.is_empty() {
         return false;
     }
@@ -4326,7 +4381,14 @@ where
 /// Walk the Taffy tree collecting flex containers that are (a) sized by
 /// their content in the inline axis and (b) contain a horizontal flex
 /// line with a zero-basis growable item — the exact shape Taffy's
-/// `AvailableSpace::Definite` shortcut under-measures.
+/// `AvailableSpace::Definite` shortcut under-measures — or (c) came out
+/// wider than their parent's content box. The same shortcut sums the
+/// items' max-content bases without clamping to the available space,
+/// where CSS `fit-content` caps the box at that space and lets its
+/// items shrink: Social's `Row { Text(username) Text(caption) }` came
+/// out wider than the card, so the caption never wrapped and ran off
+/// the edge. `previous` holds last frame's fitted nodes, whose
+/// clamped layout no longer shows the overflow.
 ///
 /// The container that needs the definite width is not necessarily the
 /// collapsing Row itself: Hypeflix's marathon banner is a `Button`
@@ -4338,6 +4400,7 @@ fn collect_fit_candidates(
     taffy: &TaffyTree<NodeContext>,
     node: NodeId,
     out: &mut Vec<FitCandidate>,
+    previous: &[NodeId],
 ) {
     // Copy out only the two fields the child check needs — cloning the
     // whole `Style` (grid template Vecs included) for every node on
@@ -4369,7 +4432,9 @@ fn collect_fit_candidates(
                     && child_style.position != Position::Absolute
                     && child_style.size.width.is_auto()
                     && !is_cross_stretched(parent_align_items, child_style)
-                    && has_zero_basis_growable_row(taffy, child)
+                    && (has_zero_basis_growable_row(taffy, child)
+                        || previous.contains(&child)
+                        || overflows_parent_content_box(taffy, node, child))
                 {
                     out.push(FitCandidate {
                         node: child,
@@ -4378,8 +4443,27 @@ fn collect_fit_candidates(
                 }
             }
         }
-        collect_fit_candidates(taffy, child, out);
+        collect_fit_candidates(taffy, child, out, previous);
     }
+}
+
+/// True when `child`'s border box (plus margins) is wider than
+/// `parent`'s content box in the last computed layout.
+fn overflows_parent_content_box(
+    taffy: &TaffyTree<NodeContext>,
+    parent: NodeId,
+    child: NodeId,
+) -> bool {
+    let (Ok(parent), Ok(child)) = (taffy.layout(parent), taffy.layout(child)) else {
+        return false;
+    };
+    let inner = parent.size.width
+        - parent.padding.left
+        - parent.padding.right
+        - parent.border.left
+        - parent.border.right
+        - parent.scrollbar_size.width;
+    child.size.width + child.margin.left + child.margin.right > inner + 0.5
 }
 
 /// True when `node` — or any flex box below it — lays children out
@@ -5123,6 +5207,8 @@ pub(crate) fn is_inherited_text_measure_key(name: &str) -> bool {
         base.to_ascii_lowercase().as_str(),
         "fontsize" | "font-size" | "fontweight" | "font-weight" | "fontfamily"
             | "font-family"
+            // Shaping inputs of the inherited `FontFamily`.
+            | "letterspacing" | "letter-spacing" | "texttransform" | "text-transform"
     )
 }
 
@@ -5208,6 +5294,11 @@ pub(crate) fn is_layout_prop(name: &str) -> bool {
             | "font-weight"
             | "fontfamily"
             | "font-family"
+            // Change glyph advances / the shaped string → measured width.
+            | "letterspacing"
+            | "letter-spacing"
+            | "texttransform"
+            | "text-transform"
             // NOT `level`: it is layout-affecting only on a Heading —
             // see `is_heading_level_write`.
             // Textarea intrinsic height is `rows` lines of its line height.
@@ -9243,23 +9334,69 @@ pub(crate) fn inherited_text_decoration(tree: &Tree, id: &str, viewport: Viewpor
     out
 }
 
-/// `font-family` inherits in CSS: the nearest Text-or-ancestor that
-/// declares one decides (the news example sets it on Text and on
-/// containers alike).
+/// The inherited font settings of a Text ([`crate::text::FontFamily`]).
+/// `font-family`, `letter-spacing` and `text-transform` all inherit in
+/// CSS: for each, the nearest Text-or-ancestor that declares it decides
+/// (the news example sets the family on Text and on containers alike).
 pub(crate) fn inherited_text_font_family(
     tree: &Tree,
     id: &str,
     viewport: Viewport,
 ) -> crate::text::FontFamily {
+    let mut family = None;
+    let mut spacing = None;
+    let mut transform = None;
     let mut cursor = Some(id);
     while let Some(current) = cursor {
+        if family.is_some() && spacing.is_some() && transform.is_some() {
+            break;
+        }
         let Some(node) = tree.get(current) else { break };
-        if let Some(list) = crate::style::prop_str_at(node, "fontFamily", viewport) {
-            return crate::text::FontFamily::from_css(list);
+        if family.is_none() {
+            family = crate::style::prop_str_at(node, "fontFamily", viewport)
+                .map(crate::text::FontFamily::from_css);
+        }
+        if spacing.is_none() {
+            // `em` resolves against the declaring element's font size;
+            // the result (a length) is what descendants inherit.
+            spacing = letter_spacing_px(node, viewport, || {
+                inherited_text_font_size(tree, current, viewport)
+            });
+        }
+        if transform.is_none() {
+            transform = crate::style::prop_str_at(node, "textTransform", viewport)
+                .map(crate::text::TextTransform::from_css);
         }
         cursor = tree.parent_of(current);
     }
-    crate::text::FontFamily::default()
+    let mut out = family.unwrap_or_default();
+    if let Some(px) = spacing.filter(|px| *px != 0.0) {
+        let font_size = inherited_text_font_size(tree, id, viewport);
+        if font_size > 0.0 {
+            out = out.with_letter_spacing_em(px / font_size);
+        }
+    }
+    out.with_transform(transform.unwrap_or_default())
+}
+
+/// A node's own `letter-spacing` in logical px: a number or `px` length
+/// (`.letterSpacing(0.8)`), an `em` length of the node's font size
+/// (Tailwind `tracking-widest` = `0.1em`), or `normal` (0).
+fn letter_spacing_px(
+    node: &crate::tree::Node,
+    viewport: Viewport,
+    font_size: impl FnOnce() -> f32,
+) -> Option<f32> {
+    if let Some(text) = crate::style::prop_str_at(node, "letterSpacing", viewport) {
+        let text = text.trim();
+        if text.eq_ignore_ascii_case("normal") {
+            return Some(0.0);
+        }
+        if let Some(em) = text.strip_suffix("em").filter(|t| !t.ends_with('r')) {
+            return em.trim().parse::<f32>().ok().map(|em| em * font_size());
+        }
+    }
+    prop_f32_at(node, "letterSpacing", viewport)
 }
 
 fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign {
@@ -9272,6 +9409,18 @@ fn inherited_text_align(tree: &Tree, id: &str, viewport: Viewport) -> TextAlign 
         cursor = tree.parent_of(current);
     }
     TextAlign::Start
+}
+
+/// The DOM's `applyTextAlign` text fill: a Text leaf whose OWN
+/// `textAlign` is center / right / end / justify fills its parent's width.
+fn text_fills_parent_width(node: &crate::tree::Node) -> bool {
+    is_text_leaf(node)
+        && crate::style::prop_str(node, "textAlign").is_some_and(|v| {
+            matches!(
+                v.trim().to_ascii_lowercase().as_str(),
+                "center" | "right" | "end" | "justify"
+            )
+        })
 }
 
 fn text_requests_stack_track_width(node: &crate::tree::Node) -> bool {

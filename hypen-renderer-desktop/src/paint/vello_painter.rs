@@ -144,6 +144,8 @@ pub struct VelloPainter {
     /// the user resized the window (which dropped the cache as a
     /// side-effect of the viewport change).
     last_image_load_gen: u64,
+    /// `TextEngine::font_generation` the subtree cache was encoded with.
+    last_font_gen: u64,
     /// Sources `draw_image` (or the Video poster path) looked up and
     /// missed while the current subtree fragment was being encoded.
     /// Cleared at the start of a cache-miss encode and moved into the
@@ -216,6 +218,7 @@ impl VelloPainter {
             subtree_cache: indexmap::IndexMap::new(),
             last_viewport: None,
             last_image_load_gen: 0,
+            last_font_gen: 0,
             encoding_awaits: Vec::new(),
             structural_epoch: 0,
             #[cfg(feature = "dev-overlay")]
@@ -372,6 +375,12 @@ impl VelloPainter {
                     .any(|src| crate::paint::image::loaded_source(src).is_some())
             });
             self.last_image_load_gen = load_gen;
+        }
+        // New font faces (web fonts) change every glyph run: no encoded
+        // fragment survives them.
+        if self.text.font_generation() != self.last_font_gen {
+            self.subtree_cache.clear();
+            self.last_font_gen = self.text.font_generation();
         }
 
         let viewport_rect = LayoutRect {
@@ -1741,22 +1750,24 @@ impl VelloPainter {
                 painted = format!("{}…", chars[..low].iter().collect::<String>().trim_end());
             }
         }
-        // Alignment needs the glyph run's intrinsic width. The wrapped
-        // measurement reports the full constraint width, which made center
-        // and end offsets resolve to zero even for a short single line.
-        let (intrinsic_w, _) = self.text.measure_weighted_line_height(
+        // Alignment works on two levels, like CSS: the text engine
+        // aligns every wrapped line within the widest one (the glyph
+        // tile), and the tile — exactly that widest line, as measured at
+        // the same wrap width — is aligned within the content box here.
+        let (block_w, _) = self.text.measure_weighted_line_height(
             &painted,
             scaled_size,
-            None,
+            wrap,
             weight,
             scaled_line_height,
         );
-        let line_w = intrinsic_w.min(content_w);
+        let line_w = block_w.min(content_w);
         let dx = match align {
             TextAlign::Start => 0.0,
             TextAlign::Center => ((content_w - line_w).max(0.0)) * 0.5,
             TextAlign::End => (content_w - line_w).max(0.0),
         };
+        let outer_align = self.text.replace_align(align);
         self.text.draw_text_into_scene_line_height(
             &mut self.scene,
             &painted,
@@ -1796,6 +1807,7 @@ impl VelloPainter {
                 );
             }
         }
+        self.text.replace_align(outer_align);
     }
 
     fn draw_input(
