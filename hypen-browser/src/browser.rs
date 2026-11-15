@@ -184,9 +184,11 @@ struct Inner {
     /// lifecycle scan (server-stream Detach/Attach) and by the slot
     /// reconcile paths (our own Detaches).
     detached_parents: std::collections::HashMap<String, String>,
-    /// Shadow copy of the full forwarded UI tree (shell chrome + the
-    /// active tab's content), kept in sync by `forward`. Serialised on
-    /// demand by the `dump_tree` debug button.
+    /// Shadow of the full forwarded UI tree (shell chrome + the active
+    /// tab's content), kept in sync by `forward`: the whole structure,
+    /// but only the props read back from it ([`shadow_prop`]) — every
+    /// other prop value the stream carries goes to the renderer without
+    /// a copy here. Serialised on demand by the `dump_tree` debug button.
     tree: Tree,
 }
 
@@ -203,8 +205,35 @@ impl Inner {
             embeds: IndexMap::new(),
             next_embed_id: 1,
             detached_parents: std::collections::HashMap::new(),
-            tree: Tree::new(),
+            tree: Tree::with_prop_retention(shadow_prop),
         }
+    }
+}
+
+/// Characters of a node's text the shadow tree keeps — what
+/// `serialize_tree` shows of it.
+const SHADOW_TEXT_PREVIEW_CHARS: usize = 40;
+
+/// What the shadow tree keeps of a prop (see [`Inner::tree`]): the slot
+/// name (`slot` / `slot.0`, read back when a cached host child is
+/// re-attached) and a [`SHADOW_TEXT_PREVIEW_CHARS`] preview of the text
+/// (`0` / `text`, for `dump_tree`). Every other prop — styles, media
+/// URLs, a bound value, a whole document in a `SetProp` — is skipped:
+/// no copy of it is made.
+fn shadow_prop(key: &str, value: &Value) -> Option<Value> {
+    match key {
+        "slot" | "slot.0" => Some(value.clone()),
+        "0" | "text" => Some(match value {
+            Value::String(text) => Value::String(
+                text.trim()
+                    .chars()
+                    .take(SHADOW_TEXT_PREVIEW_CHARS)
+                    .collect(),
+            ),
+            Value::Array(_) | Value::Object(_) => Value::Null,
+            scalar => scalar.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -3415,7 +3444,7 @@ mod tests {
         use hypen_renderer_desktop::layout::LayoutPass;
         use hypen_renderer_desktop::text::TextEngine;
 
-        let (module, _captured) = fresh_browser_with_capture();
+        let (module, captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-fg", "a9:", &[], true);
         module.inner.lock().unwrap().active_tab_id = Some("tab-fg".into());
         // Tell the shell about the tab too, so it swaps the home screen
@@ -3461,7 +3490,10 @@ mod tests {
         };
         let (safe_area, text) = (id_of("SafeArea"), id_of("Text"));
 
-        let inner = module.inner.lock().unwrap();
+        // What the RENDERER holds: the forwarded stream replayed into a
+        // full tree (the browser's own shadow tree keeps no style props).
+        let mut tree = Tree::new();
+        tree.apply_batch(&captured.lock().unwrap());
         let mut fonts = TextEngine::new();
         let viewport = (1024, 720);
         let rect = |pass: &LayoutPass, id: &str| pass.item_by_id(id).expect("laid out").rect;
@@ -3470,7 +3502,7 @@ mod tests {
         // island chrome is a floating overlay hosted apps draw under by
         // design, so a SafeArea-wrapped app lays out full-bleed — the
         // chrome is NOT reserved.
-        let bare = LayoutPass::compute(&inner.tree, &mut fonts, viewport, 1.0);
+        let bare = LayoutPass::compute(&tree, &mut fonts, viewport, 1.0);
         let area = rect(&bare, &safe_area);
         assert_eq!(
             (area.x, area.y, area.h),
@@ -3490,7 +3522,7 @@ mod tests {
         // that. Simulated explicitly so the assertion holds on any
         // host OS.
         let macos = LayoutPass::compute_with_safe_area(
-            &inner.tree,
+            &tree,
             &mut fonts,
             viewport,
             1.0,
@@ -3773,6 +3805,66 @@ mod tests {
         let (embed_batch, props_ptr, value_ptr) = batch(&big);
         let out = process_embed_patches(&module.inner, "e1:", embed_batch);
         check(&out, "e1:", props_ptr, value_ptr);
+    }
+
+    /// The shadow tree copies no prop value: a forwarded batch carrying a
+    /// 1 MiB `SetProp` (a bound document, say) and a `Create` with 1 MiB
+    /// of props costs the shadow tree a bounded number of bytes — the
+    /// structure, the slot name and a 40-character text preview — not a
+    /// copy of the values (which travel on, owned, to the renderer). The
+    /// structure and the read-back props are all still there.
+    #[test]
+    fn shadow_tree_copies_no_prop_value() {
+        const BIG: usize = 1 << 20;
+        let (module, _captured) = fresh_browser_with_capture();
+        let mut inner = module.inner.lock().unwrap();
+        let tree = &mut inner.tree;
+        let batch = vec![
+            create_with(
+                "zz1",
+                "Column",
+                &[
+                    ("backgroundImage", json!("u".repeat(BIG))),
+                    ("slot", json!("header")),
+                ],
+            ),
+            insert("root", "zz1"),
+            create_with("zz2", "Text", &[("0", json!("t".repeat(BIG)))]),
+            insert("zz1", "zz2"),
+            Patch::SetProp {
+                id: "zz2".into(),
+                name: "title".into(),
+                value: json!("v".repeat(BIG)),
+            },
+            Patch::SetProp {
+                id: "zz2".into(),
+                name: "0".into(),
+                value: json!(format!("  {}", "w".repeat(BIG))),
+            },
+        ];
+        let ((), allocated) = crate::alloc_meter::allocated_during(|| tree.apply_batch(&batch));
+        assert!(
+            allocated < 64 * 1024,
+            "the shadow tree copied prop values: {allocated} bytes for a batch carrying 4 MiB"
+        );
+        assert_eq!(tree.children_of("zz1"), ["zz2".to_string()]);
+        let column = tree.get("zz1").unwrap();
+        assert_eq!(column.props.get("slot"), Some(&json!("header")));
+        assert!(column.props.get("backgroundImage").is_none());
+        let text = tree.get("zz2").unwrap();
+        assert_eq!(
+            text.text_content().as_deref(),
+            Some("w".repeat(40).as_str())
+        );
+        assert!(text.props.get("title").is_none());
+        let dump = serialize_tree(tree);
+        assert!(
+            dump.contains(&format!(
+                "<Column #zz1>\n  <Text #zz2> \"{}\"\n",
+                "w".repeat(40)
+            )),
+            "{dump}"
+        );
     }
 
     /// The merged stream reaches the RENDERER owned as well: a tab batch,
