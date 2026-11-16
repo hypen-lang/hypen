@@ -797,6 +797,74 @@ impl EngineCore {
         *patches = out;
     }
 
+    /// Expand `ir_node` and reconcile it into `parent_id`'s subtree — the
+    /// engine side of `WasmEngine::renderInto` / `hypen_render_into` (lazy
+    /// routes rendered into an existing parent).
+    ///
+    /// If the parent already has children, the expanded IR is reconciled
+    /// against the first child (a stable route swap for `Router`-style
+    /// patterns); otherwise a fresh subtree is created under the parent.
+    ///
+    /// Runs the same pre/post passes as [`render_ir_node`](Self::render_ir_node),
+    /// [`render_dirty`](Self::render_dirty) and
+    /// [`set_list_viewport`](Self::set_list_viewport): pending renderer
+    /// `.bind` writes are folded in before diffing (no echo to a bound
+    /// Video), static Icon names are resolved into the IR, and bound Icon
+    /// names get their `__iconPaths`/`__iconViewBox` attached on the way out.
+    /// Bumps the revision.
+    // Only the wasm bindings call it outside tests.
+    #[cfg_attr(
+        not(any(
+            test,
+            all(target_arch = "wasm32", any(feature = "js", feature = "wasi"))
+        )),
+        allow(dead_code)
+    )]
+    pub fn render_subtree_into(
+        &mut self,
+        parent_id: NodeId,
+        ir_node: &IRNode,
+        state: &serde_json::Value,
+    ) -> Vec<Patch> {
+        self.apply_renderer_bind_writes();
+        let mut expanded = self.component_registry.expand_ir_node(ir_node);
+        if !self.resource_registry.is_empty() {
+            crate::ir::resolve_icons_in_ir(&self.resource_registry, &mut expanded);
+        }
+
+        let first_child_id = self
+            .tree
+            .get(parent_id)
+            .and_then(|node| node.children.front().copied());
+
+        let mut patches = Vec::new();
+        let mut ctx = crate::reconcile::diff::ReconcileCtx {
+            tree: &mut self.tree,
+            state,
+            patches: &mut patches,
+            dependencies: &mut self.dependencies,
+            data_sources: (!self.data_sources.is_empty()).then_some(&self.data_sources),
+            modules: (!self.modules.is_empty()).then_some(&self.modules),
+        };
+        match first_child_id {
+            Some(first_child_id) => {
+                crate::reconcile::reconcile_ir_node_impl(&mut ctx, first_child_id, &expanded)
+            }
+            None => {
+                crate::reconcile::create_ir_node_tree_impl(
+                    &mut ctx,
+                    &expanded,
+                    Some(parent_id),
+                    false,
+                );
+            }
+        }
+        self.attach_bound_icon_data(&mut patches);
+
+        self.revision += 1;
+        patches
+    }
+
     /// Render only dirty nodes and return the resulting patches.
     ///
     /// Consumes the pending batch-animation stamp (if any): a cycle that
@@ -1160,6 +1228,59 @@ mod tests {
         assert!(
             paths.contains(&format!("/r{}", overflow - 1)),
             "newest stays"
+        );
+    }
+
+    /// `render_subtree_into` (WasmEngine::renderInto / hypen_render_into, the
+    /// lazy-route path) resolves static Icon names into the IR and attaches
+    /// `__iconPaths`/`__iconViewBox` to bound ones — on a fresh subtree and
+    /// when it reconciles against an existing one.
+    #[test]
+    fn render_subtree_into_resolves_static_and_bound_icons() {
+        const HEART: &str = r#"<svg viewBox="0 0 24 24"><path d="M1 1L2 2"/></svg>"#;
+        const STAR: &str = r#"<svg viewBox="0 0 20 20"><path d="M3 3L4 4"/></svg>"#;
+        let mut core = EngineCore::new();
+        core.resource_registry.register("heart", HEART);
+        core.resource_registry.register("star", STAR);
+        let parse = |src: &str| {
+            let doc = hypen_parser::parse_document(src).expect("parse");
+            crate::ir::ast_to_ir_node(&doc.components[0])
+        };
+        core.render_ir_node(&parse("Column {}"));
+        let root = core.tree.root().expect("root");
+        let rev = core.revision;
+
+        let ir = parse(r#"Row { Icon(@state.icon) Icon("heart") }"#);
+        let patches = core.render_subtree_into(root, &ir, &serde_json::json!({"icon": "star"}));
+        assert_eq!(core.revision, rev + 1, "bumps the revision");
+        let icons: Vec<_> = patches
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Create {
+                    element_type,
+                    props,
+                    ..
+                } if element_type == "Icon" => Some(props.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(icons.len(), 2, "{patches:?}");
+        for props in &icons {
+            assert!(
+                props.contains_key("__iconPaths") && props.contains_key("__iconViewBox"),
+                "every Icon carries its SVG data: {props:?}"
+            );
+        }
+        assert_eq!(icons[0]["__iconViewBox"], serde_json::json!("0 0 20 20"));
+
+        // Reconciling against the existing subtree: the bound name changes
+        // and its data follows.
+        let patches = core.render_subtree_into(root, &ir, &serde_json::json!({"icon": "heart"}));
+        assert!(
+            patches.iter().any(|p| matches!(p,
+                Patch::SetProp { name, value, .. }
+                    if name == "__iconViewBox" && value == &serde_json::json!("0 0 24 24"))),
+            "bound icon data follows the name: {patches:?}"
         );
     }
 

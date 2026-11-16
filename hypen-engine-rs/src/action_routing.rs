@@ -633,6 +633,69 @@ mod tests {
         );
     }
 
+    /// `render_subtree_into` (WasmEngine::renderInto / hypen_render_into, the
+    /// lazy-route path) folds pending renderer bind writes before diffing,
+    /// like every other reconcile entry point: a bound Video's own playback
+    /// report is not echoed back through a subtree render.
+    #[test]
+    fn render_subtree_into_does_not_echo_renderer_bind_writes() {
+        let mut engine = Engine::new();
+        engine.set_module(ModuleInstance::new(
+            Module::new("App"),
+            json!({"playback": {"playing": false}}),
+        ));
+        engine.on_action(scoped_action_name("", "__hypen_bind"), |_| {});
+        let parse = |src: &str| {
+            let doc = hypen_parser::parse_document(src).unwrap();
+            crate::ir::ast_to_ir_node(&doc.components[0])
+        };
+        engine.render_ir_node(&parse("Column {}"));
+        let root = engine.core.tree.root().unwrap();
+
+        let video_ir = parse(r#"Video(src: "a.mp4").bind(@state.playback)"#);
+        let created = engine.core.render_subtree_into(
+            root,
+            &video_ir,
+            &json!({"playback": {"playing": false}}),
+        );
+        assert!(created
+            .iter()
+            .any(|p| matches!(p, crate::reconcile::Patch::Create { element_type, .. } if element_type == "Video")));
+        let video = engine.core.tree.get(root).unwrap().children[0];
+        let playback_sets = |patches: &[crate::reconcile::Patch]| {
+            patches
+                .iter()
+                .filter(|p| {
+                    matches!(p, crate::reconcile::Patch::SetProp { name, .. } if name == "playback")
+                })
+                .count()
+        };
+
+        // The renderer reports it started playing; the host's state now
+        // says so too. Re-rendering the subtree must not echo it back.
+        engine
+            .dispatch_action(ui(
+                video,
+                "__hypen_bind",
+                json!({"path": "playback.playing", "value": true}),
+            ))
+            .unwrap();
+        let echoed = engine.core.render_subtree_into(
+            root,
+            &video_ir,
+            &json!({"playback": {"playing": true}}),
+        );
+        assert_eq!(playback_sets(&echoed), 0, "echoed: {echoed:?}");
+
+        // A genuine module command still reaches the renderer.
+        let command = engine.core.render_subtree_into(
+            root,
+            &video_ir,
+            &json!({"playback": {"playing": false}}),
+        );
+        assert_eq!(playback_sets(&command), 1, "{command:?}");
+    }
+
     /// The Photos-viewer path end to end: a real `.scrub`/`.settle` node's
     /// settle write is accepted and, once applied, flips the `.states` pose —
     /// the `__anim.states` label SetProp renderers fire
