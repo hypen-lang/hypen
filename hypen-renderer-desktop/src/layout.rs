@@ -1591,8 +1591,8 @@ impl TaffyState {
 
     /// Whether an image fetch landed since the last compute that changes
     /// a style this state built — one resolved on the ABSENCE of that
-    /// image's natural size (a `w-full` hero in a content-sized Stack, an
-    /// Image with only one axis set). The window's layout cache key only
+    /// image's natural size (a `w-full` image in a content-sized Stack —
+    /// e.g. one inside a Row — or an Image with only one axis set). The window's layout cache key only
     /// covers tree / viewport / interaction inputs, so without this check
     /// the `AppEvent::Wake` an image load sends only repainted the cached
     /// layout: the Food restaurant hero stayed as wide as its button bar
@@ -2723,9 +2723,10 @@ impl TaffyState {
             for (tid, rid) in renderer_for_taffy.iter() {
                 let Some(node) = tree.get(rid) else { continue };
                 // Only the DOM's demand carriers pass a descendant's width
-                // demand up (`cross-axis-width.ts`). A Box / Button / Stack
-                // stays content-sized around a percentage child — the
-                // Calories weekly chart card shrinks to its bars in Chrome.
+                // demand up (`cross-axis-width.ts`). A Box / Button stays
+                // content-sized around a percentage child — the Calories
+                // weekly chart card shrinks to its bars in Chrome. A Stack
+                // carries it (a `w-full` hero fills its Column).
                 let carrier = is_width_demand_carrier(&node.element_type);
                 // `hasIntrinsicHorizontalDemand`: a List / Grid always asks
                 // for the parent's finite width.
@@ -7459,10 +7460,13 @@ fn grants_auto_cross_fill(parent_type: &str, parent_style: &Style) -> bool {
 }
 
 /// DOM carriers of horizontal width demand (`DEMAND_CARRIERS` in
-/// `cross-axis-width.ts`). A Box / Container / Button / Stack does not
-/// pass a descendant's percentage width up to its own parent.
+/// `cross-axis-width.ts`). A Stack carries it too: its children share its
+/// one grid cell, so a `w-full` child (the Food restaurant hero image)
+/// sizes the Stack from the parent's proposal instead of resolving against
+/// the Stack's own content width. A Box / Container / Button does not pass
+/// a descendant's percentage width up to its own parent.
 fn is_width_demand_carrier(element_type: &str) -> bool {
-    ["Column", "List", "Card"]
+    ["Column", "List", "Card", "Stack"]
         .iter()
         .any(|t| t.eq_ignore_ascii_case(element_type))
 }

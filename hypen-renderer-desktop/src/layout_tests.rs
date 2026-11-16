@@ -10558,7 +10558,10 @@ fn calc_in_content_sized_carrier(carrier: &str, viewports: &[u32]) -> Vec<(f32, 
 /// carrier's content size and the bar lost 40px per pass.
 #[test]
 fn calc_width_in_content_sized_carrier_is_stable_across_relayouts() {
-    for carrier in ["Button", "Stack"] {
+    // (A Stack used to be checked here too; it now carries the calc's
+    // width demand and fills its Column — see
+    // `calc_width_in_stack_fills_the_column_stably`.)
+    for carrier in ["Button"] {
         let passes = calc_in_content_sized_carrier(carrier, &[400, 400, 400, 400]);
         let (carrier_w, inner_w, bar_w) = passes[0];
         assert!(
@@ -10575,6 +10578,20 @@ fn calc_width_in_content_sized_carrier_is_stable_across_relayouts() {
                 "{carrier}: relayout must not shrink the box: {passes:?}"
             );
         }
+    }
+}
+
+/// A Stack passes a percentage (here `calc(100% - 40px)`) child's width
+/// demand up like the DOM's `DEMAND_CARRIERS`: its Column stretches it, the
+/// calc resolves against the full width, and relayouts keep it put.
+#[test]
+fn calc_width_in_stack_fills_the_column_stably() {
+    let passes = calc_in_content_sized_carrier("Stack", &[400, 400, 400, 400]);
+    for p in &passes {
+        assert!(
+            (p.0 - 400.0).abs() < 0.5 && (p.2 - 360.0).abs() < 0.5,
+            "{passes:?}"
+        );
     }
 }
 
@@ -10751,12 +10768,14 @@ fn dotted_box_shadow_on_button_reaches_the_item() {
     assert_eq!(shadow[0].color, Rgba(236, 72, 153, 89));
 }
 
-/// Food restaurant hero: `Stack { Image.tw("w-full h-56") }` in a
-/// start-aligned Column. The Stack is content-sized (no width demand), so
-/// the image's percentage width is cyclic and its intrinsic width comes
-/// from `height × ratio` — 224 × 4/3 ≈ 299 in Chrome.
+/// Food restaurant hero: `Stack { Image.tw("w-full h-56"); Row.w-full }`
+/// in a start-aligned Column. The Stack carries its children's width
+/// demand (DOM `DEMAND_CARRIERS` includes `stack`), so the Column
+/// stretches it and both percentages resolve against the full width.
+/// It used to stay content-sized — 224 × 4/3 ≈ 299 of 430 — which is the
+/// Chrome bug desktop had been made to copy.
 #[test]
-fn percentage_width_image_sizes_content_sized_stack_from_its_ratio() {
+fn percentage_width_child_makes_stack_fill_its_column() {
     let mut tree = Tree::new();
     node(
         &mut tree,
@@ -10790,11 +10809,7 @@ fn percentage_width_image_sizes_content_sized_stack_from_its_ratio() {
     let stack = find_item(&pass, "stack");
     let hero = find_item(&pass, "hero");
     let bar = find_item(&pass, "bar");
-    assert!(
-        (stack.rect.w - 298.67).abs() < 1.5,
-        "stack={:?}",
-        stack.rect
-    );
+    assert!((stack.rect.w - 430.0).abs() < 0.5, "stack={:?}", stack.rect);
     assert!(
         (hero.rect.w - stack.rect.w).abs() < 0.5,
         "hero={:?}",
@@ -10891,17 +10906,20 @@ fn stack_end_alignment_pins_badge_to_bottom_right() {
     );
 }
 
-/// The real Food hero: a decoded 800×600 photo, `h-56` (14rem) and
-/// `w-full`, plus a SafeArea overlay holding the back / favourite Row.
-/// The Food hero's box depends on its natural size. When that image
+/// A decoded 800×600 photo, `h-56` (14rem) and `w-full`, in a Stack that
+/// stays content-sized (a Row child), plus the back / favourite Row: the
+/// Stack's box depends on the image's natural size. When that image
 /// lands AFTER the first layout, the state must report itself stale so
 /// the window recomputes instead of repainting the cached layout (the
 /// hero stayed as wide as its button bar, 112px, in the capture).
 #[test]
 fn late_image_load_marks_layout_stale_and_resizes_the_stack() {
     let src = "/layout-tests/food-hero-late-800x600.png";
+    // In a Row the Stack is a content-sized flex item (no cross-axis fill),
+    // so its width really does come from the image's natural ratio. (In a
+    // Column it now fills: `percentage_width_child_makes_stack_fill_its_column`.)
     let patches = vec![
-        create_patch("col", "Column", &[("width", json!("100%"))]),
+        create_patch("col", "Row", &[("width", json!("100%"))]),
         insert_patch("root", "col"),
         create_patch("stack", "Stack", &[]),
         insert_patch("col", "stack"),
@@ -10984,8 +11002,11 @@ fn late_image_load_marks_layout_stale_and_resizes_the_stack() {
     assert!(!state.media_intrinsics_stale(), "unrelated load");
 }
 
+/// The real Food hero with its decoded photo and SafeArea overlay: the
+/// Stack fills the 430px Column instead of shrinking to the photo's
+/// `height × ratio` width (≈299) — the image spans the screen.
 #[test]
-fn decoded_hero_image_sizes_its_stack_like_chrome() {
+fn decoded_hero_image_fills_its_column() {
     let src = "/layout-tests/food-hero-800x600.png";
     crate::paint::image::test_seed_decoded(
         src,
@@ -11022,6 +11043,7 @@ fn decoded_hero_image_sizes_its_stack_like_chrome() {
             ("width.0", json!("100%")),
             ("paddingLeft.0", json!("16px")),
             ("paddingRight.0", json!("16px")),
+            ("justifyContent.0", json!("space-between")),
         ],
     );
     node(
@@ -11042,12 +11064,76 @@ fn decoded_hero_image_sizes_its_stack_like_chrome() {
     let mut text = TextEngine::new();
     let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
     let stack = find_item(&pass, "stack");
+    let hero = find_item(&pass, "hero");
     assert!(
-        (stack.rect.w - 298.67).abs() < 1.5,
+        (stack.rect.w - 430.0).abs() < 0.5 && (hero.rect.w - 430.0).abs() < 0.5,
         "stack={:?} hero={:?}",
         stack.rect,
-        find_item(&pass, "hero").rect
+        hero.rect
     );
+    assert!((hero.rect.h - 224.0).abs() < 0.5, "hero={:?}", hero.rect);
+    let bar = find_item(&pass, "bar");
+    assert!((bar.rect.w - 430.0).abs() < 0.5, "bar={:?}", bar.rect);
+    // The favourite button sits at the right edge, not at ≈299.
+    let b2 = find_item(&pass, "b2");
+    assert!((b2.rect.x + b2.rect.w - 414.0).abs() < 0.5, "b2={:?}", b2.rect);
+}
+
+/// A Stack of fixed-size children (avatar + online dot) in a Column has
+/// no width demand and keeps its content size; a sized Stack ends a
+/// percentage child's demand (radio artwork tile).
+#[test]
+fn stack_without_percentage_children_stays_content_sized() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "col", "Column", &[("width", json!("100%"))]);
+    node(
+        &mut tree,
+        "col",
+        "avatar",
+        "Stack",
+        &[
+            ("horizontalAlignment", json!("end")),
+            ("verticalAlignment", json!("end")),
+        ],
+    );
+    node(
+        &mut tree,
+        "avatar",
+        "face",
+        "Column",
+        &[("width", json!(54)), ("height", json!(54))],
+    );
+    node(
+        &mut tree,
+        "avatar",
+        "dot",
+        "Box",
+        &[("width", json!(16)), ("height", json!(16))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "tile",
+        "Stack",
+        &[("width", json!(148)), ("height", json!(148))],
+    );
+    node(
+        &mut tree,
+        "tile",
+        "art",
+        "Image",
+        &[("width", json!("100%")), ("height", json!("100%"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let avatar = find_item(&pass, "avatar").rect;
+    assert!((avatar.w - 54.0).abs() < 0.5, "avatar={avatar:?}");
+    let dot = find_item(&pass, "dot").rect;
+    assert!((dot.x + dot.w - (avatar.x + avatar.w)).abs() < 0.5, "dot={dot:?}");
+    let tile = find_item(&pass, "tile").rect;
+    assert!((tile.w - 148.0).abs() < 0.5, "tile={tile:?}");
+    assert!((find_item(&pass, "art").rect.w - 148.0).abs() < 0.5);
 }
 
 /// Calories Breakfast card: a content-sized Row (inside a Button) whose
