@@ -397,7 +397,8 @@ function basePaddingValue(props: Record<string, any>, type: string): any {
   return hasFixedBox && !hasCustomPadding ? 0 : "4 8";
 }
 
-const HORIZONTAL_DEMAND_CARRIERS = new Set(["column", "list", "card"]);
+// Mirrors the DOM `DEMAND_CARRIERS` (cross-axis-width.ts), Stack included.
+const HORIZONTAL_DEMAND_CARRIERS = new Set(["column", "list", "card", "stack"]);
 
 function horizontalWidthKind(node: VirtualNode): "fixed" | "relative" | null {
   const value = axisSizeValue(node.props, "width");
