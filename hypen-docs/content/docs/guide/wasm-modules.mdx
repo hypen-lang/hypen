@@ -87,19 +87,37 @@ A package whose modules ask for nothing needs nothing but `"@acme/checkout": {}`
 
 ### What gets installed, and what you can use
 
-Every module and template-only component of the package is installed (`--only Pricing,PriceTag` installs a subset; it is refused if a selected template needs something left out). The package's author decides which names are **exported** — by default its entry; the rest are internal. Your templates can use exported names only:
+A package is self-contained: you point at its root, and what is inside cannot clash with your app.
+
+Every module and template-only component of the package is installed (`--only Pricing,PriceTag` installs a subset; it is refused if a selected template needs something left out). The package's author decides which names are **exported** — by default just its entry, the root module whose template places the others. Exported names are the only ones that become names in your app:
+
+- An **exported** name is installed as written, and your templates use it: `Checkout {}`. It must be free in your app and across packages; if it is not, install it under another name — `hypen add @acme/checkout --as Checkout=Shop` — and write `Shop {}`. A clash is an error before anything is written.
+- Every other name is **internal**. It is installed under the package's namespace (`Cart` of `@acme/checkout` becomes the component `AcmeCheckout__Cart`, state scope `acmecheckout__cart`), so your app can have its own `Cart` — or install another package that has one — and nothing meets. Your templates cannot use an internal name:
 
 ```
-  Build failed: src/components/App/component.hypen uses `Tax {}`, which @acme/checkout does not export (it exports: Pricing).
+  Build failed: src/components/App/component.hypen uses `Tax {}`, which @acme/checkout does not export (it exports: Checkout).
 ```
 
-Engine scopes are global, so every installed name — exported or internal — must be free in your app and across packages. A clash is an error before anything is written. An exported module that nothing else in its package refers to can be installed under another name:
+Nothing inside the package changes for this. Its templates are rewritten when they are loaded — component tags and the `module Cart` declaration, by the engine's own parser, so a `Cart` in a string or a comment is left alone — and its code keeps calling its siblings by the names it was written with: where `Pricing` reads `Cart`, the engine hands it the package's `Cart`. State bindings (`@{state.total}`) and actions (`@actions.add`) are relative to the module and are unaffected.
+
+`hypen modules`, the consent screen and runtime diagnostics show the package's own names (`Cart  (internal)`); the namespaced name appears only as a detail. Two packages whose names derive the same namespace are told apart with `"namespace": "Shop"` in the package's `hypen.json` entry.
+
+### Modules the app provides: `--map`
+
+A package can ask for a module it does not contain — the author lists it under `wasm.external` — and your app provides it. By default that is your module of the same name. When yours is called something else, point the name at it:
 
 ```bash
-hypen add @acme/checkout --as Pricing=Quotes      # use it as Quotes {}
+hypen add @acme/checkout --map Pricing.Cart=Basket    # where Pricing reads or dispatches to Cart, use my Basket
 ```
 
-A name that siblings read, dispatch to or render cannot be renamed (they call it by that name); rename your own component instead.
+```json
+"@acme/checkout": {
+  "map": { "Pricing": { "Cart": "Basket" } },
+  "grants": { "Pricing": { "reads": ["Cart"], "dispatches": ["Cart"] } }
+}
+```
+
+Grants stay written in the package's names. `--map Cart=Basket` (no module) applies to every module of the package that asks for `Cart`. A map can only redirect a name the app is expected to provide: a module of the package itself is not replaceable, and the target must be one of your stateful modules.
 
 ### Consent
 
@@ -108,7 +126,7 @@ Nothing is granted without a decision, and nothing from the package runs when it
 - In a terminal, `hypen add` asks: all, per module, per capability, or cancel.
 - Without a terminal (CI, a pipe), every requested capability needs a flag, or the command fails and lists them: `--yes` (grant exactly what is requested), `--grant <cap>` and `--deny <cap>` (repeatable; `--deny` wins). A capability is `[Module.]capability`: `Pricing.reads:Cart`, `Pricing.dispatches`, `Tax.http`, `storage:cloud`, `Pricing` (everything it requests), `all`.
 - npm packages are added with your package manager (bun, npm, pnpm or yarn, by lockfile) with **lifecycle scripts off** (`--ignore-scripts`). A module package is data — components, templates, a manifest — and needs no install script.
-- A `reads` / `dispatches` target is checked against your app. One that names another module of the same package is shown as such. One your app does not have (`Pricing wants to read Cart; this app has no Cart module`) cannot be granted: add a module with that name and run `hypen add` again.
+- A `reads` / `dispatches` target is checked against your app. One that names another module of the same package is shown as such (and always means that sibling, whatever your app has under the name). One your app does not have (`Pricing wants to read Cart; this app has no Cart module`) cannot be granted: point it at one of your modules with `--map Pricing.Cart=<Module>`, or add a module with that name, and run `hypen add` again.
 - A module whose component *imports* a storage tier or HTTP cannot start without it, so withholding that capability refuses the install and says how to leave the module out instead.
 
 `hypen modules` shows where things stand, and `hypen remove` undoes an install:
@@ -187,6 +205,8 @@ await new RemoteServer()
   .listen(3000);
 ```
 
+`checkout.modules` and `checkout.components` carry the installed names — exported ones as written, internal ones namespaced — with templates and cross-module names already translated; `checkout.exports` lists what your templates may use. `loadWasmPackage` takes the same `as`, `map` and `namespace` as the `hypen.json` entry (`{ as: { Checkout: "Shop" }, map: { Pricing: { Cart: "Basket" } } }`). For a module you declare by hand, `wasmModule({ …, grants: { reads: ["Cart"], aliases: { Cart: "Basket" } } })` does what a map does.
+
 The manifest's `requests` are never applied by themselves: a module without an entry in `grants` gets nothing. Each component is checked against the manifest's hash, and when `hypen.lock.json` has an entry for the package the same drift rules apply. For a single module, `wasmModule({ from: "@acme/checkout", name: "Pricing", grants })` (or `wasmModuleFromManifest(path, grants)`).
 
 ## Build and publish a package
@@ -199,21 +219,22 @@ In the module project, declare what each module needs — this is what installer
   "entry": "Checkout",
   "wasm": {
     "npm": "@acme/checkout",
-    "exports": ["Checkout", "PriceTag"],
-    "external": ["Cart"],
+    "external": ["Session"],
     "modules": {
-      "Pricing": { "reads": ["Cart"], "dispatches": ["Cart"] },
+      "Pricing": { "reads": ["Cart", "Session"], "dispatches": ["Cart"] },
       "Tax": { "http": true, "httpHosts": ["api.acme.com"] }
     }
   }
 }
 ```
 
+`Checkout` is the root: its template places the package's other modules (`Cart {}`, `Pricing {}`, …), and an app that installs the package writes one tag, `Checkout {}`. Modules can be nested to any depth, inside `If` / `ForEach`, a `Route` or a template-only component; each keeps its own state. `Cart` here is another module of this project; `Session` is one the installing app provides.
+
 | Key | Meaning |
 |-----|---------|
 | `wasm.modules.<Name>` | What the module requests: `reads`, `dispatches`, `storage`, `http`, `httpHosts` |
 | `wasm.external` | Modules the *installing app* provides. Without it, a `reads` / `dispatches` target that is not in this project is a build error (a typo) |
-| `wasm.exports` | Names an app may use in its templates. Default: the entry |
+| `wasm.exports` | Names an app may use in its templates, and the only names that land in the app's namespace. Default: the entry. Everything else is internal: namespaced on install, free to share a name with the app's own modules |
 | `wasm.name`, `wasm.version`, `wasm.description` | The package's identity. Each falls back to `package.json`, then `Cargo.toml` `[package]`, then the directory name / `0.0.0` |
 | `wasm.npm` | The npm name `hypen pack` uses (default: the package's name) |
 

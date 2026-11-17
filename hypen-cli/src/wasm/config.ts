@@ -7,7 +7,7 @@
 
 import { formatHostPattern, parseHostPattern } from "./http-grammar.js";
 import { BuildError } from "../build-error.js";
-import { asRequests, type ModuleRequests } from "./module-package.js";
+import { asRequests, namespaceProblem, type ModuleRequests } from "./module-package.js";
 import {
   GRANTABLE_STORAGE,
   LANGUAGES,
@@ -47,6 +47,12 @@ export interface ModuleGrants {
    * (a package's recorded grant: `wasm.packages["…"].grants.<Name>`).
    */
   field?: string;
+  /**
+   * For a package module: which module a name in `reads` / `dispatches`
+   * means in this app when it is not the module of that name (lowercase
+   * name → lowercase scope). Never written by hand in `wasm.modules`.
+   */
+  aliases?: Readonly<Record<string, string>>;
 }
 
 /**
@@ -91,6 +97,17 @@ export interface PackageDeclaration {
   as: ReadonlyMap<string, string>;
   /** The recorded grant decisions, by the module's name in the package. */
   grants: ReadonlyMap<string, ModuleGrants>;
+  /**
+   * `"namespace"`: the namespace the package's internal names are installed
+   * under. `undefined`: derived from the package's name (`@acme/checkout` →
+   * `AcmeCheckout`).
+   */
+  namespace: string | undefined;
+  /**
+   * `"map"`: per package module, which of the APP's modules a name it reads
+   * or dispatches to means — `{ "Pricing": { "Cart": "Basket" } }`.
+   */
+  map: ReadonlyMap<string, Readonly<Record<string, string>>>;
 }
 
 /** What a module project says about the package it builds. */
@@ -339,7 +356,7 @@ function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
   return grants;
 }
 
-const PACKAGE_KEYS = ["source", "trust", "fallback", "only", "as", "grants"] as const;
+const PACKAGE_KEYS = ["source", "trust", "fallback", "only", "as", "grants", "namespace", "map"] as const;
 
 /** A dotted path segment for a key that may contain `.` / `/` / `@`. */
 export function packageField(from: string): string {
@@ -367,8 +384,34 @@ function parsePackage(from: string, raw: unknown): PackageDeclaration {
   let only: string[] | undefined;
   const as = new Map<string, string>();
   const grants = new Map<string, ModuleGrants>();
+  let namespace: string | undefined;
+  const map = new Map<string, Record<string, string>>();
   for (const [key, value] of Object.entries(raw)) {
     switch (key) {
+      case "namespace": {
+        const problem = namespaceProblem(value);
+        if (problem !== null) {
+          throw configError(`${at}.namespace: ${problem}`, `${at}.namespace`, `e.g. "namespace": "AcmeCheckout" — or remove it to derive one from the package's name`);
+        }
+        namespace = value as string;
+        break;
+      }
+      case "map":
+        if (!isRecord(value)) {
+          throw configError(`${at}.map must be an object keyed by the package's module names`, `${at}.map`, `e.g. "map": { "Pricing": { "Cart": "Basket" } }`);
+        }
+        for (const [module, entry] of Object.entries(value)) {
+          const field = `${at}.map.${module}`;
+          if (!isRecord(entry) || !Object.values(entry).every((v): v is string => typeof v === "string" && v !== "")) {
+            throw configError(
+              `${field} must map a name ${module} reads or dispatches to onto one of the app's modules`,
+              field,
+              `e.g. "${module}": { "Cart": "Basket" }`
+            );
+          }
+          map.set(module, { ...(entry as Record<string, string>) });
+        }
+        break;
       case "source":
         if (typeof value !== "boolean") {
           throw configError(`${at}.source must be true or false`, `${at}.source`, `write "source": true to build the module project at ${from}`);
@@ -424,7 +467,7 @@ function parsePackage(from: string, raw: unknown): PackageDeclaration {
         : `remove "fallback", or add "source": true if ${from} is a module project in this repository`
     );
   }
-  return { from, field: at, source, trust: trust ?? (source ? "requested" : "explicit"), fallback, only, as, grants };
+  return { from, field: at, source, trust: trust ?? (source ? "requested" : "explicit"), fallback, only, as, grants, namespace, map };
 }
 
 function parseText(value: unknown, field: string, example: string): string {
@@ -567,6 +610,21 @@ export function resolveModuleCapabilities(
       const resolved: ScopeName[] = [];
       for (const target of grants?.[key] ?? []) {
         const field = `${grants?.field ?? `wasm.modules.${name}`}.${key}`;
+        // A package module keeps its own name for the target; the alias
+        // says which module of this build that is.
+        const alias = grants?.aliases?.[target.toLowerCase()];
+        if (alias !== undefined) {
+          if (lookup(alias) === undefined) {
+            throw unknownModule(
+              field,
+              ` names "${target}", which is mapped to "${alias}" — not a stateful module of this build`,
+              `point "${target}" at one of the stateful modules (the package's "map"), or remove it from ${field}`
+            );
+          }
+          const scope = target.toLowerCase() as ScopeName;
+          if (!resolved.includes(scope)) resolved.push(scope);
+          continue;
+        }
         const module = lookup(target);
         if (module === undefined) {
           // A module the installing app provides (`wasm.external`): part of
@@ -592,6 +650,8 @@ export function resolveModuleCapabilities(
       storage: grants?.storage ?? [],
       http: grants?.http ?? false,
       httpHosts: grants?.httpHosts ?? [],
+      // Only a package module has any; the project's own modules do not.
+      ...(grants?.aliases !== undefined && Object.keys(grants.aliases).length > 0 ? { aliases: { ...grants.aliases } } : {}),
     });
   }
   return out;

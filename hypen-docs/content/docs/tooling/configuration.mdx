@@ -97,7 +97,9 @@ Under `hypen dev` and `@hypen-space/server`, a request to `localhost` or a priva
 |-----|------|---------|---------|
 | `grants.<Module>` | grants | none | The recorded decision for one module of the package, in the shape of a [`wasm.modules` entry](#wasm-module-grants). A module without an entry is granted nothing |
 | `only` | names | everything | Install only these modules / components |
-| `as` | `{ "Name": "New" }` | none | Install the exported module `Name` under another name |
+| `as` | `{ "Name": "New" }` | none | Install the exported name `Name` under another name |
+| `map` | `{ "Module": { "Name": "AppModule" } }` | none | Where `Module` of the package reads or dispatches to `Name` (a module the app provides), use the app's `AppModule`. Grants stay written with `Name` |
+| `namespace` | string | from the package's name (`@acme/checkout` → `AcmeCheckout`) | The namespace the package's internal (non-exported) names are installed under, as `<namespace>__<Name>`. Only needed when two packages derive the same one |
 | `source` | boolean | `false` | The key is a module *project* in this repository: `hypen dev` / `hypen build` build it, and `hypen dev` rebuilds it on change |
 | `trust` | `"requested"`, `"explicit"` | `"requested"` for `source` | `source` only. `"requested"`: its modules get what they declare in their own `hypen.json`; `"explicit"`: only `grants` |
 | `fallback` | path | none | `source` only: a built package to use when the toolchain is missing or `HYPEN_NO_SOURCE_BUILD=1` |
@@ -110,7 +112,7 @@ Keys for a project that *builds* a package (see [Build and publish a package](/d
 |-----|------|---------|---------|
 | `wasm.name`, `wasm.version`, `wasm.description` | string | `package.json`, then `Cargo.toml`, then the directory name / `0.0.0` | The package's identity in `hypen-modules.json` |
 | `wasm.npm` | string | the package's name | The npm name `hypen pack` uses |
-| `wasm.exports` | names | the entry | Names an installing app may use in its templates |
+| `wasm.exports` | names | the entry | Names an installing app may use in its templates. Everything else is internal: namespaced on install, so it cannot clash with the app |
 | `wasm.external` | names | `[]` | Modules the installing app provides, allowed as `reads` / `dispatches` targets |
 
 ### Server-based projects

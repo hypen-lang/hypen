@@ -126,20 +126,36 @@ export const tsBuilder: ModuleBuilder<TsSource, TsPrepared> = {
     // sees exactly what `hypen dev` sees.
     const { discoverComponents, loadDiscoveredComponents } = await import("@hypen-space/server");
     const discovered = await discoverComponents(project.componentsDir);
+    // Loading registers what it finds in the process-wide module registry
+    // (`app`): right for a server about to render those components, wrong
+    // for a build — `hypen dev` builds a source package's module project in
+    // its own process, and a leftover `Counter` of that project would make
+    // the dev server treat the APP's own `Counter` as already registered.
+    // So whatever this load adds is taken out again.
+    const registry = await import("@hypen-space/core/app").then(
+      (core) => core.app,
+      () => null
+    );
+    const before = new Set(registry?.getNames() ?? []);
+    const forget = (): void => {
+      for (const name of registry?.getNames() ?? []) if (!before.has(name)) registry?.unregister(name);
+    };
     // Loading runs each module file (to read its definition), so a module
     // that throws at import time, or imports something unresolvable, fails
     // here — before any of them is compiled.
-    const loaded = await loadDiscoveredComponents(discovered).catch((cause: unknown) => {
-      throw new BuildError(
-        `Could not load the project's modules: ${cause instanceof Error ? cause.message : String(cause)}`,
-        {
-          code: "MODULE_LOAD_FAILED",
-          file: project.componentsDir,
-          hint: "a module file failed while being imported: fix the error it reports (and install the project's dependencies if an import is unresolved)",
-          cause,
-        }
-      );
-    });
+    const loaded = await loadDiscoveredComponents(discovered)
+      .catch((cause: unknown) => {
+        throw new BuildError(
+          `Could not load the project's modules: ${cause instanceof Error ? cause.message : String(cause)}`,
+          {
+            code: "MODULE_LOAD_FAILED",
+            file: project.componentsDir,
+            hint: "a module file failed while being imported: fix the error it reports (and install the project's dependencies if an import is unresolved)",
+            cause,
+          }
+        );
+      })
+      .finally(forget);
     const found: Discovery<TsSource> = { stateful: [], stateless: [] };
     for (const d of discovered) {
       const definition = loaded.get(d.name)?.module;

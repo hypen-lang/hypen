@@ -53,13 +53,16 @@ import {
   tarballOf,
   templateRefs,
 } from "../src/build-wasm";
+import { lockEntryOf } from "../src/wasm/module-package";
 import { build as buildSpa } from "../src/build";
 import { dev } from "../src/dev-bun";
 import {
   COUNTER_UI,
   MIRROR_UI,
   STAMP_UI,
+  boardPackage,
   countersPackage,
+  flatCountersPackage,
   fixture,
   haveFixtures,
   write,
@@ -113,7 +116,7 @@ const json = (path: string) => JSON.parse(readFileSync(path, "utf8"));
 const silent = () => scriptedPrompter([], false);
 
 /** An app with the counters package vendored at ./vendor/counters. */
-function appWithPackage(tag: string, body = `Text("App: @{state.title}")\n    Mirror {}\n    Counter {}`, pkg = countersPackage()) {
+function appWithPackage(tag: string, body = `Text("App: @{state.title}")\n    Mirror {}`, pkg = countersPackage()) {
   const dir = fresh(tag);
   writeApp(dir, body);
   writePackage(join(dir, "vendor/counters"), pkg);
@@ -129,7 +132,8 @@ describe.skipIf(skip)("hypen-modules.json: parse and verify", () => {
     const dir = fresh("good");
     writePackage(dir, countersPackage());
     const pkg = readModulePackage(join(dir, PACKAGE_MANIFEST_FILE));
-    expect(pkg.manifest).toMatchObject({ name: "@acme/counters", version: "1.2.0", entry: "Mirror", exports: ["Mirror", "Counter"] });
+    // Exports default to the entry: Mirror is the package's root, Counter and Stamp are internal.
+    expect(pkg.manifest).toMatchObject({ name: "@acme/counters", version: "1.2.0", entry: "Mirror", exports: ["Mirror"] });
     expect(pkg.modules.map((m) => m.name)).toEqual(["Mirror", "Counter"]);
     expect(pkg.modules[0]!.componentPath).toBe(join(dir, "Mirror.wasm"));
     expect(pkg.modules[0]!.size).toBeGreaterThan(1000);
@@ -359,7 +363,6 @@ function moduleProject(dir: string, wasm: Record<string, unknown> = {}) {
         components: "./ui",
         entry: "Mirror",
         wasm: {
-          exports: ["Mirror", "Counter"],
           modules: {
             Mirror: { component: "./prebuilt/mirror.wasm", reads: ["Counter"], dispatches: ["Counter"] },
             Counter: { component: "./prebuilt/counter.wasm", storage: ["cloud"] },
@@ -396,7 +399,8 @@ describe.skipIf(skip)("hypen build --target wasm emits hypen-modules.json", () =
       version: "1.2.0",
       description: "from package.json",
       entry: "Mirror",
-      exports: ["Mirror", "Counter"],
+      // The default: a package exports its entry; everything else is internal.
+      exports: ["Mirror"],
       modules: [
         { name: "Mirror", component: "Mirror.wasm", template: "Mirror.hypen", abi: "0.1", requests: { reads: ["Counter"], dispatches: ["Counter"] }, integrity: integrityOf(readFileSync(fixture("mirror_module.wasm"))) },
         { name: "Counter", component: "Counter.wasm", template: "Counter.hypen", abi: "0.1", requests: { storage: ["cloud"] }, integrity: integrityOf(readFileSync(fixture("counter_module.wasm"))) },
@@ -462,10 +466,10 @@ describe.skipIf(skip)("hypen pack", () => {
     expect(result.manifest.components).toEqual([]);
     expect(result.manifest.exports).toEqual(["Counter"]);
     expect(result.manifest.entry).toBeUndefined();
-    // Mirror's template uses Stamp.
+    // Mirror's template uses Counter (and Stamp).
     const err = await failure(() => packProject({ projectDir: dir, name: "x", only: ["Mirror"], build: false, log: () => {} }));
     expect(err).toMatchObject({ code: "ONLY_INCOMPLETE", module: "Mirror" });
-    expect(err.hint).toContain("--only Mirror,Stamp");
+    expect(err.hint).toContain("--only Mirror,Counter");
   });
 
   test("needs a valid npm name, and never replaces a directory it did not write", async () => {
@@ -480,11 +484,11 @@ describe.skipIf(skip)("hypen pack", () => {
     const dir = moduleProject(fresh("pack-install"));
     const packed = await packProject({ projectDir: dir, name: "@acme/counters", log: () => {} });
     const app = fresh("pack-app");
-    writeApp(app, `Mirror {}\n    Counter {}`);
+    writeApp(app, `Mirror {}`);
     write(join(app, "package.json"), JSON.stringify({ name: "app", private: true }));
     const prompter = silent();
     const result = await addPackage({ projectDir: app, spec: `file:${packed.dir}`, yes: true, prompter });
-    expect(result).toMatchObject({ from: "@acme/counters", name: "@acme/counters", version: "1.2.0", exports: ["Mirror", "Counter"] });
+    expect(result).toMatchObject({ from: "@acme/counters", name: "@acme/counters", version: "1.2.0", exports: ["Mirror"] });
     expect(prompter.screen.join("\n")).toContain("bun add --ignore-scripts file:");
     expect(existsSync(join(app, "node_modules/@acme/counters/hypen-modules.json"))).toBe(true);
     expect(json(join(app, "package.json")).dependencies["@acme/counters"]).toContain("file:");
@@ -493,7 +497,8 @@ describe.skipIf(skip)("hypen pack", () => {
     });
     // It loads.
     const hosted = resolveHosted(parseWasmConfig(json(join(app, "hypen.json")).wasm), app);
-    expect(hosted.modules.map((m) => m.name)).toEqual(["Mirror", "Counter"]);
+    expect(hosted.modules.map((m) => m.package?.name)).toEqual(["Mirror", "Counter"]);
+    expect(hosted.modules.map((m) => m.name)).toEqual(["Mirror", "AcmeCounters__Counter"]);
 
     // Removing it can take the dependency out too.
     const removed = await removePackage({ projectDir: app, target: "@acme/counters", uninstall: true, prompter: silent() });
@@ -514,7 +519,7 @@ describe.skipIf(skip)("hypen add", () => {
     const before = readFileSync(join(app, "hypen.json"), "utf8");
     const prompter = silent();
     const result = await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter });
-    expect(result).toMatchObject({ from: "./vendor/counters", modules: ["Mirror", "Counter"], components: ["Stamp"], exports: ["Mirror", "Counter"], updated: false });
+    expect(result).toMatchObject({ from: "./vendor/counters", modules: ["Mirror", "Counter"], components: ["Stamp"], exports: ["Mirror"], updated: false });
     expect(result.granted.map((g) => g.id)).toEqual(["Mirror.reads:Counter", "Mirror.dispatches:Counter", "Counter.storage:cloud"]);
 
     // The file changed by exactly the inserted entry.
@@ -537,7 +542,9 @@ describe.skipIf(skip)("hypen add", () => {
     expect(screen).toContain("dispatch actions to the Counter module (same package)  ! it can run Counter's action handlers");
     expect(screen).toContain("read and write cloud storage (synced off this device)  ! data leaves the device");
     expect(screen).toContain("Stamp template-only component");
-    expect(screen).toContain("Use it:   Mirror {}, Counter {} in a template");
+    // ONE tag: the package's root. Counter is shown as what it is.
+    expect(screen).toContain("Counter  (internal)");
+    expect(screen).toContain("Use it:   Mirror {} in a template");
   });
 
   test("keeps the file's own formatting and key order", async () => {
@@ -658,7 +665,8 @@ describe.skipIf(skip)("hypen add", () => {
   });
 
   test("--only installs a closed subset; one that leaves out what a template needs is refused", async () => {
-    const app = appWithPackage("add-only", `Counter {}`);
+    // A flat package: Counter is exported, so it can be installed (and used) on its own.
+    const app = appWithPackage("add-only", `Counter {}`, flatCountersPackage());
     const result = await addPackage({ projectDir: app, spec: "./vendor/counters", only: ["Counter"], yes: true, prompter: silent() });
     expect(result).toMatchObject({ modules: ["Counter"], components: [], exports: ["Counter"] });
     expect(json(join(app, "hypen.json")).wasm.packages["./vendor/counters"]).toEqual({ only: ["Counter"], grants: { Counter: { storage: ["cloud"] } } });
@@ -668,34 +676,77 @@ describe.skipIf(skip)("hypen add", () => {
     expect(await failure(() => addPackage({ projectDir: app2, spec: "./vendor/counters", only: ["Mirror"], yes: true, prompter: silent() }))).toMatchObject({
       code: "ONLY_INCOMPLETE",
     });
+    // An internal module on its own is installed but is not a name the app can use.
+    const app3 = appWithPackage("add-only3", `Counter {}`);
+    expect(await failure(() => addPackage({ projectDir: app3, spec: "./vendor/counters", only: ["Counter"], yes: true, prompter: silent() }))).toMatchObject({
+      code: "NOT_EXPORTED",
+      module: "Counter",
+    });
     expect(await failure(() => addPackage({ projectDir: app2, spec: "./vendor/counters", only: ["Ghost"], yes: true, prompter: silent() }))).toMatchObject({
       code: "UNKNOWN_PACKAGE_MODULE",
     });
   });
 
-  test("name collisions with the app are errors that say how to resolve them", async () => {
-    // The app has its own Counter component; the package's Counter is read by its sibling, so it cannot be renamed.
-    const app = appWithPackage("add-collide");
+  test("a package's internal names cannot collide with the app's: same name, two modules", async () => {
+    // The app has its own Counter MODULE and its own Stamp component; the package has both too, internally.
+    const app = appWithPackage("add-private", `Mirror {}\n    Counter {}\n    Stamp()`);
+    write(join(app, "src/components/Counter/component.hypen"), `module Counter {\n  Text("mine: @{state.count}")\n}`);
+    write(join(app, "src/components/Counter/component.ts"), `export default {};`);
+    write(join(app, "src/components/Stamp/component.hypen"), `Text("the app's own stamp")`);
+    const prompter = silent();
+    const result = await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter });
+    expect(result).toMatchObject({ modules: ["Mirror", "Counter"], exports: ["Mirror"] });
+    // Mirror asks for "Counter": that is its sibling, not the app's module of the same name.
+    expect(result.granted.map((g) => [g.id, g.status])).toEqual([
+      ["Mirror.reads:Counter", "same-package"],
+      ["Mirror.dispatches:Counter", "same-package"],
+      ["Counter.storage:cloud", "n/a"],
+    ]);
+
+    const hosted = resolveHosted(parseWasmConfig(json(join(app, "hypen.json")).wasm), app, { componentsDir: join(app, "src/components") });
+    // Installed names: the export as written, the internals under the package's namespace.
+    expect(hosted.modules.map((m) => m.name)).toEqual(["Mirror", "AcmeCounters__Counter"]);
+    expect(hosted.modules.map((m) => m.package?.name)).toEqual(["Mirror", "Counter"]);
+    expect(hosted.components.map((c) => [c.name, c.packageName])).toEqual([["AcmeCounters__Stamp", "Stamp"]]);
+    expect(hosted.packages[0]).toMatchObject({ exports: ["Mirror"], internal: ["Counter", "Stamp"] });
+    // Mirror's code keeps saying "counter"; here that is the package's.
+    expect(hosted.modules[0]!.grants).toMatchObject({ reads: ["Counter"], dispatches: ["Counter"], aliases: { counter: "acmecounters__counter" } });
+    // Its template is rewritten with the parser: tags and the declaration, nothing else.
+    expect(hosted.modules[0]!.template).toBe(
+      MIRROR_UI.replace("    Counter {}", "    AcmeCounters__Counter {}").replace("    Stamp()", "    AcmeCounters__Stamp()")
+    );
+    expect(hosted.modules[1]!.template!.startsWith("module AcmeCounters__Counter {")).toBe(true);
+    expect(hosted.modules[1]!.template).toContain(`Text("Count: @{state.count}")`);
+  });
+
+  test("an EXPORTED name that collides with the app's is an error that says how to resolve it", async () => {
+    // A flat package exports Counter; the app has its own Counter component.
+    const app = appWithPackage("add-collide", undefined, flatCountersPackage());
     write(join(app, "src/components/Counter/component.hypen"), `Text("mine")`);
     const err = await failure(() => addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: silent() }));
     expect(err).toMatchObject({ code: "MODULE_NAME_COLLISION", module: "Counter" });
-    expect(err.message).toContain(`the app has its own "Counter"`);
+    expect(err.message).toContain(`./vendor/counters exports the module "Counter", and the app has its own "Counter"`);
+    expect(err.hint).toContain("--as Counter=<NewName>");
     expect(json(join(app, "hypen.json")).wasm).toBeUndefined();
-    expect(await failure(() => addPackage({ projectDir: app, spec: "./vendor/counters", as: ["Counter=Tally"], yes: true, prompter: silent() }))).toMatchObject({
-      code: "RENAME_UNSOUND",
-    });
 
-    // A template-only component of the package that collides cannot be renamed either.
-    const app2 = appWithPackage("add-collide2");
+    // Renaming it is sound even though its sibling reads and dispatches to it by name:
+    // Mirror keeps calling it "counter" and the engine translates.
+    write(join(app, "src/components/App/component.hypen"), `module App {\n  Column {\n    Mirror {}\n    Tally {}\n    Counter {}\n  }\n}`);
+    const result = await addPackage({ projectDir: app, spec: "./vendor/counters", as: ["Counter=Tally"], yes: true, prompter: silent() });
+    expect(result).toMatchObject({ modules: ["Mirror", "Tally"], exports: ["Mirror", "Tally"] });
+    const hosted = resolveHosted(parseWasmConfig(json(join(app, "hypen.json")).wasm), app, { componentsDir: join(app, "src/components") });
+    expect(hosted.modules.find((m) => m.name === "Mirror")!.grants!.aliases).toEqual({ counter: "tally" });
+    expect(hosted.modules.find((m) => m.name === "Tally")!.template!.startsWith("module Tally {")).toBe(true);
+
+    // The app's own Stamp does not meet the package's (internal) Stamp at all.
+    const app2 = appWithPackage("add-collide2", undefined, flatCountersPackage());
     write(join(app2, "src/components/Stamp/component.hypen"), `Text("mine")`);
-    const err2 = await failure(() => addPackage({ projectDir: app2, spec: "./vendor/counters", yes: true, prompter: silent() }));
-    expect(err2).toMatchObject({ code: "MODULE_NAME_COLLISION", module: "Stamp" });
-    expect(err2.hint).toContain("rename the app's own Stamp");
+    await addPackage({ projectDir: app2, spec: "./vendor/counters", yes: true, prompter: silent() });
   });
 
   test("--as renames an exported module nothing else in the package refers to", async () => {
     // The app already has a Mirror; the package's Mirror is exported and unreferenced by its sibling.
-    const app = appWithPackage("add-as", `Looking {}\n    Counter {}`);
+    const app = appWithPackage("add-as", `Looking {}\n    Counter {}`, flatCountersPackage());
     write(join(app, "src/components/Mirror/component.hypen"), `Text("the app's own Mirror")`);
     const collision = await failure(() => addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: silent() }));
     expect(collision.code).toBe("MODULE_NAME_COLLISION");
@@ -716,6 +767,136 @@ describe.skipIf(skip)("hypen add", () => {
     // An internal name, or a malformed flag, is refused.
     expect(await failure(() => addPackage({ projectDir: app, spec: "./vendor/counters", as: ["Stamp=Seal"], yes: true, prompter: silent() }))).toMatchObject({ code: "RENAME_UNSOUND" });
     expect(await failure(() => addPackage({ projectDir: app, spec: "./vendor/counters", as: ["Mirror"], yes: true, prompter: silent() }))).toMatchObject({ code: "FLAG_INVALID" });
+  });
+
+  test("two packages with the same internal names install side by side; the same EXPORTED name is still a collision", async () => {
+    const app = appWithPackage("add-two-private", `Mirror {}\n    Board {}`);
+    await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: silent() });
+    // @acme/board has its own Mirror, Counter and Stamp — all internal — under its root, Board.
+    writePackage(join(app, "vendor/board"), boardPackage());
+    const result = await addPackage({ projectDir: app, spec: "./vendor/board", yes: true, prompter: silent() });
+    expect(result).toMatchObject({ modules: ["Board", "Mirror", "Counter"], exports: ["Board"] });
+    const hosted = resolveHosted(parseWasmConfig(json(join(app, "hypen.json")).wasm), app, { componentsDir: join(app, "src/components") });
+    expect(hosted.modules.map((m) => m.name)).toEqual(["Mirror", "AcmeCounters__Counter", "Board", "AcmeBoard__Mirror", "AcmeBoard__Counter"]);
+    expect(hosted.components.map((c) => c.name)).toEqual(["AcmeCounters__Stamp", "AcmeBoard__Stamp"]);
+    // Each Mirror reaches ITS package's Counter.
+    expect(hosted.modules[0]!.grants!.aliases).toEqual({ counter: "acmecounters__counter" });
+    expect(hosted.modules[3]!.grants!.aliases).toEqual({ counter: "acmeboard__counter" });
+    expect(hosted.modules[2]!.template).toContain("    AcmeBoard__Mirror {}");
+  });
+
+  test("namespaces: two packages that derive the same one are told apart with \"namespace\"", async () => {
+    const app = appWithPackage("add-namespace", `Mirror {}\n    Board {}`);
+    await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: silent() });
+    // Another package whose name also reads as "AcmeCounters".
+    writePackage(join(app, "vendor/board"), boardPackage({ name: "acme-counters" }));
+    const err = await failure(() => addPackage({ projectDir: app, spec: "./vendor/board", yes: true, prompter: silent() }));
+    expect(err).toMatchObject({ code: "MODULE_NAME_COLLISION", field: `wasm.packages["./vendor/board"].namespace` });
+    expect(err.message).toContain(`would both install their internal modules under the namespace "AcmeCounters"`);
+    expect(err.hint).toContain(`"namespace": "AcmeCounters2"`);
+
+    const cfg = json(join(app, "hypen.json"));
+    cfg.wasm.packages["./vendor/board"] = { namespace: "Board", grants: { Mirror: { reads: ["Counter"], dispatches: ["Counter"] }, Counter: { storage: ["cloud"] } } };
+    writeFileSync(join(app, "hypen.json"), JSON.stringify(cfg, null, 2));
+    const lock = readModuleLock(app);
+    const hosted = resolveHosted(parseWasmConfig(cfg.wasm), app, {
+      componentsDir: join(app, "src/components"),
+      lock: { ...lock, "./vendor/board": lockEntryOf(readModulePackage(join(app, "vendor/board", PACKAGE_MANIFEST_FILE))) },
+    });
+    expect(hosted.modules.map((m) => m.name)).toContain("Board__Counter");
+    // `hypen add` keeps a namespace that was set by hand.
+    await addPackage({ projectDir: app, spec: "./vendor/board", yes: true, prompter: silent() });
+    expect(json(join(app, "hypen.json")).wasm.packages["./vendor/board"].namespace).toBe("Board");
+
+    expect(await failure(() => parseWasmConfig({ packages: { "@acme/x": { namespace: "not_one" } } }))).toMatchObject({
+      code: "CONFIG_INVALID",
+      field: `wasm.packages["@acme/x"].namespace`,
+    });
+  });
+
+  test("a package's template cannot use another package's internal module", async () => {
+    const app = appWithPackage("add-cross", `Mirror {}\n    Peek {}`);
+    await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: silent() });
+    // Its template reaches for `Counter {}` — which it does not have, the app does not have, and @acme/counters keeps internal.
+    writePackage(join(app, "vendor/peek"), {
+      name: "@acme/peek",
+      entry: "Peek",
+      modules: [{ name: "Peek", wasm: "seeded_module.wasm", template: `module Peek {\n  Column {\n    Counter {}\n  }\n}` }],
+    });
+    const err = await failure(() => addPackage({ projectDir: app, spec: "./vendor/peek", yes: true, prompter: silent() }));
+    expect(err).toMatchObject({ code: "NOT_EXPORTED", module: "Counter", field: `wasm.packages["./vendor/peek"]` });
+    expect(err.message).toContain("./vendor/peek: the template of Peek uses `Counter {}`, which is internal to ./vendor/counters (it exports: Mirror)");
+    expect(Object.keys(json(join(app, "hypen.json")).wasm.packages)).toEqual(["./vendor/counters"]);
+  });
+
+  test("--map points a name the package expects the APP to provide at one of the app's modules", async () => {
+    // Only Mirror: its "Counter" is the app's to provide — and this app calls its counter Tally.
+    const lonely = countersPackage({ modules: countersPackage().modules.slice(0, 1), components: [] });
+    lonely.modules[0]!.template = `module Mirror {\n  Column {\n    Text("Seen: @{state.seen}")\n    Button { Text("Bump the counter") }.onClick(@actions.bump)\n  }\n}`;
+    const app = appWithPackage("add-map", `Mirror {}\n    Tally {}`, lonely);
+    write(join(app, "src/components/Tally/component.hypen"), `module Tally {\n  Text("Tally: @{state.count}")\n}`);
+    write(join(app, "src/components/Tally/component.ts"), `export default {};`);
+
+    // Without a map the request cannot be granted, and the screen says how to fix that.
+    const unmapped = silent();
+    const first = await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: unmapped });
+    expect(first.withheld.map((w) => [w.id, w.status])).toEqual([
+      ["Mirror.reads:Counter", "missing"],
+      ["Mirror.dispatches:Counter", "missing"],
+    ]);
+    expect(unmapped.screen.join("\n")).toContain("(point it at one of yours: --map Mirror.Counter=<Module>)");
+
+    const prompter = silent();
+    const result = await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, map: ["Mirror.Counter=Tally"], prompter });
+    expect(result.granted.map((g) => [g.id, g.status, g.mappedTo])).toEqual([
+      ["Mirror.reads:Counter", "app", "Tally"],
+      ["Mirror.dispatches:Counter", "app", "Tally"],
+    ]);
+    expect(prompter.screen.join("\n")).toContain("read the state of the Counter module → the app's Tally");
+    expect(json(join(app, "hypen.json")).wasm.packages["./vendor/counters"]).toEqual({
+      map: { Mirror: { Counter: "Tally" } },
+      grants: { Mirror: { reads: ["Counter"], dispatches: ["Counter"] } },
+    });
+    const load = () => resolveHosted(parseWasmConfig(json(join(app, "hypen.json")).wasm), app, { componentsDir: join(app, "src/components") });
+    expect(load().modules[0]!.grants).toMatchObject({ reads: ["Counter"], aliases: { counter: "tally" } });
+    expect(formatPackages(listPackages(app)).join("\n")).toContain("mapped:    Counter → the app's Tally");
+    // The bare form applies to every module that requests the name; a re-review keeps the map.
+    await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: silent() });
+    expect(json(join(app, "hypen.json")).wasm.packages["./vendor/counters"].map).toEqual({ Mirror: { Counter: "Tally" } });
+    await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, map: ["Counter=Tally"], prompter: silent() });
+    expect(json(join(app, "hypen.json")).wasm.packages["./vendor/counters"].map).toEqual({ Mirror: { Counter: "Tally" } });
+
+    // Bad flags.
+    const bad = (map: string) => failure(() => addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, map: [map], prompter: silent() }));
+    expect(await bad("Counter")).toMatchObject({ code: "FLAG_INVALID" });
+    expect((await bad("Ghost.Counter=Tally")).message).toContain(`installs no module named "Ghost"`);
+    expect((await bad("Mirror.Session=Tally")).message).toContain(`Mirror does not read or dispatch to "Session"`);
+    expect((await bad("Mirror.Session=Tally")).hint).toContain("Mirror.Counter");
+
+    // A map written by hand to a module the app does not have stops the load, naming the field.
+    const cfg = json(join(app, "hypen.json"));
+    cfg.wasm.packages["./vendor/counters"].map.Mirror.Counter = "Nowhere";
+    writeFileSync(join(app, "hypen.json"), JSON.stringify(cfg));
+    const unknown = await failure(load);
+    expect(unknown).toMatchObject({ code: "MAP_TARGET_UNKNOWN", field: `wasm.packages["./vendor/counters"].map.Mirror.Counter` });
+    expect(unknown.message).toContain(`points "Counter" at "Nowhere", but the app has no module named "Nowhere" (modules: Mirror, App, Tally)`);
+    cfg.wasm.packages["./vendor/counters"].map = { Ghost: { Counter: "Tally" } };
+    writeFileSync(join(app, "hypen.json"), JSON.stringify(cfg));
+    expect(await failure(load)).toMatchObject({ code: "CONFIG_UNKNOWN_MODULE", field: `wasm.packages["./vendor/counters"].map.Ghost` });
+    expect(await failure(() => parseWasmConfig({ packages: { "@acme/x": { map: { A: "B" } } } }))).toMatchObject({
+      code: "CONFIG_INVALID",
+      field: `wasm.packages["@acme/x"].map.A`,
+    });
+  });
+
+  test("a map cannot replace a module of the package itself", async () => {
+    const app = appWithPackage("add-map-sibling");
+    write(join(app, "src/components/Tally/component.hypen"), `module Tally {\n  Text("t")\n}`);
+    write(join(app, "src/components/Tally/component.ts"), `export default {};`);
+    const err = await failure(() => addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, map: ["Mirror.Counter=Tally"], prompter: silent() }));
+    expect(err).toMatchObject({ code: "NAMING_INVALID", module: "Mirror" });
+    expect(err.message).toContain(`cannot map "Counter" of Mirror to "Tally": "Counter" is a module of the package itself`);
+    expect(json(join(app, "hypen.json")).wasm).toBeUndefined();
   });
 
   test("two packages cannot bring the same name", async () => {
@@ -812,7 +993,7 @@ describe.skipIf(skip)("hypen add <tarball>", () => {
 
   test("is extracted into a fresh directory under hypen_modules/ and installed from there", async () => {
     const app = fresh("tar-app");
-    writeApp(app, `Mirror {}\n    Counter {}`);
+    writeApp(app, `Mirror {}`);
     const prompter = silent();
     const result = await addPackage({ projectDir: app, spec: tarball(app), yes: true, prompter });
     expect(result.from).toBe("./hypen_modules/acme-counters");
@@ -872,17 +1053,22 @@ describe.skipIf(skip)("hypen remove, hypen modules", () => {
         status: "current",
         problem: undefined,
         modules: [
-          { name: "Mirror", granted: ["reads:Counter"], requested: ["reads:Counter", "dispatches:Counter"], withheld: ["dispatches:Counter"] },
-          { name: "Counter", granted: ["storage:cloud"], requested: ["storage:cloud"], withheld: [] },
+          // By their names in the package; `installed` is the debug detail.
+          { name: "Mirror", installed: "Mirror", exported: true, mapped: {}, granted: ["reads:Counter"], requested: ["reads:Counter", "dispatches:Counter"], withheld: ["dispatches:Counter"] },
+          { name: "Counter", installed: "AcmeCounters__Counter", exported: false, mapped: {}, granted: ["storage:cloud"], requested: ["storage:cloud"], withheld: [] },
         ],
         components: ["Stamp"],
-        exports: ["Mirror", "Counter"],
+        exports: ["Mirror"],
+        namespace: "AcmeCounters",
       },
     ]);
     const text = formatPackages(listed).join("\n");
     expect(text).toContain("./vendor/counters (@acme/counters) 1.2.0  current");
     expect(text).toContain("withheld:  dispatches:Counter");
-    expect(text).toContain("use: Mirror {}, Counter {}");
+    // People read the package's own names; how an internal one is installed is said once.
+    expect(text).toContain("    Counter  (internal)");
+    expect(text).toContain("use: Mirror {}\n");
+    expect(text).toContain("internal names are private to the package (installed as AcmeCounters__Counter, …; they cannot clash with the app's)");
   });
 
   test("remove a package: the entry and the lock record go, the files stay", async () => {
@@ -1027,7 +1213,7 @@ describe.skipIf(skip)("drift: the grant is a recorded decision", () => {
     write(join(app, "src/components/App/component.hypen"), `module App {\n  Column {\n    Mirror {}\n    Stamp()\n  }\n}`);
     const err = await failure(load);
     expect(err).toMatchObject({ code: "NOT_EXPORTED", module: "Stamp" });
-    expect(err.message).toContain("which ./vendor/counters does not export (it exports: Mirror, Counter)");
+    expect(err.message).toContain("which ./vendor/counters does not export (it exports: Mirror)");
   });
 
   test("templateRefs sees tags, not strings, comments, or the declared name", () => {
@@ -1056,10 +1242,14 @@ describe.skipIf(skip)("drift: the grant is a recorded decision", () => {
     const appJson = json(join(app, "dist/wasm/app.json"));
     expect(appJson.modules).toEqual([
       { name: "App", wasm: "App.wasm", ui: "App.hypen", reads: [], dispatches: [], storage: [], http: false },
-      { name: "Mirror", wasm: "Mirror.wasm", ui: "Mirror.hypen", reads: ["counter"], dispatches: ["counter"], storage: [], http: false },
-      { name: "Counter", wasm: "Counter.wasm", ui: "Counter.hypen", reads: [], dispatches: [], storage: ["cloud"], http: false },
-      { name: "Stamp", ui: "Stamp.hypen" },
+      // Mirror keeps its own name for its sibling; `aliases` says which module of the build that is.
+      { name: "Mirror", wasm: "Mirror.wasm", ui: "Mirror.hypen", reads: ["counter"], dispatches: ["counter"], storage: [], http: false, aliases: { counter: "acmecounters__counter" } },
+      { name: "AcmeCounters__Counter", wasm: "AcmeCounters__Counter.wasm", ui: "AcmeCounters__Counter.hypen", reads: [], dispatches: [], storage: ["cloud"], http: false },
+      { name: "AcmeCounters__Stamp", ui: "AcmeCounters__Stamp.hypen" },
     ]);
+    // The shipped templates say the installed names.
+    expect(readFileSync(join(app, "dist/wasm/Mirror.hypen"), "utf8")).toContain("AcmeCounters__Counter {}");
+    expect(readFileSync(join(app, "dist/wasm/AcmeCounters__Counter.hypen"), "utf8").startsWith("module AcmeCounters__Counter {")).toBe(true);
   });
 });
 
@@ -1092,7 +1282,7 @@ describe.skipIf(skip)("the commands, through bin/hypen.ts", () => {
     const added = await hypen(app, "add", "./vendor/counters", "--yes");
     expect(added.code).toBe(0);
     expect(added.out).toContain("Added ./vendor/counters");
-    expect(added.out).toContain("Use it:   Mirror {}, Counter {} in a template");
+    expect(added.out).toContain("Use it:   Mirror {} in a template");
 
     const listed = await hypen(app, "modules");
     expect(listed.code).toBe(0);
@@ -1111,7 +1301,7 @@ describe.skipIf(skip)("the commands, through bin/hypen.ts", () => {
     expect(packed.code).toBe(0);
     expect(packed.out).toContain("Packed @acme/counters 1.2.0 → dist/pack");
     const app = fresh("cli-pack-app");
-    writeApp(app, `Mirror {}\n    Counter {}`);
+    writeApp(app, `Mirror {}`);
     const added = await hypen(app, "add", join(project, "dist/pack"), "--grant", "all", "--deny", "Mirror.dispatches:Counter", "--only", "Mirror,Counter,Stamp");
     expect(added.code).toBe(0);
     expect(added.out).toContain("Withheld: Mirror.dispatches:Counter");
@@ -1208,13 +1398,103 @@ describe.skipIf(skip)("hypen dev with module packages", () => {
     await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, prompter: silent() });
     const lines: string[] = [];
     const port = await start(app, lines);
-    expect(lines.join("\n")).toContain("./vendor/counters (v1.2.0): Mirror, Counter, Stamp — use Mirror {}, Counter {}");
+    // The app's template has ONE tag from the package; its root places the rest.
+    expect(lines.join("\n")).toContain("./vendor/counters (v1.2.0): Mirror, Counter, Stamp — use Mirror {}\n");
+    expect(lines.join("\n")).toContain("Prebuilt:   Mirror, Counter (WASM, from hypen.json)");
     const c = await client(port);
     stops.push(() => c.close());
     expect(c.texts()).toEqual(expect.arrayContaining(["App: mixed", "Seen: 0", "Count: 0", "from the counters package"]));
     // Mirror dispatches `increment` to Counter (dispatches), then follows it (reads).
     c.click("Bump the counter", "bump");
     await c.until(() => expect(c.texts()).toEqual(expect.arrayContaining(["Count: 1", "Seen: 1"])));
+  });
+
+  /** A TypeScript module of the app named `name`, counting from `start`. */
+  function appCounter(app: string, name: string, start: number): void {
+    const core = join(import.meta.dir, "..", "..", "hypen-web", "packages", "core", "src", "index.ts");
+    write(
+      join(app, `src/components/${name}/component.hypen`),
+      `module ${name} {\n  Column {\n    Text("${name} of the app: @{state.count}")\n    Button { Text("${name} of the app +1") }.onClick(@actions.increment)\n  }\n}`
+    );
+    write(
+      join(app, `src/components/${name}/component.ts`),
+      `import { app } from ${JSON.stringify(core)};\nexport default app.defineState({ count: ${start} }).onAction("increment", ({ state }) => { state.count += 1; }).build();\n`
+    );
+  }
+
+  test("point at the root: ONE tag renders a package's internal modules, next to an app module of the same name", async () => {
+    // The app has its own Counter; the package (Board → Mirror → Counter) has one too, internally.
+    const app = fresh("dev-root");
+    writeApp(app, `Text("App: @{state.title}")\n    Board {}\n    Counter {}`);
+    appCounter(app, "Counter", 100);
+    writePackage(join(app, "vendor/board"), boardPackage());
+    const added = await addPackage({ projectDir: app, spec: "./vendor/board", yes: true, prompter: silent() });
+    expect(added).toMatchObject({ modules: ["Board", "Mirror", "Counter"], exports: ["Board"] });
+
+    const lines: string[] = [];
+    const port = await start(app, lines);
+    expect(lines.join("\n")).toContain("./vendor/board (v1.2.0): Board, Mirror, Counter, Stamp — use Board {}\n");
+    const c = await client(port);
+    stops.push(() => c.close());
+    expect(c.texts()).toEqual(
+      expect.arrayContaining([
+        "App: mixed",
+        "Board: 0 (Counter and Mirror are inside)",
+        "Seen: 0",
+        "Count: 0",
+        "from the counters package",
+        "Counter of the app: 100",
+      ])
+    );
+    // Inside the package: Mirror dispatches to "counter" and follows it — the package's.
+    c.click("Bump the counter", "bump");
+    await c.until(() => expect(c.texts()).toEqual(expect.arrayContaining(["Count: 1", "Seen: 1"])));
+    expect(c.texts()).toContain("Counter of the app: 100");
+    // A click on the internal module itself, three modules deep.
+    c.click("Count +1", "increment");
+    await c.until(() => expect(c.texts()).toEqual(expect.arrayContaining(["Count: 2", "Seen: 2"])));
+    // The app's own Counter is its own.
+    c.click("Counter of the app +1", "increment");
+    await c.until(() => expect(c.texts()).toContain("Counter of the app: 101"));
+    expect(c.texts()).toEqual(expect.arrayContaining(["Count: 2", "Seen: 2"]));
+    c.click("Board +1", "increment");
+    await c.until(() => expect(c.texts()).toContain("Board: 1 (Counter and Mirror are inside)"));
+  });
+
+  test("a SOURCE package is self-contained too: building it in the dev process leaves nothing behind under its names", async () => {
+    const app = fresh("dev-source-root");
+    writeApp(app, `Text("App: @{state.title}")\n    Mirror {}\n    Counter {}`, { packages: { "./modules/counters": { source: true } } });
+    appCounter(app, "Counter", 100);
+    moduleProject(join(app, "modules/counters"));
+    const lines: string[] = [];
+    const port = await start(app, lines);
+    expect(lines.join("\n")).toContain("./modules/counters (built from source): Mirror, Counter, Stamp — use Mirror {}\n");
+    const c = await client(port);
+    stops.push(() => c.close());
+    expect(c.texts()).toEqual(expect.arrayContaining(["Seen: 0", "Count: 0", "Counter of the app: 100"]));
+    c.click("Bump the counter", "bump");
+    await c.until(() => expect(c.texts()).toEqual(expect.arrayContaining(["Count: 1", "Seen: 1", "Counter of the app: 100"])));
+    c.click("Counter of the app +1", "increment");
+    await c.until(() => expect(c.texts()).toEqual(expect.arrayContaining(["Count: 1", "Seen: 1", "Counter of the app: 101"])));
+  }, 60_000);
+
+  test("a mapped name reaches the app's module: reads, dispatches and subscription", async () => {
+    const lonely = countersPackage({ modules: countersPackage().modules.slice(0, 1), components: [] });
+    lonely.modules[0]!.template = `module Mirror {\n  Column {\n    Text("Seen: @{state.seen}")\n    Button { Text("Bump the counter") }.onClick(@actions.bump)\n  }\n}`;
+    const app = appWithPackage("dev-map", `Mirror {}\n    Tally {}`, lonely);
+    appCounter(app, "Tally", 7);
+    await addPackage({ projectDir: app, spec: "./vendor/counters", yes: true, map: ["Mirror.Counter=Tally"], prompter: silent() });
+    const lines: string[] = [];
+    const port = await start(app, lines);
+    const c = await client(port);
+    stops.push(() => c.close());
+    expect(c.texts()).toEqual(expect.arrayContaining(["Seen: 0", "Tally of the app: 7"]));
+    // Mirror's code dispatches `increment` to "counter" and is subscribed to it: here, that is Tally.
+    c.click("Bump the counter", "bump");
+    await c.until(() => expect(c.texts()).toEqual(expect.arrayContaining(["Tally of the app: 8", "Seen: 8"])));
+    // A change made by the app itself notifies the subscriber too.
+    c.click("Tally of the app +1", "increment");
+    await c.until(() => expect(c.texts()).toEqual(expect.arrayContaining(["Tally of the app: 9", "Seen: 9"])));
   });
 
   test("startup stops on drift, with the package named", async () => {
@@ -1232,7 +1512,7 @@ describe.skipIf(skip)("hypen dev with module packages", () => {
 
   test("a source package is built at startup, granted what it declares, and rebuilt + hot-reloaded when its sources change", async () => {
     const app = fresh("dev-source");
-    writeApp(app, `Text("App: @{state.title}")\n    Mirror {}\n    Counter {}`, { packages: { "./modules/counters": { source: true } } });
+    writeApp(app, `Text("App: @{state.title}")\n    Mirror {}`, { packages: { "./modules/counters": { source: true } } });
     const project = moduleProject(join(app, "modules/counters"));
     const lines: string[] = [];
     const port = await start(app, lines);
@@ -1280,7 +1560,7 @@ describe.skipIf(skip)("hypen dev with module packages", () => {
 
     // HYPEN_NO_SOURCE_BUILD: no toolchain is run; the committed fallback is used, loudly.
     const app2 = fresh("dev-fallback");
-    writeApp(app2, `Mirror {}\n    Counter {}`, { packages: { "./modules/counters": { source: true, fallback: "./modules/counters/prebuilt-pkg" } } });
+    writeApp(app2, `Mirror {}`, { packages: { "./modules/counters": { source: true, fallback: "./modules/counters/prebuilt-pkg" } } });
     const project2 = moduleProject(join(app2, "modules/counters"));
     writePackage(join(project2, "prebuilt-pkg"), countersPackage());
     process.env.HYPEN_NO_SOURCE_BUILD = "1";

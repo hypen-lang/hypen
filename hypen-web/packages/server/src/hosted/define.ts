@@ -23,14 +23,20 @@ import { HostedModuleSetupError, type HostedModuleSetupCode } from "./errors.js"
 import {
   ModulePackageError,
   assertNoDrift,
+  installedNameOf,
   locateModulePackage,
+  moduleAliases,
   packageDrift,
+  planPackageNames,
   readModuleLock,
   readModulePackage,
+  type InstalledName,
   type ModulePackageErrorCode,
   type PackageManifest,
+  type PackageNaming,
   type ResolvedPackage,
 } from "./module-package.js";
+import { renameTemplateComponents } from "./template-rename.js";
 
 /** The grants of a hosted module, as written (module names in any case). */
 export interface WasmModuleGrants {
@@ -48,6 +54,14 @@ export interface WasmModuleGrants {
    * host. Needs `http: true`.
    */
   httpHosts?: readonly string[];
+  /**
+   * What a name in `reads` / `dispatches` means in this app when it is not
+   * the module of that name: `{ Cart: "Basket" }` hands the module the
+   * state of `Basket` when its code reads `Cart`, and delivers what it
+   * dispatches to `Cart` to `Basket`. The module's code and its `reads` /
+   * `dispatches` keep the module's own names. An alias grants nothing.
+   */
+  aliases?: Readonly<Record<string, string>>;
 }
 
 export interface WasmModuleOptions {
@@ -90,6 +104,11 @@ export interface WasmModuleOptions {
   declaredAt?: string;
   /** Where its grants are written (prefix of the grant key). Set by tooling. */
   grantsAt?: string;
+  /**
+   * The name people know the module by when it is registered under another
+   * (an internal module of a namespaced package). Set by tooling.
+   */
+  label?: string;
 }
 
 /** What the first eight bytes of a file say it is. */
@@ -190,10 +209,10 @@ function normalizeGrants(grants: WasmModuleGrants | undefined, grantsAt: string,
       hint: `e.g. { reads: ["Cart"], storage: ["app"] }`,
     });
   }
-  const known = ["reads", "dispatches", "storage", "http", "httpHosts"];
+  const known = ["reads", "dispatches", "storage", "http", "httpHosts", "aliases"];
   for (const key of Object.keys(grants ?? {})) {
     if (!known.includes(key)) {
-      throw new HostedModuleSetupError(`Unknown grant "${key}" (expected reads, dispatches, storage, http or httpHosts).`, {
+      throw new HostedModuleSetupError(`Unknown grant "${key}" (expected reads, dispatches, storage, http, httpHosts or aliases).`, {
         code: "INVALID_OPTIONS",
         module,
         field: `${grantsAt}.${key}`,
@@ -232,13 +251,86 @@ function normalizeGrants(grants: WasmModuleGrants | undefined, grantsAt: string,
     });
   }
   const http = grants?.http === true;
+  const reads = scopes("reads");
+  const dispatches = scopes("dispatches");
+  const aliases = normalizeAliases(grants?.aliases, { reads, dispatches }, grantsAt, module);
   return {
-    reads: scopes("reads"),
-    dispatches: scopes("dispatches"),
+    reads,
+    dispatches,
     storage,
     http,
     httpHosts: normalizeHttpHosts(grants?.httpHosts, http, grantsAt, module),
+    ...(Object.keys(aliases).length > 0 ? { aliases } : {}),
   };
+}
+
+/** Why `name` cannot be an engine scope, or `null`. The engine's `ScopeName` rules. */
+function scopeProblem(name: string): string | null {
+  if (name === "") return "it is empty";
+  if (name.includes(":")) return `it contains ":" (the engine's scope separator)`;
+  if (name.toLowerCase().startsWith("__hypen_")) return `it uses the reserved "__hypen_" prefix`;
+  return null;
+}
+
+/**
+ * An alias table as the engine takes it (lowercase name → lowercase scope),
+ * checked the way the engine checks it — here, so the error names the field
+ * to edit instead of surfacing when the first session mounts the module.
+ */
+function normalizeAliases(
+  raw: unknown,
+  lists: { reads: readonly string[]; dispatches: readonly string[] },
+  grantsAt: string,
+  module: string
+): Record<string, string> {
+  if (raw === undefined) return {};
+  const at = `${grantsAt}.aliases`;
+  const bad = (message: string, field: string, hint: string): HostedModuleSetupError =>
+    new HostedModuleSetupError(message, { code: "NAMING_INVALID", module, field, hint });
+  if (raw === null || typeof raw !== "object" || Array.isArray(raw) || !Object.values(raw).every((v) => typeof v === "string")) {
+    throw new HostedModuleSetupError(`${at} must map a name the module uses to the module it means.`, {
+      code: "INVALID_OPTIONS",
+      module,
+      field: at,
+      hint: `e.g. { Cart: "Basket" }`,
+    });
+  }
+  const aliases: Record<string, string> = {};
+  for (const [name, target] of Object.entries(raw as Record<string, string>)) {
+    const field = `${at}.${name}`;
+    const nameProblem = scopeProblem(name);
+    if (nameProblem !== null) throw bad(`${field}: "${name}" cannot be aliased: ${nameProblem}.`, field, "an alias key is a name from `reads` / `dispatches`");
+    const targetProblem = scopeProblem(target);
+    if (targetProblem !== null) throw bad(`${field}: "${target}" cannot be a module: ${targetProblem}.`, field, `point "${name}" at one of the app's modules`);
+    const key = name.toLowerCase();
+    const scope = target.toLowerCase();
+    if (aliases[key] !== undefined && aliases[key] !== scope) {
+      throw bad(
+        `${at} aliases "${key}" twice, to "${aliases[key]}" and to "${scope}" (names compare case-insensitively).`,
+        field,
+        "keep one of the two entries"
+      );
+    }
+    if (key !== scope) aliases[key] = scope;
+  }
+  // Each module a hosted module can reach has ONE name in it: the engine
+  // refuses a table where two granted names mean the same scope.
+  for (const key of ["reads", "dispatches"] as const) {
+    const means = new Map<string, string>();
+    for (const name of lists[key]) {
+      const scope = aliases[name] ?? name;
+      const other = means.get(scope);
+      if (other !== undefined) {
+        throw bad(
+          `${grantsAt}.${key} names "${other}" and "${name}", which both mean the module "${scope}".`,
+          at,
+          `remove one of them from ${grantsAt}.${key}, or point the alias somewhere else`
+        );
+      }
+      means.set(scope, name);
+    }
+  }
+  return aliases;
 }
 
 /**
@@ -418,6 +510,7 @@ export function wasmModule(options: WasmModuleOptions): HostedModuleDefinition {
       ...(templatePath !== undefined ? { templatePath } : {}),
       declaredAt,
       grantsAt,
+      ...(typeof options.label === "string" && options.label !== "" && options.label !== name ? { label: options.label } : {}),
     },
   };
 }
@@ -438,6 +531,7 @@ const PACKAGE_CODES: Record<ModulePackageErrorCode, HostedModuleSetupCode> = {
   REQUESTS_CHANGED: "REQUESTS_CHANGED",
   NOT_RECORDED: "REQUESTS_CHANGED",
   UNKNOWN_PACKAGE_MODULE: "UNKNOWN_MODULE",
+  NAMING_INVALID: "NAMING_INVALID",
 };
 
 function packageError(err: unknown): unknown {
@@ -463,6 +557,26 @@ export interface LoadWasmPackageOptions {
   only?: readonly string[];
   /** Per-module `init` config, by module name. */
   config?: Readonly<Record<string, unknown>>;
+  /**
+   * Install an EXPORTED name under another name: `{ Checkout: "Shop" }`
+   * makes the app's templates say `Shop {}`. Internal names never need it —
+   * they are namespaced.
+   */
+  as?: Readonly<Record<string, string>>;
+  /**
+   * Point a name a module expects the APP to provide at one of the app's
+   * modules, per package module: `{ Pricing: { Cart: "Basket" } }` — where
+   * Pricing's code reads / dispatches to `Cart`, it reaches the app's
+   * `Basket`. The name must be granted to the module (`grants`) and must
+   * not be a module of the package itself.
+   */
+  map?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /**
+   * The namespace the package's internal names are installed under.
+   * Default: derived from the manifest's name (`@acme/checkout` →
+   * `AcmeCheckout`). Only needed when two packages derive the same one.
+   */
+  namespace?: string;
   /** Directory `from` and `hypen.lock.json` resolve against. Default: `process.cwd()`. */
   baseDir?: string;
   /**
@@ -480,10 +594,22 @@ export interface LoadedWasmPackage {
   manifest: PackageManifest;
   /** The manifest's directory. */
   dir: string;
-  /** One hosted module per stateful module of the package. */
+  /**
+   * One hosted module per stateful module of the package, under its
+   * INSTALLED name: an exported module keeps its name (or takes the one
+   * `as` gives it); an internal one is namespaced
+   * (`AcmeCheckout__Cart`) so it cannot clash with the app's or another
+   * package's. Templates and cross-module names are already translated.
+   */
   modules: HostedModuleDefinition[];
-  /** Its template-only components, for `RemoteServer.components()`. */
+  /** Its template-only components (installed names), for `RemoteServer.components()`. */
   components: Array<{ name: string; template: string }>;
+  /** The names the app's own templates may use (after `as`). */
+  exports: string[];
+  /** The namespace its internal names were installed under. */
+  namespace: string;
+  /** Every name of the package and the name it was installed under. */
+  names: InstalledName[];
 }
 
 function resolvePackage(from: string, baseDir: string, checkLock: boolean | undefined, names?: readonly string[]): ResolvedPackage {
@@ -540,30 +666,65 @@ export function loadWasmPackage(from: string, options: LoadWasmPackageOptions = 
       hint: `fix the name in \`${where}\``,
     });
   for (const name of options.only ?? []) if (!all.includes(name)) throw unknown(name, "only");
-  for (const name of Object.keys(options.grants ?? {})) {
-    if (!pkg.modules.some((m) => m.name === name)) throw unknown(name, "grants");
+  for (const [where, names] of [["grants", options.grants], ["map", options.map]] as const) {
+    for (const name of Object.keys(names ?? {})) {
+      if (!pkg.modules.some((m) => m.name === name)) throw unknown(name, where);
+    }
   }
   const picked = (name: string): boolean => options.only === undefined || options.only.includes(name);
   const at = `loadWasmPackage(${JSON.stringify(from)})`;
+  let naming: PackageNaming;
+  try {
+    naming = planPackageNames(pkg.manifest, { namespace: options.namespace, as: options.as, from });
+  } catch (err) {
+    throw packageError(err);
+  }
+  // `installedNameOf` cannot miss: `naming` covers every name of the manifest.
+  const installed = (name: string): string => installedNameOf(naming, name)?.installed ?? name;
+  const install = (name: string, path: string): { text: string; renamed: boolean } => {
+    const text = readFileSync(path, "utf8").trim();
+    const renamed = renameTemplateComponents(text, naming.renames, { module: name, file: path });
+    return { text: renamed, renamed: renamed !== text };
+  };
   return {
     manifest: pkg.manifest,
     dir: pkg.dir,
     modules: pkg.modules
       .filter((m) => picked(m.name))
-      .map((m) =>
-        wasmModule({
-          name: m.name,
+      .map((m) => {
+        const given = options.grants?.[m.name];
+        let aliases: Record<string, string>;
+        try {
+          aliases = moduleAliases(
+            naming,
+            m.name,
+            { reads: [...(given?.reads ?? [])], dispatches: [...(given?.dispatches ?? [])] },
+            options.map?.[m.name],
+            from
+          );
+        } catch (err) {
+          throw packageError(err);
+        }
+        const template = m.templatePath !== undefined ? install(m.name, m.templatePath) : undefined;
+        return wasmModule({
+          name: installed(m.name),
+          label: m.name,
           component: m.componentPath,
-          ...(m.templatePath !== undefined ? { template: m.templatePath } : {}),
-          grants: options.grants?.[m.name],
+          // A template that needed no renaming stays a file (hot reload
+          // watches it); a rewritten one is passed as source.
+          ...(template === undefined ? {} : template.renamed ? { ui: template.text } : { template: m.templatePath }),
+          grants: { ...given, aliases: { ...given?.aliases, ...aliases } },
           config: options.config?.[m.name],
           declaredAt: `${at} ${m.name}`,
           grantsAt: `${at}.grants.${m.name}`,
-        })
-      ),
+        });
+      }),
     components: pkg.components
       .filter((c) => picked(c.name))
-      .map((c) => ({ name: c.name, template: readFileSync(c.templatePath, "utf8").trim() })),
+      .map((c) => ({ name: installed(c.name), template: install(c.name, c.templatePath).text })),
+    exports: naming.names.filter((n) => n.exported && picked(n.name)).map((n) => n.installed),
+    namespace: naming.namespace,
+    names: naming.names.filter((n) => picked(n.name)),
   };
 }
 
@@ -648,6 +809,26 @@ export interface LoadWasmModulesOptions {
   only?: readonly string[];
   /** Per-module `init` config, by module name. */
   config?: Readonly<Record<string, unknown>>;
+  /**
+   * Install an EXPORTED name under another name: `{ Checkout: "Shop" }`
+   * makes the app's templates say `Shop {}`. Internal names never need it —
+   * they are namespaced.
+   */
+  as?: Readonly<Record<string, string>>;
+  /**
+   * Point a name a module expects the APP to provide at one of the app's
+   * modules, per package module: `{ Pricing: { Cart: "Basket" } }` — where
+   * Pricing's code reads / dispatches to `Cart`, it reaches the app's
+   * `Basket`. The name must be granted to the module (`grants`) and must
+   * not be a module of the package itself.
+   */
+  map?: Readonly<Record<string, Readonly<Record<string, string>>>>;
+  /**
+   * The namespace the package's internal names are installed under.
+   * Default: derived from the manifest's name (`@acme/checkout` →
+   * `AcmeCheckout`). Only needed when two packages derive the same one.
+   */
+  namespace?: string;
 }
 
 /**

@@ -14,7 +14,7 @@
 //!   successful steps applied stays applied.
 
 use super::names::ScopeName;
-use super::registry::Registry;
+use super::registry::{Granted, Registry};
 use super::report::{
     CascadeFailure, CascadeReport, CascadeRoot, FailureCause, LifecycleHook, Origin,
 };
@@ -450,7 +450,7 @@ impl HostedModules {
             })?;
 
         // `on_deactivated` takes no sibling snapshots (see `ModuleHost`).
-        let readable: &[String] = match call {
+        let readable: &[Granted] = match call {
             Call::Lifecycle(LifecycleHook::Deactivated) => &[],
             Call::Dispatch(_) | Call::Lifecycle(LifecycleHook::Activated) => {
                 module.grants.readable()
@@ -458,16 +458,18 @@ impl HostedModules {
         };
         let mut siblings: Vec<SiblingState> = Vec::with_capacity(readable.len());
         let mut receipts = Vec::with_capacity(readable.len());
-        for name in readable {
-            if name == scope.as_str() {
+        for granted in readable {
+            if granted.scope() == scope.as_str() {
                 continue;
             }
             // A grant may name a scope with no state (not registered yet, or
             // destroyed): the module simply is not handed a snapshot of it.
-            if let Ok(lease) = self.snapshots.checkout(core, name) {
+            if let Ok(lease) = self.snapshots.checkout(core, granted.scope()) {
                 let (bytes, receipt) = lease.into_parts();
-                siblings.push((name.clone(), bytes));
-                receipts.push(receipt);
+                // The snapshot goes over under the module's own name for the
+                // scope — the one its host's ACL and its `read()` calls use.
+                siblings.push((granted.name().to_string(), bytes));
+                receipts.push((granted.scope(), receipt));
             }
         }
 
@@ -482,8 +484,8 @@ impl HostedModules {
         };
 
         self.snapshots.checkin(scope.as_str(), own);
-        for ((name, bytes), receipt) in siblings.into_iter().zip(receipts) {
-            self.snapshots.checkin(&name, receipt.rejoin(bytes));
+        for ((_, bytes), (sibling, receipt)) in siblings.into_iter().zip(receipts) {
+            self.snapshots.checkin(sibling, receipt.rejoin(bytes));
         }
         result.map_err(FailureCause::Host)
     }

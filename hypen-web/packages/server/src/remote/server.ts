@@ -1422,15 +1422,23 @@ export class RemoteServer {
       const { grants, grantsAt } = definition.hosted;
       for (const key of ["reads", "dispatches"] as const) {
         for (const target of grants[key]) {
-          if (known.has(target)) continue;
+          // The name the module uses may stand for another module here.
+          const scope = grants.aliases?.[target] ?? target;
+          if (known.has(scope)) continue;
+          const name = definition.hosted.label ?? definition.name;
           throw new HostedModuleSetupError(
-            `Hosted module "${definition.name}" is granted ${key} on "${target}", but the app has no such module ` +
+            (scope === target
+              ? `Hosted module "${name}" is granted ${key} on "${target}", but the app has no such module `
+              : `Hosted module "${name}" is granted ${key} on "${target}", which here means "${scope}", but the app has no module "${scope}" `) +
               `(modules: ${[...known.values()].join(", ") || "none"}).`,
             {
               code: "UNKNOWN_GRANT_TARGET",
-              module: definition.name,
-              field: `${grantsAt}.${key}`,
-              hint: `use one of the app's module names, or remove "${target}" from ${grantsAt}.${key}`,
+              module: name,
+              field: scope === target ? `${grantsAt}.${key}` : `${grantsAt}.aliases.${target}`,
+              hint:
+                scope === target
+                  ? `use one of the app's module names, point "${target}" at one of them (a map / \`aliases\`), or remove "${target}" from ${grantsAt}.${key}`
+                  : `point "${target}" at one of the app's modules, or remove "${target}" from ${grantsAt}.${key}`,
             }
           );
         }

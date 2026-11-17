@@ -25,6 +25,11 @@ export interface StatefulManifestEntry {
   storage: GrantableStorage[];
   http: boolean;
   httpHosts?: string[];
+  /**
+   * Which module a name in `reads` / `dispatches` stands for, when it is
+   * not the module of that name (written only when there is one).
+   */
+  aliases?: Record<string, string>;
 }
 
 /**
@@ -59,6 +64,7 @@ export function statefulEntry(name: ModuleName, capabilities: Capabilities): Sta
     storage: capabilities.storage,
     http: capabilities.http,
     ...(capabilities.httpHosts.length > 0 ? { httpHosts: capabilities.httpHosts } : {}),
+    ...(capabilities.aliases !== undefined ? { aliases: { ...capabilities.aliases } } : {}),
   };
 }
 

@@ -10,8 +10,9 @@ use super::names::{canonical_scope, ActionSet, ScopeName};
 use super::ClosureActions;
 use crate::action_routing::scoped_action_name;
 use crate::engine_core::EngineCore;
-use crate::module_host::{HttpGrant, ModuleInstanceId, ModuleManifest};
+use crate::module_host::{HttpGrant, ModuleInstanceId, ModuleManifest, ScopeAliases};
 use indexmap::IndexMap;
+use std::fmt;
 use std::sync::Arc;
 
 /// The capabilities the engine enforces for one hosted scope.
@@ -23,6 +24,10 @@ use std::sync::Arc;
 /// handed at all — it does not rely on the
 /// [`ModuleHost`](crate::module_host::ModuleHost) having enforced them. Scope
 /// names compare case-insensitively; there is no wildcard.
+///
+/// `reads` / `dispatches` hold the names *the module uses* — the same lists
+/// its host was registered with. A name means the scope of that name unless
+/// `aliases` says otherwise (see [`ScopeAliases`]).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ModuleGrants {
     /// Scopes whose state this module may read and subscribe to.
@@ -32,6 +37,9 @@ pub struct ModuleGrants {
     /// What the module may request over deferred HTTP
     /// (`hypen:http/deferred`). Default: nothing.
     pub http: HttpGrant,
+    /// Which scope a name in `reads` / `dispatches` stands for, where it is
+    /// not the scope of that name. Default: none.
+    pub aliases: ScopeAliases,
 }
 
 impl ModuleGrants {
@@ -51,7 +59,15 @@ impl ModuleGrants {
             reads: reads.into_iter().map(Into::into).collect(),
             dispatches: dispatches.into_iter().map(Into::into).collect(),
             http: HttpGrant::Denied,
+            aliases: ScopeAliases::new(),
         }
+    }
+
+    /// The same grants, with the names in `reads` / `dispatches` meaning
+    /// what `aliases` says.
+    pub fn with_aliases(mut self, aliases: ScopeAliases) -> Self {
+        self.aliases = aliases;
+        self
     }
 
     /// The same grants with deferred HTTP allowed as `http` says.
@@ -67,56 +83,209 @@ impl From<&ModuleManifest> for ModuleGrants {
             reads: manifest.reads.clone(),
             dispatches: manifest.dispatches.clone(),
             http: manifest.http_grant(),
+            aliases: manifest.aliases.clone(),
         }
     }
 }
 
+/// Why a module's alias table cannot be wired. Nothing is changed when one
+/// of these is returned.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InvalidAlias {
+    /// The aliased name is empty, contains `:` or is in the reserved
+    /// `__hypen_` namespace: no module could address a scope by it.
+    Name(String),
+    /// The scope an alias points at cannot be a scope name.
+    Target { name: String, target: String },
+    /// Two entries alias the same name (names compare case-insensitively) to
+    /// different scopes.
+    Conflict {
+        name: String,
+        first: String,
+        second: String,
+    },
+    /// Two names in one grant list stand for the same scope. Each scope a
+    /// module can reach has exactly one name in that module.
+    SameScope {
+        /// `reads` or `dispatches`.
+        list: &'static str,
+        first: String,
+        second: String,
+        scope: String,
+    },
+}
+
+impl fmt::Display for InvalidAlias {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            InvalidAlias::Name(name) => write!(
+                f,
+                "invalid alias '{name}': an aliased name must be non-empty, contain no ':' and \
+                 not start with '__hypen_'"
+            ),
+            InvalidAlias::Target { name, target } => write!(
+                f,
+                "alias '{name}' points at '{target}', which cannot be a module scope (non-empty, \
+                 no ':', not starting with '__hypen_')"
+            ),
+            InvalidAlias::Conflict {
+                name,
+                first,
+                second,
+            } => write!(
+                f,
+                "alias '{name}' is given twice, as '{first}' and as '{second}' (names compare \
+                 case-insensitively)"
+            ),
+            InvalidAlias::SameScope {
+                list,
+                first,
+                second,
+                scope,
+            } => write!(
+                f,
+                "`{list}` names '{first}' and '{second}', which both stand for the scope \
+                 '{scope}' — keep one of them, or point the alias somewhere else"
+            ),
+        }
+    }
+}
+
+/// One entry of a grant list: the name the module (and its host) uses, and
+/// the scope it stands for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Granted {
+    /// Canonical spelling of the module's own name for the scope.
+    name: Arc<str>,
+    /// The scope an alias points the name at; `None` when the name is the
+    /// scope.
+    target: Option<Arc<str>>,
+}
+
+impl Granted {
+    /// The name the module knows the scope by — what crosses the host
+    /// boundary.
+    pub(crate) fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The engine scope the name stands for (canonical).
+    pub(crate) fn scope(&self) -> &str {
+        self.target.as_deref().unwrap_or(&self.name)
+    }
+
+    /// The module's name for the scope, when it differs from the scope — a
+    /// shared handle, for a failure record.
+    pub(crate) fn alias(&self) -> Option<&Arc<str>> {
+        self.target.as_ref().map(|_| &self.name)
+    }
+}
+
 /// [`ModuleGrants`] as the engine enforces them: every name canonical
-/// (lowercase) and listed once. Built once per wiring, so the checks on the
-/// dispatch path are plain string comparisons.
+/// (lowercase), listed once and resolved to the scope it stands for. Built
+/// once per wiring, so the checks on the dispatch path are plain string
+/// comparisons and nothing is allocated to look a name up.
 ///
 /// A grant may name a scope that is not hosted (a closure-backed module's
 /// state is readable too) or not registered yet, so the entries are scope
 /// *references*, not validated [`ScopeName`]s.
 #[derive(Debug, Default)]
 pub(crate) struct Grants {
-    reads: Vec<String>,
-    dispatches: Vec<String>,
+    reads: Vec<Granted>,
+    dispatches: Vec<Granted>,
     /// Shared with each `Effect::Http` the module causes (the embedder
     /// re-checks it on redirect hops), hence the `Arc`.
     http: Arc<HttpGrant>,
 }
 
-impl From<ModuleGrants> for Grants {
-    fn from(grants: ModuleGrants) -> Self {
-        fn canonical(names: Vec<String>) -> Vec<String> {
-            let mut out: Vec<String> = Vec::with_capacity(names.len());
-            for name in names {
-                let name = canonical_scope(&name).into_owned();
-                if !out.contains(&name) {
-                    out.push(name);
-                }
-            }
-            out
-        }
-        Self {
-            reads: canonical(grants.reads),
-            dispatches: canonical(grants.dispatches),
-            http: Arc::new(grants.http),
-        }
-    }
-}
-
 impl Grants {
-    /// Whether the module may read (and subscribe to) `scope`'s state.
-    /// `scope` must be canonical.
-    pub(crate) fn may_read(&self, scope: &str) -> bool {
-        self.reads.iter().any(|granted| granted == scope)
+    /// Validate and resolve `grants`. Without aliases this cannot fail.
+    pub(crate) fn resolve(grants: ModuleGrants) -> Result<Self, InvalidAlias> {
+        let ModuleGrants {
+            reads,
+            dispatches,
+            http,
+            aliases,
+        } = grants;
+
+        // name → scope, both canonical. An alias of a name to itself says
+        // nothing and is dropped.
+        let mut table: Vec<(Arc<str>, Arc<str>)> = Vec::with_capacity(aliases.len());
+        for (name, target) in aliases.iter() {
+            let invalid = |raw: &str| {
+                let canonical = canonical_scope(raw);
+                ScopeName::parse(&canonical).is_err()
+            };
+            if invalid(name) {
+                return Err(InvalidAlias::Name(name.to_string()));
+            }
+            if invalid(target) {
+                return Err(InvalidAlias::Target {
+                    name: name.to_string(),
+                    target: target.to_string(),
+                });
+            }
+            let name = canonical_scope(name);
+            let target = canonical_scope(target);
+            match table.iter().find(|(known, _)| **known == *name) {
+                Some((_, first)) if **first != *target => {
+                    return Err(InvalidAlias::Conflict {
+                        name: name.into_owned(),
+                        first: first.to_string(),
+                        second: target.into_owned(),
+                    });
+                }
+                Some(_) => {}
+                None => table.push((Arc::from(name.as_ref()), Arc::from(target.as_ref()))),
+            }
+        }
+
+        let list = |names: Vec<String>, which: &'static str| {
+            let mut out: Vec<Granted> = Vec::with_capacity(names.len());
+            for name in names {
+                let name = canonical_scope(&name);
+                if out.iter().any(|granted| granted.name() == &*name) {
+                    continue;
+                }
+                let granted = match table.iter().find(|(alias, _)| **alias == *name) {
+                    Some((alias, target)) if alias != target => Granted {
+                        name: Arc::clone(alias),
+                        target: Some(Arc::clone(target)),
+                    },
+                    _ => Granted {
+                        name: Arc::from(name.as_ref()),
+                        target: None,
+                    },
+                };
+                if let Some(other) = out.iter().find(|other| other.scope() == granted.scope()) {
+                    return Err(InvalidAlias::SameScope {
+                        list: which,
+                        first: other.name().to_string(),
+                        second: granted.name().to_string(),
+                        scope: granted.scope().to_string(),
+                    });
+                }
+                out.push(granted);
+            }
+            Ok(out)
+        };
+        Ok(Self {
+            reads: list(reads, "reads")?,
+            dispatches: list(dispatches, "dispatches")?,
+            http: Arc::new(http),
+        })
     }
 
-    /// Whether the module may dispatch actions to `scope` (canonical).
-    pub(crate) fn may_dispatch_to(&self, scope: &str) -> bool {
-        self.dispatches.iter().any(|granted| granted == scope)
+    /// The `reads` entry for `name` — the module's own name for a scope,
+    /// canonical — if the module may read (and subscribe to) it.
+    pub(crate) fn readable_as(&self, name: &str) -> Option<&Granted> {
+        self.reads.iter().find(|granted| granted.name() == name)
+    }
+
+    /// The `dispatches` entry for `name` (the module's own name, canonical),
+    /// if the module may dispatch actions to it.
+    pub(crate) fn dispatchable_as(&self, name: &str) -> Option<&Granted> {
+        self.dispatches.iter().find(|granted| granted.name() == name)
     }
 
     /// What the module may request over deferred HTTP.
@@ -125,7 +294,7 @@ impl Grants {
     }
 
     /// The scopes whose snapshots the module is handed on a call.
-    pub(crate) fn readable(&self) -> &[String] {
+    pub(crate) fn readable(&self) -> &[Granted] {
         &self.reads
     }
 }
@@ -244,12 +413,100 @@ mod tests {
         }
     }
 
+    fn names(list: &[Granted]) -> Vec<(&str, &str)> {
+        list.iter().map(|g| (g.name(), g.scope())).collect()
+    }
+
     #[test]
     fn grants_are_canonical_and_deduplicated() {
-        let grants = Grants::from(ModuleGrants::new(["B", "b", "c"], ["Ä"]));
-        assert_eq!(grants.readable(), ["b", "c"]);
-        assert!(grants.may_read("b") && !grants.may_read("B") && !grants.may_read("ä"));
-        assert!(grants.may_dispatch_to("ä") && !grants.may_dispatch_to("b"));
+        let grants = Grants::resolve(ModuleGrants::new(["B", "b", "c"], ["Ä"])).unwrap();
+        assert_eq!(names(grants.readable()), [("b", "b"), ("c", "c")]);
+        assert!(grants.readable_as("b").is_some());
+        assert!(grants.readable_as("B").is_none() && grants.readable_as("ä").is_none());
+        assert!(grants.dispatchable_as("ä").is_some() && grants.dispatchable_as("b").is_none());
+        assert!(grants.readable().iter().all(|g| g.alias().is_none()));
+    }
+
+    fn aliased(reads: &[&str], dispatches: &[&str], aliases: &[(&str, &str)]) -> ModuleGrants {
+        ModuleGrants::new(reads.iter().copied(), dispatches.iter().copied())
+            .with_aliases(aliases.iter().copied().collect())
+    }
+
+    #[test]
+    fn an_alias_says_which_scope_a_granted_name_means() {
+        let grants = Grants::resolve(aliased(
+            &["Cart", "user"],
+            &["cart"],
+            &[("Cart", "Acme__Cart"), ("user", "user"), ("unused", "x")],
+        ))
+        .unwrap();
+        assert_eq!(
+            names(grants.readable()),
+            [("cart", "acme__cart"), ("user", "user")]
+        );
+        let cart = grants.dispatchable_as("cart").unwrap();
+        assert_eq!((cart.scope(), cart.alias().map(|a| &**a)), ("acme__cart", Some("cart")));
+        // The scope's own name is not a name the module has for it, an alias
+        // of a name to itself is no alias, and an alias grants nothing.
+        assert!(grants.readable_as("acme__cart").is_none());
+        assert!(grants.readable_as("user").unwrap().alias().is_none());
+        assert!(grants.readable_as("unused").is_none() && grants.readable_as("x").is_none());
+    }
+
+    #[test]
+    fn aliases_are_not_chained_so_a_swap_is_not_a_cycle() {
+        let grants = Grants::resolve(aliased(&["a", "b"], &[], &[("a", "b"), ("b", "a")])).unwrap();
+        assert_eq!(names(grants.readable()), [("a", "b"), ("b", "a")]);
+    }
+
+    #[test]
+    fn bad_alias_tables_are_refused_with_the_reason() {
+        let err = |grants| Grants::resolve(grants).unwrap_err();
+        assert_eq!(
+            err(aliased(&[], &[], &[("", "x")])),
+            InvalidAlias::Name(String::new())
+        );
+        assert!(matches!(
+            err(aliased(&[], &[], &[("__hypen_x", "x")])),
+            InvalidAlias::Name(_)
+        ));
+        for target in ["", "a:b", "__hypen_scoped"] {
+            assert!(
+                matches!(
+                    err(aliased(&["cart"], &[], &[("cart", target)])),
+                    InvalidAlias::Target { .. }
+                ),
+                "{target:?}"
+            );
+        }
+        assert_eq!(
+            err(aliased(&[], &[], &[("Cart", "a"), ("cart", "b")])),
+            InvalidAlias::Conflict {
+                name: "cart".into(),
+                first: "a".into(),
+                second: "b".into()
+            }
+        );
+        // The same alias twice is not a conflict.
+        assert!(Grants::resolve(aliased(&[], &[], &[("Cart", "a"), ("cart", "A")])).is_ok());
+
+        // An aliased name landing on a scope another granted name already
+        // means: the module would see one scope under two names.
+        let same = err(aliased(&["basket", "cart"], &[], &[("cart", "basket")]));
+        assert_eq!(
+            same,
+            InvalidAlias::SameScope {
+                list: "reads",
+                first: "basket".into(),
+                second: "cart".into(),
+                scope: "basket".into()
+            }
+        );
+        assert!(same.to_string().contains("'basket' and 'cart'"), "{same}");
+        assert!(matches!(
+            err(aliased(&[], &["a", "b"], &[("a", "x"), ("b", "x")])),
+            InvalidAlias::SameScope { list: "dispatches", .. }
+        ));
     }
 
     #[test]

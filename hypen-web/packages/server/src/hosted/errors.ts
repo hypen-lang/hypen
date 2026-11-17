@@ -23,6 +23,10 @@ export type HostedModuleSetupCode =
   | "COMPONENT_INVALID"
   /** The `.hypen` template file does not exist. */
   | "TEMPLATE_MISSING"
+  /** A package's template could not be rewritten to its installed names. */
+  | "TEMPLATE_INVALID"
+  /** A package `namespace` / `as` / `map` entry, or an alias table, that cannot be applied. */
+  | "NAMING_INVALID"
   /** `app.json` is missing, unreadable or malformed. */
   | "MANIFEST_INVALID"
   /** jco could not transpile / the runtime could not compile the component. */

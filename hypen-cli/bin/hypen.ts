@@ -171,6 +171,13 @@ const COMMAND_HELP: Record<string, string> = {
                         ${dim("Pricing.dispatches")}, ${dim("Tax.http")}, ${dim("storage:cloud")}, ${dim("Pricing.all")}, ${dim("all")}
     --only <A,B>        Install only these modules / components
     --as <Name=New>     Install the exported module Name as New; repeatable
+    --map <M.Name=Mod>  Where module M of the package reads or dispatches to
+                        Name (a module the APP provides), use the app's Mod;
+                        repeatable. ${dim("--map Pricing.Cart=Basket")}
+
+  A package is self-contained: only what it EXPORTS (by default its entry)
+  becomes a name in your app (${dim("Checkout {}")}); its other modules are internal
+  and cannot clash with yours, even under the same name.
 
   Without a terminal (CI, pipes) every requested capability needs a flag;
   otherwise the command fails and lists them.
@@ -1924,6 +1931,7 @@ try {
       deny: { type: "string", multiple: true },
       only: { type: "string" },
       as: { type: "string", multiple: true },
+      map: { type: "string", multiple: true },
       name: { type: "string" },
       uninstall: { type: "boolean" },
     },
@@ -2057,6 +2065,7 @@ switch (command) {
           deny: values.deny,
           only: splitNames(values.only),
           as: values.as,
+          map: values.map,
           prompter,
         });
       } finally {

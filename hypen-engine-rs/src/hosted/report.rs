@@ -44,14 +44,25 @@ pub enum Origin {
     Lifecycle(LifecycleHook),
     /// The module emitted it to itself.
     Emit,
-    /// Module `from` dispatched it across modules.
-    CrossDispatch { from: ScopeName },
+    /// Module `from` dispatched it across modules. `addressed_as` is the
+    /// name `from` used for the target when an alias translated it (the
+    /// failure's `scope` is then the scope the alias stands for).
+    CrossDispatch {
+        from: ScopeName,
+        addressed_as: Option<Arc<str>>,
+    },
     /// The module subscribed to `target` at `path`, and that state changed
     /// (written by a reducer, or by the host — see [`CascadeRoot::HostWrite`]).
     SubscriptionChange { target: Arc<str>, path: Arc<str> },
     /// Not a run at all: the module asked to subscribe to `target` at `path`
     /// with this action as `on_change`, and the request itself was refused.
-    SubscribeRequest { target: String, path: String },
+    /// `target` is the name the module used; `scope` the scope an alias
+    /// makes it stand for, when there is one.
+    SubscribeRequest {
+        target: String,
+        path: String,
+        scope: Option<Arc<str>>,
+    },
     /// Not a run at all: the module queued this deferred HTTP request
     /// (`hypen:http/deferred.send`) with the failure's action as `then`, and
     /// the request was refused. `url` is shortened for display.
@@ -298,7 +309,7 @@ impl CascadeFailure {
             },
             FailureCause::DispatchDenied { missing_grant } => {
                 let sender = match origin {
-                    Origin::CrossDispatch { from } => from.as_str(),
+                    Origin::CrossDispatch { from, .. } => from.as_str(),
                     _ => "the sender",
                 };
                 write!(
@@ -357,8 +368,16 @@ impl fmt::Display for CascadeFailure {
             cause,
         } = self;
         let verb = cause.verb();
-        if let Origin::SubscribeRequest { target, path } = origin {
+        if let Origin::SubscribeRequest {
+            target,
+            path,
+            scope: aliased,
+        } = origin
+        {
             write!(f, "[{scope}] subscribe to '{target}'")?;
+            if let Some(aliased) = aliased {
+                write!(f, " (the scope '{aliased}')")?;
+            }
             if !path.is_empty() {
                 write!(f, " at '{path}'")?;
             }
@@ -379,7 +398,14 @@ impl fmt::Display for CascadeFailure {
             | Origin::HttpRequest { .. } => Ok(()),
             Origin::HttpRefusal => write!(f, " (completion of a refused http request)"),
             Origin::Emit => write!(f, " (emitted by '{scope}')"),
-            Origin::CrossDispatch { from } => write!(f, " (dispatched by '{from}')"),
+            Origin::CrossDispatch {
+                from,
+                addressed_as: None,
+            } => write!(f, " (dispatched by '{from}')"),
+            Origin::CrossDispatch {
+                from,
+                addressed_as: Some(name),
+            } => write!(f, " (dispatched by '{from}', which calls it '{name}')"),
             Origin::SubscriptionChange { target, path } if path.is_empty() => {
                 write!(f, " (notification: '{target}' changed)")
             }
@@ -474,7 +500,9 @@ impl LifecycleHook {
 
 impl Origin {
     /// `{ kind, ... }`: `root`, `lifecycle` (`hook`), `emit`, `crossDispatch`
-    /// (`from`), `subscriptionChange` / `subscribeRequest` (`target`, `path`),
+    /// (`from`, and `addressedAs` when an alias translated the target),
+    /// `subscriptionChange` / `subscribeRequest` (`target`, `path`; the
+    /// latter also `scope` when `target` is an alias),
     /// `httpRequest` (`method`, `url`), `httpRefusal`.
     pub fn to_json(&self) -> serde_json::Value {
         use serde_json::json;
@@ -482,14 +510,27 @@ impl Origin {
             Origin::Root => json!({ "kind": "root" }),
             Origin::Lifecycle(hook) => json!({ "kind": "lifecycle", "hook": hook.code() }),
             Origin::Emit => json!({ "kind": "emit" }),
-            Origin::CrossDispatch { from } => {
-                json!({ "kind": "crossDispatch", "from": from.as_str() })
+            Origin::CrossDispatch { from, addressed_as } => {
+                let mut origin = json!({ "kind": "crossDispatch", "from": from.as_str() });
+                if let Some(name) = addressed_as {
+                    origin["addressedAs"] = json!(&**name);
+                }
+                origin
             }
             Origin::SubscriptionChange { target, path } => {
                 json!({ "kind": "subscriptionChange", "target": &**target, "path": &**path })
             }
-            Origin::SubscribeRequest { target, path } => {
-                json!({ "kind": "subscribeRequest", "target": target, "path": path })
+            Origin::SubscribeRequest {
+                target,
+                path,
+                scope,
+            } => {
+                let mut origin =
+                    json!({ "kind": "subscribeRequest", "target": target, "path": path });
+                if let Some(scope) = scope {
+                    origin["scope"] = json!(&**scope);
+                }
+                origin
             }
             Origin::HttpRequest { method, url } => {
                 json!({ "kind": "httpRequest", "method": method, "url": url })
@@ -698,6 +739,7 @@ mod tests {
             "charge",
             Origin::CrossDispatch {
                 from: scope("cart"),
+                addressed_as: None,
             },
             FailureCause::DispatchDenied {
                 missing_grant: "payments".into(),
@@ -714,6 +756,7 @@ mod tests {
             Origin::SubscribeRequest {
                 target: "catalog".into(),
                 path: "prices".into(),
+                scope: None,
             },
             FailureCause::ReadDenied {
                 missing_grant: "catalog".into(),

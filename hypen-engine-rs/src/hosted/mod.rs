@@ -78,7 +78,7 @@ mod tests;
 
 pub use http::{HttpCompletionError, HttpDelivery};
 pub use names::{ActionSet, InvalidName, ScopeName};
-pub use registry::ModuleGrants;
+pub use registry::{InvalidAlias, ModuleGrants};
 pub use report::{
     CascadeFailure, CascadeReport, CascadeRoot, FailureCause, HttpLimit, InvalidState,
     LifecycleHook, Origin, MAX_REPORTED_FAILURES,
@@ -343,7 +343,11 @@ impl HostedModules {
         initial_state: serde_json::Value,
     ) -> Result<(), EngineError> {
         self.reject_during_cascade("register_module_instance")?;
-        let WiringNames { scope, actions } = WiringNames::parse(scope, actions)?;
+        let WiringNames {
+            scope,
+            actions,
+            grants,
+        } = WiringNames::parse(scope, actions, grants)?;
         if !initial_state.is_object() {
             return Err(EngineError::StateError(format!(
                 "[{scope}] module state must be a JSON object"
@@ -358,7 +362,7 @@ impl HostedModules {
         let module = HostedModule {
             id,
             actions,
-            grants: Grants::from(grants),
+            grants,
             wiring: self.next_wiring(),
         };
         self.registry.wire(ctx.core, scope, module);
@@ -376,7 +380,11 @@ impl HostedModules {
         grants: ModuleGrants,
     ) -> Result<(), EngineError> {
         self.reject_during_cascade("rewire_module_instance")?;
-        let WiringNames { scope, actions } = WiringNames::parse(scope, actions)?;
+        let WiringNames {
+            scope,
+            actions,
+            grants,
+        } = WiringNames::parse(scope, actions, grants)?;
         if !ctx.core.modules.contains_key(scope.as_str()) {
             return Err(EngineError::ModuleError(format!(
                 "[{scope}] cannot rewire: no module state registered under this scope"
@@ -387,7 +395,7 @@ impl HostedModules {
         let module = HostedModule {
             id: new_id,
             actions,
-            grants: Grants::from(grants),
+            grants,
             wiring: self.next_wiring(),
         };
         self.registry.wire(ctx.core, scope, module);
@@ -603,16 +611,23 @@ impl HostedModules {
 struct WiringNames {
     scope: ScopeName,
     actions: ActionSet,
+    grants: Grants,
 }
 
 impl WiringNames {
-    /// The one place caller-supplied scope and action names are validated;
-    /// nothing is changed when this fails.
-    fn parse(scope: &str, actions: Vec<String>) -> Result<Self, EngineError> {
+    /// The one place caller-supplied scope, action and alias names are
+    /// validated; nothing is changed when this fails.
+    fn parse(scope: &str, actions: Vec<String>, grants: ModuleGrants) -> Result<Self, EngineError> {
         let invalid = |e: InvalidName| EngineError::ModuleError(e.to_string());
         let scope = ScopeName::parse(scope).map_err(invalid)?;
         let actions = ActionSet::parse(&scope, actions).map_err(invalid)?;
-        Ok(Self { scope, actions })
+        let grants = Grants::resolve(grants)
+            .map_err(|e| EngineError::ModuleError(format!("[{scope}] {e}")))?;
+        Ok(Self {
+            scope,
+            actions,
+            grants,
+        })
     }
 }
 

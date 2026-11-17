@@ -77,6 +77,12 @@ export interface Capabilities {
   http: boolean;
   /** Canonical host patterns `http` is limited to; empty = any host. */
   httpHosts: string[];
+  /**
+   * Which scope a name in `reads` / `dispatches` stands for when it is not
+   * the scope of that name (a module of a namespaced package keeps its own
+   * names for its siblings). Absent for the project's own modules.
+   */
+  aliases?: Readonly<Record<string, string>>;
 }
 
 /** A template-only building block (`Header()`): UI, no wasm, no state scope. */
@@ -143,8 +149,14 @@ export interface PrebuiltModule {
   package?: {
     /** The `wasm.packages` key. */
     from: string;
-    /** Its name in the package (differs from `name` when renamed with `as`). */
+    /**
+     * Its name in the package — what its author wrote and what people are
+     * shown. `name` is what it is INSTALLED as: the same for an exported
+     * module (unless renamed with `as`), namespaced for an internal one.
+     */
     name: string;
+    /** Whether the app's templates may use it. */
+    exported: boolean;
     version: string;
     manifestPath: string;
   };
@@ -157,6 +169,12 @@ export interface PackageModuleGrants {
   storage: GrantableStorage[];
   http: boolean;
   httpHosts: string[];
+  /**
+   * Which module a name in `reads` / `dispatches` means in this app when it
+   * is not the module of that name: a sibling installed under the package's
+   * namespace, or the app module a `map` points it at (lowercase scopes).
+   */
+  aliases: Record<string, string>;
   /** Where the decision is recorded. */
   field: string;
   /**

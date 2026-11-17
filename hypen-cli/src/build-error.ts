@@ -102,6 +102,12 @@ export type BuildErrorCode =
   /** An app template uses a package name the package does not export. */
   | "NOT_EXPORTED"
   /** A rename (`--as`) that cannot be made sound. */
+  /** A package `namespace` / `map` entry (or a name it leads to) that cannot be applied. */
+  | "NAMING_INVALID"
+  /** A package template that cannot be rewritten to its installed names. */
+  | "TEMPLATE_INVALID"
+  /** A `map` that points a name at a module the app does not have. */
+  | "MAP_TARGET_UNKNOWN"
   | "RENAME_UNSOUND"
   /** `--only` leaves out something a selected template needs. */
   | "ONLY_INCOMPLETE"

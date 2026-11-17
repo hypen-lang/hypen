@@ -227,6 +227,9 @@ function manifestOf(definition: HostedModuleDefinition): HostedModuleManifest {
     http: grants.http,
     // Only when narrowed: an older module host ignores a key it does not know.
     ...(grants.httpHosts.length > 0 ? { httpHosts: [...grants.httpHosts] } : {}),
+    // The module host ignores it (the guest and its ACL use the names in
+    // `reads` / `dispatches`); the engine translates through it.
+    ...(grants.aliases !== undefined && Object.keys(grants.aliases).length > 0 ? { aliases: { ...grants.aliases } } : {}),
   };
 }
 
@@ -793,7 +796,8 @@ class SessionRuntime implements HostedModuleSession {
   }
 
   private nameOf(scope: string): string {
-    return this.definitionOf(scope)?.name ?? scope;
+    const definition = this.definitionOf(scope);
+    return definition?.hosted.label ?? definition?.name ?? scope;
   }
 
   /** Deliver a failure after the engine call in progress (if any) returns. */

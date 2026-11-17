@@ -49,6 +49,7 @@ pub mod reactive;
 pub mod reconcile;
 pub mod serialize;
 pub mod state;
+pub mod template_rename;
 
 /// Internal rendering logic shared between Engine and WasmEngine.
 ///
@@ -80,6 +81,8 @@ pub mod uniffi;
 
 pub use agent::{AgentAction, AgentRoute, BoundInput, BACK, BIND_ACTION, NAVIGATE, SET_INPUT};
 pub use engine::{Engine, ModuleGrants};
+pub use module_host::ScopeAliases;
+pub use template_rename::{rename_template_components, RenameError};
 pub use error::EngineError;
 
 pub use ir::{ast_to_ir_node, Element, IRNode, Value};

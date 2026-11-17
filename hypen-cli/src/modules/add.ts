@@ -26,6 +26,7 @@ import {
   locateModulePackage,
   lockEntryOf,
   notCovered,
+  planPackageNames,
   readModulePackage,
   type Capability,
   type LockedPackage,
@@ -127,14 +128,20 @@ export interface RequestedCapability {
   /** `Pricing.reads:Cart` — what `--grant` / `--deny` name. */
   id: string;
   status: TargetStatus | "n/a";
+  /** The app module a `map` points the target at (`Cart` → the app's `Basket`). */
+  mappedTo?: string;
   /** Was not requested when the package was last reviewed. */
   isNew: boolean;
 }
 
+/** `map` per package module: the name its code uses → the app's module. */
+export type PackageMap = ReadonlyMap<string, Readonly<Record<string, string>>>;
+
 function requested(
   selection: PackageSelection,
   appModules: ReadonlySet<string> | null,
-  previous: LockedPackage | undefined
+  previous: LockedPackage | undefined,
+  map: PackageMap
 ): RequestedCapability[] {
   const siblings = new Set(selection.modules.map((m) => m.name.toLowerCase()));
   const out: RequestedCapability[] = [];
@@ -143,15 +150,26 @@ function requested(
     const fresh = before === undefined ? [] : notCovered(module.requests, before.requests).map(capabilityId);
     for (const capability of capabilitiesOf(module.requests)) {
       let status: RequestedCapability["status"] = "n/a";
+      let mappedTo: string | undefined;
       if (capability.kind === "reads" || capability.kind === "dispatches") {
         const target = capability.target.toLowerCase();
-        status = siblings.has(target) ? "same-package" : appModules === null ? "unverified" : appModules.has(target) ? "app" : "missing";
+        // A sibling in the package is always the sibling, whatever the app
+        // has under that name; any other name is the app's to provide —
+        // under that name, or the one a map points it at.
+        if (siblings.has(target)) {
+          status = "same-package";
+        } else {
+          mappedTo = Object.entries(map.get(module.name) ?? {}).find(([name]) => name.toLowerCase() === target)?.[1];
+          const provided = (mappedTo ?? capability.target).toLowerCase();
+          status = appModules === null ? "unverified" : appModules.has(provided) ? "app" : "missing";
+        }
       }
       out.push({
         module: module.name,
         capability,
         id: `${module.name}.${capabilityId(capability)}`,
         status,
+        ...(mappedTo !== undefined ? { mappedTo } : {}),
         isNew: previous !== undefined && (before === undefined || fresh.includes(capabilityId(capability))),
       });
     }
@@ -177,7 +195,8 @@ function patternMatches(pattern: string, item: RequestedCapability): boolean {
 function describe(item: RequestedCapability): string {
   const { text, notable } = describeCapability(item.capability);
   const where =
-    item.status === "same-package" ? " (same package)" : item.status === "unverified" ? " (not checked: this app registers its modules in code)" : "";
+    (item.mappedTo !== undefined ? ` → the app's ${item.mappedTo}` : "") +
+    (item.status === "same-package" ? " (same package)" : item.status === "unverified" ? " (not checked: this app registers its modules in code)" : "");
   return `${text}${where}${notable !== null ? `  ${boldYellow("!")} ${notable}` : ""}${item.isNew ? `  ${boldYellow("NEW")}` : ""}`;
 }
 
@@ -217,7 +236,10 @@ export function renderSummary(
       if (item.status === "missing") {
         const target = (item.capability as { target: string }).target;
         lines.push(
-          `       ${yellow("✗")} ${describeCapability(item.capability).text} — this app has no \`${target}\` module, so this cannot be granted`
+          item.mappedTo !== undefined
+            ? `       ${yellow("✗")} ${describeCapability(item.capability).text} — mapped to \`${item.mappedTo}\`, but this app has no such module, so this cannot be granted`
+            : `       ${yellow("✗")} ${describeCapability(item.capability).text} — this app has no \`${target}\` module, so this cannot be granted ` +
+                dim(`(point it at one of yours: --map ${item.module}.${target}=<Module>)`)
         );
       } else {
         lines.push(`    ${String(++n).padStart(2)}. ${describe(item)}`);
@@ -249,6 +271,13 @@ export interface AddOptions {
   only?: readonly string[];
   /** `Name=NewName` renames of exported modules. */
   as?: readonly string[];
+  /**
+   * `[Module.]Name=AppModule`: where a package module reads or dispatches
+   * to `Name` — a module the APP is expected to provide — use the app's
+   * `AppModule` instead. Without `Module.` it applies to every module of
+   * the package that requests `Name`.
+   */
+  map?: readonly string[];
   prompter: Prompter;
 }
 
@@ -281,6 +310,50 @@ function parseRenames(values: readonly string[]): Map<string, string> {
     renames.set((match[1] as string).trim(), (match[2] as string).trim());
   }
   return renames;
+}
+
+/**
+ * `--map [Module.]Name=AppModule` values as a per-module map.
+ *
+ * @throws {BuildError} `FLAG_INVALID` for a malformed value, a module the
+ *   package does not install, or a name no module requests.
+ */
+function parseMap(values: readonly string[], selection: PackageSelection, from: string): Map<string, Record<string, string>> {
+  const map = new Map<string, Record<string, string>>();
+  const requestsName = (module: ResolvedPackageModule, name: string): boolean =>
+    [...module.requests.reads, ...module.requests.dispatches].some((t) => t.toLowerCase() === name.toLowerCase());
+  for (const value of values) {
+    const match = /^(?:([^.=]+)\.)?([^.=]+)=([^.=]+)$/.exec(value.trim());
+    if (match === null) {
+      throw new BuildError(`--map takes [<Module>.]<Name>=<AppModule> (got "${value}").`, {
+        code: "FLAG_INVALID",
+        hint: "e.g. `hypen add @acme/checkout --map Pricing.Cart=Basket` — where Pricing reads or dispatches to Cart, use the app's Basket",
+      });
+    }
+    const [, moduleName, name, target] = match as unknown as [string, string | undefined, string, string];
+    const candidates = selection.modules.filter((m) => moduleName === undefined || m.name.toLowerCase() === moduleName.trim().toLowerCase());
+    if (moduleName !== undefined && candidates.length === 0) {
+      throw new BuildError(`--map ${value}: ${from} installs no module named "${moduleName}".`, {
+        code: "FLAG_INVALID",
+        hint: `modules: ${selection.modules.map((m) => m.name).join(", ") || "none"}`,
+      });
+    }
+    const users = candidates.filter((m) => requestsName(m, name.trim()));
+    if (users.length === 0) {
+      const all = [...new Set(selection.modules.flatMap((m) => [...m.requests.reads, ...m.requests.dispatches].map((t) => `${m.name}.${t}`)))];
+      throw new BuildError(
+        `--map ${value}: ${moduleName !== undefined ? `${candidates[0]?.name} does not` : "no module of the package does"} read or dispatch to "${name.trim()}".`,
+        { code: "FLAG_INVALID", hint: `a map redirects a name a module requests: ${all.join(", ") || "this package requests none"}` }
+      );
+    }
+    for (const module of users) {
+      // Keyed by the name as the module requests it.
+      const requestedAs =
+        [...module.requests.reads, ...module.requests.dispatches].find((t) => t.toLowerCase() === name.trim().toLowerCase()) ?? name.trim();
+      map.set(module.name, { ...map.get(module.name), [requestedAs]: target.trim() });
+    }
+  }
+  return map;
 }
 
 async function acquire(spec: ModuleSpec, project: AppProject, say: (line: string) => void): Promise<{ from: string; manifestPath: string }> {
@@ -345,8 +418,11 @@ function appModuleScopes(project: AppProject, exceptFrom: string): Set<string> |
     if (decl.from === exceptFrom || decl.source) continue;
     try {
       const other = readModulePackage(locateModulePackage(decl.from, project.dir).manifestPath);
+      const naming = planPackageNames(other.manifest, { namespace: decl.namespace, as: decl.as, from: decl.from });
       for (const module of selectFromPackage(other, decl.only, decl.from, decl.field).modules) {
-        scopes.add((decl.as.get(module.name) ?? module.name).toLowerCase());
+        // Only what the other package EXPORTS is a module of the app.
+        const installed = naming.names.find((n) => n.name === module.name);
+        if (installed?.exported) scopes.add(installed.installed.toLowerCase());
       }
     } catch {
       // A broken sibling package is reported by `hypen dev` / `hypen modules`.
@@ -483,8 +559,11 @@ async function review(options: AddOptions, project: AppProject, from: string, ma
   const renames = options.as !== undefined && options.as.length > 0 ? parseRenames(options.as) : new Map(existing?.as ?? []);
   assertRenamesSound(pkg, selection, renames, from, field);
 
+  const map: PackageMap =
+    options.map !== undefined && options.map.length > 0 ? parseMap(options.map, selection, from) : new Map(existing?.map ?? []);
+
   const previous = project.lock[from];
-  const items = requested(selection, appModuleScopes(project, from), previous);
+  const items = requested(selection, appModuleScopes(project, from), previous, map);
   for (const line of renderSummary(from, pkg, selection, items, previous)) say(line);
   const granted = await decide(items, options, from);
 
@@ -498,9 +577,20 @@ async function review(options: AddOptions, project: AppProject, from: string, ma
   }
   assertStartable(from, selection.modules, decisions);
 
+  // A map entry for a name that was not granted would redirect nothing.
+  const mapJson: Record<string, Record<string, string>> = {};
+  for (const [module, entries] of map) {
+    const grant = decisions.get(module);
+    const kept = Object.entries(entries).filter(([name]) =>
+      [...(grant?.reads ?? []), ...(grant?.dispatches ?? [])].some((t) => t.toLowerCase() === name.toLowerCase())
+    );
+    if (kept.length > 0) mapJson[module] = Object.fromEntries(kept);
+  }
   const entry: Record<string, unknown> = {
+    ...(existing?.namespace !== undefined ? { namespace: existing.namespace } : {}),
     ...(only !== undefined ? { only } : {}),
     ...(renames.size > 0 ? { as: Object.fromEntries(renames) } : {}),
+    ...(Object.keys(mapJson).length > 0 ? { map: mapJson } : {}),
     ...(Object.keys(grants).length > 0 ? { grants } : {}),
   };
   let text: string;

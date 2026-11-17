@@ -319,7 +319,8 @@ fn an_acl_refusal_is_reported_with_the_grant_to_add() {
     assert_eq!(
         failure.origin,
         Origin::CrossDispatch {
-            from: scope("cart")
+            from: scope("cart"),
+            addressed_as: None
         }
     );
     assert!(matches!(
@@ -1393,3 +1394,193 @@ fn the_report_as_json_names_root_origin_and_cause() {
 // Deferred HTTP: admission, requests in flight, completion.
 #[path = "http_tests.rs"]
 mod http;
+
+// ── scope aliases: the module's names, the engine's scopes ──────────────────
+
+/// `pricing` knows a sibling as `cart`; in this app that module lives under
+/// `acme__cart`, next to an unrelated `cart`.
+fn aliased_pricing(reads: &[&str], dispatches: &[&str]) -> ModuleGrants {
+    ModuleGrants::new(reads.iter().copied(), dispatches.iter().copied())
+        .with_aliases([("Cart", "Acme__Cart")].into_iter().collect())
+}
+
+#[test]
+fn a_sibling_snapshot_goes_over_under_the_modules_own_name() {
+    let mut fx = Fixture::new();
+    fx.module("cart", &[], ModuleGrants::none(), |_| Ok(with_state(json!({ "who": "app" }))));
+    fx.module("acme__cart", &["set"], ModuleGrants::none(), |_| {
+        Ok(with_state(json!({ "who": "package" })))
+    });
+    fx.dispatch("acme__cart", "set").unwrap();
+    fx.module("pricing", &["price"], aliased_pricing(&["cart"], &[]), |_| {
+        Ok(ReducerOutput::default())
+    });
+    fx.dispatch("pricing", "price").unwrap();
+
+    let seen = fx.script.lock().unwrap().seen.last().cloned().unwrap();
+    assert_eq!(seen.siblings, [("cart".to_string(), json!({ "who": "package" }))]);
+
+    // The encoded-state cache is keyed by scope, not by the alias: a second
+    // call is handed the same (non-empty) bytes.
+    fx.dispatch("pricing", "price").unwrap();
+    let seen = fx.script.lock().unwrap().seen.last().cloned().unwrap();
+    assert_eq!(seen.siblings, [("cart".to_string(), json!({ "who": "package" }))]);
+}
+
+#[test]
+fn a_cross_dispatch_to_an_aliased_name_runs_in_the_scope_it_stands_for() {
+    let mut fx = Fixture::new();
+    let app_cart = fx.module("cart", &["add"], ModuleGrants::none(), |_| Ok(Default::default()));
+    let pkg_cart = fx.module("acme__cart", &["add"], ModuleGrants::none(), |_| {
+        Ok(Default::default())
+    });
+    let pricing = fx.module("pricing", &["go"], aliased_pricing(&[], &["cart"]), |_| {
+        Ok(cross("Cart", "add"))
+    });
+    fx.dispatch("pricing", "go").unwrap();
+    assert_eq!(
+        fx.calls(),
+        [(pricing, "go".to_string()), (pkg_cart, "add".to_string())]
+    );
+    let _ = app_cart;
+}
+
+#[test]
+fn the_scopes_real_name_is_not_a_name_the_module_was_granted() {
+    let mut fx = Fixture::new();
+    fx.module("acme__cart", &["add"], ModuleGrants::none(), |_| Ok(Default::default()));
+    fx.module("pricing", &["go"], aliased_pricing(&["cart"], &["cart"]), |_| {
+        let mut out = cross("acme__cart", "add");
+        out.subscribe_requests = subscribe("acme__cart", "", "go").subscribe_requests;
+        Ok(out)
+    });
+    let message = message(fx.dispatch("pricing", "go"));
+    assert!(
+        message.contains("'pricing' has no `dispatches` grant on 'acme__cart'"),
+        "{message}"
+    );
+    assert!(message.contains("no `reads` grant on 'acme__cart'"), "{message}");
+    assert_eq!(fx.report().failure_count(), 2);
+}
+
+#[test]
+fn a_failure_behind_an_alias_names_both_the_scope_and_the_modules_name_for_it() {
+    let mut fx = Fixture::new();
+    // The alias points at a scope nothing is registered under.
+    fx.module("pricing", &["go"], aliased_pricing(&[], &["cart"]), |_| Ok(cross("cart", "add")));
+    assert_eq!(
+        message(fx.dispatch("pricing", "go")),
+        "module cascade from [pricing] go finished with 1 failure(s):\n  - [acme__cart] 'add' \
+         refused: no hosted module under scope 'acme__cart' (dispatched by 'pricing', which \
+         calls it 'cart')"
+    );
+    let [failure] = fx.report().failures() else {
+        panic!("one failure")
+    };
+    assert_eq!(
+        failure.origin,
+        Origin::CrossDispatch {
+            from: scope("pricing"),
+            addressed_as: Some(Arc::from("cart")),
+        }
+    );
+    assert_eq!(
+        failure.origin.to_json(),
+        json!({ "kind": "crossDispatch", "from": "pricing", "addressedAs": "cart" })
+    );
+}
+
+#[test]
+fn a_subscription_to_an_aliased_name_watches_the_scope_it_stands_for() {
+    let mut fx = Fixture::new();
+    fx.module("cart", &["set"], ModuleGrants::none(), |_| Ok(with_state(json!({ "n": 1 }))));
+    fx.module("acme__cart", &["set"], ModuleGrants::none(), |_| {
+        Ok(with_state(json!({ "n": 2 })))
+    });
+    let pricing = fx.module("pricing", &["changed"], aliased_pricing(&["cart"], &[]), |seen| {
+        Ok(if seen.action == ACTIVATED {
+            subscribe("Cart", "n", "changed")
+        } else {
+            ReducerOutput::default()
+        })
+    });
+    fx.lifecycle("pricing", LifecycleHook::Activated).unwrap();
+    fx.calls();
+
+    // The app's own `cart` changing is not what `pricing` watches.
+    fx.dispatch("cart", "set").unwrap();
+    assert!(!fx.calls().contains(&(pricing, "changed".to_string())));
+
+    fx.dispatch("acme__cart", "set").unwrap();
+    assert!(fx.calls().contains(&(pricing, "changed".to_string())));
+
+    // A host write to the scope notifies too.
+    fx.host_write("acme__cart", json!({ "n": 3 }));
+    assert_eq!(fx.calls(), [(pricing, "changed".to_string())]);
+}
+
+#[test]
+fn a_refused_subscription_through_an_alias_shows_the_scope() {
+    let mut fx = Fixture::new();
+    fx.module("pricing", &["go"], aliased_pricing(&["cart"], &[]), |_| {
+        Ok(subscribe("cart", "n", "not-an-action"))
+    });
+    let message = message(fx.dispatch("pricing", "go"));
+    assert!(
+        message.contains(
+            "[pricing] subscribe to 'cart' (the scope 'acme__cart') at 'n' refused: on_change \
+             'not-an-action' is not an action of 'pricing'"
+        ),
+        "{message}"
+    );
+    assert_eq!(
+        fx.report().failures()[0].origin.to_json(),
+        json!({ "kind": "subscribeRequest", "target": "cart", "path": "n", "scope": "acme__cart" })
+    );
+}
+
+#[test]
+fn an_alias_reaches_an_in_process_scope_like_any_other_target() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let mut fx = Fixture::new();
+    fx.core.register_module(
+        "basket",
+        ModuleInstance::new(Module::new("basket"), json!({ "items": 2 })),
+    );
+    let delivered = Arc::new(AtomicUsize::new(0));
+    let count = Arc::clone(&delivered);
+    let handler = crate::action_routing::scoped_action_name("basket", "add");
+    fx.core.note_handler(&handler);
+    fx.closures.on(handler, move |action| {
+        assert_eq!(action.sender.as_deref(), Some("pricing"));
+        count.fetch_add(1, Ordering::SeqCst);
+    });
+    let grants = ModuleGrants::new(["Cart"], ["Cart"])
+        .with_aliases([("cart", "basket")].into_iter().collect());
+    fx.module("pricing", &["go"], grants, |_| Ok(cross("cart", "add")));
+    fx.dispatch("pricing", "go").unwrap();
+    assert_eq!(delivered.load(Ordering::SeqCst), 1);
+    let seen = fx.script.lock().unwrap().seen.last().cloned().unwrap();
+    assert_eq!(seen.siblings, [("cart".to_string(), json!({ "items": 2 }))]);
+}
+
+#[test]
+fn an_invalid_alias_table_wires_nothing() {
+    let mut fx = Fixture::new();
+    let grants = ModuleGrants::new(["basket", "cart"], [""; 0])
+        .with_aliases([("cart", "basket")].into_iter().collect());
+    let (hosted, mut ctx) = fx.parts();
+    let error = hosted
+        .register(&mut ctx, "pricing", ModuleInstanceId(9), vec![], grants, json!({}))
+        .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        EngineError::ModuleError(
+            "[pricing] `reads` names 'basket' and 'cart', which both stand for the scope \
+             'basket' — keep one of them, or point the alias somewhere else"
+                .into()
+        )
+        .to_string()
+    );
+    assert!(fx.hosted.is_empty() && fx.core.get_module_state("pricing").is_none());
+}

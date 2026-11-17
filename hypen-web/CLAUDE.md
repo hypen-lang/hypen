@@ -201,6 +201,13 @@ lives:
 - `packages/server/src/hosted/define.ts` — `loadWasmPackage(from, { grants, only, checkLock })`,
   `wasmModule({ from, name, grants })`, `wasmModuleFromManifest()`. Requests are never applied by
   themselves; a lock entry for `from` in `<baseDir>/hypen.lock.json` turns on the drift check.
+- Names (same file): `planPackageNames` (exported names as written or per `as`; internal ones
+  under the package's namespace, `AcmeCheckout__Cart`), `moduleAliases` (per module: the names its
+  code uses → the scopes they mean here, incl. a `map` to an app module). `loadWasmPackage`
+  applies both — templates rewritten by `hosted/template-rename.ts` (the engine parser's
+  `renameTemplateComponents`), `HostedModuleGrants.aliases` handed to the engine through
+  `manifestOf` (`runtime.ts`), `HostedModuleSpec.label` for diagnostics. `wasmModule()` accepts
+  `grants.aliases` directly; `RemoteServer.assertHostedGrants` checks the alias target exists.
 - `RemoteServer.components({ Name: template })` registers template-only components that do not
   live in the `.source()` directory (a package's stateless components).
 - Tests: `tests/hosted-module-packages.test.ts`.

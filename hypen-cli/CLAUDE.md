@@ -146,7 +146,7 @@ and never exits. Layout, one responsibility per file:
 | `shim-contract.ts` | Compile-time only: the shim's `ShimHttp` is `@hypen-space/core`'s `ModuleHttp` (what authors type against) |
 | `module-package.ts` | GENERATED copy of `hypen-web/packages/server/src/hosted/module-package.ts` (same sync script; its one differing line is the `./http-grammar.js` import): the `hypen-modules.json` manifest + `hypen.lock.json` model — `ModuleRequests` vs `ModuleGrant` (branded, not interchangeable), `Capability` + `describeCapability` (the one human rendering), `readModulePackage` (shape, path confinement, integrity), `locateModulePackage`, `packageDrift` / `assertNoDrift`. Do not edit |
 | `component-imports.ts` | Reads a component's top-level imports from its bytes (no dependency, nothing executed) and maps them to link-time capabilities (`linkRequirements`) |
-| `packages.ts` | `wasm.packages` in an app: `resolveHosted` (legacy prebuilt + every package → `PrebuiltModule[]` + template-only components; lock/drift, link-time grants, name collisions across packages and with the app, exports), `selectFromPackage` (`only` + closure), `assertRenamesSound` (`as`), `templateRefs`, `appComponents` |
+| `packages.ts` | `wasm.packages` in an app: `resolveHosted` (legacy prebuilt + every package → `PrebuiltModule[]` + template-only components under their installed names; lock/drift, link-time grants, namespacing + aliases + `map`, collisions of exported names across packages and with the app, exports), `selectFromPackage` (`only` + closure), `assertRenamesSound` (`as`: exported names only), `renameTemplate`, `templateRefs`, `appComponents` |
 | `http-grammar.ts` | GENERATED copy of `hypen-web/packages/module-host/src/http.ts` (URL / host-pattern grammar; `bun hypen-web/scripts/sync-http-grammar.ts`, checked by `tests/http-grammar-sync.test.ts`). Do not edit |
 | `shims/module_shim.go` | The Go shim template; a gofmt-valid file whose three `hypen.invalid/...` imports `renderGoShim` replaces |
 
@@ -214,7 +214,7 @@ tier / HTTP import is `UNDECLARED_IMPORT`, an unused declaration a warning.
 An app uses packages through `wasm.packages.<from>` (`PackageDeclaration` in
 `config.ts`; the key is an npm name or a path): `grants.<Module>` (the
 recorded decision, same parser as `wasm.modules` entries), `only`, `as`,
-and for a module project in the same repo `source: true` (+ `trust`,
+`map`, `namespace`, and for a module project in the same repo `source: true` (+ `trust`,
 default `"requested"`: granted what its manifest requests; + `fallback`: a
 built package used when the toolchain is missing or
 `HYPEN_NO_SOURCE_BUILD=1`). `buildSourcePackage` (in `wasm/build.ts`) runs
@@ -229,9 +229,35 @@ package components ship as stateless entries) and the server-based build
 (`NOT_RECORDED`); more requests than recorded is `REQUESTS_CHANGED`, changed
 bytes under the recorded version `INTEGRITY_MISMATCH`, an ungranted
 link-time import `UNGRANTED_IMPORT` (field + `hypen add … --grant` fix).
-A renamed (`as`) module is hosted with its template's `module <Name>`
-declaration rewritten (`renameTemplateModule`; the engine keys the scope by
-it) and passed inline (`ui`).
+
+**A package is self-contained** (`planPackageNames` / `moduleAliases` in
+`module-package.ts`, applied in `resolveUse`). The names a package EXPORTS
+(default: its entry) are installed as written, or under the name `as` gives
+them, and are the only ones checked against the app and other packages
+(`MODULE_NAME_COLLISION`). Every other module / component is internal and
+installed under the package's namespace — `Cart` of `@acme/checkout` is the
+component `AcmeCheckout__Cart`, scope `acmecheckout__cart`
+(`packageNamespace`; `"namespace"` in the declaration overrides it; two
+packages with one namespace collide). So `PrebuiltModule.name` /
+`PackageComponentUse.name` are INSTALLED names; `module.package.name` /
+`packageName` are the package's own, and everything shown to a person
+(`hypen modules`, the consent screen, the dev banner, reload lines, the
+server's failures via `label`) uses those. Templates are rewritten to the
+installed names with the engine's parser (`renameTemplate` →
+`renameTemplateComponents` of `@hypen-space/server`; never a regex) and
+always passed inline (`ui`). Each module carries `grants.aliases` — the
+names its code uses for siblings (and for app modules a `map` redirects) →
+the scopes they mean here — which `dev-hosted.ts` passes to `wasmModule`
+and the wasm build writes to `app.json` (`aliases`; `reads` / `dispatches`
+keep the module's own names). `"map": { "Pricing": { "Cart": "Basket" } }`
+(`hypen add --map [Module.]Name=AppModule`) points a name the APP provides
+at one of its modules: only for a granted name that is not a sibling
+(`NAMING_INVALID`), to an existing stateful module (`MAP_TARGET_UNKNOWN`).
+An app template using an internal name, or a package template using
+another package's internal, is `NOT_EXPORTED`. The TS builder's discovery
+unregisters what `loadDiscoveredComponents` added to the process-wide
+module registry, so building a source package inside `hypen dev` leaves no
+stand-in under its names.
 
 The commands live in `src/modules/`: `add.ts` (`ModuleSpec` union: dir |
 manifest | tarball | npm | installed; `acquire` → `review`: summary,

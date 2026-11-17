@@ -79,6 +79,7 @@ impl HostedModules {
                             origin: Origin::SubscribeRequest {
                                 target: request.target,
                                 path: request.path,
+                                scope: None,
                             },
                             cause: FailureCause::UnknownModule,
                         });
@@ -112,34 +113,39 @@ impl HostedModules {
         // 4b. Cross-dispatch needs the sender's `dispatches` grant on the
         //     target, re-checked here whatever the host enforced.
         for (target, action) in cross_dispatch {
+            // `target` is the sender's own name for a scope; its grant entry
+            // says which scope that is.
             let target = canonical_scope(&target);
-            let origin = Origin::CrossDispatch {
-                from: scope.clone(),
-            };
             let granted = self
                 .registry
                 .get(scope.as_str())
-                .is_some_and(|module| module.grants.may_dispatch_to(&target));
-            if !granted {
+                .and_then(|module| module.grants.dispatchable_as(&target));
+            let Some(granted) = granted else {
                 cascade.fail(CascadeFailure {
                     scope: target.to_string(),
                     action: action.name,
-                    origin,
+                    origin: Origin::CrossDispatch {
+                        from: scope.clone(),
+                        addressed_as: None,
+                    },
                     cause: FailureCause::DispatchDenied {
                         missing_grant: target.into_owned(),
                     },
                 });
                 continue;
-            }
+            };
             cascade.admit_cross_dispatch(
                 &self.registry,
                 ctx.closures,
                 ctx.core,
                 scope,
                 FollowUp {
-                    target: &target,
+                    target: granted.scope(),
                     action,
-                    origin,
+                    origin: Origin::CrossDispatch {
+                        from: scope.clone(),
+                        addressed_as: granted.alias().cloned(),
+                    },
                     caused_at_depth: depth,
                 },
             );

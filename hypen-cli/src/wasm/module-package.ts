@@ -70,7 +70,9 @@ export type ModulePackageErrorCode =
   /** The package is used but was never reviewed (no lock entry). */
   | "NOT_RECORDED"
   /** A module name that the package does not have. */
-  | "UNKNOWN_PACKAGE_MODULE";
+  | "UNKNOWN_PACKAGE_MODULE"
+  /** A `namespace`, `as` or `map` entry that cannot be applied. */
+  | "NAMING_INVALID";
 
 export interface ModulePackageErrorInfo {
   code: ModulePackageErrorCode;
@@ -830,6 +832,224 @@ export function locateModulePackage(from: string, baseDir: string): PackageLocat
     package: from,
     hint: `install the project's dependencies (bun install / npm install), or add it with \`hypen add ${from}\``,
   });
+}
+
+// ── names: a package in an app's namespace ──────────────────────────────────
+//
+// Engine scopes and component names are global to an app, so what a package
+// brings must not depend on the app (or another package) having no module of
+// the same name. The rule:
+//
+// - an EXPORTED name is the package's public API: it is installed as written
+//   (`Checkout {}` in the app's templates), or under the name `as` gives it;
+// - every other name is INTERNAL and installed under the package's
+//   namespace: `Cart` of `@acme/checkout` is the component
+//   `AcmeCheckout__Cart`, state scope `acmecheckout__cart`.
+//
+// Nothing inside the package changes. Its templates are rewritten when they
+// are loaded (component tags and the `module X` declaration — by the engine's
+// parser, `renameTemplateComponents`), and its code keeps calling siblings by
+// the names it was written with: each module gets an alias table
+// (`aliases`: the name its code uses → the scope it means here) that the
+// engine applies at the module-host boundary.
+
+/** Between a package's namespace and an internal name: `AcmeCheckout__Cart`. */
+export const NAMESPACE_SEPARATOR = "__";
+
+/**
+ * The namespace a package's internal names live under, from its manifest
+ * name: `@acme/checkout` → `AcmeCheckout`, `checkout-flow` → `CheckoutFlow`.
+ * Always a component name without `_`, so `<namespace>__<Name>` reads back
+ * unambiguously.
+ */
+export function packageNamespace(name: string): string {
+  const words = name.split(/[^A-Za-z0-9]+/).filter((w) => w !== "");
+  const joined = words.map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join("");
+  if (joined === "") return "Package";
+  return /^[0-9]/.test(joined) ? `P${joined}` : joined;
+}
+
+/** Why `raw` cannot be a namespace, or `null` when it can. */
+export function namespaceProblem(raw: unknown): string | null {
+  if (typeof raw !== "string" || raw === "") return "a namespace must be a non-empty string";
+  if (!/^[A-Za-z][A-Za-z0-9]*$/.test(raw)) {
+    return `"${raw}" is not a namespace (letters and digits, starting with a letter — e.g. "AcmeCheckout")`;
+  }
+  return null;
+}
+
+/** How one name of a package is installed in an app. */
+export interface InstalledName {
+  /** The name in the package (what its author wrote, what `hypen modules` shows). */
+  name: string;
+  /** The component name / (lowercased) state scope it has in the app. */
+  installed: string;
+  /** Whether the app's templates may use it. */
+  exported: boolean;
+}
+
+/** The names of a package as installed in one app. */
+export interface PackageNaming {
+  namespace: string;
+  /** Every module and component of the package, in manifest order. */
+  names: InstalledName[];
+  /** `name in the package → installed name` for the names that change: the template renames. */
+  renames: Record<string, string>;
+}
+
+export interface PackageNamingOptions {
+  /** Override the namespace derived from the manifest's name. */
+  namespace?: string;
+  /** Renames of EXPORTED names: name in the package → name in the app. */
+  as?: ReadonlyMap<string, string> | Readonly<Record<string, string>>;
+  /** For messages: the package as the app refers to it. Default: the manifest's name. */
+  from?: string;
+}
+
+const entriesOf = (map: ReadonlyMap<string, string> | Readonly<Record<string, string>> | undefined): Array<[string, string]> =>
+  map === undefined ? [] : map instanceof Map ? [...map.entries()] : Object.entries(map as Record<string, string>);
+
+/**
+ * Decide the installed name of everything in a package.
+ *
+ * @throws {ModulePackageError} `NAMING_INVALID`: a bad `namespace`, an `as`
+ *   entry that names nothing exported or is not a component name, or two
+ *   names that would be installed as the same component / scope.
+ */
+export function planPackageNames(manifest: PackageManifest, options: PackageNamingOptions = {}): PackageNaming {
+  const from = options.from ?? manifest.name;
+  const bad = (message: string, info: { module?: string; field?: string; hint: string }): ModulePackageError =>
+    new ModulePackageError(`${from}: ${message}`, { code: "NAMING_INVALID", package: from, ...info });
+
+  if (options.namespace !== undefined) {
+    const problem = namespaceProblem(options.namespace);
+    if (problem !== null) throw bad(problem, { field: "namespace", hint: `e.g. "namespace": "${packageNamespace(manifest.name)}"` });
+  }
+  const namespace = options.namespace ?? packageNamespace(manifest.name);
+  const all = [...manifest.modules.map((m) => m.name), ...manifest.components.map((c) => c.name)];
+  const isExported = (name: string): boolean => manifest.exports.some((e) => sameName(e, name));
+
+  const as = new Map<string, string>();
+  for (const [name, renamed] of entriesOf(options.as)) {
+    const known = all.find((n) => sameName(n, name));
+    if (known === undefined) {
+      throw bad(`cannot install "${name}" as "${renamed}": the package has nothing of that name (it has: ${all.join(", ")})`, {
+        module: name,
+        field: `as.${name}`,
+        hint: "fix the name",
+      });
+    }
+    if (!isExported(known)) {
+      throw bad(
+        `cannot install "${known}" as "${renamed}": it is internal to the package (exports: ${manifest.exports.join(", ") || "nothing"})`,
+        {
+          module: known,
+          field: `as.${name}`,
+          hint: `internal names are namespaced (${namespace}${NAMESPACE_SEPARATOR}${known}) and never clash with the app's; only exported names are renamed`,
+        }
+      );
+    }
+    const problem = moduleNameProblem(renamed);
+    if (problem !== null) throw bad(`cannot install "${known}" as "${renamed}": ${problem}`, { module: known, field: `as.${name}`, hint: `e.g. ${known}2` });
+    as.set(known, renamed);
+  }
+
+  const names: InstalledName[] = all.map((name) => {
+    const exported = isExported(name);
+    return { name, installed: exported ? (as.get(name) ?? name) : `${namespace}${NAMESPACE_SEPARATOR}${name}`, exported };
+  });
+  const seen = new Map<string, InstalledName>();
+  for (const entry of names) {
+    const other = seen.get(entry.installed.toLowerCase());
+    if (other !== undefined) {
+      throw bad(
+        `"${entry.name}" and "${other.name}" would both be installed as "${entry.installed}"`,
+        { module: entry.name, field: "as", hint: "choose another name in `as`" }
+      );
+    }
+    seen.set(entry.installed.toLowerCase(), entry);
+  }
+  const renames: Record<string, string> = {};
+  for (const entry of names) if (entry.installed !== entry.name) renames[entry.name] = entry.installed;
+  return { namespace, names, renames };
+}
+
+/** The installed name of `name` (compared case-insensitively), if the package has it. */
+export function installedNameOf(naming: PackageNaming, name: string): InstalledName | undefined {
+  return naming.names.find((n) => sameName(n.name, name));
+}
+
+/** The package-relative name behind an installed name, if `installed` is one of this package's. */
+export function packageNameOf(naming: PackageNaming, installed: string): InstalledName | undefined {
+  return naming.names.find((n) => sameName(n.installed, installed));
+}
+
+/**
+ * The alias table of one module of a package: for every module it may read
+ * or dispatch to (`access`: its grant), the engine scope that name means in
+ * this app — when that is not simply the scope of the name.
+ *
+ * - a sibling in the package → its installed name;
+ * - a module the app provides → the app's module of that name, or the one
+ *   `map` points the name at (`{ Cart: "Basket" }`).
+ *
+ * Keys and values are lowercase scopes. Empty for a module whose names all
+ * mean themselves.
+ *
+ * @throws {ModulePackageError} `NAMING_INVALID`: a `map` entry for a name
+ *   the module does not use, for a sibling in the package, or to something
+ *   that is not a module name — or two names that end up meaning one scope.
+ */
+export function moduleAliases(
+  naming: PackageNaming,
+  module: string,
+  access: Pick<CapabilitySet, "reads" | "dispatches">,
+  map: Readonly<Record<string, string>> = {},
+  from = "the package"
+): Record<string, string> {
+  const bad = (message: string, name: string, hint: string): ModulePackageError =>
+    new ModulePackageError(`${from}: ${message}`, { code: "NAMING_INVALID", package: from, module, field: `map.${module}.${name}`, hint });
+  const used = [...access.reads, ...access.dispatches.filter((d) => !access.reads.some((r) => sameName(r, d)))];
+  for (const [name, target] of Object.entries(map)) {
+    const sibling = installedNameOf(naming, name);
+    if (sibling !== undefined) {
+      throw bad(
+        `cannot map "${name}" of ${module} to "${target}": "${sibling.name}" is a module of the package itself`,
+        name,
+        "a map points a name the package expects the APP to provide at one of the app's modules; a package's own modules are not replaceable"
+      );
+    }
+    if (!used.some((u) => sameName(u, name))) {
+      throw bad(
+        `cannot map "${name}" of ${module} to "${target}": ${module} is not granted "${name}"` +
+          (used.length > 0 ? ` (it may reach: ${used.join(", ")})` : " (it reaches no other module)"),
+        name,
+        `a map says which module a granted name means; grant "${name}" first, or remove the entry`
+      );
+    }
+    const problem = moduleNameProblem(target);
+    if (problem !== null) throw bad(`cannot map "${name}" of ${module}: ${problem}`, name, `e.g. "${name}": "Basket"`);
+  }
+  const aliases: Record<string, string> = {};
+  for (const list of [access.reads, access.dispatches]) {
+    const scopes = new Map<string, string>();
+    for (const name of list) {
+      const sibling = installedNameOf(naming, name);
+      const mapped = Object.entries(map).find(([key]) => sameName(key, name))?.[1];
+      const scope = (sibling?.installed ?? mapped ?? name).toLowerCase();
+      const other = scopes.get(scope);
+      if (other !== undefined && !sameName(other, name)) {
+        throw bad(
+          `"${other}" and "${name}" of ${module} would both mean the module "${scope}"`,
+          name,
+          "a module reaches each module under one name: point the map somewhere else, or drop one of the two grants"
+        );
+      }
+      scopes.set(scope, name);
+      if (scope !== name.toLowerCase()) aliases[name.toLowerCase()] = scope;
+    }
+  }
+  return aliases;
 }
 
 // ── the lock: what was reviewed ─────────────────────────────────────────────

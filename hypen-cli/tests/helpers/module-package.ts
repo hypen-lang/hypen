@@ -91,17 +91,30 @@ export const MIRROR_UI = `module Mirror {
   Column {
     Text("Seen: @{state.seen}")
     Button { Text("Bump the counter") }.onClick(@actions.bump)
+    Counter {}
     Stamp()
+  }
+}`;
+
+/** The root of {@link boardPackage}: it composes the package's other two modules. */
+export const BOARD_UI = `// Board is the package's root: it places Mirror and Counter
+module Board {
+  Column {
+    Text("Board: @{state.count} (Counter and Mirror are inside)")
+    Button { Text("Board +1") }.onClick(@actions.increment)
+    Mirror {}
   }
 }`;
 
 export const STAMP_UI = `Text("from the counters package")`;
 
 /**
- * The standard two-module package: `Mirror` (the entry) reads and
- * dispatches to its sibling `Counter`, whose component imports the `cloud`
- * storage tier; Mirror's template uses the template-only, internal `Stamp`.
- * Both modules are exported (an app renders each from its own template).
+ * The standard two-module package, self-contained: `Mirror` is its root
+ * (the entry and — by default — its only export). Mirror's template places
+ * its sibling `Counter` and the template-only `Stamp`; Mirror's code reads,
+ * dispatches to and subscribes to `counter` by that name; Counter's
+ * component imports the `cloud` storage tier. An app uses ONE tag,
+ * `Mirror {}`; Counter and Stamp are internal to the package.
  */
 export function countersPackage(overrides: Partial<FixturePackage> = {}): FixturePackage {
   return {
@@ -109,12 +122,44 @@ export function countersPackage(overrides: Partial<FixturePackage> = {}): Fixtur
     version: "1.2.0",
     description: "A counter and a module that mirrors it",
     entry: "Mirror",
-    exports: ["Mirror", "Counter"],
     modules: [
       { name: "Mirror", wasm: "mirror_module.wasm", template: MIRROR_UI, requests: { reads: ["Counter"], dispatches: ["Counter"] } },
       { name: "Counter", wasm: "counter_module.wasm", template: COUNTER_UI, requests: { storage: ["cloud"] } },
     ],
     components: [{ name: "Stamp", template: STAMP_UI }],
+    ...overrides,
+  };
+}
+
+/** Mirror's template in {@link flatCountersPackage}: it does not place Counter. */
+export const FLAT_MIRROR_UI = MIRROR_UI.replace("    Counter {}\n", "");
+
+/**
+ * The same two modules as a FLAT package: both are exported and the app
+ * places each in its own template (`Mirror {}` and `Counter {}`); Mirror
+ * still reads and dispatches to its sibling. `Stamp` stays internal.
+ */
+export function flatCountersPackage(overrides: Partial<FixturePackage> = {}): FixturePackage {
+  const counters = countersPackage();
+  return {
+    ...counters,
+    exports: ["Mirror", "Counter"],
+    modules: counters.modules.map((m) => (m.name === "Mirror" ? { ...m, template: FLAT_MIRROR_UI } : m)),
+    ...overrides,
+  };
+}
+
+/**
+ * {@link countersPackage} under a third module, `Board`, that is the root:
+ * Board → Mirror → Counter. Only `Board` is exported.
+ */
+export function boardPackage(overrides: Partial<FixturePackage> = {}): FixturePackage {
+  const counters = countersPackage();
+  return {
+    ...counters,
+    name: "@acme/board",
+    entry: "Board",
+    modules: [{ name: "Board", wasm: "seeded_module.wasm", template: BOARD_UI }, ...counters.modules],
     ...overrides,
   };
 }

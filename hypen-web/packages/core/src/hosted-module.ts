@@ -51,6 +51,13 @@ export interface HostedModuleGrants {
    * either with `:port`), in canonical form. Empty = any host.
    */
   readonly httpHosts: readonly string[];
+  /**
+   * What a name in `reads` / `dispatches` means when it is not the scope of
+   * that name (lowercase name → lowercase scope). Set for the modules of a
+   * namespaced package and by a `map`; the engine applies it. Absent = every
+   * name is its own scope.
+   */
+  readonly aliases?: Readonly<Record<string, string>>;
 }
 
 /** Where a hosted module's component bytes come from. */
@@ -79,6 +86,13 @@ export interface HostedModuleSpec {
    * `wasmModule({ name: "Pricing" }).grants`.
    */
   readonly grantsAt: string;
+  /**
+   * The name people know the module by, when that is not `name`: an
+   * internal module of a package is registered under a namespaced name
+   * (`AcmeCheckout__Cart`) and reported as `Cart`. Diagnostics use this;
+   * the scope stays available on every failure for disambiguation.
+   */
+  readonly label?: string;
 }
 
 /**

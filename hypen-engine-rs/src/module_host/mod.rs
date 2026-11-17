@@ -31,8 +31,10 @@ use std::fmt;
 // storage on the JS side).
 #[cfg(all(feature = "module-loader", not(target_arch = "wasm32")))]
 mod kv;
+mod aliases;
 mod http;
 mod registry;
+pub use aliases::ScopeAliases;
 pub use http::{
     base64_encode, is_host_owned_header, HostPattern, HttpDenial, HttpEffect, HttpFailure,
     HttpFailureKind, HttpGrant, HttpOutcome, HttpRequest, HttpRequestError, HttpRequestId,
@@ -218,6 +220,12 @@ pub struct ModuleManifest {
     /// request.
     #[serde(rename = "httpHosts", alias = "http_hosts")]
     pub http_hosts: Vec<HostPattern>,
+    /// What the names in `reads` / `dispatches` mean in this app, where that
+    /// is not the scope of the same name: `{ "cart": "acme__cart" }`. The
+    /// module and its host only ever see the names; the engine translates
+    /// them (see [`ScopeAliases`]). Omitted = every name is its own scope.
+    #[serde(skip_serializing_if = "ScopeAliases::is_empty")]
+    pub aliases: ScopeAliases,
 }
 
 impl ModuleManifest {
@@ -234,6 +242,7 @@ impl ModuleManifest {
             dispatches: Vec::new(),
             http: true,
             http_hosts: Vec::new(),
+            aliases: ScopeAliases::new(),
         }
     }
 

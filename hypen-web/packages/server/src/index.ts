@@ -104,6 +104,8 @@ export {
   DEFAULT_MAX_CONCURRENT_HTTP_REQUESTS,
   httpTargetNetwork,
   httpHostsNameExplicitly,
+  renameTemplateComponents,
+  packageNamespace,
 } from "./hosted/index.js";
 export type {
   WasmModuleOptions,
@@ -116,6 +118,7 @@ export type {
   ModuleRequests,
   ModuleGrant,
   Capability,
+  InstalledName,
   WasmKind,
   HostedModuleSetupCode,
   HostedModuleSetupInfo,

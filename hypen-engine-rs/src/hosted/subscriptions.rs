@@ -69,30 +69,33 @@ impl Subscriptions {
             path,
             on_change,
         } = request;
-        let target = canonical_scope(&target);
-        let cause = if !module.grants.may_read(&target) {
-            Some(FailureCause::ReadDenied {
-                missing_grant: target.to_string(),
-            })
-        } else if !module.actions.accepts(&on_change) {
-            Some(FailureCause::NotAccepted)
-        } else {
-            None
-        };
-        let refuse = |cause, target: &str, path: String, on_change| {
+        // `target` is the subscriber's own name for a scope; its grant entry
+        // says which scope that is. The subscription is kept under the scope.
+        let name = canonical_scope(&target);
+        let granted = module.grants.readable_as(&name);
+        let refuse = |cause, path: String, on_change| {
             Box::new(CascadeFailure {
                 scope: subscriber.as_str().to_string(),
                 action: on_change,
                 origin: Origin::SubscribeRequest {
-                    target: target.to_string(),
+                    target: name.to_string(),
                     path,
+                    scope: granted
+                        .and_then(|granted| granted.alias().map(|_| Arc::from(granted.scope()))),
                 },
                 cause,
             })
         };
-        if let Some(cause) = cause {
-            return Err(refuse(cause, &target, path, on_change));
+        let Some(granted) = granted else {
+            let cause = FailureCause::ReadDenied {
+                missing_grant: name.to_string(),
+            };
+            return Err(refuse(cause, path, on_change));
+        };
+        if !module.actions.accepts(&on_change) {
+            return Err(refuse(FailureCause::NotAccepted, path, on_change));
         }
+        let target = granted.scope();
 
         let existing = self
             .entries
@@ -111,11 +114,11 @@ impl Subscriptions {
             let cause = FailureCause::SubscriptionLimit {
                 limit: MAX_SUBSCRIPTIONS_PER_MODULE,
             };
-            return Err(refuse(cause, &target, path, on_change));
+            return Err(refuse(cause, path, on_change));
         }
         self.entries.push(Subscription {
             subscriber: subscriber.clone(),
-            target: Arc::from(target.as_ref()),
+            target: Arc::from(target),
             path: Arc::from(path),
             on_change,
         });
@@ -170,7 +173,7 @@ mod tests {
         let module = HostedModule {
             id: ModuleInstanceId(0),
             actions: ActionSet::parse(&scope, vec!["changed".into(), "other".into()]).unwrap(),
-            grants: Grants::from(ModuleGrants::new(reads.iter().copied(), [""; 0])),
+            grants: Grants::resolve(ModuleGrants::new(reads.iter().copied(), [""; 0])).unwrap(),
             wiring: Default::default(),
         };
         (scope, module)
@@ -199,7 +202,8 @@ mod tests {
             denied.origin,
             Origin::SubscribeRequest {
                 target: "u".into(),
-                path: "n".into()
+                path: "n".into(),
+                scope: None
             }
         );
 

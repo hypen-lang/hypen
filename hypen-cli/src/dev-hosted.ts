@@ -30,9 +30,17 @@ export interface HostedServerPackage {
     component: string;
     template?: string;
     ui?: string;
-    grants: { reads: string[]; dispatches: string[]; storage: string[]; http: boolean; httpHosts?: string[] };
+    grants: {
+      reads: string[];
+      dispatches: string[];
+      storage: string[];
+      http: boolean;
+      httpHosts?: string[];
+      aliases?: Record<string, string>;
+    };
     declaredAt: string;
     grantsAt: string;
+    label?: string;
   }) => HostedModuleDefinition;
 }
 
@@ -251,7 +259,7 @@ export class DevPrebuiltModules {
     this.components = this.hosted.components;
     if (this.modules.length > 0 && typeof options.serverPackage.wasmModule !== "function") {
       throw new BuildError(
-        `hypen.json declares prebuilt modules (${this.modules.map((m) => m.name).join(", ")}), but the ` +
+        `hypen.json declares prebuilt modules (${this.names.join(", ")}), but the ` +
           "project's @hypen-space/server cannot run them.",
         {
           code: "PREBUILT_UNSUPPORTED_TARGET",
@@ -319,14 +327,16 @@ export class DevPrebuiltModules {
   get packageLines(): string[] {
     return this.hosted.packages.map((use) => {
       const how = use.origin === "source" ? "built from source" : use.origin === "fallback" ? "prebuilt fallback" : `v${use.pkg.manifest.version}`;
-      const names = [...use.modules.map((m) => m.name), ...use.components.map((c) => c.name)];
+      // The names people know: the package's own, not the namespaced ones.
+      const names = [...use.modules.map((m) => m.package?.name ?? m.name), ...use.components.map((c) => c.packageName)];
       const usable = use.exports.length > 0 ? ` — use ${use.exports.map((e) => `${e} {}`).join(", ")}` : "";
       return `${use.declaration.from} (${how}): ${names.join(", ")}${usable}`;
     });
   }
 
+  /** The hosted modules, by the names people know (a package module by its name in the package). */
   get names(): string[] {
-    return this.modules.map((m) => m.name);
+    return this.modules.map((m) => m.package?.name ?? m.name);
   }
 
   get size(): number {
@@ -345,14 +355,20 @@ export class DevPrebuiltModules {
       grants?.storage,
       grants?.http,
       grants?.httpHosts,
+      module.grants?.aliases,
+      // A package template is rewritten to its installed names: the text
+      // is what is loaded, so the text is what is compared.
+      module.package !== undefined ? module.template : undefined,
     ]);
   }
 
   private define(module: PrebuiltModule, config: WasmConfig): HostedModuleDefinition {
     const grants = module.grants ?? config.modules.get(module.name);
-    // A renamed package module runs with its template's `module <Name>`
-    // declaration rewritten, so the template is passed as source.
-    const renamed = module.package !== undefined && module.package.name !== module.name;
+    // A package module's template is rewritten to the names the package is
+    // installed under (its `module <Name>` declaration and the tags of its
+    // siblings), so it is passed as source.
+    const renamed = module.package !== undefined;
+    const aliases = module.grants?.aliases ?? {};
     const at = `hypen.json ${module.field}`;
     // Checked in the constructor.
     const wasmModule = this.options.serverPackage.wasmModule!;
@@ -372,9 +388,15 @@ export class DevPrebuiltModules {
         // Only when narrowed: a project on an older @hypen-space/server
         // rejects a grant key it does not know.
         ...(grants?.httpHosts?.length ? { httpHosts: grants.httpHosts } : {}),
+        // Likewise only when there is one: the names this module uses for
+        // other modules, where they are installed under another scope.
+        ...(Object.keys(aliases).length > 0 ? { aliases } : {}),
       },
       declaredAt: at,
       grantsAt: module.grants?.editAt ?? at,
+      // What the module is called in its package, when it is installed
+      // under another name (diagnostics say `Cart`, not the namespaced name).
+      ...(module.package !== undefined && module.package.name !== module.name ? { label: module.package.name } : {}),
     });
   }
 
@@ -514,12 +536,12 @@ export class DevPrebuiltModules {
               ]
                 .filter(Boolean)
                 .join(", ");
-        this.print.info(`  ${yellow("Reloaded")} ${module.name} ${dim(`(${detail})`)}`);
+        this.print.info(`  ${yellow("Reloaded")} ${module.package?.name ?? module.name} ${dim(`(${detail})`)}`);
       } catch (err) {
         // Remember the stamp anyway: the same broken file is not retried
         // (and re-reported) on unrelated events; the next write changes it.
         this.loaded.set(module.name, stamp);
-        this.printError(`Not reloaded: ${module.name} keeps running its previous build.`, err);
+        this.printError(`Not reloaded: ${module.package?.name ?? module.name} keeps running its previous build.`, err);
       }
     }
   }

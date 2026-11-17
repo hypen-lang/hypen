@@ -1355,6 +1355,31 @@ pub fn parse_to_json(source: &str) -> Result<String, JsValue> {
         .map_err(|e| structured_error("renderError", &format!("Serialization error: {}", e)))
 }
 
+/// Rename the components a template refers to: every tag named `from`
+/// (and the template's own `module` / `component` declaration) becomes
+/// `to`, for each entry of `renames` (`{ from: to }` as a JSON string).
+/// Strings, comments, bindings and argument values are never touched. See
+/// [`crate::template_rename::rename_template_components`].
+///
+/// Throws `{ type: "parseError" }` when the template does not parse and
+/// `{ type: "renameError" }` for an invalid or conflicting rename.
+#[wasm_bindgen(js_name = renameTemplateComponents)]
+pub fn rename_template_components(source: &str, renames_json: &str) -> Result<String, JsValue> {
+    use crate::template_rename::RenameError;
+    let renames: indexmap::IndexMap<String, String> = serde_json::from_str(renames_json)
+        .map_err(|e| {
+            structured_error(
+                "renameError",
+                &format!("renames must be a JSON object of names ({e})"),
+            )
+        })?;
+    let renames: Vec<(String, String)> = renames.into_iter().collect();
+    crate::template_rename::rename_template_components(source, &renames).map_err(|e| match e {
+        RenameError::Parse(message) => structured_error("parseError", &message),
+        other => structured_error("renameError", &other.to_string()),
+    })
+}
+
 #[wasm_bindgen(start)]
 pub fn main() {}
 

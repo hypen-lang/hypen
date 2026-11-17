@@ -264,7 +264,7 @@ The runtime is deny-by-default: a module can't read or dispatch to other modules
 
 A module entry can also carry `"component": "<path to a .wasm>"` and `"template": "<path to a .hypen>"`. That declares a **prebuilt** module: it is not compiled but copied into the output as `<Name>.wasm` and `<Name>.hypen` and listed in `app.json` with its grants, and it does not count as a module of another language. A project whose only stateful modules are prebuilt needs no toolchain. The build fails if the file is missing or is not a WebAssembly Component, if the template is missing (declare `template`, or keep a template-only component with that name), or if a source module has the same name. `hypen dev` loads the same declarations; the browser SPA build (`hypen build` without `--target wasm` on a component project) refuses them with `PREBUILT_UNSUPPORTED_TARGET`. This is the low-level form; to use modules someone else built, install their package with [`hypen add`](#hypen-add) — see [WASM Modules](/docs/guide/wasm-modules).
 
-Beside `app.json` the build writes **`hypen-modules.json`**, the package manifest that [`hypen add`](#hypen-add) and [`hypen pack`](#hypen-pack) work with: every stateful module with what it *requests* (its `wasm.modules.<Name>` declaration) and the SHA-256 of its component, the template-only components, the `entry` and the `exports`. `app.json` stays what `hypen-runtime --app` loads; both are written from the same build. Each declaration is checked against the component's real imports: a storage tier or HTTP interface the component imports but the declaration does not list fails the build with `UNDECLARED_IMPORT` (the module could not start for anyone who installs it); a declared capability the component never imports is a warning. A `reads` / `dispatches` target that is a module of the *installing app* rather than of this project goes in `"wasm": { "external": ["Cart"] }`; it is recorded as a request and left out of this project's own `app.json`. Package identity: `wasm.name` / `wasm.version` / `wasm.description`, each falling back to `package.json`, then `Cargo.toml` `[package]`, then the directory name / `0.0.0`. `wasm.exports` lists the names an installing app may use in its templates (default: the entry).
+Beside `app.json` the build writes **`hypen-modules.json`**, the package manifest that [`hypen add`](#hypen-add) and [`hypen pack`](#hypen-pack) work with: every stateful module with what it *requests* (its `wasm.modules.<Name>` declaration) and the SHA-256 of its component, the template-only components, the `entry` and the `exports`. `app.json` stays what `hypen-runtime --app` loads; both are written from the same build. Each declaration is checked against the component's real imports: a storage tier or HTTP interface the component imports but the declaration does not list fails the build with `UNDECLARED_IMPORT` (the module could not start for anyone who installs it); a declared capability the component never imports is a warning. A `reads` / `dispatches` target that is a module of the *installing app* rather than of this project goes in `"wasm": { "external": ["Cart"] }`; it is recorded as a request and left out of this project's own `app.json`. Package identity: `wasm.name` / `wasm.version` / `wasm.description`, each falling back to `package.json`, then `Cargo.toml` `[package]`, then the directory name / `0.0.0`. `wasm.exports` lists the names an installing app may use in its templates (default: the entry); every other module and component is internal to the package — installed under its namespace, never a name in the app.
 
 An app's own [`wasm.packages`](/docs/tooling/configuration#wasm-packages) are part of its build: `source` packages are built first, and every package's modules and components are copied into the output with their recorded grants.
 
@@ -287,7 +287,7 @@ In TypeScript modules on the wasm target, `context.router.push`/`replace` naviga
 ### `hypen add`
 
 ```bash
-hypen add <package> [--yes] [--grant <cap>]... [--deny <cap>]... [--only <A,B>] [--as <Name=New>]...
+hypen add <package> [--yes] [--grant <cap>]... [--deny <cap>]... [--only <A,B>] [--as <Name=New>]... [--map <[Module.]Name=AppModule>]...
 ```
 
 Installs a [module package](/docs/guide/wasm-modules) into the app in the current directory. `<package>` is:
@@ -308,7 +308,10 @@ It verifies the manifest and each component's hash, prints the package and what 
 | `--grant <cap>` | Grant one capability; repeatable |
 | `--deny <cap>` | Withhold one; repeatable; wins over `--yes` |
 | `--only <A,B>` | Install only these modules / components |
-| `--as <Name=New>` | Install the exported module `Name` as `New`; repeatable |
+| `--as <Name=New>` | Install the exported name `Name` as `New` (the app writes `New {}`); repeatable. What refers to it inside the package follows the rename |
+| `--map <[Module.]Name=AppModule>` | Where module `Module` of the package reads or dispatches to `Name` — a module the *app* provides — use the app's `AppModule`; repeatable. Without `Module.`, every module that requests `Name` |
+
+Only the names a package **exports** (by default its entry) become names in the app; its other modules and components are internal and installed under the package's namespace, so they cannot clash with the app's own or another package's. `hypen modules` lists a package's modules by their names in the package and marks the internal ones.
 
 `<cap>` is `[Module.]capability`: `Pricing.reads:Cart`, `Pricing.dispatches`, `Tax.http`, `storage:cloud`, `Pricing` (all it requests), `all`. In a terminal the command asks (all / per module / per capability / cancel). Without one, every requested capability needs a flag:
 
@@ -323,7 +326,7 @@ It verifies the manifest and each component's hash, prints the package and what 
   Hint: decide each one with flags: --yes (grant exactly what is requested), --grant <capability> / --deny <capability> …
 ```
 
-Errors carry a stable code: `SPEC_NOT_FOUND`, `PACKAGE_NOT_HYPEN`, `MANIFEST_INVALID`, `MANIFEST_VERSION_UNSUPPORTED`, `MANIFEST_PATH_ESCAPES`, `INTEGRITY_MISMATCH`, `COMPONENT_INVALID`, `MODULE_NAME_COLLISION`, `RENAME_UNSOUND`, `ONLY_INCOMPLETE`, `UNGRANTED_IMPORT`, `CONSENT_REQUIRED`, `FLAG_INVALID`, `TARBALL_UNSAFE`, `TARBALL_INVALID`, `CONFIG_INVALID`, `CONFIG_NOT_WRITABLE`, `TOOL_FAILED` (the package manager; its stderr is shown).
+Errors carry a stable code: `SPEC_NOT_FOUND`, `PACKAGE_NOT_HYPEN`, `MANIFEST_INVALID`, `MANIFEST_VERSION_UNSUPPORTED`, `MANIFEST_PATH_ESCAPES`, `INTEGRITY_MISMATCH`, `COMPONENT_INVALID`, `MODULE_NAME_COLLISION` (an exported name, or two packages with one namespace), `RENAME_UNSOUND`, `NAMING_INVALID` (a `map` that cannot apply), `MAP_TARGET_UNKNOWN`, `NOT_EXPORTED`, `TEMPLATE_INVALID`, `ONLY_INCOMPLETE`, `UNGRANTED_IMPORT`, `CONSENT_REQUIRED`, `FLAG_INVALID`, `TARBALL_UNSAFE`, `TARBALL_INVALID`, `CONFIG_INVALID`, `CONFIG_NOT_WRITABLE`, `TOOL_FAILED` (the package manager; its stderr is shown).
 
 ### `hypen remove`
 

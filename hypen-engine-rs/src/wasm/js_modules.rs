@@ -676,10 +676,14 @@ impl WasmEngine {
     ///   `JsModuleHost`, `prepare()`d) under in the module host. Defaults to
     ///   `scope` as given.
     /// - `manifest`: `{ name?, version?, storage?, reads?, dispatches?,
-    ///   http? }`. `reads` / `dispatches` become the scope's grants, enforced
-    ///   by the engine; they may name in-process modules. Omitted = no
-    ///   cross-module access. The whole manifest is handed to the host's
-    ///   `register` (with empty bytes: the component must already be there).
+    ///   http?, httpHosts?, aliases? }`. `reads` / `dispatches` become the
+    ///   scope's grants, enforced by the engine; they may name in-process
+    ///   modules. Omitted = no cross-module access. `aliases`
+    ///   (`{ name: scope }`) says which scope a name in those lists stands
+    ///   for when it is not the scope of that name: the module and the host
+    ///   keep the names, the engine translates (`ScopeAliases`). The whole
+    ///   manifest is handed to the host's `register` (with empty bytes: the
+    ///   component must already be there).
     /// - `config`: the module's `init` config — JSON-encoded, or a
     ///   `Uint8Array` passed as is. Omitted = `{}`.
     /// - `actions`: an action-list override; omitted = the module's own

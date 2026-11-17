@@ -13,13 +13,21 @@
  *   package that now requests MORE than was reviewed stops the command;
  * - a link-time capability (storage tier, HTTP) the component imports but
  *   was not granted is an error naming the field and the one-line fix;
- * - every name the package brings is checked against the app and the other
- *   packages (engine scopes are global);
+ * - a package is self-contained: the names it EXPORTS (default: its entry)
+ *   are installed as written — or under the name `as` gives them — and
+ *   checked against the app and the other packages; every other name is
+ *   internal and installed under the package's namespace
+ *   (`AcmeCheckout__Cart`), so it cannot clash with anything. Templates are
+ *   rewritten to the installed names with the engine's parser, and each
+ *   module gets an alias table so its code keeps calling siblings by the
+ *   names it was written with (`planPackageNames` / `moduleAliases` in
+ *   `module-package.ts`);
  * - app templates may only use the names a package exports.
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { basename, join, relative, resolve } from "path";
+import * as hypenServer from "@hypen-space/server";
 import { BuildError } from "../build-error.js";
 import { linkRequirements, readComponentImports } from "./component-imports.js";
 import type { ModuleGrants, PackageDeclaration, WasmConfig } from "./config.js";
@@ -28,13 +36,17 @@ import {
   PACKAGE_MANIFEST_FILE,
   assertNoDrift,
   describeCapability,
+  installedNameOf,
   locateModulePackage,
+  moduleAliases,
   packageDrift,
+  planPackageNames,
   readModuleLock,
   readModulePackage,
   unionGrant,
   type Capability,
   type ModuleLock,
+  type PackageNaming,
   type ResolvedPackage,
   type ResolvedPackageComponent,
   type ResolvedPackageModule,
@@ -89,9 +101,50 @@ export function templateRefs(source: string): Set<string> {
   return refs;
 }
 
-/** `module <from> {` → `module <to> {` in a template's declaration. */
-export function renameTemplateModule(template: string, from: string, to: string): string {
-  return template.replace(new RegExp(`^(\\s*(?:module|component)\\s+)${from}\\b`), `$1${to}`);
+/**
+ * `template` with the components named by `renames` renamed (tags and the
+ * `module X` / `component X` declaration), by the engine's parser — strings,
+ * comments and bindings are never touched.
+ *
+ * @throws {BuildError} `TEMPLATE_INVALID` when the template does not parse;
+ *   `PREBUILT_UNSUPPORTED_TARGET` when the CLI's `@hypen-space/server`
+ *   predates the helper.
+ */
+export function renameTemplate(
+  template: string,
+  renames: Readonly<Record<string, string>>,
+  where: { module: string; file: string | undefined }
+): string {
+  if (Object.keys(renames).length === 0) return template;
+  const rename = (
+    hypenServer as {
+      renameTemplateComponents?: (t: string, r: Readonly<Record<string, string>>, where?: { module?: string; file?: string }) => string;
+    }
+  ).renameTemplateComponents;
+  if (typeof rename !== "function") {
+    throw new BuildError(
+      "This @hypen-space/server cannot install a package under its namespace (it has no template renaming).",
+      {
+        code: "PREBUILT_UNSUPPORTED_TARGET",
+        module: where.module,
+        hint: "update @hypen-space/server (and @hypen-space/cli) to the same version",
+      }
+    );
+  }
+  try {
+    return rename(template, renames, { module: where.module, file: where.file });
+  } catch (cause) {
+    throw new BuildError(
+      cause instanceof Error ? cause.message : `The template of "${where.module}" could not be installed: ${String(cause)}`,
+      {
+        code: "TEMPLATE_INVALID",
+        module: where.module,
+        file: where.file,
+        hint: "the package's template is not valid Hypen: rebuild the package (`hypen build --target wasm`) or report it to its author",
+        cause,
+      }
+    );
+  }
 }
 
 // ── selection ───────────────────────────────────────────────────────────────
@@ -158,10 +211,11 @@ export function selectFromPackage(
 }
 
 /**
- * Check the `as` renames of a package against what makes a rename sound:
- * the renamed name is an exported module, and nothing else in the package
- * refers to it — siblings name each other in templates and call each other
- * by scope through `hypen:engine/state`, and neither can be redirected.
+ * Check the `as` renames of a package: a rename applies to a name the
+ * package EXPORTS and installs. (Internal names are namespaced and never
+ * need one. What refers to the renamed name inside the package follows it:
+ * templates are rewritten, and siblings reach it through their alias
+ * tables.)
  *
  * @throws {BuildError} `RENAME_UNSOUND`
  */
@@ -172,6 +226,7 @@ export function assertRenamesSound(
   from: string,
   field: string
 ): void {
+  const installs = [...selection.modules.map((m) => m.name), ...selection.components.map((c) => c.name)];
   for (const [name, renamed] of as) {
     const unsound = (why: string, hint: string): BuildError =>
       new BuildError(`${from}: cannot install "${name}" as "${renamed}": ${why}.`, {
@@ -185,46 +240,14 @@ export function assertRenamesSound(
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(renamed)) {
       throw unsound(`"${renamed}" is not a component name`, `use letters, digits and "_", e.g. ${name}2`);
     }
-    const module = selection.modules.find((m) => same(m.name, name));
-    if (module === undefined) {
-      const component = selection.components.find((c) => same(c.name, name));
-      throw unsound(
-        component !== undefined
-          ? `it is a template-only component, which the package's templates use by that name`
-          : `the package installs no module of that name`,
-        component !== undefined
-          ? `rename the app's own "${name}" instead, or leave it out with --only if nothing selected uses it`
-          : `fix the name (modules: ${selection.modules.map((m) => m.name).join(", ") || "none"})`
-      );
+    if (!installs.some((n) => same(n, name))) {
+      throw unsound(`the package installs nothing of that name`, `fix the name (it installs: ${installs.join(", ") || "nothing"})`);
     }
     if (!pkg.manifest.exports.some((n) => same(n, name))) {
       throw unsound(
         `it is internal to the package (exports: ${pkg.manifest.exports.join(", ")})`,
-        "only exported modules can be renamed; an internal name that collides needs the app's own component renamed"
+        "internal names are installed under the package's namespace and cannot clash with the app's, so they are never renamed; only exported names are"
       );
-    }
-    for (const other of selection.modules) {
-      if (other === module) continue;
-      const asks = [...other.requests.reads, ...other.requests.dispatches].some((t) => same(t, name));
-      if (asks) {
-        throw unsound(
-          `${other.name} (same package) reads or dispatches to "${name}" by that name`,
-          `a module calls its siblings by name, so "${name}" must keep its name: rename the app's own "${name}" instead`
-        );
-      }
-    }
-    const templates = [
-      ...selection.modules.filter((m) => m !== module).map((m) => ({ name: m.name, path: m.templatePath })),
-      ...selection.components.map((c) => ({ name: c.name, path: c.templatePath as string | undefined })),
-    ];
-    for (const { name: user, path } of templates) {
-      if (path === undefined) continue;
-      if ([...templateRefs(readFileSync(path, "utf8"))].some((ref) => same(ref, name))) {
-        throw unsound(
-          `the template of ${user} (same package) uses \`${name} {}\``,
-          `"${name}" must keep its name: rename the app's own "${name}" instead`
-        );
-      }
     }
   }
 }
@@ -284,11 +307,14 @@ export function appComponents(componentsDir: string): AppComponent[] {
 /** A template-only component a package brings. */
 export interface PackageComponentUse {
   name: ModuleName;
-  /** The template's source. */
+  /** The template's source, rewritten to the package's installed names. */
   template: string;
   templatePath: string;
   /** The `wasm.packages` key. */
   from: string;
+  /** Its name in the package (`name` is the installed one). */
+  packageName: string;
+  exported: boolean;
 }
 
 /** Where the files of a package in use came from. */
@@ -305,12 +331,16 @@ export interface PackageUse {
   declaration: PackageDeclaration;
   pkg: ResolvedPackage;
   origin: PackageOrigin;
+  /** Its modules, under their INSTALLED names (`module.package.name` is the name in the package). */
   modules: PrebuiltModule[];
+  /** Its template-only components, under their installed names. */
   components: PackageComponentUse[];
   /** The names the app's templates may use (after renames). */
   exports: string[];
-  /** Names the package brings that are internal to it. */
+  /** Names the package brings that are internal to it, as written in the package. */
   internal: string[];
+  /** How every name of the package is installed (the namespace, and the mangled names — a debug detail). */
+  naming: PackageNaming;
 }
 
 export interface ResolvedHosted {
@@ -412,7 +442,27 @@ function resolveUse(
     if (note !== null) notes.push(note);
   }
 
-  const renamedTo = (name: string): string => decl.as.get(name) ?? name;
+  for (const name of decl.map.keys()) {
+    if (selection.modules.some((m) => m.name === name)) continue;
+    throw new BuildError(
+      `${CONFIG_FILE}: ${decl.field}.map.${name}: ${decl.from} installs no module named "${name}" (modules: ${selection.modules.map((m) => m.name).join(", ") || "none"}).`,
+      {
+        code: "CONFIG_UNKNOWN_MODULE",
+        module: name,
+        file: CONFIG_FILE,
+        field: `${decl.field}.map.${name}`,
+        hint: "a map is keyed by the package module whose names it redirects; fix the name or remove the entry",
+      }
+    );
+  }
+
+  // `assertRenamesSound` has vetted `as`; what is left for this to refuse is
+  // a namespace clash inside the package (two names installed alike).
+  const naming = planPackageNames(pkg.manifest, { namespace: decl.namespace, as: decl.as, from: decl.from });
+  // `naming` covers every name of the manifest, so this cannot miss.
+  const installedAs = (name: string): string => installedNameOf(naming, name)?.installed ?? name;
+  const isExported = (name: string): boolean => installedNameOf(naming, name)?.exported ?? false;
+
   const modules = selection.modules.map((module): PrebuiltModule => {
     const recorded: ModuleGrants | undefined = decl.grants.get(module.name);
     const field = `${decl.field}.grants.${module.name}`;
@@ -426,6 +476,7 @@ function resolveUse(
     const effective = decl.trust === "requested" ? unionGrant(base, module.requests) : base;
     const grants: PackageModuleGrants = {
       ...effective,
+      aliases: moduleAliases(naming, module.name, effective, decl.map.get(module.name), `${CONFIG_FILE} ${decl.field}`),
       field,
       editAt:
         decl.source && decl.trust === "requested"
@@ -433,9 +484,11 @@ function resolveUse(
           : `${CONFIG_FILE} ${field}`,
     };
     assertLinkGrants(decl, module, grants);
-    const name = parseModuleName(renamedTo(module.name));
-    let template = module.templatePath !== undefined ? readFileSync(module.templatePath, "utf8").trim() : undefined;
-    if (template !== undefined && name !== module.name) template = renameTemplateModule(template, module.name, name);
+    const name = parseModuleName(installedAs(module.name));
+    const template =
+      module.templatePath !== undefined
+        ? renameTemplate(readFileSync(module.templatePath, "utf8").trim(), naming.renames, { module: module.name, file: module.templatePath })
+        : undefined;
     return {
       kind: "prebuilt",
       name,
@@ -444,27 +497,38 @@ function resolveUse(
       template,
       field,
       grants,
-      package: { from: decl.from, name: module.name, version: pkg.manifest.version, manifestPath: pkg.manifestPath },
+      package: {
+        from: decl.from,
+        name: module.name,
+        exported: isExported(module.name),
+        version: pkg.manifest.version,
+        manifestPath: pkg.manifestPath,
+      },
     };
   });
   const components = selection.components.map(
     (component): PackageComponentUse => ({
-      name: parseModuleName(component.name),
-      template: readFileSync(component.templatePath, "utf8").trim(),
+      name: parseModuleName(installedAs(component.name)),
+      template: renameTemplate(readFileSync(component.templatePath, "utf8").trim(), naming.renames, {
+        module: component.name,
+        file: component.templatePath,
+      }),
       templatePath: component.templatePath,
       from: decl.from,
+      packageName: component.name,
+      exported: isExported(component.name),
     })
   );
   const installed = [...selection.modules.map((m) => m.name), ...selection.components.map((c) => c.name)];
-  const exported = installed.filter((n) => pkg.manifest.exports.some((e) => same(e, n)));
   return {
     declaration: decl,
     pkg,
     origin,
     modules,
     components,
-    exports: exported.map(renamedTo),
-    internal: installed.filter((n) => !exported.includes(n)),
+    exports: installed.filter(isExported).map(installedAs),
+    internal: installed.filter((n) => !isExported(n)),
+    naming,
   };
 }
 
@@ -496,9 +560,31 @@ export function resolveHosted(config: WasmConfig, projectDir: string, options: R
       }
     }
 
+    // Two packages under one namespace would install their internal names
+    // alike.
+    const namespaces = new Map<string, PackageUse>();
+    for (const use of packages) {
+      const other = namespaces.get(use.naming.namespace.toLowerCase());
+      if (other !== undefined) {
+        throw new BuildError(
+          `${use.declaration.from} and ${other.declaration.from} would both install their internal modules under the namespace "${use.naming.namespace}".`,
+          {
+            code: "MODULE_NAME_COLLISION",
+            file: CONFIG_FILE,
+            field: `${use.declaration.field}.namespace`,
+            hint: `give one of them its own: "namespace": "${use.naming.namespace}2" in ${use.declaration.field}`,
+          }
+        );
+      }
+      namespaces.set(use.naming.namespace.toLowerCase(), use);
+    }
+
     // Engine scopes and component names are global: one owner per name.
+    // Only what a package EXPORTS can meet another name — its internal
+    // names are namespaced (and so are claimed here without ever clashing,
+    // unless someone names a component like a namespaced one).
     const owners = new Map<string, { name: string; owner: string; field: string }>();
-    const claim = (name: string, owner: string, field: string): void => {
+    const claim = (name: string, owner: string, field: string, renameHint: string): void => {
       const other = owners.get(name.toLowerCase());
       if (other !== undefined) {
         throw new BuildError(
@@ -508,46 +594,56 @@ export function resolveHosted(config: WasmConfig, projectDir: string, options: R
             module: name,
             file: CONFIG_FILE,
             field,
-            hint:
-              "engine scopes are global, so two packages cannot bring the same name: install one of them partially (`only`), " +
-              "or rename an exported module (`hypen add <package> --as <Name>=<NewName>`)",
+            hint: renameHint,
           }
         );
       }
       owners.set(name.toLowerCase(), { name, owner, field });
     };
-    for (const module of legacy) claim(module.name, `${CONFIG_FILE} ${module.field}`, module.field);
+    for (const module of legacy) {
+      claim(module.name, `${CONFIG_FILE} ${module.field}`, module.field, `rename one of the two declarations`);
+    }
     for (const use of packages) {
-      for (const module of use.modules) claim(module.name, use.declaration.from, use.declaration.field);
-      for (const component of use.components) claim(component.name, use.declaration.from, use.declaration.field);
+      const { from, field } = use.declaration;
+      const hint = (packageName: string, exported: boolean): string =>
+        exported
+          ? `both are names their packages export: install one under another name (\`hypen add ${from} --as ${packageName}=<NewName>\`), or leave it out (\`only\`)`
+          : `"${packageName}" is internal to ${from} and installed under its namespace; give the package another one ("namespace" in ${field})`;
+      for (const module of use.modules) {
+        claim(module.name, from, field, hint(module.package?.name ?? module.name, module.package?.exported ?? true));
+      }
+      for (const component of use.components) claim(component.name, from, field, hint(component.packageName, component.exported));
     }
 
-    if (options.componentsDir !== undefined) {
-      const own = appComponents(options.componentsDir);
+    const own = options.componentsDir !== undefined ? appComponents(options.componentsDir) : null;
+    if (own !== null) {
       for (const use of packages) {
         const { from, field } = use.declaration;
-        for (const name of [...use.modules.map((m) => m.name as string), ...use.components.map((c) => c.name as string)]) {
-          const mine = own.find((c) => same(c.name, name));
+        const brings = [
+          ...use.modules.map((m) => ({ name: m.name as string, packageName: m.package?.name ?? m.name, exported: m.package?.exported ?? true, isModule: true })),
+          ...use.components.map((c) => ({ name: c.name as string, packageName: c.packageName, exported: c.exported, isModule: false })),
+        ];
+        for (const brought of brings) {
+          const mine = own.find((c) => same(c.name, brought.name));
           if (mine === undefined) continue;
-          const isModule = use.modules.some((m) => m.name === name);
-          // A template-only component of the app named like a package MODULE
-          // would shadow it silently; anything named like a package name
-          // would fight over one scope.
+          // Only an exported name can meet one of the app's: a template-only
+          // component of the app named like it would shadow it silently, and
+          // a module would fight over one scope.
           throw new BuildError(
-            `Name collision: ${from} brings ${isModule ? "the module" : "the component"} "${name}", and the app has its own "${mine.name}" (${relative(root, mine.template) || mine.template}).`,
+            `Name collision: ${from} ${brought.exported ? "exports" : "installs"} ${brought.isModule ? "the module" : "the component"} "${brought.name}", and the app has its own "${mine.name}" (${relative(root, mine.template) || mine.template}).`,
             {
               code: "MODULE_NAME_COLLISION",
-              module: name,
+              module: brought.name,
               file: CONFIG_FILE,
               field,
-              hint: use.exports.includes(name) && isModule
-                ? `install it under another name: \`hypen add ${from} --as ${name}=<NewName>\` — or rename the app's own ${mine.name}`
-                : `"${name}" is ${isModule ? "internal to the package" : "a template-only component the package's templates use"} and cannot be renamed: rename the app's own ${mine.name}`,
+              hint: brought.exported
+                ? `install it under another name: \`hypen add ${from} --as ${brought.packageName}=<NewName>\` — or rename the app's own ${mine.name}`
+                : `"${brought.name}" is how ${from} installs its internal "${brought.packageName}": rename the app's own ${mine.name}, or give the package another namespace ("namespace" in ${field})`,
             }
           );
         }
-        // App templates may only use what the package exports.
-        if (use.internal.length === 0) continue;
+        // App templates may only use what the package exports. An internal
+        // name the app also has a component for is simply the app's own.
         for (const component of own) {
           let refs: Set<string>;
           try {
@@ -555,7 +651,9 @@ export function resolveHosted(config: WasmConfig, projectDir: string, options: R
           } catch {
             continue;
           }
-          const used = use.internal.find((n) => [...refs].some((r) => same(r, n)));
+          const used = use.internal.find(
+            (n) => [...refs].some((r) => same(r, n)) && !own.some((c) => same(c.name, n)) && !owners.has(n.toLowerCase())
+          );
           if (used === undefined) continue;
           throw new BuildError(
             `${relative(root, component.template) || component.template} uses \`${used} {}\`, which ${from} does not export ` +
@@ -566,6 +664,64 @@ export function resolveHosted(config: WasmConfig, projectDir: string, options: R
               file: component.template,
               field,
               hint: `use ${use.exports.map((e) => `\`${e} {}\``).join(" or ") || "an exported component"} instead — "${used}" is internal to ${from} (its author lists exports in the module project's hypen.json "wasm.exports")`,
+            }
+          );
+        }
+      }
+    }
+
+    // A package's templates may use their own package's names (already
+    // rewritten) and what the app or another package EXPORTS — never
+    // another package's internals.
+    for (const use of packages) {
+      const mine = (name: string): boolean => installedNameOf(use.naming, name) !== undefined;
+      const templates = [
+        ...use.modules.map((m) => ({ name: m.package?.name ?? m.name, path: m.templatePath })),
+        ...use.components.map((c) => ({ name: c.packageName, path: c.templatePath as string | undefined })),
+      ];
+      for (const { name, path } of templates) {
+        if (path === undefined) continue;
+        for (const ref of templateRefs(readFileSync(path, "utf8"))) {
+          if (mine(ref) || owners.has(ref.toLowerCase()) || own?.some((c) => same(c.name, ref))) continue;
+          const other = packages.find((p) => p !== use && p.internal.some((n) => same(n, ref)));
+          if (other === undefined) continue;
+          throw new BuildError(
+            `${use.declaration.from}: the template of ${name} uses \`${ref} {}\`, which is internal to ${other.declaration.from} ` +
+              `(it exports: ${other.exports.join(", ") || "nothing"}).`,
+            {
+              code: "NOT_EXPORTED",
+              module: ref,
+              file: path,
+              field: use.declaration.field,
+              hint: `a package can use what another package exports, not its internals: ${other.declaration.from} would have to export "${ref}" ("wasm.exports" in its hypen.json)`,
+            }
+          );
+        }
+      }
+    }
+
+    // A `map` points a name at one of the APP's modules: it must be one.
+    const stateful = new Map<string, string>();
+    for (const module of legacy) stateful.set(module.name.toLowerCase(), module.name);
+    for (const use of packages) {
+      for (const module of use.modules) if (module.package?.exported) stateful.set(module.name.toLowerCase(), module.name);
+    }
+    if (own !== null) for (const component of own) if (component.stateful) stateful.set(component.name.toLowerCase(), component.name);
+    for (const use of packages) {
+      for (const [module, entries] of use.declaration.map) {
+        for (const [name, target] of Object.entries(entries)) {
+          // Without a components directory the app's modules are registered
+          // in code and cannot be checked here; the server checks at startup.
+          if (own === null || stateful.has(target.toLowerCase())) continue;
+          throw new BuildError(
+            `${CONFIG_FILE}: ${use.declaration.field}.map.${module}.${name} points "${name}" at "${target}", but the app has no module named "${target}"` +
+              ` (modules: ${[...stateful.values()].join(", ") || "none"}).`,
+            {
+              code: "MAP_TARGET_UNKNOWN",
+              module,
+              file: CONFIG_FILE,
+              field: `${use.declaration.field}.map.${module}.${name}`,
+              hint: `point it at one of the app's stateful modules: \`hypen add ${use.declaration.from} --map ${module}.${name}=<Module>\``,
             }
           );
         }
@@ -588,6 +744,9 @@ export function withPackageGrants(config: WasmConfig, hosted: ResolvedHosted): W
   for (const module of hosted.modules) {
     if (module.grants === undefined) continue;
     const { editAt: _editAt, ...grants } = module.grants;
+    // Keyed by the INSTALLED name: that is the module of the build. Its
+    // `reads` / `dispatches` keep the names its code uses; `aliases` says
+    // which modules of the build they are.
     modules.set(module.name, grants);
   }
   return { ...config, modules };

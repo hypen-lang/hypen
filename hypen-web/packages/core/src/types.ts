@@ -503,6 +503,17 @@ export type HostedModuleManifest = {
    * host. A malformed pattern is an `invalidArgument` at registration.
    */
   httpHosts?: string[];
+  /**
+   * What a name in `reads` / `dispatches` means in this app when it is not
+   * the scope of that name: `{ cart: "acmecheckout__cart" }`. The module and
+   * the module host keep using the names (the keys); the engine translates
+   * them to the scopes (the values) wherever a name crosses the host
+   * boundary — sibling snapshots, cross-dispatch and `subscribe` targets. An
+   * alias grants nothing, and aliases are not chained. A table the engine
+   * cannot apply (a name aliased twice, two granted names meaning one
+   * scope, an invalid scope) fails the registration with `invalidName`.
+   */
+  aliases?: Record<string, string>;
 };
 
 /** Options of `registerHostedModule`. */
@@ -719,9 +730,11 @@ export type ModuleCascadeOrigin =
   | { kind: "root" }
   | { kind: "lifecycle"; hook: "activated" | "deactivated" }
   | { kind: "emit" }
-  | { kind: "crossDispatch"; from: string }
+  /** `addressedAs`: the name `from` used for the target, when an alias translated it. */
+  | { kind: "crossDispatch"; from: string; addressedAs?: string }
   | { kind: "subscriptionChange"; target: string; path: string }
-  | { kind: "subscribeRequest"; target: string; path: string }
+  /** `target` is the name the module used; `scope` what an alias makes it mean. */
+  | { kind: "subscribeRequest"; target: string; path: string; scope?: string }
   /** A deferred HTTP request the module queued (admission refused it). */
   | { kind: "httpRequest"; method: string; url: string }
   /** The completion (`ok: false`, `denied`) of a request that was refused at admission. */

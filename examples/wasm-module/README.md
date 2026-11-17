@@ -47,7 +47,16 @@ it". What `Pricing` may do is declared once, by the module project itself, in
 ```
 
 (`external` says `Cart` is a module of the app that hosts this one, not of
-this project.) A source package is granted what it declares, so there is
+this project. An app whose cart is called something else points the name at
+it: `"map": { "Pricing": { "Cart": "Basket" } }` in the package's entry, or
+`hypen add … --map Pricing.Cart=Basket`.)
+
+`Pricing` is the package's entry, so it is what the package exports: the
+app's template uses that one tag, `Pricing {}`. A package with more modules
+works the same way — its root's template places the others, and everything
+that is not exported is internal to the package (installed under its
+namespace), so it cannot clash with a module of the app that happens to
+have the same name. A source package is granted what it declares, so there is
 nothing to repeat in the app. Remove `"dispatches"` there and add a grinder:
 the dev server prints which module was refused and the field to add.
 

@@ -46,6 +46,8 @@ struct RawModule {
     http: Option<bool>,
     #[serde(default, rename = "httpHosts")]
     http_hosts: Option<Vec<String>>,
+    #[serde(default)]
+    aliases: Option<std::collections::BTreeMap<String, String>>,
 }
 
 // ── validated model ─────────────────────────────────────────────────────────
@@ -94,6 +96,10 @@ pub struct Capabilities {
     pub http: bool,
     /// `httpHosts`: the hosts `http` is limited to. Empty = any host.
     pub http_hosts: Vec<HostPattern>,
+    /// `aliases`: which module a name in `reads` / `dispatches` stands for,
+    /// where it is not the module of that name (the name the module's code
+    /// uses → the scope it means here).
+    pub aliases: Vec<(ScopeName, ScopeName)>,
 }
 
 impl Capabilities {
@@ -107,6 +113,11 @@ impl Capabilities {
             dispatches: self.dispatches.iter().map(|s| s.as_str().to_string()).collect(),
             http: self.http,
             http_hosts: self.http_hosts.clone(),
+            aliases: self
+                .aliases
+                .iter()
+                .map(|(name, scope)| (name.as_str(), scope.as_str()))
+                .collect(),
             ..ModuleManifest::default()
         }
     }
@@ -149,6 +160,8 @@ pub enum ManifestProblem {
     HostPattern(#[from] InvalidHostPattern),
     #[error("`httpHosts` narrows the `http` grant, but `http` is not true for this module")]
     HostsWithoutHttp,
+    #[error("`{name}` is aliased twice, to different modules (names compare case-insensitively)")]
+    AliasConflict { name: String },
 }
 
 impl ManifestProblem {
@@ -332,6 +345,24 @@ fn capabilities(
         }
     }
 
+    // The name the module's code uses → the module it means in this app.
+    for (name, target) in m.aliases.iter().flatten() {
+        let field = format!("modules[{index}].aliases.{name}");
+        let alias = ScopeName::new(name).map_err(|e| (field.clone(), e.into()))?;
+        let scope = ScopeName::new(target).map_err(|e| (field.clone(), e.into()))?;
+        if !stateful_scopes.contains(&scope) {
+            return Err((field, ManifestProblem::UnknownTarget { target: target.clone() }));
+        }
+        match caps.aliases.iter().find(|(known, _)| *known == alias) {
+            Some((_, other)) if *other != scope => {
+                return Err((field, ManifestProblem::AliasConflict { name: name.clone() }));
+            }
+            Some(_) => {}
+            None => caps.aliases.push((alias, scope)),
+        }
+    }
+    let aliases = caps.aliases.clone();
+
     let targets = |list: &Option<Vec<String>>,
                    key: &str|
      -> Result<Vec<ScopeName>, (String, ManifestProblem)> {
@@ -339,7 +370,10 @@ fn capabilities(
         for (j, t) in list.iter().flatten().enumerate() {
             let field = format!("modules[{index}].{key}[{j}]");
             let scope = ScopeName::new(t).map_err(|e| (field.clone(), e.into()))?;
-            if !stateful_scopes.contains(&scope) {
+            // An aliased name is checked by its alias (above); any other
+            // name must itself be a module here.
+            let aliased = aliases.iter().any(|(name, _)| *name == scope);
+            if !aliased && !stateful_scopes.contains(&scope) {
                 return Err((field, ManifestProblem::UnknownTarget { target: t.clone() }));
             }
             if !out.contains(&scope) {
@@ -570,6 +604,46 @@ mod tests {
         );
         assert_eq!(field, "modules[0].dispatches[0]");
         assert!(matches!(p, ManifestProblem::UnknownTarget { .. }), "{p}");
+    }
+
+    #[test]
+    fn an_alias_says_which_module_a_granted_name_means() {
+        let dir = app_dir();
+        let m = parse(
+            &dir,
+            r#"{ "entry": "App", "modules": [
+                { "name": "App", "wasm": "a.wasm", "ui": "app.hypen",
+                  "reads": ["Cart"], "dispatches": ["Cart"], "aliases": { "Cart": "Acme__Cart" } },
+                { "name": "Acme__Cart", "wasm": "a.wasm", "ui": "counter.hypen" } ] }"#,
+        )
+        .expect("an aliased name need not be a module itself");
+        let ModuleKind::Stateful { capabilities, .. } = &m.entry().kind else {
+            panic!("App is stateful");
+        };
+        let host = capabilities.to_manifest("app");
+        // The host keeps the module's own names; the alias travels beside them.
+        assert_eq!(host.reads, vec!["cart"]);
+        assert_eq!(host.aliases.iter().collect::<Vec<_>>(), [("cart", "acme__cart")]);
+
+        // The alias target must be a stateful module of the manifest.
+        let (field, p) = problem(
+            &dir,
+            r#"{ "entry": "App", "modules": [
+                { "name": "App", "wasm": "a.wasm", "ui": "app.hypen",
+                  "reads": ["Cart"], "aliases": { "Cart": "Ghost" } } ] }"#,
+        );
+        assert_eq!(field, "modules[0].aliases.Cart");
+        assert!(matches!(p, ManifestProblem::UnknownTarget { .. }), "{p}");
+
+        let (field, p) = problem(
+            &dir,
+            r#"{ "entry": "App", "modules": [
+                { "name": "App", "wasm": "a.wasm", "ui": "app.hypen",
+                  "aliases": { "Cart": "App", "cart": "Other" } },
+                { "name": "Other", "wasm": "a.wasm", "ui": "counter.hypen" } ] }"#,
+        );
+        assert_eq!(field, "modules[0].aliases.cart");
+        assert!(matches!(p, ManifestProblem::AliasConflict { .. }), "{p}");
     }
 
     #[test]

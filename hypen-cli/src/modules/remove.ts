@@ -104,6 +104,7 @@ export async function removePackage(options: RemoveOptions): Promise<RemoveResul
     let text = setJsonPath(project.text, ["wasm", "packages", decl.from, "only"], rest);
     text = removeJsonPath(text, ["wasm", "packages", decl.from, "grants", name], 3);
     text = removeJsonPath(text, ["wasm", "packages", decl.from, "as", name], 3);
+    text = removeJsonPath(text, ["wasm", "packages", decl.from, "map", name], 3);
     const lock: ModuleLock = { ...project.lock };
     const locked = lock[decl.from];
     if (locked !== undefined) {

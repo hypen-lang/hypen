@@ -14,7 +14,14 @@ export {
   parsePackageManifest,
   readModulePackage,
   readModuleLock,
+  NAMESPACE_SEPARATOR,
+  packageNamespace,
+  planPackageNames,
+  moduleAliases,
+  installedNameOf,
+  packageNameOf,
 } from "./module-package.js";
+export { renameTemplateComponents } from "./template-rename.js";
 export type {
   Capability,
   ModuleGrant,
@@ -23,6 +30,9 @@ export type {
   PackageModule,
   PackageComponent,
   ResolvedPackage,
+  InstalledName,
+  PackageNaming,
+  PackageNamingOptions,
 } from "./module-package.js";
 export type {
   LoadWasmPackageOptions,
