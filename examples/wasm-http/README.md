@@ -36,19 +36,28 @@ native runtime, a browser). The full module is
 
 ## The grants
 
+The module is a **source package** of the app: the app's `hypen.json` points
+at the module project and `hypen dev` builds it.
+
 ```json
-"Weather": {
-  "component": "./modules/weather/weather.wasm",
-  "template": "./modules/weather/src/components/Weather/component.hypen",
-  "http": true,
-  "httpHosts": ["127.0.0.1:8787"]
+"wasm": {
+  "packages": {
+    "./modules/weather": { "source": true }
+  }
 }
 ```
 
-- `"http": true` lets the module make requests at all. It appears twice — in
-  `modules/weather/hypen.json` (where the module is **built**: the grant
-  decides whether the component imports the HTTP interface) and in this
-  directory's `hypen.json` (where it is **hosted**).
+What the module may do is declared once, in the module project
+(`modules/weather/hypen.json`):
+
+```json
+"Weather": { "http": true, "httpHosts": ["127.0.0.1:8787"] }
+```
+
+- `"http": true` lets the module make requests at all. For a TypeScript
+  module it also decides whether the built component imports the HTTP
+  interface. A source package is granted what it declares, so the app does
+  not repeat it.
 - `"httpHosts"` narrows the grant to an allowlist. Here it also does a second
   job: a server does not let a hosted module reach `localhost` or a private
   address unless the module's `httpHosts` names that host exactly. Remove the
@@ -57,21 +66,21 @@ native runtime, a browser). The full module is
 
 ## Run
 
-The module's component is built from source (it is about 12 MB — a TypeScript
-module carries a JavaScript engine — so it is not committed). From this
-directory, with the in-repo CLI:
+`hypen dev` builds the module's component from source at startup (a few
+seconds; it is about 12 MB — a TypeScript module carries a JavaScript engine
+— so it is not committed). That needs `@bytecodealliance/jco`, a dev
+dependency of the CLI. From this directory, with the in-repo CLI:
 
 ```bash
-# 1. build the module (needs @bytecodealliance/jco, a dev dependency of the CLI)
-(cd modules/weather && bun ../../../../hypen-cli/bin/hypen.ts build --target wasm \
-   && cp dist/wasm/Weather.wasm weather.wasm)
-
-# 2. the local "weather service"
+# 1. the local "weather service"
 bun scripts/api.ts                               # http://127.0.0.1:8787
 
-# 3. the app (another terminal)
+# 2. the app (another terminal): builds modules/weather, then serves
 bun ../../hypen-cli/bin/hypen.ts dev             # http://localhost:3000
 ```
+
+Edit `modules/weather/src/components/Weather/component.ts` while it runs and
+the module is rebuilt and reloaded in the open page.
 
 Open the page and press **Refresh**, or drive it from a third terminal over
 the same WebSocket protocol a renderer uses:
@@ -123,16 +132,14 @@ and `bun add -d @hypen-space/cli @bytecodealliance/jco@1.42.0`.
 ## Files
 
 ```
-hypen.json                                    the app; declares Weather and its grants
+hypen.json                                    the app; points at modules/weather as a source package
 src/components/App/                           entry (in-process TypeScript)
-modules/weather/hypen.json                    the module's own project (what `hypen build --target wasm` reads)
+modules/weather/hypen.json                    the module's own project: what Weather requests
 modules/weather/src/components/Weather/       the module: component.ts + component.hypen
-modules/weather/weather.wasm                  the built component (git-ignored; build it)
+modules/weather/dist/wasm/                    what `hypen dev` builds (git-ignored)
 scripts/api.ts                                the local weather API
 scripts/drive.ts                              a small protocol client
 ```
 
 The example is built, booted and clicked through by
-`hypen-cli/tests/example-wasm-http.test.ts` (with `HYPEN_WASM_E2E=1`, which
-builds the module first; without it the test runs only when `weather.wasm`
-is already there).
+`hypen-cli/tests/example-wasm-http.test.ts`, wherever jco is available.

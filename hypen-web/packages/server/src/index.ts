@@ -90,7 +90,9 @@ export type {
 
 export {
   wasmModule,
+  wasmModuleFromManifest,
   loadWasmModules,
+  loadWasmPackage,
   classifyWasm,
   HostedModuleSetupError,
   isHostedModuleSetupError,
@@ -108,6 +110,12 @@ export type {
   WasmModuleGrants,
   LoadedWasmModules,
   LoadWasmModulesOptions,
+  LoadWasmPackageOptions,
+  LoadedWasmPackage,
+  PackageManifest,
+  ModuleRequests,
+  ModuleGrant,
+  Capability,
   WasmKind,
   HostedModuleSetupCode,
   HostedModuleSetupInfo,

@@ -133,6 +133,38 @@ export interface PrebuiltModule {
   template: string | undefined;
   /** `wasm.modules.<Name>` — where it is declared, for messages. */
   field: string;
+  /**
+   * Set for a module that comes from a package (`wasm.packages`): the grants
+   * it runs with — the recorded decision, or for a trusted `source` package
+   * what it declares. Consumers use these instead of `wasm.modules.<Name>`.
+   */
+  grants?: PackageModuleGrants;
+  /** The package it comes from. */
+  package?: {
+    /** The `wasm.packages` key. */
+    from: string;
+    /** Its name in the package (differs from `name` when renamed with `as`). */
+    name: string;
+    version: string;
+    manifestPath: string;
+  };
+}
+
+/** The grants of a package module, in the shape of a `wasm.modules` entry. */
+export interface PackageModuleGrants {
+  reads: string[];
+  dispatches: string[];
+  storage: GrantableStorage[];
+  http: boolean;
+  httpHosts: string[];
+  /** Where the decision is recorded. */
+  field: string;
+  /**
+   * The file + field to edit to change them, for messages: the app's
+   * hypen.json, or — for a trusted `source` package — the module project's
+   * own hypen.json, where the module declares what it needs.
+   */
+  editAt: string;
 }
 
 /** A module's compiled component, written into the build's staging dir. */

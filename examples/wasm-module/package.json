@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "hypen dev",
-    "build:pricing": "cd modules/pricing && cargo build --release --target wasm32-wasip2 && cp target/wasm32-wasip2/release/pricing_module.wasm pricing.wasm"
+    "build:pricing": "cd modules/pricing && hypen pack --name hypen-example-pricing && rm -rf prebuilt && cp -r dist/pack prebuilt"
   },
   "dependencies": {
     "@hypen-space/core": "latest",

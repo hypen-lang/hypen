@@ -4,8 +4,29 @@
  * (`.wasmModules(...)`, `.hostedModules({ storage, onError })`).
  */
 
-export { wasmModule, loadWasmModules, classifyWasm } from "./define.js";
+export { wasmModule, wasmModuleFromManifest, loadWasmModules, loadWasmPackage, classifyWasm } from "./define.js";
+export {
+  ModulePackageError,
+  PACKAGE_MANIFEST_FILE,
+  MODULE_LOCK_FILE,
+  capabilitiesOf,
+  describeCapability,
+  parsePackageManifest,
+  readModulePackage,
+  readModuleLock,
+} from "./module-package.js";
 export type {
+  Capability,
+  ModuleGrant,
+  ModuleRequests,
+  PackageManifest,
+  PackageModule,
+  PackageComponent,
+  ResolvedPackage,
+} from "./module-package.js";
+export type {
+  LoadWasmPackageOptions,
+  LoadedWasmPackage,
   WasmModuleOptions,
   WasmModuleGrants,
   LoadedWasmModules,

@@ -100,6 +100,12 @@ export interface DevOptions {
    * edited there reaches the running prebuilt modules without a restart.
    */
   configFile?: string;
+
+  /**
+   * The project root that `wasm.packages` paths (and `hypen.lock.json`)
+   * resolve against. Default: the working directory.
+   */
+  root?: string;
 }
 
 /** Configuration for the opt-in dev-loop accessibility pass. */

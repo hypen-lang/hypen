@@ -1,0 +1,12 @@
+module Pricing {
+    Column {
+        Heading("Pricing").level(2)
+        Text("Subtotal: @{state.subtotal}")
+        Text("Discount: @{state.discountPercent}%")
+        Text("Tax: @{state.tax}")
+        Text("Total: @{state.total}").fontWeight("bold")
+        Text("Quotes requested: @{state.quotes}").color("#666666")
+        Button { Text("Toggle tax (8%)") }.onClick(@actions.toggleTax)
+    }
+    .gap(8)
+}

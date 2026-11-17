@@ -19,7 +19,18 @@ import type {
   HostedStorageGrant,
 } from "@hypen-space/core/hosted-module";
 import { formatHostPattern, parseHostPattern } from "@hypen-space/core/http";
-import { HostedModuleSetupError } from "./errors.js";
+import { HostedModuleSetupError, type HostedModuleSetupCode } from "./errors.js";
+import {
+  ModulePackageError,
+  assertNoDrift,
+  locateModulePackage,
+  packageDrift,
+  readModuleLock,
+  readModulePackage,
+  type ModulePackageErrorCode,
+  type PackageManifest,
+  type ResolvedPackage,
+} from "./module-package.js";
 
 /** The grants of a hosted module, as written (module names in any case). */
 export interface WasmModuleGrants {
@@ -40,14 +51,26 @@ export interface WasmModuleGrants {
 }
 
 export interface WasmModuleOptions {
-  /** The component tag (`Pricing {}` in templates); lowercased, the state scope. */
-  name: string;
+  /**
+   * The component tag (`Pricing {}` in templates); lowercased, the state
+   * scope. With `from`: which module of the package (default: the package's
+   * entry, or its only module).
+   */
+  name?: string;
   /**
    * The component: its bytes, a filesystem path (relative paths resolve
    * against `baseDir`), or an `http(s):` / `file:` URL (fetched once at
-   * server startup).
+   * server startup). Omit it when `from` names a package.
    */
-  component: Uint8Array | string | URL;
+  component?: Uint8Array | string | URL;
+  /**
+   * A module package to take the module from instead of `component` /
+   * `template`: an installed npm package (`"@acme/checkout"`) or a path to a
+   * package directory / its `hypen-modules.json`. The manifest names the
+   * files; the component's integrity is verified. To load EVERY module of a
+   * package (and its template-only components) use `loadWasmPackage()`.
+   */
+  from?: string;
   /** Path of the module's `.hypen` template (relative to `baseDir`). */
   template?: string;
   /** The template source inline — instead of `template`. */
@@ -326,6 +349,7 @@ export function wasmModule(options: WasmModuleOptions): HostedModuleDefinition {
       hint: 'e.g. wasmModule({ name: "Pricing", component: "./pricing.wasm" })',
     });
   }
+  if (options.from !== undefined) return moduleFromPackage(options);
   const label = typeof options.name === "string" && options.name ? options.name : "?";
   const declaredAt = options.declaredAt ?? `wasmModule({ name: "${label}" })`;
   assertName(options.name, declaredAt);
@@ -333,7 +357,12 @@ export function wasmModule(options: WasmModuleOptions): HostedModuleDefinition {
   const grantsAt = options.grantsAt ?? `${declaredAt}.grants`;
   const baseDir = resolve(options.baseDir ?? process.cwd());
 
-  const component = componentSource(options.component, baseDir, name, `${declaredAt}.component`);
+  const component = componentSource(
+    options.component as Uint8Array | string | URL,
+    baseDir,
+    name,
+    `${declaredAt}.component`
+  );
 
   let template: string | undefined;
   let templatePath: string | undefined;
@@ -391,6 +420,203 @@ export function wasmModule(options: WasmModuleOptions): HostedModuleDefinition {
       grantsAt,
     },
   };
+}
+
+// ── module packages (hypen-modules.json) ────────────────────────────────────
+
+const PACKAGE_CODES: Record<ModulePackageErrorCode, HostedModuleSetupCode> = {
+  MANIFEST_NOT_FOUND: "MANIFEST_INVALID",
+  MANIFEST_INVALID: "MANIFEST_INVALID",
+  MANIFEST_VERSION_UNSUPPORTED: "MANIFEST_INVALID",
+  MANIFEST_PATH_ESCAPES: "MANIFEST_INVALID",
+  MODULE_FILE_MISSING: "COMPONENT_MISSING",
+  COMPONENT_INVALID: "COMPONENT_INVALID",
+  INTEGRITY_MISMATCH: "INTEGRITY_MISMATCH",
+  PACKAGE_NOT_FOUND: "PACKAGE_NOT_FOUND",
+  PACKAGE_NOT_HYPEN: "MANIFEST_INVALID",
+  LOCK_INVALID: "MANIFEST_INVALID",
+  REQUESTS_CHANGED: "REQUESTS_CHANGED",
+  NOT_RECORDED: "REQUESTS_CHANGED",
+  UNKNOWN_PACKAGE_MODULE: "UNKNOWN_MODULE",
+};
+
+function packageError(err: unknown): unknown {
+  if (!(err instanceof ModulePackageError)) return err;
+  return new HostedModuleSetupError(err.message, {
+    code: PACKAGE_CODES[err.code],
+    module: err.module,
+    file: err.file,
+    field: err.field,
+    hint: err.hint,
+    cause: err,
+  });
+}
+
+export interface LoadWasmPackageOptions {
+  /**
+   * What each module may do, by module name. A module without an entry is
+   * granted nothing — the manifest's `requests` are what the module ASKS
+   * for and are never applied by themselves.
+   */
+  grants?: Readonly<Record<string, WasmModuleGrants>>;
+  /** Load only these modules / components. Default: everything in the package. */
+  only?: readonly string[];
+  /** Per-module `init` config, by module name. */
+  config?: Readonly<Record<string, unknown>>;
+  /** Directory `from` and `hypen.lock.json` resolve against. Default: `process.cwd()`. */
+  baseDir?: string;
+  /**
+   * Compare the package with what `hypen add` recorded in
+   * `<baseDir>/hypen.lock.json` and refuse one that now requests more than
+   * was reviewed (or whose bytes changed under the reviewed version).
+   * Default: `true` when the lock has an entry for `from`.
+   */
+  checkLock?: boolean;
+}
+
+/** What {@link loadWasmPackage} read. */
+export interface LoadedWasmPackage {
+  /** The package's manifest (name, version, entry, exports, requests). */
+  manifest: PackageManifest;
+  /** The manifest's directory. */
+  dir: string;
+  /** One hosted module per stateful module of the package. */
+  modules: HostedModuleDefinition[];
+  /** Its template-only components, for `RemoteServer.components()`. */
+  components: Array<{ name: string; template: string }>;
+}
+
+function resolvePackage(from: string, baseDir: string, checkLock: boolean | undefined, names?: readonly string[]): ResolvedPackage {
+  const located = locateModulePackage(from, baseDir);
+  const pkg = readModulePackage(located.manifestPath);
+  if (checkLock !== false) {
+    const locked = readModuleLock(baseDir)[from];
+    if (locked !== undefined) assertNoDrift(from, pkg, packageDrift(pkg, locked, names));
+    else if (checkLock === true) {
+      throw new ModulePackageError(`${from} is not recorded in ${baseDir}/hypen.lock.json.`, {
+        code: "NOT_RECORDED",
+        package: from,
+        hint: `run \`hypen add ${from}\` to review what it requests and record the decision`,
+      });
+    }
+  }
+  return pkg;
+}
+
+/**
+ * Load a module package — what `hypen build --target wasm` / `hypen pack`
+ * produce and `hypen add` installs: `from` is an installed npm package
+ * name, or a path to a package directory or its `hypen-modules.json`.
+ * Every component's integrity is verified against the manifest.
+ *
+ * ```ts
+ * const checkout = loadWasmPackage("@acme/checkout", {
+ *   grants: { Pricing: { reads: ["Cart"], dispatches: ["Cart"] } },
+ * });
+ * new RemoteServer()
+ *   .source("./src/components")
+ *   .wasmModules(checkout.modules)
+ *   .components(checkout.components)
+ * ```
+ *
+ * @throws {HostedModuleSetupError} `MANIFEST_INVALID`, `PACKAGE_NOT_FOUND`,
+ *   `INTEGRITY_MISMATCH`, `REQUESTS_CHANGED`, `UNKNOWN_MODULE`, and
+ *   everything `wasmModule()` throws.
+ */
+export function loadWasmPackage(from: string, options: LoadWasmPackageOptions = {}): LoadedWasmPackage {
+  const baseDir = resolve(options.baseDir ?? process.cwd());
+  let pkg: ResolvedPackage;
+  try {
+    pkg = resolvePackage(from, baseDir, options.checkLock, options.only);
+  } catch (err) {
+    throw packageError(err);
+  }
+  const all = [...pkg.modules.map((m) => m.name), ...pkg.components.map((c) => c.name)];
+  const unknown = (name: string, where: string): HostedModuleSetupError =>
+    new HostedModuleSetupError(`${from} has no module named "${name}" (it has: ${all.join(", ")}).`, {
+      code: "UNKNOWN_MODULE",
+      module: name,
+      file: pkg.manifestPath,
+      hint: `fix the name in \`${where}\``,
+    });
+  for (const name of options.only ?? []) if (!all.includes(name)) throw unknown(name, "only");
+  for (const name of Object.keys(options.grants ?? {})) {
+    if (!pkg.modules.some((m) => m.name === name)) throw unknown(name, "grants");
+  }
+  const picked = (name: string): boolean => options.only === undefined || options.only.includes(name);
+  const at = `loadWasmPackage(${JSON.stringify(from)})`;
+  return {
+    manifest: pkg.manifest,
+    dir: pkg.dir,
+    modules: pkg.modules
+      .filter((m) => picked(m.name))
+      .map((m) =>
+        wasmModule({
+          name: m.name,
+          component: m.componentPath,
+          ...(m.templatePath !== undefined ? { template: m.templatePath } : {}),
+          grants: options.grants?.[m.name],
+          config: options.config?.[m.name],
+          declaredAt: `${at} ${m.name}`,
+          grantsAt: `${at}.grants.${m.name}`,
+        })
+      ),
+    components: pkg.components
+      .filter((c) => picked(c.name))
+      .map((c) => ({ name: c.name, template: readFileSync(c.templatePath, "utf8").trim() })),
+  };
+}
+
+/** `wasmModule({ from, name?, grants })`: one module of a package. */
+function moduleFromPackage(options: WasmModuleOptions): HostedModuleDefinition {
+  const from = options.from as string;
+  if (options.component !== undefined || options.template !== undefined) {
+    throw new HostedModuleSetupError("wasmModule(): `from` names a package; `component` / `template` come from its manifest.", {
+      code: "INVALID_OPTIONS",
+      field: "from",
+      hint: "pass either `from` (a module package) or `component` + `template` (the low-level form)",
+    });
+  }
+  const baseDir = resolve(options.baseDir ?? process.cwd());
+  let pkg: ResolvedPackage;
+  try {
+    pkg = resolvePackage(from, baseDir, undefined, options.name !== undefined ? [options.name] : undefined);
+  } catch (err) {
+    throw packageError(err);
+  }
+  const wanted = options.name ?? pkg.manifest.entry ?? (pkg.modules.length === 1 ? pkg.modules[0]?.name : undefined);
+  const module = pkg.modules.find((m) => m.name === wanted);
+  if (module === undefined) {
+    throw new HostedModuleSetupError(
+      wanted === undefined
+        ? `${from} has several modules (${pkg.modules.map((m) => m.name).join(", ")}) and no entry: say which one with \`name\`.`
+        : `${from} has no module named "${wanted}" (it has: ${pkg.modules.map((m) => m.name).join(", ") || "none"}).`,
+      { code: "UNKNOWN_MODULE", module: wanted, file: pkg.manifestPath, hint: "set `name` to one of its modules, or use loadWasmPackage() for all of them" }
+    );
+  }
+  const at = options.declaredAt ?? `wasmModule({ from: ${JSON.stringify(from)}, name: "${module.name}" })`;
+  return wasmModule({
+    name: module.name,
+    component: module.componentPath,
+    ...(options.ui !== undefined ? { ui: options.ui } : module.templatePath !== undefined ? { template: module.templatePath } : {}),
+    grants: options.grants,
+    config: options.config,
+    persist: options.persist,
+    declaredAt: at,
+    grantsAt: options.grantsAt ?? `${at}.grants`,
+  });
+}
+
+/**
+ * One module from a package manifest: `wasmModuleFromManifest("./vendor/checkout", { reads: ["Cart"] })`.
+ * Shorthand for `wasmModule({ from, name, grants })`.
+ */
+export function wasmModuleFromManifest(
+  from: string,
+  grants?: WasmModuleGrants,
+  options: { name?: string; baseDir?: string; config?: unknown } = {}
+): HostedModuleDefinition {
+  return wasmModule({ from, grants, ...options });
 }
 
 /** The stateful entry of an `app.json` (see `hypen build --target wasm`). */

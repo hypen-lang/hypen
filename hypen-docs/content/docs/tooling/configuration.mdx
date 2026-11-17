@@ -30,7 +30,7 @@ All fields:
 | `outDir` | `string` | `"dist"` | Production build output directory (`--outDir` overrides it) |
 | `a11y` | `object` | none | `{ "ignoreRules": ["rule-id"], "dev": true }`. `ignoreRules` suppresses those rules in `hypen check` and `hypen dev --a11y`; `dev: true` prints findings on every `hypen dev` rebuild without the flag |
 | `theme` | `string` | `"./theme.json"` when it exists | Path of the [theme file](/docs/guide/theming#the-theme-file). `hypen check` validates `@theme.*` references against it and `hypen theme export` reads it |
-| `wasm` | `object` | none | WASM modules. For `hypen build --target wasm`: `language` (`"ts"`, `"go"` or `"rust"`, overrides detection) and per-module capability grants in `modules` (`reads`, `dispatches`, `storage`, `http`, and `httpHosts` to narrow `http` to a host allowlist) — see [`hypen build --target wasm`](/docs/tooling/cli#hypen-build---target-wasm). A `modules.<Name>` entry with a `component` path (and optionally `template`) declares a prebuilt module that `hypen dev` loads next to the project's own — see [Prebuilt WASM Modules](/docs/guide/wasm-modules) |
+| `wasm` | `object` | none | WASM modules. For `hypen build --target wasm`: `language` (`"ts"`, `"go"` or `"rust"`, overrides detection) and per-module capability grants in `modules` (`reads`, `dispatches`, `storage`, `http`, and `httpHosts` to narrow `http` to a host allowlist) — see [`hypen build --target wasm`](/docs/tooling/cli#hypen-build---target-wasm). `packages` lists the [module packages](#wasm-packages) the app uses (written by `hypen add`). In a module project, `name` / `version` / `description` / `npm` / `exports` / `external` describe the package it builds. A `modules.<Name>` entry with a `component` path (and optionally `template`) declares a single prebuilt module by hand — see [WASM Modules](/docs/guide/wasm-modules) |
 
 ### WASM module grants
 
@@ -54,7 +54,7 @@ Each entry under `wasm.modules` holds one module's grants. A module starts with 
 
 | Key | Type | Default | Meaning |
 |-----|------|---------|---------|
-| `component`, `template` | paths | none | Declare a [prebuilt module](/docs/guide/wasm-modules#declare-it) |
+| `component`, `template` | paths | none | Declare a [single prebuilt module by hand](/docs/guide/wasm-modules#reference-declaring-a-single-wasm-by-hand) |
 | `reads`, `dispatches` | module names | `[]` | Modules it may read / dispatch to |
 | `storage` | `"app"`, `"cloud"` | `[]` | Storage tiers beyond `local` |
 | `http` | boolean | `false` | Outbound [HTTP requests](/docs/guide/wasm-modules#http-requests) |
@@ -73,6 +73,45 @@ Each entry under `wasm.modules` holds one module's grants. A module starts with 
 ```
 
 Under `hypen dev` and `@hypen-space/server`, a request to `localhost` or a private address also needs that host named in `httpHosts`; see [What a server adds](/docs/guide/wasm-modules#what-a-server-adds).
+
+### WASM packages
+
+`wasm.packages` holds one entry per module package the app uses, keyed by where it comes from: an npm package name, or a path relative to the project. [`hypen add`](/docs/tooling/cli#hypen-add) writes it; the package's own manifest lists its modules.
+
+```json
+{
+  "wasm": {
+    "packages": {
+      "@acme/checkout": {
+        "grants": {
+          "Pricing": { "reads": ["Cart"], "dispatches": ["Cart"] }
+        }
+      },
+      "./modules/reports": { "source": true, "fallback": "./modules/reports/prebuilt" }
+    }
+  }
+}
+```
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `grants.<Module>` | grants | none | The recorded decision for one module of the package, in the shape of a [`wasm.modules` entry](#wasm-module-grants). A module without an entry is granted nothing |
+| `only` | names | everything | Install only these modules / components |
+| `as` | `{ "Name": "New" }` | none | Install the exported module `Name` under another name |
+| `source` | boolean | `false` | The key is a module *project* in this repository: `hypen dev` / `hypen build` build it, and `hypen dev` rebuilds it on change |
+| `trust` | `"requested"`, `"explicit"` | `"requested"` for `source` | `source` only. `"requested"`: its modules get what they declare in their own `hypen.json`; `"explicit"`: only `grants` |
+| `fallback` | path | none | `source` only: a built package to use when the toolchain is missing or `HYPEN_NO_SOURCE_BUILD=1` |
+
+Installed packages are checked on every `hypen dev` / `hypen build` against `hypen.lock.json`, which records what was reviewed; see [Upgrades and drift](/docs/guide/wasm-modules#upgrades-and-drift). Commit both files.
+
+Keys for a project that *builds* a package (see [Build and publish a package](/docs/guide/wasm-modules#build-and-publish-a-package)):
+
+| Key | Type | Default | Meaning |
+|-----|------|---------|---------|
+| `wasm.name`, `wasm.version`, `wasm.description` | string | `package.json`, then `Cargo.toml`, then the directory name / `0.0.0` | The package's identity in `hypen-modules.json` |
+| `wasm.npm` | string | the package's name | The npm name `hypen pack` uses |
+| `wasm.exports` | names | the entry | Names an installing app may use in its templates |
+| `wasm.external` | names | `[]` | Modules the installing app provides, allowed as `reads` / `dispatches` targets |
 
 ### Server-based projects
 

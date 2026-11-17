@@ -99,6 +99,12 @@ export interface DevOptions {
    * edited there reaches the running prebuilt modules without a restart.
    */
   configFile?: string;
+
+  /**
+   * The project root that `wasm.packages` paths (and `hypen.lock.json`)
+   * resolve against. Default: the working directory.
+   */
+  root?: string;
 }
 
 export interface BuildOptions {
@@ -312,10 +318,11 @@ export async function dev(options: DevOptions): Promise<{
   // Prebuilt (hosted) modules declared in hypen.json run in the same
   // server. Resolving them throws a BuildError (missing file, not a
   // component, malformed `wasm` section) before anything listens.
-  const prebuilt = new DevPrebuiltModules({
+  const prebuilt = await DevPrebuiltModules.create({
     wasm: options.wasm,
     configFile: options.configFile,
-    projectRoot: resolve("."),
+    componentsDir: resolvedComponentsDir,
+    projectRoot: resolve(options.root ?? "."),
     serverPackage: serverPackage as HostedServerPackage,
   });
   prebuilt.attach(remoteServer as unknown as HostedRemoteServer);
@@ -411,6 +418,7 @@ export async function dev(options: DevOptions): Promise<{
   if (prebuilt.size > 0) {
     console.log(`  ${dim("Prebuilt:")}   ${prebuilt.names.join(", ")} ${dim("(WASM, from hypen.json)")}`);
   }
+  for (const line of prebuilt.packageLines) console.log(`  ${dim("Package:")}    ${line}`);
   console.log("");
 
   onStart?.(serverUrl);

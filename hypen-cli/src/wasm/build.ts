@@ -20,15 +20,22 @@
  * `BuildError`, which `bin/hypen.ts` prints before exiting.
  */
 
-import { copyFileSync, existsSync, statSync, writeFileSync } from "fs";
-import { join, relative, resolve } from "path";
+import { copyFileSync, existsSync, readFileSync, statSync, writeFileSync } from "fs";
+import { basename, join, relative, resolve } from "path";
 import { BuildError } from "../build-error.js";
 import { boldPink, dim, pink, yellow } from "../colors.js";
 import type { BuildContext, ModuleBuilder } from "./builders/builder.js";
 import { goBuilder } from "./builders/go.js";
 import { rustBuilder } from "./builders/rust.js";
 import { tsBuilder } from "./builders/ts.js";
-import { parseWasmConfig, resolveModuleCapabilities, type WasmConfig } from "./config.js";
+import { linkRequirements, readComponentImports, unversioned } from "./component-imports.js";
+import {
+  declaredRequests,
+  parseWasmConfig,
+  resolveModuleCapabilities,
+  type PackageDeclaration,
+  type WasmConfig,
+} from "./config.js";
 import { assertBuildable, detectProjectLanguage } from "./discover.js";
 import {
   MANIFEST_FILE,
@@ -41,11 +48,31 @@ import {
   type AppManifestModule,
 } from "./manifest.js";
 import { assertSafeOutput, createStaging, type Staging } from "./output.js";
-import { prebuiltNames, resolvePrebuiltModules } from "./prebuilt.js";
+import {
+  PACKAGE_MANIFEST_FILE,
+  integrityOf,
+  locateModulePackage,
+  serializePackageManifest,
+  type ModuleRequests,
+  type PackageManifest,
+  type PackageModule,
+} from "./module-package.js";
+import {
+  builtManifestPath,
+  resolveHosted,
+  withPackageErrors,
+  withPackageGrants,
+  type PackageComponentUse,
+  type ResolvedHosted,
+} from "./packages.js";
+import { prebuiltNames } from "./prebuilt.js";
+import { readProjectConfig } from "../project-config.js";
 import { killRunningTools } from "./process.js";
 import {
+  parseModuleName,
   scopeOf,
   type Discovery,
+  type ModuleName,
   type Language,
   type PrebuiltModule,
   type Project,
@@ -68,6 +95,13 @@ export interface BuildWasmOptions {
    * capability grants. Parsed (and rejected if malformed) by `parseWasmConfig`.
    */
   wasm?: unknown;
+  /** Where progress lines go. Default: `console.log`. */
+  log?: (line: string) => void;
+  /**
+   * Do not run toolchains for `source` packages: use each one's `fallback`
+   * (also `HYPEN_NO_SOURCE_BUILD=1`). For machines without the toolchains.
+   */
+  noSourceBuild?: boolean;
 }
 
 /** Everything the language-agnostic part of a build needs, resolved up front. */
@@ -76,9 +110,14 @@ interface BuildPlan {
   outDir: string;
   outWasmDir: string;
   keepTemp: boolean;
+  /** The config, with package modules' grants merged into `modules`. */
   config: WasmConfig;
   /** The modules hypen.json declares prebuilt, resolved against the project. */
   prebuilt: PrebuiltModule[];
+  /** Template-only components the app's packages bring. */
+  packageComponents: PackageComponentUse[];
+  hosted: ResolvedHosted;
+  say: (line: string) => void;
 }
 
 function assertComponentsDir(componentsDir: string): void {
@@ -203,6 +242,214 @@ function placePrebuilt<S>(
   return { placed, stateless };
 }
 
+
+/** The `hypen:module` contract version a component was built against. */
+function abiOf(imports: readonly string[] | null): string {
+  return imports?.some((name) => /^hypen:module\/[^@]+@0\.2\./.test(name)) ? "0.2" : "0.1";
+}
+
+function packageModuleEntry(name: ModuleName, bytes: Uint8Array, requests: ModuleRequests): PackageModule {
+  return {
+    name,
+    component: wasmFileName(name),
+    template: uiFileName(name),
+    abi: abiOf(readComponentImports(bytes)),
+    requests,
+    integrity: integrityOf(bytes),
+  };
+}
+
+/**
+ * Cross-check what a module DECLARES it needs (its `wasm.modules.<Name>`
+ * entry — what installers will be asked to grant) against what its
+ * component really imports.
+ *
+ * @throws {BuildError} `UNDECLARED_IMPORT`: the component imports a
+ *   link-time capability the declaration does not cover, so it would fail
+ *   to instantiate for everyone who grants what it asks for.
+ * @returns warnings for declared capabilities the component never uses.
+ */
+export function checkDeclaredImports(name: ModuleName, bytes: Uint8Array, requests: ModuleRequests): string[] {
+  const imports = readComponentImports(bytes);
+  if (imports === null) return [];
+  const needs = linkRequirements(imports);
+  const field = `wasm.modules.${name}`;
+  const undeclared = (what: string, key: string, json: string): BuildError =>
+    new BuildError(
+      `${name} imports ${what}, but ${field}.${key} does not declare it: the module would fail to start for everyone who installs it.`,
+      {
+        code: "UNDECLARED_IMPORT",
+        module: name,
+        file: "hypen.json",
+        field: `${field}.${key}`,
+        hint: `declare what the module needs — add ${json} to ${field} in hypen.json — or remove the code that uses ${unversioned(what)}`,
+      }
+    );
+  for (const tier of needs.storage) {
+    if (!requests.storage.includes(tier)) throw undeclared(`hypen:storage/${tier}`, "storage", `"storage": ["${tier}"]`);
+  }
+  if (needs.http !== null && !requests.http) throw undeclared(needs.http, "http", `"http": true`);
+
+  const warnings: string[] = [];
+  for (const tier of requests.storage) {
+    if (!needs.storage.includes(tier)) {
+      warnings.push(`${name} declares storage "${tier}" but its component does not import hypen:storage/${tier}; remove "${tier}" from ${field}.storage so installers are not asked for it`);
+    }
+  }
+  if (requests.http && needs.http === null) {
+    warnings.push(`${name} declares http but its component imports neither wasi:http nor hypen:http/deferred; remove "http" from ${field} so installers are not asked for it`);
+  }
+  if ((requests.reads.length > 0 || requests.dispatches.length > 0) && !needs.engineState) {
+    warnings.push(`${name} declares reads/dispatches but its component does not import hypen:engine/state; remove them from ${field} so installers are not asked for them`);
+  }
+  return warnings;
+}
+
+function packageJsonOf(dir: string): Record<string, unknown> {
+  try {
+    const raw: unknown = JSON.parse(readFileSync(join(dir, "package.json"), "utf8"));
+    return typeof raw === "object" && raw !== null && !Array.isArray(raw) ? (raw as Record<string, unknown>) : {};
+  } catch {
+    return {};
+  }
+}
+
+/** `name` / `version` / `description` of `[package]` in a Cargo.toml. */
+function cargoPackageOf(dir: string): Record<string, unknown> {
+  let text: string;
+  try {
+    text = readFileSync(join(dir, "Cargo.toml"), "utf8");
+  } catch {
+    return {};
+  }
+  const section = /^\[package\]\s*$([\s\S]*?)(?=^\[)/m.exec(text + "\n[")?.[1] ?? "";
+  const out: Record<string, unknown> = {};
+  for (const key of ["name", "version", "description"]) {
+    const value = new RegExp(`^\\s*${key}\\s*=\\s*"([^"]*)"`, "m").exec(section)?.[1];
+    if (value !== undefined) out[key] = value;
+  }
+  return out;
+}
+
+/**
+ * The identity of the package a project builds. Precedence, per field:
+ * hypen.json `wasm.{name,version,description}` → `package.json` →
+ * `Cargo.toml` `[package]` → the directory name / `0.0.0`.
+ */
+export function packageIdentity(
+  projectDir: string,
+  config: WasmConfig
+): { name: string; version: string; description: string | undefined } {
+  const pkg = packageJsonOf(projectDir);
+  const cargo = cargoPackageOf(projectDir);
+  const pick = (key: "name" | "version" | "description"): string | undefined => {
+    for (const value of [config.package[key], pkg[key], cargo[key]]) {
+      if (typeof value === "string" && value.trim() !== "") return value;
+    }
+    return undefined;
+  };
+  return {
+    name: pick("name") ?? basename(projectDir),
+    version: pick("version") ?? "0.0.0",
+    description: pick("description"),
+  };
+}
+
+function describePackage(plan: BuildPlan, modules: PackageModule[], stateless: readonly StatelessComponent[]): PackageManifest {
+  const names = [...modules.map((m) => m.name), ...stateless.map((c) => c.name as string)];
+  const exports = (plan.config.package.exports ?? [plan.project.entry]).map((name) => {
+    const found = names.find((n) => n.toLowerCase() === name.toLowerCase());
+    if (found === undefined) {
+      throw new BuildError(`hypen.json: wasm.exports names "${name}", which this project does not build (it builds: ${names.join(", ")}).`, {
+        code: "CONFIG_UNKNOWN_MODULE",
+        module: name,
+        file: "hypen.json",
+        field: "wasm.exports",
+        hint: `list component names from the components directory, or remove "wasm.exports" to export only the entry (${plan.project.entry})`,
+      });
+    }
+    return found;
+  });
+  return {
+    ...packageIdentity(plan.project.projectDir, plan.config),
+    entry: plan.project.entry,
+    exports: [...new Set(exports)],
+    modules,
+    components: stateless.map((c) => ({ name: c.name, template: uiFileName(c.name) })),
+  };
+}
+
+/** A `source` package, built (or resolved to its fallback). */
+export interface BuiltSource {
+  manifestPath: string;
+  origin: "source" | "fallback";
+  /** What to tell the user when the fallback was used. */
+  notice?: string;
+}
+
+const TOOLCHAIN_CODES = new Set(["TOOLCHAIN_MISSING", "TOOLCHAIN_VERSION"]);
+
+/**
+ * Build the module project a `source` package points at, with the same
+ * pipeline `hypen build --target wasm` runs there, and return its manifest.
+ *
+ * When the project's toolchain is missing (or `noSourceBuild`) and the
+ * declaration names a `fallback`, the fallback package is used instead and
+ * `notice` says so. A compile error is never papered over by the fallback.
+ *
+ * @throws {BuildError}
+ */
+export async function buildSourcePackage(
+  decl: PackageDeclaration,
+  projectDir: string,
+  options: { log?: (line: string) => void; noSourceBuild?: boolean } = {}
+): Promise<BuiltSource> {
+  const dir = resolve(projectDir, decl.from);
+  if (!existsSync(join(dir, "hypen.json"))) {
+    throw new BuildError(`hypen.json: ${decl.field} is a source package, but ${dir} is not a Hypen project (no hypen.json there).`, {
+      code: "CONFIG_INVALID",
+      file: "hypen.json",
+      field: decl.field,
+      hint: `point the key at the module project's directory (the one with its own hypen.json), relative to ${resolve(projectDir)}; for an already-built package drop "source": true and run \`hypen add <path>\``,
+    });
+  }
+  const useFallback = (why: string): BuiltSource => {
+    const located = withPackageErrors(() => locateModulePackage(decl.fallback as string, projectDir));
+    return {
+      manifestPath: located.manifestPath,
+      origin: "fallback",
+      notice: `${decl.from}: ${why} — using the prebuilt fallback ${decl.fallback}. Changes to its sources are NOT picked up until it is built.`,
+    };
+  };
+  const skip = options.noSourceBuild === true || process.env.HYPEN_NO_SOURCE_BUILD === "1";
+  if (skip) {
+    if (decl.fallback !== undefined) return useFallback("source builds are disabled (HYPEN_NO_SOURCE_BUILD)");
+    throw new BuildError(`${decl.from} has to be built from source, but source builds are disabled (HYPEN_NO_SOURCE_BUILD=1) and it has no fallback.`, {
+      code: "TOOLCHAIN_MISSING",
+      file: "hypen.json",
+      field: decl.field,
+      hint: `unset HYPEN_NO_SOURCE_BUILD, or commit a built package and name it in ${decl.field}.fallback`,
+    });
+  }
+  const project = readProjectConfig(dir);
+  try {
+    await buildWasm({
+      root: dir,
+      components: project.components,
+      entry: project.entry,
+      outDir: project.outDir,
+      wasm: project.wasm,
+      log: options.log,
+    });
+  } catch (err) {
+    if (err instanceof BuildError && TOOLCHAIN_CODES.has(err.code) && decl.fallback !== undefined) {
+      return useFallback(err.message.replace(/\.$/, ""));
+    }
+    throw err;
+  }
+  return { manifestPath: builtManifestPath(dir, project.outDir), origin: "source" };
+}
+
 /** Discover, validate, compile and publish one project with one builder. */
 async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Promise<AppManifest> {
   const { project, outWasmDir } = plan;
@@ -216,7 +463,14 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
   // already compiled: they join the build as stateful modules that only
   // need copying. Placed before `assertBuildable`, so a project whose only
   // modules — or whose entry — are prebuilt is a valid build.
-  const { placed: prebuilt, stateless } = placePrebuilt(plan.prebuilt, discovery, project);
+  const placedPrebuilt = placePrebuilt(plan.prebuilt, discovery, project);
+  const prebuilt = placedPrebuilt.placed;
+  // Template-only components that packages bring ship like the project's own.
+  const stateless: StatelessComponent[] = [
+    ...placedPrebuilt.stateless,
+    ...plan.packageComponents.map((c): StatelessComponent => ({ kind: "stateless", name: c.name, template: c.template })),
+  ];
+  const say = plan.say;
   assertBuildable(
     {
       stateful: [
@@ -242,7 +496,7 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
     project,
     workDir: staging.workDir,
     stageDir: staging.stageDir,
-    log: (line) => console.log(`  ${dim(line)}`),
+    log: (line) => say(`  ${dim(line)}`),
   };
 
   return withInterruptCleanup(staging.dispose, async () => {
@@ -263,14 +517,14 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
         }
         const notes = builder.describe?.(module) ?? {};
         const building = notes.building ? ` ${dim(notes.building)}` : "";
-        console.log(`  ${pink("building")} ${module.name}${building} ${dim("…")}`);
+        say(`  ${pink("building")} ${module.name}${building} ${dim("…")}`);
 
         await builder.build(ctx, prepared.value, module, grants);
         writeFileSync(join(staging.stageDir, uiFileName(module.name)), module.template);
         entries.push(statefulEntry(module.name, grants));
 
         const built = notes.built ? ` ${dim(notes.built)}` : "";
-        console.log(
+        say(
           `    ${dim("→")} ${wasmFileName(module.name)} ${dim("+")} ${uiFileName(module.name)}${built}`
         );
       }
@@ -283,27 +537,49 @@ async function runBuild<S, P>(builder: ModuleBuilder<S, P>, plan: BuildPlan): Pr
         copyFileSync(module.componentPath, join(staging.stageDir, wasmFileName(module.name)));
         writeFileSync(join(staging.stageDir, uiFileName(module.name)), template);
         entries.push(statefulEntry(module.name, grants));
-        console.log(`  ${pink("copying")} ${module.name} ${dim("(prebuilt)")}`);
-        console.log(`    ${dim("→")} ${wasmFileName(module.name)} ${dim("+")} ${uiFileName(module.name)}`);
+        say(`  ${pink("copying")} ${module.name} ${dim(module.package ? `(${module.package.from})` : "(prebuilt)")}`);
+        say(`    ${dim("→")} ${wasmFileName(module.name)} ${dim("+")} ${uiFileName(module.name)}`);
       }
 
       for (const component of stateless) {
         writeFileSync(join(staging.stageDir, uiFileName(component.name)), component.template);
         entries.push(statelessEntry(component));
-        console.log(`    ${dim("→")} ${uiFileName(component.name)} ${dim("(stateless)")}`);
+        say(`    ${dim("→")} ${uiFileName(component.name)} ${dim("(stateless)")}`);
       }
 
       const manifest: AppManifest = { entry: project.entry, modules: entries };
       writeFileSync(join(staging.stageDir, MANIFEST_FILE), serializeManifest(manifest));
+
+      // The package manifest: the same modules and components, described for
+      // whoever INSTALLS this build (what each module requests, its
+      // integrity) rather than for the runtime that runs it (app.json).
+      const statefulNames = [...stateful.map((m) => m.name), ...prebuilt.map((p) => p.module.name)];
+      const packageModules: PackageModule[] = [];
+      for (const module of stateful) {
+        const requests = declaredRequests(plan.config, module.name, statefulNames);
+        const bytes = readFileSync(join(staging.stageDir, wasmFileName(module.name)));
+        for (const line of checkDeclaredImports(module.name, bytes, requests)) say(`  ${yellow("warning:")} ${line}`);
+        packageModules.push(packageModuleEntry(module.name, bytes, requests));
+      }
+      for (const { module } of prebuilt) {
+        const bytes = readFileSync(join(staging.stageDir, wasmFileName(module.name)));
+        const from = plan.hosted.packages.find((use) => use.modules.includes(module));
+        const original = from?.pkg.modules.find((m) => m.name === module.package?.name);
+        packageModules.push(
+          packageModuleEntry(module.name, bytes, original?.requests ?? declaredRequests(plan.config, module.name, statefulNames))
+        );
+      }
+      const packageManifest = describePackage(plan, packageModules, stateless);
+      writeFileSync(join(staging.stageDir, PACKAGE_MANIFEST_FILE), serializePackageManifest(packageManifest));
       staging.publish();
 
       const statelessNote = stateless.length > 0 ? ` + ${stateless.length} stateless` : "";
       const prebuiltNote = prebuilt.length > 0 ? ` + ${prebuilt.length} prebuilt` : "";
-      console.log(
+      say(
         `\n  ${boldPink("Done.")} ${stateful.length} module(s)${prebuiltNote}${statelessNote} → ${dim(outWasmDir)}`
       );
       const manifestRel = relative(project.projectDir, join(outWasmDir, MANIFEST_FILE)) || MANIFEST_FILE;
-      console.log(`  ${dim("Run it:")} ${yellow(`hypen-runtime --app ${manifestRel}`)}\n`);
+      say(`  ${dim("Run it:")} ${yellow(`hypen-runtime --app ${manifestRel}`)}\n`);
       return manifest;
     } finally {
       staging.dispose();
@@ -327,6 +603,7 @@ const LANGUAGE_LABELS: Record<Language, string> = {
  * @returns the manifest written to `<outDir>/wasm/app.json`.
  */
 export async function buildWasm(options: BuildWasmOptions): Promise<AppManifest> {
+  const say = options.log ?? ((line: string) => console.log(line));
   const config = parseWasmConfig(options.wasm);
   const projectDir = resolve(options.root ?? process.cwd());
   const project: Project = {
@@ -335,29 +612,46 @@ export async function buildWasm(options: BuildWasmOptions): Promise<AppManifest>
     entry: options.entry,
     prebuilt: prebuiltNames(config),
   };
+  for (const name of config.package.external) parseModuleName(name);
   const outDir = resolve(projectDir, options.outDir ?? "dist");
   const outWasmDir = join(outDir, "wasm");
   const detected = detectProjectLanguage(projectDir, config.language);
 
-  console.log(`\n  ${boldPink("Hypen Build")} ${dim("→")} ${yellow("wasm")}\n`);
-  console.log(`  ${dim("Entry:")}      ${project.entry}`);
+  say(`\n  ${boldPink("Hypen Build")} ${dim("→")} ${yellow("wasm")}\n`);
+  say(`  ${dim("Entry:")}      ${project.entry}`);
   const languageSource = detected.from === "config" ? ` ${dim("(hypen.json wasm.language)")}` : "";
-  console.log(`  ${dim("Language:")}   ${LANGUAGE_LABELS[detected.language]}${languageSource}`);
-  console.log(`  ${dim("Components:")} ${project.componentsDir}`);
-  console.log(`  ${dim("Output:")}     ${outWasmDir}\n`);
+  say(`  ${dim("Language:")}   ${LANGUAGE_LABELS[detected.language]}${languageSource}`);
+  say(`  ${dim("Components:")} ${project.componentsDir}`);
+  say(`  ${dim("Output:")}     ${outWasmDir}\n`);
 
   assertComponentsDir(project.componentsDir);
   assertSafeOutput(outWasmDir, project);
-  // Paths and "is it a component" — before discovery loads any module.
-  const prebuilt = resolvePrebuiltModules(config, projectDir);
+  // Module projects in this repository (`"source": true` packages) are
+  // built first, with this same pipeline; their output is then installed
+  // like any other package.
+  const built = new Map<string, BuiltSource>();
+  for (const decl of config.packages.values()) {
+    if (!decl.source) continue;
+    say(`  ${pink("source")} ${decl.from} ${dim("…")}`);
+    const source = await buildSourcePackage(decl, projectDir, { log: options.log, noSourceBuild: options.noSourceBuild });
+    if (source.notice) say(`  ${yellow("notice:")} ${source.notice}`);
+    built.set(decl.from, source);
+  }
+  // Paths, "is it a component", integrity, drift, collisions — before
+  // discovery loads any module.
+  const hosted = resolveHosted(config, projectDir, { built, componentsDir: project.componentsDir });
+  for (const note of hosted.notes) say(`  ${yellow("note:")} ${note}`);
 
   const plan: BuildPlan = {
     project,
     outDir,
     outWasmDir,
     keepTemp: options.keepTemp ?? false,
-    config,
-    prebuilt,
+    config: withPackageGrants(config, hosted),
+    prebuilt: hosted.modules,
+    packageComponents: hosted.components,
+    hosted,
+    say,
   };
   // One arm per language keeps each builder's source/prepared types intact
   // (a `Record<Language, ModuleBuilder<…>>` lookup would have to erase them).

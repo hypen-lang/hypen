@@ -31,9 +31,34 @@ export type {
 } from "./wasm/types.js";
 
 export { parseWasmConfig, resolveModuleCapabilities } from "./wasm/config.js";
-export type { ModuleGrants, PrebuiltDeclaration, WasmConfig } from "./wasm/config.js";
+export type { ModuleGrants, PackageDeclaration, PackageMeta, PrebuiltDeclaration, WasmConfig } from "./wasm/config.js";
+export { buildSourcePackage, checkDeclaredImports, packageIdentity } from "./wasm/build.js";
+export type { BuiltSource } from "./wasm/build.js";
 export {
+  appComponents,
+  resolveHosted,
+  selectFromPackage,
+  templateRefs,
+  withPackageGrants,
+} from "./wasm/packages.js";
+export type { PackageUse, ResolvedHosted } from "./wasm/packages.js";
+export { linkRequirements, readComponentImports } from "./wasm/component-imports.js";
+export * from "./wasm/module-package.js";
+export { readProjectConfig } from "./project-config.js";
+export { addPackage, classifySpec, renderSummary } from "./modules/add.js";
+export type { AddOptions, AddResult, ModuleSpec, RequestedCapability } from "./modules/add.js";
+export { removePackage } from "./modules/remove.js";
+export { formatPackages, listPackages } from "./modules/list.js";
+export { packProject } from "./modules/pack.js";
+export { scriptedPrompter, terminalPrompter } from "./modules/prompter.js";
+export type { Prompter } from "./modules/prompter.js";
+export { extractTarball, tarballOf } from "./modules/tar.js";
+export { setJsonPath, removeJsonPath } from "./modules/json-edit.js";
+export { detectPackageManager, addCommand } from "./modules/pm.js";
+export {
+  copyHostedFiles,
   copyPrebuiltModules,
+  declaredPackages,
   declaredPrebuiltNames,
   prebuiltNames,
   resolvePrebuiltModules,

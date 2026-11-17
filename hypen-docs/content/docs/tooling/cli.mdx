@@ -53,6 +53,10 @@ The first time you run the CLI interactively on a machine it shows a short tour.
 | [`hypen dev`](#hypen-dev) | Development server with hot reload |
 | [`hypen build`](#hypen-build) | Production build |
 | [`hypen generate`](#hypen-generate) | Write `.hypen/components.generated.ts` |
+| [`hypen add <package>`](#hypen-add) | Install a WASM module package and record what it is granted |
+| [`hypen remove <package\|Module>`](#hypen-remove) | Undo `hypen add` |
+| [`hypen modules`](#hypen-modules) | List installed module packages: granted vs requested |
+| [`hypen pack`](#hypen-pack) | Pack a module project into an npm-publishable package |
 | [`hypen check [path...]`](#hypen-check) | Accessibility + template checks (`hypen a11y`: accessibility only) |
 | [`hypen studio`](#hypen-studio) | Hypen Studio IDE |
 | [`hypen test`](#hypen-test) | Studio Test Mode |
@@ -234,7 +238,7 @@ On failure the build exits 1 with `Build failed: <reason>`, for example when `@h
 
 Builds a component project into portable WebAssembly components instead of a site: `<outDir>/wasm/` gets one `<Module>.wasm` per stateful module, each component's `<Module>.hypen` template, and an `app.json` manifest that runs offline with `hypen-runtime --app dist/wasm/app.json`. `--keep-temp` keeps the intermediate files in `<outDir>/.wasm-temp`; `--minify` and `--sourcemap` don't apply.
 
-The build works in a private directory and swaps the finished output into `<outDir>/wasm` at the end, so a failed or interrupted build leaves the previous output untouched. `<outDir>/wasm` is replaced as a whole: the build refuses to run if that directory holds anything other than earlier build output (`.wasm`, `.hypen`, `app.json`), or if it overlaps the project's sources.
+The build works in a private directory and swaps the finished output into `<outDir>/wasm` at the end, so a failed or interrupted build leaves the previous output untouched. `<outDir>/wasm` is replaced as a whole: the build refuses to run if that directory holds anything other than earlier build output (`.wasm`, `.hypen`, `app.json`, `hypen-modules.json`), or if it overlaps the project's sources.
 
 The language comes from the project: a `Cargo.toml` means Rust (needs `cargo` and `rustup target add wasm32-wasip2`), a `go.mod` means Go (needs TinyGo 0.39 or newer and `wit-bindgen-go`), anything else is TypeScript (needs `@bytecodealliance/jco`: `bun add -d @bytecodealliance/jco@1.42.0`). Set `"wasm": { "language": "ts" | "go" | "rust" }` in `hypen.json` to choose explicitly; that is required when the project has both a `Cargo.toml` and a `go.mod`. A build compiles one language: a component whose only module is written in another one fails the build instead of being emitted without its module.
 
@@ -258,7 +262,11 @@ The runtime is deny-by-default: a module can't read or dispatch to other modules
 | `http` | boolean | `false` | Outbound HTTP: `context.http` in a TypeScript module (`hypen:http/deferred`), and blocking `wasi:http`. For a TypeScript module the grant also decides whether the built component imports the interface |
 | `httpHosts` | host patterns | any host | Narrows `http` to an allowlist: `"api.example.com"`, `"*.example.com"` (subdomains, not the apex), either with `:port`. Needs `http: true`. See [HTTP requests](/docs/guide/wasm-modules#http-requests) |
 
-A module entry can also carry `"component": "<path to a .wasm>"` and `"template": "<path to a .hypen>"`. That declares a **prebuilt** module: it is not compiled but copied into the output as `<Name>.wasm` and `<Name>.hypen` and listed in `app.json` with its grants, and it does not count as a module of another language. A project whose only stateful modules are prebuilt needs no toolchain. The build fails if the file is missing or is not a WebAssembly Component, if the template is missing (declare `template`, or keep a template-only component with that name), or if a source module has the same name. `hypen dev` loads the same declarations; the browser SPA build (`hypen build` without `--target wasm` on a component project) refuses them with `PREBUILT_UNSUPPORTED_TARGET`. See [Prebuilt WASM Modules](/docs/guide/wasm-modules).
+A module entry can also carry `"component": "<path to a .wasm>"` and `"template": "<path to a .hypen>"`. That declares a **prebuilt** module: it is not compiled but copied into the output as `<Name>.wasm` and `<Name>.hypen` and listed in `app.json` with its grants, and it does not count as a module of another language. A project whose only stateful modules are prebuilt needs no toolchain. The build fails if the file is missing or is not a WebAssembly Component, if the template is missing (declare `template`, or keep a template-only component with that name), or if a source module has the same name. `hypen dev` loads the same declarations; the browser SPA build (`hypen build` without `--target wasm` on a component project) refuses them with `PREBUILT_UNSUPPORTED_TARGET`. This is the low-level form; to use modules someone else built, install their package with [`hypen add`](#hypen-add) — see [WASM Modules](/docs/guide/wasm-modules).
+
+Beside `app.json` the build writes **`hypen-modules.json`**, the package manifest that [`hypen add`](#hypen-add) and [`hypen pack`](#hypen-pack) work with: every stateful module with what it *requests* (its `wasm.modules.<Name>` declaration) and the SHA-256 of its component, the template-only components, the `entry` and the `exports`. `app.json` stays what `hypen-runtime --app` loads; both are written from the same build. Each declaration is checked against the component's real imports: a storage tier or HTTP interface the component imports but the declaration does not list fails the build with `UNDECLARED_IMPORT` (the module could not start for anyone who installs it); a declared capability the component never imports is a warning. A `reads` / `dispatches` target that is a module of the *installing app* rather than of this project goes in `"wasm": { "external": ["Cart"] }`; it is recorded as a request and left out of this project's own `app.json`. Package identity: `wasm.name` / `wasm.version` / `wasm.description`, each falling back to `package.json`, then `Cargo.toml` `[package]`, then the directory name / `0.0.0`. `wasm.exports` lists the names an installing app may use in its templates (default: the entry).
+
+An app's own [`wasm.packages`](/docs/tooling/configuration#wasm-packages) are part of its build: `source` packages are built first, and every package's modules and components are copied into the output with their recorded grants.
 
 Every stateful module is written to `app.json` with the four grant fields (`httpHosts` is added only when it names hosts); module names in `reads`/`dispatches` are written lowercased (the runtime's state scopes). An unknown module name, an unknown key or a value of the wrong type fails the build before anything compiles. So do module names that differ only by case (they would share a state scope) or contain `:`.
 
@@ -275,6 +283,67 @@ On failure the build exits 1 and prints the reason, the module, file or `hypen.j
 ```
 
 In TypeScript modules on the wasm target, `context.router.push`/`replace` navigate, but other router methods, unsubscribing from `context.on`, cross-module `setState`, data sources and `async` handlers throw an error saying they aren't supported yet. Node built-ins (`fs`, `path`, `crypto`, ...) can be imported but throw when used.
+
+### `hypen add`
+
+```bash
+hypen add <package> [--yes] [--grant <cap>]... [--deny <cap>]... [--only <A,B>] [--as <Name=New>]...
+```
+
+Installs a [module package](/docs/guide/wasm-modules) into the app in the current directory. `<package>` is:
+
+| Form | Example | What happens |
+|------|---------|--------------|
+| npm package | `@acme/checkout`, `@acme/checkout@^1.2`, `file:../checkout/dist/pack` | Added with the project's package manager — `bun`, `npm`, `pnpm` or `yarn`, from `packageManager` in `package.json`, else the lockfile, else Bun — with lifecycle scripts **disabled** (`--ignore-scripts`). The manifest is found through the package's `"hypen": { "modules": … }` |
+| directory | `./vendor/checkout` | Used where it is |
+| manifest | `./vendor/checkout/hypen-modules.json` | Used where it is |
+| tarball | `./checkout-1.2.0.tgz` | Extracted into a fresh `./hypen_modules/<name>/` (commit it). Entries that would land outside it, and links, are refused |
+| already installed | `@acme/checkout` | Reviewed again in place — run it after an upgrade |
+
+It verifies the manifest and each component's hash, prints the package and what each module requests, and records the decision: one `hypen.json` entry under `wasm.packages` (the file's formatting is kept) and the reviewed version, hashes and requests in `hypen.lock.json`.
+
+| Flag | Meaning |
+|------|---------|
+| `-y`, `--yes` | Grant exactly what is requested |
+| `--grant <cap>` | Grant one capability; repeatable |
+| `--deny <cap>` | Withhold one; repeatable; wins over `--yes` |
+| `--only <A,B>` | Install only these modules / components |
+| `--as <Name=New>` | Install the exported module `Name` as `New`; repeatable |
+
+`<cap>` is `[Module.]capability`: `Pricing.reads:Cart`, `Pricing.dispatches`, `Tax.http`, `storage:cloud`, `Pricing` (all it requests), `all`. In a terminal the command asks (all / per module / per capability / cancel). Without one, every requested capability needs a flag:
+
+```text
+  Error: ./vendor/counters requests capabilities, and nothing is granted without a decision. Undecided: Mirror.reads:Counter, Mirror.dispatches:Counter, Counter.storage:cloud.
+
+    Mirror.reads:Counter         read the state of the Counter module
+    Mirror.dispatches:Counter    dispatch actions to the Counter module
+    Counter.storage:cloud        read and write cloud storage (synced off this device)
+    code:    CONSENT_REQUIRED
+
+  Hint: decide each one with flags: --yes (grant exactly what is requested), --grant <capability> / --deny <capability> …
+```
+
+Errors carry a stable code: `SPEC_NOT_FOUND`, `PACKAGE_NOT_HYPEN`, `MANIFEST_INVALID`, `MANIFEST_VERSION_UNSUPPORTED`, `MANIFEST_PATH_ESCAPES`, `INTEGRITY_MISMATCH`, `COMPONENT_INVALID`, `MODULE_NAME_COLLISION`, `RENAME_UNSOUND`, `ONLY_INCOMPLETE`, `UNGRANTED_IMPORT`, `CONSENT_REQUIRED`, `FLAG_INVALID`, `TARBALL_UNSAFE`, `TARBALL_INVALID`, `CONFIG_INVALID`, `CONFIG_NOT_WRITABLE`, `TOOL_FAILED` (the package manager; its stderr is shown).
+
+### `hypen remove`
+
+```bash
+hypen remove <package | Module> [--uninstall]
+```
+
+Removes a package's `hypen.json` entry and its `hypen.lock.json` record. Given the name of one installed module or component, only that one is dropped (refused when something that stays still uses it). Files are never deleted: a package directory or an extracted tarball stays where it is, and the npm dependency is removed only with `--uninstall` (in a terminal the command asks).
+
+### `hypen modules`
+
+`hypen modules` (alias `hypen list`) prints the app's hosted modules grouped by package: source, version, whether it still is what was reviewed, and per module what is granted, requested and withheld. It exits 1 when a package needs attention: never reviewed, requesting more than was reviewed, changed bytes, or unreadable.
+
+### `hypen pack`
+
+```bash
+hypen pack [--name <npm-name>] [--only <A,B>] [--outDir <dir>] [--no-build]
+```
+
+Run in a module project. Builds the wasm target and writes `<outDir>/pack/`: every module and template-only component, `hypen-modules.json`, a `README.md` listing what each module requests, and a `package.json` with no scripts and `"hypen": { "modules": "hypen-modules.json" }`. The npm name comes from `--name`, then `hypen.json` `wasm.npm`, then the package's name. Nothing is published — `cd dist/pack && npm publish` is yours to run.
 
 ### `hypen generate`
 

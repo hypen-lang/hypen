@@ -67,7 +67,62 @@ export type BuildErrorCode =
   /** The build target cannot run prebuilt (hosted) modules. */
   | "PREBUILT_UNSUPPORTED_TARGET"
   /** A file shipped with the CLI (WIT, shim) is missing: broken install. */
-  | "CLI_ASSET_MISSING";
+  | "CLI_ASSET_MISSING"
+  // ── module packages (hypen-modules.json, `hypen add`) ──
+  /** No `hypen-modules.json` where one was expected. */
+  | "MANIFEST_NOT_FOUND"
+  /** A package manifest is not JSON or has a wrongly-shaped field. */
+  | "MANIFEST_INVALID"
+  /** A package manifest of a newer format than this CLI reads. */
+  | "MANIFEST_VERSION_UNSUPPORTED"
+  /** A manifest path points outside the package directory. */
+  | "MANIFEST_PATH_ESCAPES"
+  /** A file a package manifest lists does not exist. */
+  | "MODULE_FILE_MISSING"
+  /** A package's component is empty, not wasm, or a core module. */
+  | "COMPONENT_INVALID"
+  /** A component's bytes do not match the manifest / the reviewed record. */
+  | "INTEGRITY_MISMATCH"
+  /** An npm package named in `wasm.packages` is not installed. */
+  | "PACKAGE_NOT_FOUND"
+  /** A package or directory without a Hypen module manifest. */
+  | "PACKAGE_NOT_HYPEN"
+  /** `hypen.lock.json` is malformed. */
+  | "LOCK_INVALID"
+  /** A package requests more than was reviewed when it was added. */
+  | "REQUESTS_CHANGED"
+  /** A package is used but was never reviewed with `hypen add`. */
+  | "NOT_RECORDED"
+  /** A name the package does not have. */
+  | "UNKNOWN_PACKAGE_MODULE"
+  /** A built component imports an interface its declaration does not cover. */
+  | "UNDECLARED_IMPORT"
+  /** An installed component imports an interface it has not been granted. */
+  | "UNGRANTED_IMPORT"
+  /** An app template uses a package name the package does not export. */
+  | "NOT_EXPORTED"
+  /** A rename (`--as`) that cannot be made sound. */
+  | "RENAME_UNSOUND"
+  /** `--only` leaves out something a selected template needs. */
+  | "ONLY_INCOMPLETE"
+  /** `hypen add <spec>`: the spec names nothing that exists. */
+  | "SPEC_NOT_FOUND"
+  /** A tarball that is not a readable .tgz. */
+  | "TARBALL_INVALID"
+  /** A tarball entry that would escape the extraction directory (or a link). */
+  | "TARBALL_UNSAFE"
+  /** Non-interactive `hypen add` without a decision for every request. */
+  | "CONSENT_REQUIRED"
+  /** The user declined. */
+  | "CANCELLED"
+  /** A `--grant` / `--deny` / `--as` / `--only` value that names nothing. */
+  | "FLAG_INVALID"
+  /** hypen.json (or hypen.lock.json) cannot be written. */
+  | "CONFIG_NOT_WRITABLE"
+  /** `hypen remove` / `hypen add` named something that is not installed. */
+  | "NOT_INSTALLED"
+  /** `hypen pack` has no npm name for the package. */
+  | "PACK_NAME_MISSING";
 
 /** What a failed subprocess looked like. */
 export interface ToolFailure {

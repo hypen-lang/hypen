@@ -79,6 +79,10 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${pink("dev")}             Start development server
     ${pink("build")}           Build for production
     ${pink("generate")}        Generate component imports
+    ${pink("add")} <package>   Install a WASM module package (npm name, directory, .tgz)
+    ${pink("remove")} <name>   Remove an installed module package (or one module)
+    ${pink("modules")}         List installed module packages: granted vs requested
+    ${pink("pack")}            Pack this module project into an npm-publishable package
     ${pink("check")} [path...] Accessibility + template checks over .hypen files
     ${pink("a11y")} [path...]  Accessibility checks only
     ${pink("theme")} export    Export design tokens (CSS, Android, iOS)
@@ -97,6 +101,13 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     --format        theme export: css, android, ios or all (default: all)
     -t, --target    build: spa (default) or wasm (module components)
     --keep-temp     build --target wasm: keep the intermediate build directory
+    -y, --yes       add: grant exactly what the package requests
+    --grant <cap>   add: grant one capability (${dim("Pricing.reads:Cart")}, ${dim("Tax.http")}, ${dim("all")})
+    --deny <cap>    add: withhold one capability
+    --only <names>  add, pack: only these modules / components (comma-separated)
+    --as <A=B>      add: install the exported module A under the name B
+    --name <npm>    pack: the npm name of the package
+    --uninstall     remove: also remove the npm dependency
     -m, --minify    build: minify (default on; ${dim("--no-minify")} to disable)
     -s, --sourcemap build: emit external source maps
     --no-open       studio/test: don't open a browser tab
@@ -114,6 +125,8 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${dim("$")} hypen dev --a11y
     ${dim("$")} hypen build --minify
     ${dim("$")} hypen build --target wasm
+    ${dim("$")} hypen add @acme/checkout
+    ${dim("$")} hypen modules
     ${dim("$")} hypen check
     ${dim("$")} hypen check src/components/App/component.hypen
     ${dim("$")} hypen studio --port 5173
@@ -129,6 +142,90 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
  * exactly the flags that command reads below — keep them in sync.
  */
 const COMMAND_HELP: Record<string, string> = {
+  add: `
+  ${boldPink("hypen add")} ${dim("-")} Install a WASM module package into this app
+
+  ${boldYellow("Usage:")}
+    hypen add <package> [options]
+
+  <package> is one of:
+    an npm package      ${dim("@acme/checkout, @acme/checkout@^1.2, file:../checkout/dist/pack")}
+                        added with the project's package manager (bun / npm /
+                        pnpm / yarn, by lockfile) with lifecycle scripts OFF
+    a directory         ${dim("./vendor/checkout")}   used where it is
+    a manifest          ${dim("./vendor/checkout/hypen-modules.json")}
+    a tarball           ${dim("./checkout-1.2.0.tgz")}   extracted into ./hypen_modules/
+    an installed one    ${dim("@acme/checkout")}   reviewed again (after an upgrade)
+
+  Shows every module of the package and what it asks for, then records the
+  decision: ONE entry in hypen.json (wasm.packages.<package>, with the
+  grants you gave) and what was reviewed in hypen.lock.json. Commit both.
+  Nothing from the package is executed, and nothing is granted without a
+  decision — interactively, or with the flags below.
+
+  ${boldYellow("Options:")}
+    -y, --yes           Grant exactly what the package requests
+    --grant <cap>       Grant one capability; repeatable
+    --deny <cap>        Withhold one capability; repeatable (wins over --yes)
+                        <cap> is [Module.]capability: ${dim("Pricing.reads:Cart")},
+                        ${dim("Pricing.dispatches")}, ${dim("Tax.http")}, ${dim("storage:cloud")}, ${dim("Pricing.all")}, ${dim("all")}
+    --only <A,B>        Install only these modules / components
+    --as <Name=New>     Install the exported module Name as New; repeatable
+
+  Without a terminal (CI, pipes) every requested capability needs a flag;
+  otherwise the command fails and lists them.
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen add @acme/checkout
+    ${dim("$")} hypen add ./vendor/checkout --yes
+    ${dim("$")} hypen add @acme/checkout --grant Pricing.reads:Cart --deny Tax.http
+`,
+  remove: `
+  ${boldPink("hypen remove")} ${dim("-")} Remove an installed module package, or one of its modules
+
+  ${boldYellow("Usage:")}
+    hypen remove <package | Module> [--uninstall]
+
+  Removes the hypen.json entry (wasm.packages.<package>) and its record in
+  hypen.lock.json. Given a module name, only that module is dropped from its
+  package (refused when what stays still uses it). Files are never deleted:
+  a package directory stays where it is, and the npm dependency is removed
+  only with --uninstall (or when you answer yes in a terminal).
+
+  ${boldYellow("Examples:")}
+    ${dim("$")} hypen remove @acme/checkout --uninstall
+    ${dim("$")} hypen remove Tax
+`,
+  modules: `
+  ${boldPink("hypen modules")} ${dim("-")} List the app's hosted (WASM) modules by package
+
+  ${boldYellow("Usage:")}
+    hypen modules        ${dim("(alias: hypen list)")}
+
+  Per package: where it comes from, its version and whether it still is
+  what was reviewed; per module: what it was granted, what it requests and
+  what is withheld. Exits 1 when a package needs attention (never reviewed,
+  requests more than was reviewed, changed bytes, unreadable).
+`,
+  pack: `
+  ${boldPink("hypen pack")} ${dim("-")} Pack a module project into an npm-publishable package
+
+  ${boldYellow("Usage:")}
+    hypen pack [options]
+
+  Runs ${dim("hypen build --target wasm")} and writes <outDir>/pack/: every
+  module (.wasm + .hypen) and template-only component the project builds,
+  hypen-modules.json, a package.json marked ${dim('"hypen": { "modules": … }')} and a
+  README listing the capabilities each module requests. Nothing is published:
+  ${dim("cd dist/pack && npm publish")} is yours to run.
+
+  ${boldYellow("Options:")}
+    --name <npm-name>   The package's npm name (default: hypen.json "wasm.npm",
+                        then the project's name)
+    --only <A,B>        Pack only these modules / components
+    -o, --outDir <dir>  Output directory (default: hypen.json "outDir", else dist)
+    --no-build          Pack the existing <outDir>/wasm without rebuilding
+`,
   init: `
   ${boldPink("hypen init")} ${dim("-")} Create a new Hypen project
 
@@ -811,9 +908,10 @@ async function devServer(options: { port?: number; debug?: boolean; a11y?: boole
       a11y: isDevA11yEnabled(options.a11y, config.a11y)
         ? { ignoreRules: config.a11y?.ignoreRules }
         : undefined,
-      // Prebuilt (WASM) modules declared under `wasm.modules.<Name>.component`.
+      // Hosted (WASM) modules: `wasm.packages` and `wasm.modules.<Name>.component`.
       wasm: config.wasm,
       configFile: resolve("hypen.json"),
+      root: process.cwd(),
     });
   } catch (err: any) {
     // `dev()` throws (DevServerError for expected cases) instead of
@@ -935,11 +1033,21 @@ async function buildProject(options: {
     // bundle: their files are copied under the output directory at the same
     // project-relative paths the entry script names them by.
     try {
-      const { parseWasmConfig, resolvePrebuiltModules, copyPrebuiltModules, declaredPrebuiltNames } =
+      const { parseWasmConfig, resolveHosted, copyHostedFiles, declaredPrebuiltNames, declaredPackages, buildSourcePackage } =
         await import("../src/build-wasm.js");
-      if (declaredPrebuiltNames(config.wasm).length > 0) {
-        const modules = resolvePrebuiltModules(parseWasmConfig(config.wasm), process.cwd());
-        const { copied, outside } = copyPrebuiltModules(modules, process.cwd(), outDir);
+      if (declaredPrebuiltNames(config.wasm).length > 0 || declaredPackages(config.wasm).length > 0) {
+        const wasmConfig = parseWasmConfig(config.wasm);
+        // Module projects in this repository are built as part of the app build.
+        const built = new Map<string, Awaited<ReturnType<typeof buildSourcePackage>>>();
+        for (const decl of wasmConfig.packages.values()) {
+          if (!decl.source) continue;
+          const source = await buildSourcePackage(decl, process.cwd());
+          if (source.notice) console.warn(`\n  ${yellow("Notice:")} ${source.notice}`);
+          built.set(decl.from, source);
+        }
+        const hosted = resolveHosted(wasmConfig, process.cwd(), { built });
+        for (const note of hosted.notes) console.warn(`\n  ${yellow("Note:")} ${note}`);
+        const { copied, outside } = copyHostedFiles(hosted, process.cwd(), outDir, resolve("hypen.lock.json"));
         for (const module of copied) {
           for (const file of module.files) console.log(`    ${yellow(file)} ${dim(`(prebuilt ${module.name})`)}`);
         }
@@ -984,6 +1092,35 @@ async function buildProject(options: {
       const { formatBuildError } = await import("../src/build-error.js");
       console.error(`\n${formatBuildError(err)}\n`);
     }
+    process.exit(1);
+  }
+}
+
+/** `--only A,B` → ["A", "B"]. */
+function splitNames(value: string | undefined): string[] | undefined {
+  if (value === undefined) return undefined;
+  return value.split(",").map((n) => n.trim()).filter(Boolean);
+}
+
+/**
+ * Run one of the module-package commands (`add`, `remove`, `modules`,
+ * `pack`). The library throws `BuildError`; printing it and exiting is done
+ * here.
+ */
+async function moduleCommand(run: (m: typeof import("../src/build-wasm.js")) => Promise<void>): Promise<void> {
+  const m = await import("../src/build-wasm.js");
+  try {
+    await run(m);
+  } catch (err) {
+    if (err instanceof m.BuildError) {
+      if (err.code === "CANCELLED") {
+        console.error(`\n  ${err.message}\n`);
+        process.exit(130);
+      }
+      console.error(`\n${m.formatBuildError(err).replace("Build failed:", "Error:")}\n`);
+      process.exit(1);
+    }
+    console.error(`\n  Error: ${err instanceof Error ? (err.stack ?? err.message) : String(err)}\n`);
     process.exit(1);
   }
 }
@@ -1747,7 +1884,7 @@ async function maybeDelegateToLocalCli(): Promise<void> {
 
 // Parse command line arguments. `--no-<flag>` negations are peeled off
 // first: util.parseArgs only understands them on newer runtimes.
-const NEGATABLE = ["open", "minify"] as const;
+const NEGATABLE = ["open", "minify", "build"] as const;
 const negated = new Set<string>();
 const rawArgs = process.argv.slice(2).filter((arg) => {
   const m = /^--no-(.+)$/.exec(arg);
@@ -1782,6 +1919,13 @@ try {
       format: { type: "string" },
       target: { type: "string", short: "t" },
       "keep-temp": { type: "boolean" },
+      yes: { type: "boolean", short: "y" },
+      grant: { type: "string", multiple: true },
+      deny: { type: "string", multiple: true },
+      only: { type: "string" },
+      as: { type: "string", multiple: true },
+      name: { type: "string" },
+      uninstall: { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -1842,7 +1986,7 @@ const command = positionals[0];
 // Go/Kotlin projects run on their own SDK. Without this, dev/studio/test
 // would "repair" them with a package.json + npm install and serve their
 // templates without their modules.
-const TS_ONLY_COMMANDS = new Set(["dev", "build", "generate", "studio", "test", "run"]);
+const TS_ONLY_COMMANDS = new Set(["dev", "build", "generate", "studio", "test", "run", "add", "remove", "modules"]);
 // `build --target wasm` is the exception: it compiles Go (and Rust) modules
 // itself and never writes a package.json into the project.
 const isWasmBuild = command === "build" && values.target?.toLowerCase() === "wasm";
@@ -1901,6 +2045,63 @@ switch (command) {
     await generateComponents();
     break;
 
+  case "add":
+    await moduleCommand(async (m) => {
+      const prompter = m.terminalPrompter();
+      try {
+        await m.addPackage({
+          projectDir: process.cwd(),
+          spec: positionals[1] ?? "",
+          yes: values.yes,
+          grant: values.grant,
+          deny: values.deny,
+          only: splitNames(values.only),
+          as: values.as,
+          prompter,
+        });
+      } finally {
+        prompter.close();
+      }
+    });
+    break;
+
+  case "remove":
+    await moduleCommand(async (m) => {
+      if (!positionals[1]) {
+        console.error(`\n  Usage: hypen remove <package | Module>   ${dim("(see: hypen modules)")}\n`);
+        process.exit(1);
+      }
+      const prompter = m.terminalPrompter();
+      try {
+        await m.removePackage({ projectDir: process.cwd(), target: positionals[1], uninstall: values.uninstall, prompter });
+      } finally {
+        prompter.close();
+      }
+    });
+    break;
+
+  case "modules":
+  case "list":
+    await moduleCommand(async (m) => {
+      const listed = m.listPackages(process.cwd());
+      for (const line of m.formatPackages(listed)) console.log(line);
+      if (listed.some((p) => p.problem !== undefined)) process.exit(1);
+    });
+    break;
+
+  case "pack":
+    await moduleCommand(async (m) => {
+      console.log("");
+      await m.packProject({
+        projectDir: process.cwd(),
+        name: values.name,
+        only: splitNames(values.only),
+        outDir: values.outDir,
+        build: (values as Record<string, unknown>).build !== false,
+      });
+    });
+    break;
+
   case "check":
     await checkAccessibility(positionals.slice(1), { templates: true });
     break;
@@ -1946,7 +2147,7 @@ switch (command) {
 
   default:
     if (command) {
-      const known = ["init", "dev", "build", "generate", "check", "a11y", "studio", "test", "run"];
+      const known = ["init", "dev", "build", "generate", "add", "remove", "modules", "pack", "check", "a11y", "studio", "test", "run"];
       const guess = known.find((k) => k.startsWith(command.slice(0, 2)));
       console.error(`\n  Unknown command: ${command}${guess ? ` (did you mean ${pink(guess)}?)` : ""}`);
       console.error(`  Run ${dim("hypen --help")} for the list of commands.\n`);

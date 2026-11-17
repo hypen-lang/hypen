@@ -1,5 +1,14 @@
 {
   "components": "./ui",
   "entry": "Pricing",
-  "wasm": { "language": "rust" }
+  "wasm": {
+    "language": "rust",
+    "external": ["Cart"],
+    "modules": {
+      "Pricing": {
+        "reads": ["Cart"],
+        "dispatches": ["Cart"]
+      }
+    }
+  }
 }

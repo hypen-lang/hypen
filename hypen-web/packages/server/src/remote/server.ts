@@ -207,6 +207,8 @@ export class RemoteServer {
   private _ui: string = "";
   private _sourceDir: string | null = null;
   private _discoveredComponents: Map<string, { template: string; module?: HypenModuleDefinition<any> }> = new Map();
+  private _extraComponents: Map<string, string> = new Map();
+  private _installedExtras: Map<string, { template: string }> = new Map();
   private _config: RemoteServerConfig = {};
   private _sessionConfig: SessionConfig = {};
   private _onConnectionCallbacks: Array<(client: RemoteClient) => void> = [];
@@ -383,6 +385,54 @@ export class RemoteServer {
   app(appInstance: HypenApp): this {
     this._app = appInstance;
     return this;
+  }
+
+  /**
+   * Add template-only components by name — templates that do not live in
+   * the `.source()` directory, such as the stateless components a module
+   * package (`loadWasmPackage()`) brings for its modules' templates. A
+   * later call replaces the set. A name the source directory also has is an
+   * error: one of the two would silently shadow the other.
+   *
+   * @example
+   * ```typescript
+   * const checkout = loadWasmPackage("@acme/checkout", { grants: { Pricing: { reads: ["Cart"] } } });
+   * new RemoteServer().source("./src/components").wasmModules(checkout.modules).components(checkout.components)
+   * ```
+   */
+  components(components: Record<string, string> | ReadonlyArray<{ name: string; template: string }>): this {
+    const entries: Array<[string, string]> = Array.isArray(components)
+      ? (components as ReadonlyArray<{ name: string; template: string }>).map((c) => [c.name, c.template])
+      : Object.entries(components as Record<string, string>);
+    this._extraComponents = new Map(entries);
+    if (this._prepared) this.installExtraComponents();
+    return this;
+  }
+
+  /** Merge `.components()` into the discovery map. Runs after every discovery pass. */
+  private installExtraComponents(): void {
+    // Take out what an earlier pass put in (by identity: a rediscovery may
+    // have replaced the entry with a real component of the same name).
+    for (const [name, entry] of this._installedExtras) {
+      if (this._discoveredComponents.get(name) === entry) this._discoveredComponents.delete(name);
+    }
+    this._installedExtras = new Map();
+    for (const [name, template] of this._extraComponents) {
+      const clash = [...this._discoveredComponents.keys()].find((n) => n.toLowerCase() === name.toLowerCase());
+      if (clash !== undefined) {
+        throw new HostedModuleSetupError(
+          `Component name collision: "${name}" was added with .components() and the source directory has "${clash}".`,
+          {
+            code: "DUPLICATE_MODULE",
+            module: name,
+            hint: "rename the app's own component, or leave the package's out (`only`)",
+          }
+        );
+      }
+      const entry = { template };
+      this._discoveredComponents.set(name, entry);
+      this._installedExtras.set(name, entry);
+    }
   }
 
   /**
@@ -870,6 +920,7 @@ export class RemoteServer {
         this._app = app;
       }
     }
+    this.installExtraComponents();
     // Hosted modules join the registry before the entry is resolved (so a
     // hosted module is never picked as the entry by accident) and are
     // validated against everything else the app has.
@@ -1517,6 +1568,7 @@ export class RemoteServer {
       // Reset _ui so discoverFromSource picks up the latest entry template
       this._ui = "";
       await this.discoverFromSource();
+      this.installExtraComponents();
       this.installHostedDefinitions();
       // Refresh the primary module definition too — discovery re-imports
       // the entry's .ts (mtime-busted), so edited handlers/initial state

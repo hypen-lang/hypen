@@ -36,7 +36,13 @@ export type HostedModuleSetupCode =
   /** The app's entry module is hosted; it must be a TypeScript module. */
   | "ENTRY_HOSTED"
   /** No hosted module with that name. */
-  | "UNKNOWN_MODULE";
+  | "UNKNOWN_MODULE"
+  /** A package named in `from` is not installed. */
+  | "PACKAGE_NOT_FOUND"
+  /** A package component's bytes do not match its manifest / the reviewed record. */
+  | "INTEGRITY_MISMATCH"
+  /** A package requests more than was reviewed with `hypen add`. */
+  | "REQUESTS_CHANGED";
 
 export interface HostedModuleSetupInfo {
   code: HostedModuleSetupCode;

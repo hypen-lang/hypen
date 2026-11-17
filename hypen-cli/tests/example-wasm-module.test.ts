@@ -2,17 +2,27 @@
  * examples/wasm-module, booted for real: `hypen dev` in the example
  * directory, a WebSocket client connected over the actual protocol, one
  * interaction in each direction between the TypeScript `Cart` module and the
- * prebuilt Rust `Pricing` module.
+ * Rust `Pricing` module.
+ *
+ * `Pricing` is a SOURCE PACKAGE of the app (hypen.json
+ * `wasm.packages["./modules/pricing"]`, `"source": true`): `hypen dev`
+ * builds the crate. So that the example — and this test — run without a
+ * Rust toolchain, the app also names a committed `fallback` package
+ * (`modules/pricing/prebuilt`, made by `hypen pack`). By default this test
+ * takes that path (`HYPEN_NO_SOURCE_BUILD=1`: no toolchain is invoked);
+ * with `HYPEN_WASM_E2E=1` it lets `hypen dev` build the crate with cargo.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
 import { existsSync, readFileSync, statSync } from "fs";
 import { join, resolve } from "path";
-import { classifyWasm } from "../src/build-wasm";
+import { classifyWasm, readModulePackage } from "../src/build-wasm";
 
 const REPO = resolve(import.meta.dir, "..", "..");
 const EXAMPLE = join(REPO, "examples", "wasm-module");
-const WASM = join(EXAMPLE, "modules", "pricing", "pricing.wasm");
+const FALLBACK = join(EXAMPLE, "modules", "pricing", "prebuilt");
+const WASM = join(FALLBACK, "Pricing.wasm");
+const E2E = process.env.HYPEN_WASM_E2E === "1";
 const PORT = 19960;
 const skip = !existsSync(WASM);
 
@@ -26,7 +36,12 @@ describe.skipIf(skip)("examples/wasm-module", () => {
     proc = Bun.spawn({
       cmd: ["bun", join(REPO, "hypen-cli", "bin", "hypen.ts"), "dev", "--port", String(PORT)],
       cwd: EXAMPLE,
-      env: { ...process.env, HYPEN_NO_ONBOARDING: "1", NO_COLOR: "1" },
+      env: {
+        ...process.env,
+        HYPEN_NO_ONBOARDING: "1",
+        NO_COLOR: "1",
+        ...(E2E ? {} : { HYPEN_NO_SOURCE_BUILD: "1" }),
+      },
       stdout: "pipe",
       stderr: "pipe",
     });
@@ -35,7 +50,7 @@ describe.skipIf(skip)("examples/wasm-module", () => {
     };
     void drain(proc.stdout as ReadableStream<Uint8Array>);
     void drain(proc.stderr as ReadableStream<Uint8Array>);
-    const deadline = Date.now() + 60_000;
+    const deadline = Date.now() + (E2E ? 280_000 : 60_000);
     for (;;) {
       try {
         if ((await fetch(`http://localhost:${PORT}/health`)).ok) break;
@@ -47,15 +62,29 @@ describe.skipIf(skip)("examples/wasm-module", () => {
       }
       await new Promise((r) => setTimeout(r, 100));
     }
-  }, 90_000);
+  }, 300_000);
 
   afterAll(() => {
     proc?.kill();
   });
 
-  test("the committed component is a small WebAssembly Component", () => {
+  test("the committed fallback is a verified package with a small WebAssembly Component", () => {
     expect(classifyWasm(readFileSync(WASM).subarray(0, 8))).toEqual({ kind: "component" });
     expect(statSync(WASM).size).toBeLessThan(200 * 1024);
+    // readModulePackage checks the component against the manifest's integrity.
+    const pkg = readModulePackage(join(FALLBACK, "hypen-modules.json"));
+    expect(pkg.manifest.exports).toEqual(["Pricing"]);
+    expect({ ...pkg.modules[0]!.requests }).toEqual({ reads: ["Cart"], dispatches: ["Cart"], storage: [], http: false, httpHosts: [] });
+  });
+
+  test(E2E ? "hypen dev built the crate from source" : "without a toolchain run, hypen dev says it is using the fallback", () => {
+    if (E2E) {
+      expect(output).toContain("Building ./modules/pricing");
+      expect(output).toContain("./modules/pricing (built from source): Pricing");
+    } else {
+      expect(output).toContain("using the prebuilt fallback ./modules/pricing/prebuilt");
+      expect(output).toContain("./modules/pricing (prebuilt fallback): Pricing");
+    }
   });
 
   test("Cart (TypeScript) and Pricing (Rust) interact in both directions", async () => {

@@ -189,6 +189,22 @@ lives:
   `packages/module-host/tests/{deferred-http,http-parity}.test.ts`, and the browser harness
   (`bun run test:browser` in `packages/module-host`, scenario (g)).
 
+## Module packages (`hypen-modules.json`)
+
+- `packages/server/src/hosted/module-package.ts` — the manifest / lock model shared with the CLI:
+  `ModuleRequests` (what a module asks for) vs `ModuleGrant` (what an app decided) as distinct
+  branded types, `Capability` + `describeCapability`, `readModulePackage` (shape, path
+  confinement, component integrity), `locateModulePackage` (path or npm package via
+  `"hypen": { "modules": … }`), `hypen.lock.json` (`packageDrift`, `assertNoDrift`).
+  **The one place to edit**; `../hypen-cli/src/wasm/module-package.ts` is a GENERATED copy
+  (`bun scripts/sync-http-grammar.ts`, same drift tests as the HTTP grammar).
+- `packages/server/src/hosted/define.ts` — `loadWasmPackage(from, { grants, only, checkLock })`,
+  `wasmModule({ from, name, grants })`, `wasmModuleFromManifest()`. Requests are never applied by
+  themselves; a lock entry for `from` in `<baseDir>/hypen.lock.json` turns on the drift check.
+- `RemoteServer.components({ Name: template })` registers template-only components that do not
+  live in the `.source()` directory (a package's stateless components).
+- Tests: `tests/hosted-module-packages.test.ts`.
+
 ## Rust device broker (WASM) — RFC 001
 
 The server-side device broker is the Rust `DeviceBroker` (hypen-engine-rs `src/device/`), shared by

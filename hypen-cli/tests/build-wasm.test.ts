@@ -217,8 +217,13 @@ describe("build --target wasm: hypen.json wasm config", () => {
     });
     // Parsing normalises: an absent section, and absent grant fields, become
     // explicit defaults, so nothing downstream handles "maybe missing".
-    expect(parseWasmConfig(undefined)).toEqual({ language: undefined, modules: new Map() });
-    expect(parseWasmConfig(null)).toEqual({ language: undefined, modules: new Map() });
+    expect(parseWasmConfig(undefined)).toEqual({
+      language: undefined,
+      modules: new Map(),
+      packages: new Map(),
+      package: { name: undefined, version: undefined, description: undefined, npm: undefined, exports: undefined, external: [] },
+    });
+    expect(parseWasmConfig(null)).toEqual(parseWasmConfig(undefined));
     expect(parseWasmConfig({ modules: { Cart: {} } }).modules.get("Cart")).toEqual({
       reads: [],
       dispatches: [],

@@ -4,7 +4,6 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build:weather": "cd modules/weather && hypen build --target wasm && cp dist/wasm/Weather.wasm weather.wasm",
     "api": "bun scripts/api.ts",
     "dev": "hypen dev"
   },

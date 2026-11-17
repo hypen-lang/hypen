@@ -7,52 +7,38 @@
  *
  * Offline: everything it talks to is on 127.0.0.1.
  *
- * The module's component (`modules/weather/weather.wasm`, ~12 MB: it embeds a
- * JS engine) is built from source, not committed. With `HYPEN_WASM_E2E=1`
- * the test builds it first (`hypen build --target wasm`, a few seconds with
- * jco); otherwise it runs only when a built component is already there.
+ * The module is a SOURCE PACKAGE of the app (`wasm.packages["./modules/weather"]`
+ * with `"source": true`): `hypen dev` builds its component (~12 MB: it embeds
+ * a JS engine; a few seconds with jco) at startup, so nothing is committed
+ * and nothing is copied by hand. The test runs wherever jco is available.
  */
 
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { copyFileSync, existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync } from "fs";
 import { join, resolve } from "path";
-import { classifyWasm } from "../src/build-wasm";
+import { classifyWasm, findJco, readModulePackage } from "../src/build-wasm";
 
 const REPO = resolve(import.meta.dir, "..", "..");
 const EXAMPLE = join(REPO, "examples", "wasm-http");
 const MODULE = join(EXAMPLE, "modules", "weather");
-const WASM = join(MODULE, "weather.wasm");
+/** Where `hypen dev` builds the module (the app declares it as a source package). */
+const WASM = join(MODULE, "dist", "wasm", "Weather.wasm");
 const CLI = join(REPO, "hypen-cli", "bin", "hypen.ts");
 const PORT = 19961;
 const E2E = process.env.HYPEN_WASM_E2E === "1";
 
 type Patch = Record<string, any>;
 
-describe.skipIf(!E2E && !existsSync(WASM))("examples/wasm-http", () => {
+// `hypen dev` builds the module itself, so the test needs jco — which the
+// CLI's own devDependencies provide in this repository.
+const haveJco = findJco(MODULE).status === "found";
+
+describe.skipIf(!E2E && !haveJco)("examples/wasm-http", () => {
   let dev: ReturnType<typeof Bun.spawn> | null = null;
   let api: { server: { stop(force?: boolean): void }; hits: string[] } | null = null;
   let output = "";
 
   beforeAll(async () => {
-    if (E2E) {
-      // Always rebuild under E2E: the test then covers the shim and the
-      // build as they are now, not as they were when a stale file was made.
-      const build = Bun.spawn({
-        cmd: ["bun", CLI, "build", "--target", "wasm"],
-        cwd: MODULE,
-        env: { ...process.env, HYPEN_NO_ONBOARDING: "1", NO_COLOR: "1" },
-        stdout: "pipe",
-        stderr: "pipe",
-      });
-      const [code, out, err] = await Promise.all([
-        build.exited,
-        new Response(build.stdout as ReadableStream).text(),
-        new Response(build.stderr as ReadableStream).text(),
-      ]);
-      if (code !== 0) throw new Error(`building the Weather module failed:\n${out}\n${err}`);
-      copyFileSync(join(MODULE, "dist", "wasm", "Weather.wasm"), WASM);
-    }
-
     // The example's own API server, on the port its hypen.json allowlists.
     const { startApi } = (await import(join(EXAMPLE, "scripts", "api.ts"))) as {
       startApi(port?: number): { server: { stop(force?: boolean): void }; hits: string[] };
@@ -90,8 +76,16 @@ describe.skipIf(!E2E && !existsSync(WASM))("examples/wasm-http", () => {
     api?.server.stop(true);
   });
 
-  test("the component is a WebAssembly Component built from the TypeScript module", () => {
+  test("hypen dev built the module from source: a Component, described by a verified manifest", () => {
+    expect(output).toContain("Building ./modules/weather");
+    expect(existsSync(WASM)).toBe(true);
     expect(classifyWasm(readFileSync(WASM).subarray(0, 8))).toEqual({ kind: "component" });
+    // What the module declares in its own hypen.json is what it requests.
+    const pkg = readModulePackage(join(MODULE, "dist", "wasm", "hypen-modules.json"));
+    expect(pkg.manifest.entry).toBe("Weather");
+    expect(pkg.modules.map((m) => [m.name, { ...m.requests }])).toEqual([
+      ["Weather", { reads: [], dispatches: [], storage: [], http: true, httpHosts: ["127.0.0.1:8787"] }],
+    ]);
   });
 
   /** Connect like a renderer; returns helpers over the patch stream. */
@@ -178,7 +172,9 @@ describe.skipIf(!E2E && !existsSync(WASM))("examples/wasm-http", () => {
       }
       expect(output).toContain('✖ Weather "loaded": HTTP request did not complete');
       expect(output).toContain('missing grant: httpHosts ← "example.com:80"');
-      expect(output).toContain('add "example.com:80" to hypen.json wasm.modules.Weather.httpHosts');
+      // A source package is granted what it declares, so the place to
+      // change the allowlist is the module project's own hypen.json.
+      expect(output).toContain('add "example.com:80" to ./modules/weather/hypen.json wasm.modules.Weather.httpHosts');
     } finally {
       client.socket.close();
     }

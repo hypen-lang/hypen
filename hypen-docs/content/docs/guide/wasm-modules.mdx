@@ -1,0 +1,622 @@
+---
+title: WASM Modules
+description: Install modules built to WebAssembly Components (for example in Rust) into a TypeScript app with hypen add, or build them from a folder in the same repository
+---
+
+# Using WASM modules in a TypeScript app
+
+A Hypen module does not have to be TypeScript. A module can be a **WebAssembly Component** — built from Rust, Go or TypeScript against the `hypen:module` contract — that you add to an app the way you would install a library. The server runs it in a sandbox next to your TypeScript modules, in the same engine, and it behaves like any other module:
+
+- `Pricing {}` in a template renders it, and a `Route` can mount it
+- its buttons dispatch to it, and `context.getModule("pricing")` reads its state and dispatches to it
+- it can read, subscribe to and dispatch to your TypeScript modules, but only where you grant it
+
+Modules travel in **packages**: everything one module project builds — its modules (a `.wasm` plus a `.hypen` template each), the template-only components those templates use, and a manifest, `hypen-modules.json`, that lists them and says what each module asks for. You point at the package; you never list its modules by hand.
+
+<Callout type="info">
+Hosted modules run on a server: `hypen dev`, or `RemoteServer` from `@hypen-space/server` on Bun or Node. See [where it runs](#where-it-runs) for the browser SPA build and Cloudflare Workers.
+</Callout>
+
+## Install a package: `hypen add`
+
+```bash
+bun add @hypen-space/module-host     # once: the sandbox the server loads for hosted modules
+hypen add @acme/checkout
+```
+
+`hypen add` takes an npm package (`@acme/checkout`, `@acme/checkout@^1.2`, `file:../checkout/dist/pack`), a directory (`./vendor/checkout`), a manifest path, or a tarball (`./checkout-1.2.0.tgz`, extracted into `./hypen_modules/`). It shows every module in the package and what it asks for, and waits for your decision:
+
+```
+  @acme/checkout 1.2.0  2 modules, 1 template-only component, 147 KB
+
+  Pricing 82 KB requests to:
+     1. read the state of the Cart module
+     2. dispatch actions to the Cart module  ! it can run Cart's action handlers
+  Tax  (internal) 65 KB requests to:
+     3. make HTTP requests to api.acme.com
+  PriceTag template-only component (no code, no capabilities)
+
+  Grant: [a] all of the above   [m] choose per module   [c] choose per capability   [n] cancel  ›
+```
+
+Then it writes **one entry** to `hypen.json` — the package, and the grants you gave:
+
+```json
+{
+  "components": "./src/components",
+  "entry": "App",
+  "wasm": {
+    "packages": {
+      "@acme/checkout": {
+        "grants": {
+          "Pricing": {
+            "reads": ["Cart"],
+            "dispatches": ["Cart"]
+          },
+          "Tax": {
+            "http": true,
+            "httpHosts": ["api.acme.com"]
+          }
+        }
+      }
+    }
+  }
+}
+```
+
+and tells you what to write in a template:
+
+```
+  Added @acme/checkout → hypen.json wasm.packages["@acme/checkout"], hypen.lock.json
+  Granted:  Pricing.reads:Cart, Pricing.dispatches:Cart, Tax.http
+  Use it:   Pricing {} in a template
+```
+
+```hypen
+module App {
+    Column {
+        Cart {}
+        Pricing {}
+    }
+}
+```
+
+A package whose modules ask for nothing needs nothing but `"@acme/checkout": {}`. The rest of the file keeps its formatting. Commit `hypen.json` and `hypen.lock.json`.
+
+`hypen dev` loads the package (`Package: @acme/checkout (v1.2.0): Pricing, Tax, PriceTag — use Pricing {}`), and `hypen build --target wasm` ships its modules with the recorded grants.
+
+### What gets installed, and what you can use
+
+Every module and template-only component of the package is installed (`--only Pricing,PriceTag` installs a subset; it is refused if a selected template needs something left out). The package's author decides which names are **exported** — by default its entry; the rest are internal. Your templates can use exported names only:
+
+```
+  Build failed: src/components/App/component.hypen uses `Tax {}`, which @acme/checkout does not export (it exports: Pricing).
+```
+
+Engine scopes are global, so every installed name — exported or internal — must be free in your app and across packages. A clash is an error before anything is written. An exported module that nothing else in its package refers to can be installed under another name:
+
+```bash
+hypen add @acme/checkout --as Pricing=Quotes      # use it as Quotes {}
+```
+
+A name that siblings read, dispatch to or render cannot be renamed (they call it by that name); rename your own component instead.
+
+### Consent
+
+Nothing is granted without a decision, and nothing from the package runs when it is added:
+
+- In a terminal, `hypen add` asks: all, per module, per capability, or cancel.
+- Without a terminal (CI, a pipe), every requested capability needs a flag, or the command fails and lists them: `--yes` (grant exactly what is requested), `--grant <cap>` and `--deny <cap>` (repeatable; `--deny` wins). A capability is `[Module.]capability`: `Pricing.reads:Cart`, `Pricing.dispatches`, `Tax.http`, `storage:cloud`, `Pricing` (everything it requests), `all`.
+- npm packages are added with your package manager (bun, npm, pnpm or yarn, by lockfile) with **lifecycle scripts off** (`--ignore-scripts`). A module package is data — components, templates, a manifest — and needs no install script.
+- A `reads` / `dispatches` target is checked against your app. One that names another module of the same package is shown as such. One your app does not have (`Pricing wants to read Cart; this app has no Cart module`) cannot be granted: add a module with that name and run `hypen add` again.
+- A module whose component *imports* a storage tier or HTTP cannot start without it, so withholding that capability refuses the install and says how to leave the module out instead.
+
+`hypen modules` shows where things stand, and `hypen remove` undoes an install:
+
+```
+$ hypen modules
+
+  @acme/checkout 1.2.0  current
+    Pricing
+      granted:   reads:Cart, dispatches:Cart
+      requested: reads:Cart, dispatches:Cart
+    Tax
+      granted:   nothing
+      requested: http
+      withheld:  http
+    components: PriceTag
+    use: Pricing {}
+
+$ hypen remove @acme/checkout --uninstall    # or one module: hypen remove Tax
+```
+
+`hypen remove` never deletes your files: a package directory stays where it is, and the npm dependency goes only with `--uninstall`.
+
+### Upgrades and drift
+
+`hypen.json` holds what you **granted**; the package's manifest holds what its modules **request**; `hypen.lock.json` holds what you **reviewed** — per package its version and, per module, the component's hash and the requests you saw. `hypen dev`, `hypen build` and a server using `loadWasmPackage()` compare them on every start:
+
+| The package now… | Result |
+|------------------|--------|
+| is exactly what was reviewed | loads |
+| changed, but asks for nothing new | loads, with a note to run `hypen add <package> --yes` to record it |
+| requests **more** than was reviewed | stops: `@acme/checkout 1.3.0: Tax now also requests: make HTTP requests to api.acme.com. Review and run hypen add @acme/checkout to update the grant.` |
+| has different bytes under the reviewed version | stops (`INTEGRITY_MISMATCH`) |
+| was never reviewed (no lock entry) | stops (`NOT_RECORDED`): run `hypen add <package>` |
+| imports a storage tier or HTTP it is not granted | stops, naming the `hypen.json` field and the fix: `hypen add @acme/checkout --grant Tax.http` |
+
+A module that requests something you withheld on purpose is not an error: it runs, and the call it was refused fails with the grant named (see [Grants](#grants)). After upgrading a package with your package manager, run `hypen add @acme/checkout` again to review it.
+
+## Modules in the same repository: `source`
+
+When the module project lives in your repository, point at its folder and let the CLI build it:
+
+```json
+"wasm": {
+  "packages": {
+    "./modules/checkout": { "source": true }
+  }
+}
+```
+
+`./modules/checkout` is a Hypen project of its own (its `hypen.json`, and a `Cargo.toml` / `go.mod` / TypeScript sources). `hypen dev` builds it with the same pipeline as `hypen build --target wasm`, loads every module it produces, watches its sources and rebuilds and hot-reloads on change; a failed rebuild prints the build error and the running modules keep their previous build. `hypen build` builds it as part of the app build.
+
+You control both sides of a source package, so its modules are granted **what they declare** in their own `hypen.json` (`wasm.modules.<Name>` there) — no consent round-trip and no lock entry. Set `"trust": "explicit"` to grant only what the app lists under `grants`. Other keys: `only` (a subset), and `fallback` — a built package to use when the toolchain is not installed:
+
+```json
+"./modules/checkout": { "source": true, "fallback": "./modules/checkout/prebuilt" }
+```
+
+With a fallback, a missing `cargo` / `tinygo` / `jco` (or `HYPEN_NO_SOURCE_BUILD=1`) does not stop the app: the dev server says it is using the prebuilt package and that source changes are not picked up. A compile error is never hidden by the fallback. Without one, the missing toolchain is reported with its install hint and the rest of the app still starts.
+
+## Use a package from server code
+
+In a server entry script, load the package and register its modules and components:
+
+```typescript
+import { RemoteServer, loadWasmPackage } from "@hypen-space/server";
+
+const checkout = loadWasmPackage("@acme/checkout", {
+  grants: { Pricing: { reads: ["Cart"], dispatches: ["Cart"] } },
+});
+
+await new RemoteServer()
+  .source("./src/components")
+  .wasmModules(checkout.modules)
+  .components(checkout.components)      // its template-only components
+  .listen(3000);
+```
+
+The manifest's `requests` are never applied by themselves: a module without an entry in `grants` gets nothing. Each component is checked against the manifest's hash, and when `hypen.lock.json` has an entry for the package the same drift rules apply. For a single module, `wasmModule({ from: "@acme/checkout", name: "Pricing", grants })` (or `wasmModuleFromManifest(path, grants)`).
+
+## Build and publish a package
+
+In the module project, declare what each module needs — this is what installers will be asked to grant:
+
+```json
+{
+  "components": "./src/components",
+  "entry": "Checkout",
+  "wasm": {
+    "npm": "@acme/checkout",
+    "exports": ["Checkout", "PriceTag"],
+    "external": ["Cart"],
+    "modules": {
+      "Pricing": { "reads": ["Cart"], "dispatches": ["Cart"] },
+      "Tax": { "http": true, "httpHosts": ["api.acme.com"] }
+    }
+  }
+}
+```
+
+| Key | Meaning |
+|-----|---------|
+| `wasm.modules.<Name>` | What the module requests: `reads`, `dispatches`, `storage`, `http`, `httpHosts` |
+| `wasm.external` | Modules the *installing app* provides. Without it, a `reads` / `dispatches` target that is not in this project is a build error (a typo) |
+| `wasm.exports` | Names an app may use in its templates. Default: the entry |
+| `wasm.name`, `wasm.version`, `wasm.description` | The package's identity. Each falls back to `package.json`, then `Cargo.toml` `[package]`, then the directory name / `0.0.0` |
+| `wasm.npm` | The npm name `hypen pack` uses (default: the package's name) |
+
+`hypen build --target wasm` writes `dist/wasm/hypen-modules.json` beside `app.json`, and cross-checks each declaration against what the built component really imports: an import the declaration does not cover is an **error** (the module would fail to start for everyone who installs it); a declared capability the component never imports is a warning.
+
+```bash
+hypen pack                      # build, then write dist/pack/
+hypen add ../checkout/dist/pack # try it in an app
+cd dist/pack && npm publish     # publishing is yours to run; hypen pack publishes nothing
+```
+
+`dist/pack/` holds the components, templates, `hypen-modules.json`, a `README.md` listing what each module requests, and a `package.json` with no scripts and the marker `hypen add` looks for: `"hypen": { "modules": "hypen-modules.json" }`. `--only A,B` packs a subset; `--name` sets the npm name.
+
+### The manifest: `hypen-modules.json`
+
+```json
+{
+  "hypenModules": 1,
+  "name": "@acme/checkout",
+  "version": "1.2.0",
+  "description": "Checkout modules",
+  "entry": "Checkout",
+  "exports": ["Checkout", "PriceTag"],
+  "modules": [
+    {
+      "name": "Pricing",
+      "component": "Pricing.wasm",
+      "template": "Pricing.hypen",
+      "abi": "0.1",
+      "requests": { "reads": ["Cart"], "dispatches": ["Cart"] },
+      "integrity": "sha256-0kA3VGT39sLKW/M+UpRfRDzI7iDTJIyBmCfk80G2VgM="
+    }
+  ],
+  "components": [{ "name": "PriceTag", "template": "PriceTag.hypen" }]
+}
+```
+
+`requests` is what a module asks for — never a grant. Paths are relative to the manifest and must stay inside its directory. `integrity` is the SHA-256 of the component and is verified whenever the manifest is read. A manifest with a newer `hypenModules` than the tool understands is refused with a message to update.
+
+## Grants
+
+A hosted module starts with nothing: it can compute over its own state and keep private `local` storage. Everything else is a grant, written where the module is declared.
+
+| Grant | Allows |
+|-------|--------|
+| `reads: ["Cart"]` | Reading the state of `Cart` and subscribing to changes of it |
+| `dispatches: ["Cart"]` | Dispatching actions to `Cart` |
+| `storage: ["app", "cloud"]` | Storage tiers beyond `local` |
+| `http: true` | Outbound [HTTP requests](#http-requests) |
+| `httpHosts: ["api.example.com"]` | Narrows `http` to those hosts. Needs `http: true` |
+
+Targets can be TypeScript modules or other hosted modules. A name that is not a module of the app stops the server at startup.
+
+Storage and HTTP are linked into the component when it is loaded, so a missing one is a startup error that names the field:
+
+```
+Error: Hosted module "Pricing" imports hypen:storage/cloud, which it has not been granted.
+
+  module:  Pricing
+  field:   hypen.json wasm.modules.Pricing.storage
+  code:    UNGRANTED_IMPORT
+
+Hint: grant the "cloud" storage tier: add "cloud" to hypen.json wasm.modules.Pricing.storage
+```
+
+`reads` and `dispatches` are checked on every call. A refused call fails that action and is reported with the grant to add:
+
+```
+✖ Pricing "quote": action failed
+  [pricing] 'quote' failed: runtime error: dispatch cart.applyDiscount: Error::PermissionDenied("dispatches")
+  cascade: pricing quote — 1 failure (the action itself failed: nothing was applied)
+    - pricing quote [failed; root] runtime: runtime error: dispatch cart.applyDiscount: Error::PermissionDenied("dispatches")
+  Hint: "Pricing" tried to dispatch to a module it has no grant for: add that module to hypen.json wasm.modules.Pricing.dispatches
+```
+
+`hypen dev` watches `hypen.json`, so adding the grant takes effect without a restart.
+
+## Talking to it from TypeScript
+
+A hosted module is in the same global context as every other module:
+
+```typescript
+app
+  .module("Cart")
+  .defineState({ items: [], count: 0, discountPercent: 0 })
+  .onAction("requestQuote", async ({ context }) => {
+    const pricing = context.getModule("pricing");
+    pricing.getState();               // a snapshot of its state
+    await pricing.dispatch("quote");  // run one of its actions
+  })
+```
+
+The component owns its state, so `state` is a read-only snapshot and `setState` throws. Change it by dispatching an action. `dispatch` is deferred, which makes it safe to call from inside a handler, and rejects if the module's handling of the action fails.
+
+## Being called by it
+
+When a hosted module dispatches to a TypeScript module it holds a `dispatches` grant for, the action arrives in the ordinary `onAction` handler. `action.sender` is the name of the module that sent it (it is `undefined` for an action from the UI):
+
+```typescript
+.onAction<{ percent: number }>("applyDiscount", ({ action, state }) => {
+  state.discountPercent = action.payload?.percent ?? 0;
+  state.note = `Set by ${action.sender}`;   // "pricing"
+})
+```
+
+A hosted module that subscribed to one of your module's state paths is notified whenever your handlers change it. There is nothing to wire.
+
+## Storage is per session by default
+
+A module's `local` storage is private to that module, and `app` storage is shared by the modules of one **owner**. On a server the owner matters: every user runs the same module, so by default each session is its own owner with a private in-memory store. One user never sees another's data, and nothing survives a restart.
+
+To keep data per user, name the owner and give the server a directory:
+
+```typescript
+server.hostedModules({
+  storage: (session) => ({ key: session.props?.userId ?? session.id }),
+  storageDir: "./data/modules",
+});
+```
+
+Sessions with the same key share one store, saved as one file per owner. For a database or anything else, return a backend instead of a key: any object with synchronous `get`, `set`, `delete` and `keys`. Two sessions share data only if you return the same backend or key for both.
+
+## HTTP requests
+
+A module's handler is a synchronous reducer: it cannot `await` a response. There are two ways for it to make an HTTP request, both behind the `http` grant.
+
+| | Deferred (`hypen:http/deferred`) | Blocking (`wasi:http`) |
+|---|---|---|
+| How | The handler **queues** a request and names one of its own actions. The host performs the request after the handler returns and dispatches that action with the response | The handler calls an HTTP client and waits for the answer |
+| Works on | Every host: Node, Bun, the native runtime, and a browser | Hosts that can suspend a synchronous guest: Node, Bun, the native runtime. **Not a browser**: the request is sent, but the module traps while waiting |
+| While waiting | Nothing is held. The module handles other actions | The session's engine is held for the whole exchange |
+| Use it for | Everything new | A module that already uses a `wasi:http` client library |
+
+### From a TypeScript module
+
+A TypeScript module built with [`hypen build --target wasm`](/docs/tooling/cli#hypen-build---target-wasm) gets deferred HTTP as `context.http`:
+
+```typescript
+import { app, isHttpCompletion } from "@hypen-space/core";
+
+export default app
+  .defineState({ status: "idle", city: "" })
+  .onAction("refresh", ({ state, context }) => {
+    state.status = "loading";
+    // Queued, not sent: this returns immediately.
+    context.http!.get("https://api.example.com/forecast/oslo", { then: "loaded" });
+  })
+  .onAction("loaded", ({ action, state }) => {
+    const response = action.payload;
+    if (!isHttpCompletion(response)) return;
+    if (!response.ok) {
+      state.status = `failed: ${response.error.kind}`;      // no response at all
+    } else if (response.status !== 200) {
+      state.status = `HTTP ${response.status}`;             // a 404 is still a response
+    } else {
+      state.city = JSON.parse(response.body).city;
+      state.status = "ok";
+    }
+  })
+  .build();
+```
+
+| Call | Does |
+|------|------|
+| `context.http.get(url, { then, tag?, headers?, timeoutMs? })` | Queues a `GET` |
+| `context.http.send({ method?, url, headers?, body?, timeoutMs? }, { then, tag? })` | Queues any request. `body` is a string, a `Uint8Array`, or a JSON-serialisable value (sent as JSON with `content-type: application/json` unless you set one). `method` defaults to `GET`, or `POST` when there is a body |
+
+`then` must be one of the module's own actions. `tag` is echoed back in the response so one handler can tell requests apart. The response arrives as the action's payload (`HttpCompletion`, exported with the `isHttpCompletion` guard from `@hypen-space/core`):
+
+```typescript
+{ ok: true, status: 200, headers: { "content-type": "…" }, body: "…", bodyEncoding: "utf8" | "base64", tag }
+{ ok: false, error: { kind: "network" | "timeout" | "denied" | "too-large" | "invalid-response", message }, tag }
+```
+
+Header names are lowercased. `body` is the text when the bytes are UTF-8 and standard base64 otherwise; `bodyEncoding` says which. Any status is `ok: true`: `ok: false` means there was no response.
+
+A request that cannot be queued makes `send` throw a `ModuleHttpError` (`isModuleHttpError`) with a `code`: `not-granted`, `permission-denied` (a host outside `httpHosts`), `invalid-request` or `limit-exceeded`. Left uncaught it fails the action, and `hypen dev` prints it with the field to change. `context.http` is typed as optional because hand-built contexts in tests may lack it; both runtimes always provide it. In an ordinary in-process TypeScript module it throws `unavailable`: there, make the handler `async` and call `fetch`.
+
+The [`wasm-http` example](https://github.com/hypen-lang/hypen/tree/main/examples/wasm-http) is a complete module, the app that hosts it and a local API to fetch from.
+
+A Rust module imports `hypen:http/deferred` from the `module-x` world and calls `send(request, then, tag)`; the interface and the payload are documented in [`wit/deps/hypen-http/http.wit`](https://github.com/hypen-lang/hypen/blob/main/wit/deps/hypen-http/http.wit). Go modules cannot use it through `hypen build` yet: the TinyGo world declares the interface, but the build does not generate Go bindings for it and the Go SDK has no helper.
+
+### Granting it
+
+```json
+"Weather": {
+  "component": "./modules/weather/weather.wasm",
+  "http": true,
+  "httpHosts": ["api.example.com", "*.example.org", "localhost:8080"]
+}
+```
+
+`http: true` is the grant. A TypeScript module needs it **when it is built** too: the grant decides whether the component imports the interface at all, so a module built without it has a `context.http` that explains the missing grant instead of sending.
+
+`httpHosts` is optional and narrows the grant to an allowlist:
+
+| Pattern | Matches |
+|---------|---------|
+| `api.example.com` | That host, on any port |
+| `api.example.com:8443` | That host on that port |
+| `*.example.com` | Every subdomain of `example.com`, at any depth. Not `example.com` itself |
+| `127.0.0.1:8080`, `[::1]` | An IP address |
+
+A pattern names a host, never a URL: no scheme, no path. Leaving `httpHosts` out allows any host. A malformed pattern, or `httpHosts` without `http: true`, is a configuration error that names the entry. The allowlist is checked when the request is queued (the module is told `permission-denied` and nothing is sent) and again on every redirect.
+
+### What a server adds
+
+A server runs modules next to other people's infrastructure, so `@hypen-space/server` (and with it `hypen dev`) is stricter than the native runtime on a developer's machine:
+
+- **The server's own network is off limits by default.** A request whose URL is `localhost` or a loopback, link-local or private IP address (`127.0.0.1`, `169.254.169.254`, `10.x`, `192.168.x`, `[::1]`, …) is refused with `denied` unless the module's `httpHosts` names that host exactly (`"127.0.0.1:8080"`; a wildcard does not count). An `http` grant on its own never reaches a cloud metadata service or an internal admin port. This also applies to a redirect that leads there. `hypen-runtime` has no such rule. To turn it off on a server whose modules are all your own, pass `privateNetwork: "allow"`.
+- **An egress hook.** `onHttpRequest` sees every request and redirect hop and can refuse it.
+- **Your own `fetch`**, to send module traffic through a proxy.
+
+```typescript
+server.hostedModules({
+  onHttpRequest: (request, context) =>
+    request.host.endsWith(".internal.example.com") ? { deny: "internal services are not for modules" } : "allow",
+  fetch: (url, init) => fetch(url, { ...init, proxy: "http://egress-proxy:3128" }),
+  // privateNetwork: "allow",
+  // maxConcurrentHttpRequests: 8,
+});
+```
+
+The private-network rule reads the URL, not DNS: a public name that resolves to a private address is not caught. If modules are untrusted, resolve and pin addresses in your `fetch`, or route egress through a proxy that does.
+
+Responses are not followed blindly: the server follows redirects itself, at most five, asking the allowlist, the private-network rule and your hook before each hop. `Authorization` and `Cookie` headers are dropped when a redirect changes origin.
+
+### Limits
+
+| Limit | Value |
+|-------|-------|
+| Requests queued by one handler call | 16 |
+| Requests a module may have in flight | 32 (`engine.setModuleHttpInFlightLimit`) |
+| Requests a session performs at once | 8 (`maxConcurrentHttpRequests`); the rest wait in order |
+| URL | 8 KiB, ASCII, `http://` or `https://`, no `user:pass@` |
+| Request headers | 64 headers, 16 KiB of names and values. `host`, `content-length`, `connection`, `transfer-encoding`, `keep-alive`, `upgrade`, `te`, `trailer`, `expect` and `proxy-*` belong to the host |
+| Request body | 1 MiB |
+| Response body | 4 MiB, otherwise the request fails with `too-large` |
+| Time budget | 30 s unless the request sets `timeoutMs`; at most 120 s. Covers redirects |
+| Redirects | 5 |
+| `then` and `tag` | 256 bytes each |
+
+Over a limit, `send` throws `limit-exceeded` (or `invalid-request`) and nothing is queued. A module destroyed while a request is in flight does not get its response.
+
+## Failures
+
+A hosted module cannot take the app down. What goes wrong is reported and the rest keeps running:
+
+- **An action fails**: the module's state is unchanged, and the failure is reported with the engine's cascade report (which module, which action, why).
+- **The instance crashes** (a trap, such as a Rust panic): that action fails, and the instance is replaced before the session's next action. Its state goes back to what `init` returns. Other modules, and the same module in other sessions, are unaffected.
+- **It cannot start on a session**: the module's template still renders, without logic.
+- **An HTTP request is refused or fails**: the module gets its completion with `ok: false`, and the failure is reported with the request, how it ended and, for a refusal, the field to add the host to.
+
+`hypen dev` prints these. In your own server, receive them with `onError`:
+
+```typescript
+server.hostedModules({
+  onError: (failure) => {
+    // failure.kind: "setup" | "action" | "cascade" | "lifecycle" | "crash" | "recovered" | "effect" | "http" | "reload"
+    console.error(failure.module, failure.action, failure.message, failure.hint);
+  },
+});
+```
+
+## Writing a module in Rust
+
+A module is a `cdylib` crate that implements the `hypen:module` world with `wit-bindgen`:
+
+```rust
+wit_bindgen::generate!({ world: "module-x", path: "wit", generate_all });
+
+use hypen::engine::state as engine;
+
+struct Module;
+
+impl Guest for Module {
+    fn init(_config: Vec<u8>) -> Result<Vec<u8>, String> {
+        Ok(br#"{"total":0}"#.to_vec())
+    }
+
+    fn dispatch(state: Vec<u8>, action: Action) -> Result<ReducerOutput, String> {
+        match action.name.as_str() {
+            "quote" => {
+                let cart = engine::read("cart").map_err(|e| format!("{e:?}"))?;   // needs `reads`
+                // ... compute the new state from `state` and `cart`
+                Ok(ReducerOutput { state: Some(new_state), effects: vec![], emit: vec![] })
+            }
+            other => Err(format!("unknown action: {other}")),
+        }
+    }
+
+    fn on_activated(_state: Vec<u8>) -> Result<ReducerOutput, String> {
+        // Re-run "quote" whenever cart.count changes.
+        engine::subscribe("cart", "count", "quote").map_err(|e| format!("{e:?}"))?;
+        Ok(ReducerOutput { state: None, effects: vec![], emit: vec![] })
+    }
+
+    // on_deactivated, on_destroyed, actions ...
+}
+
+export!(Module);
+```
+
+State and payloads are JSON bytes. `dispatch` is a pure reducer: it takes the current state and returns the new one.
+
+Make the crate a small Hypen project (a `hypen.json` with `"components"` and `"entry"`, and the module's template in the components directory), and the CLI builds it and provides the `wit/` directory the macro reads:
+
+```bash
+rustup target add wasm32-wasip2
+hypen build --target wasm          # writes dist/wasm/Pricing.wasm, and wit/ on the first run
+```
+
+After that first run, plain `cargo build --release --target wasm32-wasip2` works too. The [`wasm-module` example](https://github.com/hypen-lang/hypen/tree/main/examples/wasm-module) has a complete crate, the TypeScript app that uses it, and the built `.wasm`.
+
+## Reference: declaring a single `.wasm` by hand
+
+The low-level form, for a `.wasm` you built yourself and do not want to package. It has no manifest, so there are no requests to review and no drift detection: you write the grants and find out at startup if one is missing.
+
+Put the two files in your project and declare them in `hypen.json` under `wasm.modules.<Name>`:
+
+```json
+{
+  "components": "./src/components",
+  "entry": "App",
+  "wasm": {
+    "modules": {
+      "Pricing": {
+        "component": "./modules/pricing/pricing.wasm",
+        "template": "./modules/pricing/Pricing.hypen",
+        "reads": ["Cart"],
+        "dispatches": ["Cart"]
+      }
+    }
+  }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `component` | Path of the `.wasm` Component, relative to the project root. Its presence is what makes the module *prebuilt*: it is loaded as is, never compiled |
+| `template` | Path of the module's `.hypen` template. Optional when the components directory has a template-only component with the module's name (`src/components/Pricing/component.hypen`) |
+| `reads`, `dispatches`, `storage`, `http`, `httpHosts` | The module's [grants](#grants) |
+
+Install the module host, which the server loads only when an app has hosted modules:
+
+```bash
+bun add @hypen-space/module-host
+```
+
+Then use the module by name:
+
+```hypen
+module App {
+    Column {
+        Cart {}
+        Pricing {}
+    }
+}
+```
+
+`hypen dev` loads it, prints it in the banner (`Prebuilt: Pricing`), and reloads it in place when the `.wasm` changes. Sessions keep the module's state if the new build accepts it.
+
+### In code
+
+In a server entry script, define the module in code:
+
+```typescript
+import { RemoteServer, wasmModule } from "@hypen-space/server";
+
+await new RemoteServer()
+  .source("./src/components")
+  .wasmModules(
+    wasmModule({
+      name: "Pricing",
+      component: "./modules/pricing/pricing.wasm",
+      template: "./modules/pricing/Pricing.hypen",
+      grants: { reads: ["Cart"], dispatches: ["Cart"] },
+      config: { currency: "USD" },   // passed to the module's init
+    })
+  )
+  .listen(3000);
+```
+
+`component` can be a path, a `URL`, or the bytes. `loadWasmModules("./dist/wasm")` returns the definitions for everything a [`hypen build --target wasm`](/docs/tooling/cli#hypen-build---target-wasm) wrote, with the grants from its `app.json`.
+
+## Where it runs
+
+| Target | Hosted modules |
+|--------|----------------|
+| `hypen dev` (component project) | Yes. Loaded from `hypen.json`, hot-reloaded |
+| `hypen dev` (server entry script) | Yes. The script registers them itself with `wasmModule()` |
+| `RemoteServer` (`@hypen-space/server`) on Bun or Node | Yes |
+| `hypen build` for a server entry script | Yes. The declared `.wasm` and `.hypen` files are copied into the output directory at the same relative paths |
+| `hypen build --target wasm` | Yes. A prebuilt module is copied into the output and listed in `app.json` with its grants, next to the modules compiled from source |
+| `hypen build` for a component project (browser SPA) | No. The build stops with `PREBUILT_UNSUPPORTED_TARGET`: the browser engine cannot run hosted modules |
+| Cloudflare Workers (`@hypen-space/cf`) | No. Defining the worker throws `Hosted WASM modules are not supported on Cloudflare Workers yet` |
+
+## Limits
+
+- **Handlers are synchronous.** A module's `dispatch` runs to completion; there is no `await`. Use the `delay` effect to come back later, and the app's TypeScript modules for anything long-running.
+- **HTTP** needs the `http` grant. [Deferred requests](#http-requests) work on every host. A blocking `wasi:http` call holds the engine while it waits and works on Node, Bun and the native runtime, but cannot complete in a browser.
+- **Startup cost.** Each component is transpiled once when the server starts, and instantiated once per session. A small Rust module (about 100 KB) is quick. A module that embeds a language runtime is far larger (a TypeScript module built with `--target wasm` is around 14 MB), so it takes correspondingly longer to prepare and holds more memory in every session. Measure before putting one on a busy server.
+- **State is reset** whenever a client reconnects (every connection gets a fresh instance, which starts from `init`), which includes a `hypen dev` reload triggered by a TypeScript or template change, and after a crash. A resumed session keeps its storage, so keep what must survive there and read it back in `init`. TypeScript modules' state is restored on reconnect as before.
+- **Module config** comes from the declaration (`config` in `wasmModule()`), not from arguments at the place the module is used in a template.
+- **The entry module** must be a TypeScript module.
+- The JS module host runs the synchronous `hypen:module@0.1` contract. Modules built for the async 0.2 contract need the native runtime (`hypen-runtime`).

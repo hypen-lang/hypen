@@ -28,7 +28,7 @@
  * work).
  */
 
-import { declaredPrebuiltNames } from "./wasm/prebuilt.js";
+import { declaredPackages, declaredPrebuiltNames } from "./wasm/prebuilt.js";
 import { join, resolve, relative } from "path";
 import { createHypenSourceValidator } from "./dev-diagnostics.js";
 import { copyFileSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "fs";
@@ -263,6 +263,21 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
         field: `wasm.modules.${prebuilt[0]}.component`,
         hint:
           "serve the app from a server instead (`hypen dev`, or a server entry using RemoteServer + wasmModule()), " +
+          "or build the portable target: `hypen build --target wasm`",
+      }
+    );
+  }
+  const packages = declaredPackages(options.wasm);
+  if (packages.length > 0) {
+    throw new BuildError(
+      `This project uses module packages (${packages.join(", ")}), which the browser SPA build ` +
+        "cannot run: the browser engine has no hosted-module support.",
+      {
+        code: "PREBUILT_UNSUPPORTED_TARGET",
+        file: "hypen.json",
+        field: `wasm.packages[${JSON.stringify(packages[0])}]`,
+        hint:
+          "serve the app from a server instead (`hypen dev`, or a server entry using RemoteServer + loadWasmPackage()), " +
           "or build the portable target: `hypen build --target wasm`",
       }
     );

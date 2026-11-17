@@ -12,13 +12,15 @@
  * previous instance keeps running.
  */
 
-import { existsSync, readFileSync, statSync, watch, type FSWatcher } from "fs";
-import { basename, dirname, relative, resolve } from "path";
+import { existsSync, readFileSync, readdirSync, statSync, watch, type FSWatcher } from "fs";
+import { basename, dirname, join, relative, resolve } from "path";
 import type { HostedModuleDefinition, HostedModuleFailure } from "@hypen-space/core";
 import { BuildError, formatBuildError } from "./build-error.js";
 import { boldYellow, dim, pink, yellow } from "./colors.js";
-import { parseWasmConfig, type WasmConfig } from "./wasm/config.js";
-import { resolvePrebuiltModules } from "./wasm/prebuilt.js";
+import { buildSourcePackage, type BuiltSource } from "./wasm/build.js";
+import { parseWasmConfig, type PackageDeclaration, type WasmConfig } from "./wasm/config.js";
+import { resolveHosted, type PackageComponentUse, type ResolvedHosted } from "./wasm/packages.js";
+import { readProjectConfig } from "./project-config.js";
 import type { PrebuiltModule } from "./wasm/types.js";
 
 /** The slice of the project's `@hypen-space/server` this file uses. */
@@ -27,6 +29,7 @@ export interface HostedServerPackage {
     name: string;
     component: string;
     template?: string;
+    ui?: string;
     grants: { reads: string[]; dispatches: string[]; storage: string[]; http: boolean; httpHosts?: string[] };
     declaredAt: string;
     grantsAt: string;
@@ -41,6 +44,9 @@ export interface HostedRemoteServer {
     definition: HostedModuleDefinition,
     options?: { reconnect?: boolean }
   ): Promise<{ module: string; sessions: number; reloaded: number; stateReset: number; kept: number; failed: number }>;
+  /** Template-only components that come from packages (newer @hypen-space/server). */
+  components?(components: Record<string, string>): unknown;
+  reload?(): Promise<void>;
 }
 
 export interface DevPrebuiltOptions {
@@ -53,6 +59,40 @@ export interface DevPrebuiltOptions {
   serverPackage: HostedServerPackage;
   /** Where diagnostics go. Default: `console.error` / `console.log`. */
   print?: { error(line: string): void; info(line: string): void };
+  /** The app's components directory: enables the name-collision and export checks. */
+  componentsDir?: string;
+  /** `source` packages already built (see {@link DevPrebuiltModules.create}). */
+  built?: Map<string, BuiltSource>;
+}
+
+/** Directories of a module project whose changes are never source changes. */
+const IGNORED_SOURCE_DIRS = new Set(["node_modules", "target", "dist", ".git", ".wasm-temp"]);
+
+/** A cheap fingerprint of a module project's sources: paths, sizes, mtimes. */
+function sourceStamp(dir: string, outDir: string): string {
+  const parts: string[] = [];
+  const walk = (current: string): void => {
+    let entries: string[];
+    try {
+      entries = readdirSync(current).sort();
+    } catch {
+      return;
+    }
+    for (const entry of entries) {
+      const path = join(current, entry);
+      if (IGNORED_SOURCE_DIRS.has(entry) || path === outDir || entry.startsWith(".wasm-")) continue;
+      let stat;
+      try {
+        stat = statSync(path);
+      } catch {
+        continue;
+      }
+      if (stat.isDirectory()) walk(path);
+      else parts.push(`${path}:${stat.size}:${stat.mtimeMs}`);
+    }
+  };
+  walk(dir);
+  return parts.join("\n");
 }
 
 /** A setup error of `@hypen-space/server`'s hosted modules, recognised structurally. */
@@ -179,6 +219,12 @@ export class DevPrebuiltModules {
   private readonly print: { error(line: string): void; info(line: string): void };
   private config: WasmConfig;
   private modules: PrebuiltModule[];
+  private hosted: ResolvedHosted;
+  private components: PackageComponentUse[];
+  private readonly built: Map<string, BuiltSource>;
+  /** Per source package: the fingerprint of its sources when it was last built. */
+  private readonly sourceStamps = new Map<string, string>();
+  private sourceTimer: ReturnType<typeof setTimeout> | null = null;
   /** Per module: the stamps of its files and its grants when it was last (re)loaded. */
   private loaded = new Map<string, string>();
   private watchers: FSWatcher[] = [];
@@ -199,7 +245,10 @@ export class DevPrebuiltModules {
       info: (line) => console.log(line),
     };
     this.config = parseWasmConfig(options.wasm);
-    this.modules = resolvePrebuiltModules(this.config, options.projectRoot);
+    this.built = options.built ?? new Map();
+    this.hosted = this.resolve(this.config);
+    this.modules = this.hosted.modules;
+    this.components = this.hosted.components;
     if (this.modules.length > 0 && typeof options.serverPackage.wasmModule !== "function") {
       throw new BuildError(
         `hypen.json declares prebuilt modules (${this.modules.map((m) => m.name).join(", ")}), but the ` +
@@ -214,6 +263,68 @@ export class DevPrebuiltModules {
     }
   }
 
+  /**
+   * Like the constructor, but first builds the `source` packages of
+   * hypen.json (module projects in this repository) with the wasm build
+   * pipeline. A package that fails to build is reported and left out — the
+   * rest of the app still starts — and is retried when its sources change.
+   *
+   * @throws {BuildError} for everything the constructor throws.
+   */
+  static async create(options: DevPrebuiltOptions): Promise<DevPrebuiltModules> {
+    const print = options.print ?? { error: (line: string) => console.error(line), info: (line: string) => console.log(line) };
+    const config = parseWasmConfig(options.wasm);
+    const built = options.built ?? new Map<string, BuiltSource>();
+    const stamps = new Map<string, string>();
+    for (const decl of config.packages.values()) {
+      if (!decl.source) continue;
+      stamps.set(decl.from, DevPrebuiltModules.stampOf(decl, options.projectRoot));
+      print.info(`  ${pink("Building")} ${decl.from} ${dim("(source package)")}`);
+      try {
+        const source = await buildSourcePackage(decl, options.projectRoot, { log: (line) => print.info(`  ${dim("│")}${line}`) });
+        if (source.notice) print.error(`\n  ${boldYellow("Notice:")} ${source.notice}\n`);
+        built.set(decl.from, source);
+      } catch (err) {
+        print.error(`\n  ${yellow(`${decl.from} was not built — its modules are missing from this session until it builds:`)}`);
+        if (err instanceof BuildError) for (const line of formatBuildError(err).split("\n")) print.error(line);
+        else print.error(`  ${err instanceof Error ? err.message : String(err)}`);
+        print.error("");
+      }
+    }
+    const instance = new DevPrebuiltModules({ ...options, built });
+    for (const [from, stamp] of stamps) instance.sourceStamps.set(from, stamp);
+    for (const note of instance.hosted.notes) print.info(`  ${yellow("Note:")} ${note}`);
+    return instance;
+  }
+
+  private static stampOf(decl: PackageDeclaration, projectRoot: string): string {
+    const dir = resolve(projectRoot, decl.from);
+    let outDir = join(dir, "dist");
+    try {
+      outDir = resolve(dir, readProjectConfig(dir).outDir);
+    } catch {
+      // A broken hypen.json there is reported by the build.
+    }
+    return sourceStamp(dir, outDir);
+  }
+
+  private resolve(config: WasmConfig): ResolvedHosted {
+    return resolveHosted(config, this.options.projectRoot, {
+      built: this.built,
+      componentsDir: this.options.componentsDir,
+    });
+  }
+
+  /** One line per package in use, for the startup banner. */
+  get packageLines(): string[] {
+    return this.hosted.packages.map((use) => {
+      const how = use.origin === "source" ? "built from source" : use.origin === "fallback" ? "prebuilt fallback" : `v${use.pkg.manifest.version}`;
+      const names = [...use.modules.map((m) => m.name), ...use.components.map((c) => c.name)];
+      const usable = use.exports.length > 0 ? ` — use ${use.exports.map((e) => `${e} {}`).join(", ")}` : "";
+      return `${use.declaration.from} (${how}): ${names.join(", ")}${usable}`;
+    });
+  }
+
   get names(): string[] {
     return this.modules.map((m) => m.name);
   }
@@ -223,7 +334,7 @@ export class DevPrebuiltModules {
   }
 
   private stamp(module: PrebuiltModule, config: WasmConfig): string {
-    const grants = config.modules.get(module.name);
+    const grants = module.grants ?? config.modules.get(module.name);
     return JSON.stringify([
       module.componentPath,
       fileStamp(module.componentPath),
@@ -238,14 +349,21 @@ export class DevPrebuiltModules {
   }
 
   private define(module: PrebuiltModule, config: WasmConfig): HostedModuleDefinition {
-    const grants = config.modules.get(module.name);
+    const grants = module.grants ?? config.modules.get(module.name);
+    // A renamed package module runs with its template's `module <Name>`
+    // declaration rewritten, so the template is passed as source.
+    const renamed = module.package !== undefined && module.package.name !== module.name;
     const at = `hypen.json ${module.field}`;
     // Checked in the constructor.
     const wasmModule = this.options.serverPackage.wasmModule!;
     return wasmModule({
       name: module.name,
       component: module.componentPath,
-      ...(module.templatePath !== undefined ? { template: module.templatePath } : {}),
+      ...(renamed && module.template !== undefined
+        ? { ui: module.template }
+        : module.templatePath !== undefined
+          ? { template: module.templatePath }
+          : {}),
       grants: {
         reads: grants?.reads ?? [],
         dispatches: grants?.dispatches ?? [],
@@ -256,17 +374,38 @@ export class DevPrebuiltModules {
         ...(grants?.httpHosts?.length ? { httpHosts: grants.httpHosts } : {}),
       },
       declaredAt: at,
-      grantsAt: at,
+      grantsAt: module.grants?.editAt ?? at,
     });
   }
 
   /** Register the modules and the diagnostics printer on `server` (before `prepare()` / `listen()`). */
   attach(server: HostedRemoteServer): void {
+    this.attachComponents(server);
     if (this.modules.length === 0) return;
     server.wasmModules(...this.modules.map((m) => this.define(m, this.config)));
     server.hostedModules({ onError: (failure) => this.printFailure(failure) });
     for (const module of this.modules) this.loaded.set(module.name, this.stamp(module, this.config));
   }
+
+  /** Register the packages' template-only components on `server`. */
+  private attachComponents(server: HostedRemoteServer): void {
+    if (this.components.length === 0 && this.componentsStamp === "[]") return;
+    if (typeof server.components !== "function") {
+      throw new BuildError(
+        `Packages bring template-only components (${this.components.map((c) => c.name).join(", ")}), but the ` +
+          "project's @hypen-space/server cannot register them.",
+        {
+          code: "PREBUILT_UNSUPPORTED_TARGET",
+          file: "hypen.json",
+          field: "wasm.packages",
+          hint: "update @hypen-space/server to a version with `RemoteServer.components()`",
+        }
+      );
+    }
+    server.components(Object.fromEntries(this.components.map((c) => [c.name, c.template])));
+    this.componentsStamp = JSON.stringify(this.components.map((c) => [c.name, c.template]));
+  }
+  private componentsStamp = "[]";
 
   private printFailure(failure: HostedModuleFailure): void {
     const [title, ...rest] = formatHostedFailure(failure);
@@ -286,6 +425,10 @@ export class DevPrebuiltModules {
       this.print.error(`  ${err instanceof Error ? err.message : String(err)}`);
     }
     this.print.error("");
+  }
+
+  private sameSet(modules: readonly PrebuiltModule[]): boolean {
+    return this.modules.map((m) => m.name).sort().join(",") === modules.map((m) => m.name).sort().join(",");
   }
 
   /** Re-read hypen.json's `wasm` section (when a config file was given). */
@@ -321,7 +464,16 @@ export class DevPrebuiltModules {
     let modules: PrebuiltModule[];
     try {
       config = this.readConfig();
-      modules = resolvePrebuiltModules(config, this.options.projectRoot);
+      const hosted = this.resolve(config);
+      modules = hosted.modules;
+      const components = JSON.stringify(hosted.components.map((c) => [c.name, c.template]));
+      if (components !== this.componentsStamp && this.sameSet(modules)) {
+        this.components = hosted.components;
+        this.attachComponents(server);
+        await server.reload?.();
+        this.print.info(`  ${yellow("Reloaded")} ${dim("(package components changed)")}`);
+      }
+      this.hosted = hosted;
     } catch (err) {
       this.printError("Not reloaded — the running modules keep the last good version:", err);
       return;
@@ -378,13 +530,15 @@ export class DevPrebuiltModules {
    * name and renamed over the old one, which a watch on the file would miss.
    */
   watch(server: HostedRemoteServer): { stop: () => void } {
-    if (this.modules.length === 0) return { stop: () => {} };
+    if (this.modules.length === 0 && this.config.packages.size === 0) return { stop: () => {} };
     const files = new Set<string>();
     for (const module of this.modules) {
       files.add(module.componentPath);
       if (module.templatePath !== undefined) files.add(module.templatePath);
     }
+    for (const component of this.components) files.add(component.templatePath);
     if (this.options.configFile !== undefined) files.add(resolve(this.options.configFile));
+    this.watchSources(server);
     const byDir = new Map<string, Set<string>>();
     for (const file of files) {
       const names = byDir.get(dirname(file)) ?? new Set<string>();
@@ -416,9 +570,64 @@ export class DevPrebuiltModules {
     return { stop: () => this.stop() };
   }
 
+  /**
+   * Watch the module projects of `source` packages; on a change to their
+   * sources rebuild (debounced) and hot-reload. A failed rebuild prints the
+   * build error and leaves the running instances alone.
+   */
+  private watchSources(server: HostedRemoteServer): void {
+    for (const decl of this.config.packages.values()) {
+      if (!decl.source || this.built.get(decl.from)?.origin === "fallback") continue;
+      const dir = resolve(this.options.projectRoot, decl.from);
+      try {
+        const watcher = watch(dir, { recursive: true }, (_event, filename) => {
+          const first = String(filename ?? "").split(/[\\/]/)[0] ?? "";
+          if (IGNORED_SOURCE_DIRS.has(first) || first.startsWith(".wasm-")) return;
+          if (this.sourceTimer) clearTimeout(this.sourceTimer);
+          this.sourceTimer = setTimeout(() => {
+            this.sourceTimer = null;
+            void this.rebuildSources(server);
+          }, 300);
+        });
+        watcher.on("error", () => {});
+        this.watchers.push(watcher);
+      } catch {
+        this.print.error(`  ${yellow("Warning:")} cannot watch ${decl.from}; it will not rebuild on change.`);
+      }
+    }
+  }
+
+  /** Rebuild every source package whose sources changed since its last build. Never rejects. */
+  rebuildSources(server: HostedRemoteServer): Promise<void> {
+    const run = this.running.then(async () => {
+      let rebuilt = false;
+      for (const decl of this.config.packages.values()) {
+        if (!decl.source || this.built.get(decl.from)?.origin === "fallback") continue;
+        const stamp = DevPrebuiltModules.stampOf(decl, this.options.projectRoot);
+        if (this.sourceStamps.get(decl.from) === stamp) continue;
+        this.sourceStamps.set(decl.from, stamp);
+        this.print.info(`  ${pink("Rebuilding")} ${decl.from} ${dim("…")}`);
+        try {
+          const source = await buildSourcePackage(decl, this.options.projectRoot, {
+            log: (line) => this.print.info(`  ${dim("│")}${line}`),
+          });
+          this.built.set(decl.from, source);
+          rebuilt = true;
+        } catch (err) {
+          this.printError(`${decl.from} did not build — the running modules keep their previous build:`, err);
+        }
+      }
+      if (rebuilt) await this.reloadNow(server);
+    });
+    this.running = run.catch((err) => this.printError("Rebuild failed:", err));
+    return this.running;
+  }
+
   stop(): void {
     if (this.timer) clearTimeout(this.timer);
     this.timer = null;
+    if (this.sourceTimer) clearTimeout(this.sourceTimer);
+    this.sourceTimer = null;
     for (const watcher of this.watchers) watcher.close();
     this.watchers = [];
   }

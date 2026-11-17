@@ -28,6 +28,9 @@ Run `hypen --help` for the overview and `hypen <command> --help` for a command's
 | `hypen dev` | Dev server: web client at `http://localhost:3000` plus a `ws://` endpoint for native runners, with hot reload |
 | `hypen build` | Static production site in `dist/` (`node dist/server.js` serves it) |
 | `hypen generate` | Write `.hypen/components.generated.ts` (imports for every discovered component) |
+| `hypen add <package>` | Install a WASM module package (npm name, directory or `.tgz`): shows what its modules ask for, records what you grant in `hypen.json` + `hypen.lock.json`. Nothing from the package runs |
+| `hypen remove <package\|Module>` / `hypen modules` | Undo an install / list installed packages with granted vs requested |
+| `hypen pack` | In a module project: build and write an npm-publishable package to `dist/pack` |
 | `hypen check [path...]` | Accessibility checks over `.hypen` files (alias `hypen a11y`; exit 0 clean, 1 findings, 2 couldn't check) |
 | `hypen studio` | Hypen Studio, the in-browser IDE |
 | `hypen test` | Studio Test Mode: live DOM/Canvas previews and device mirrors |

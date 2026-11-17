@@ -63,6 +63,12 @@ export function declaredPrebuiltNames(rawWasm: unknown): string[] {
     .map(([name]) => name);
 }
 
+/** The `wasm.packages` keys of a raw (unparsed) hypen.json `wasm` section. */
+export function declaredPackages(rawWasm: unknown): string[] {
+  if (!isRecord(rawWasm) || !isRecord(rawWasm.packages)) return [];
+  return Object.keys(rawWasm.packages);
+}
+
 /**
  * Resolve every prebuilt declaration against `projectDir`, in hypen.json
  * order.
@@ -192,4 +198,47 @@ export function copyPrebuiltModules(
     if (notInTree.length > 0) outside.push({ name: module.name, files: notInTree });
   }
   return { copied, outside };
+}
+
+/**
+ * Everything a server-based build has to ship for the hosted modules of an
+ * app — `wasm.modules.<Name>.component` files and module packages alike:
+ * components, templates, package manifests and `hypen.lock.json`, mirrored
+ * under `outDir` at their project-relative paths. Packages installed in
+ * `node_modules` are not copied: the bundle runs against the project's
+ * dependencies.
+ */
+export function copyHostedFiles(
+  hosted: { modules: readonly PrebuiltModule[]; components: ReadonlyArray<{ name: ModuleName; templatePath: string }> },
+  projectDir: string,
+  outDir: string,
+  lockFile?: string
+): { copied: CopiedPrebuilt[]; outside: CopiedPrebuilt[] } {
+  const inNodeModules = (path: string): boolean => relative(resolve(projectDir), path).split(/[\\/]/).includes("node_modules");
+  const modules = hosted.modules.filter((m) => !inNodeModules(m.componentPath));
+  const result = copyPrebuiltModules(modules, projectDir, outDir);
+  const extras = new Map<string, string[]>();
+  const add = (name: string, path: string): void => {
+    if (inNodeModules(path)) return;
+    extras.set(name, [...(extras.get(name) ?? []), path]);
+  };
+  for (const module of modules) if (module.package) add(module.package.from, module.package.manifestPath);
+  for (const component of hosted.components) add(component.name, component.templatePath);
+  if (lockFile !== undefined && isFile(lockFile) && hosted.modules.some((m) => m.package)) add("hypen.lock.json", lockFile);
+  const root = resolve(projectDir);
+  for (const [name, files] of extras) {
+    const copied: string[] = [];
+    for (const source of new Set(files)) {
+      const rel = relative(root, source);
+      if (rel.startsWith("..") || isAbsolute(rel)) continue;
+      const target = join(outDir, rel);
+      if (resolve(target) !== resolve(source)) {
+        mkdirSync(dirname(target), { recursive: true });
+        copyFileSync(source, target);
+      }
+      copied.push(target);
+    }
+    if (copied.length > 0) result.copied.push({ name: name as ModuleName, files: copied });
+  }
+  return result;
 }

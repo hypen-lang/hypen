@@ -20,6 +20,7 @@ import {
 import { basename, dirname, isAbsolute, join, relative } from "path";
 import { BuildError } from "../build-error.js";
 import { MANIFEST_FILE } from "./manifest.js";
+import { PACKAGE_MANIFEST_FILE } from "./module-package.js";
 import type { Project } from "./types.js";
 
 /** The directory `--keep-temp` leaves behind, relative to `outDir`. */
@@ -67,7 +68,7 @@ export function assertSafeOutput(outWasmDir: string, project: Project): void {
   // manifest. Anything else was put there by someone, and replacing the
   // directory would delete it.
   const foreign = readdirSync(outWasmDir).filter(
-    (f) => f !== MANIFEST_FILE && !f.endsWith(".wasm") && !f.endsWith(".hypen")
+    (f) => f !== MANIFEST_FILE && f !== PACKAGE_MANIFEST_FILE && !f.endsWith(".wasm") && !f.endsWith(".hypen")
   );
   if (foreign.length > 0) {
     throw unsafe(

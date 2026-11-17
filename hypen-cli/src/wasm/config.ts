@@ -7,6 +7,7 @@
 
 import { formatHostPattern, parseHostPattern } from "./http-grammar.js";
 import { BuildError } from "../build-error.js";
+import { asRequests, type ModuleRequests } from "./module-package.js";
 import {
   GRANTABLE_STORAGE,
   LANGUAGES,
@@ -41,6 +42,11 @@ export interface ModuleGrants {
    * instead of being compiled from a source component.
    */
   prebuilt?: PrebuiltDeclaration;
+  /**
+   * Where the entry is written when that is not `wasm.modules.<Name>`
+   * (a package's recorded grant: `wasm.packages["…"].grants.<Name>`).
+   */
+  field?: string;
 }
 
 /**
@@ -54,13 +60,79 @@ export interface PrebuiltDeclaration {
   template: string | undefined;
 }
 
+/**
+ * `wasm.packages.<from>`: one module package the app uses — the ONE entry a
+ * user writes (or `hypen add` writes for them). The key says where the
+ * package comes from: an npm package name, or a path (`./vendor/checkout`).
+ * The package's manifest lists its modules; they are never listed by hand.
+ */
+export interface PackageDeclaration {
+  /** The key as written: a package name or a path relative to the project. */
+  from: string;
+  /** `wasm.packages["<from>"]`, for messages. */
+  field: string;
+  /**
+   * `"source": true`: `from` is a module *project* in this repository;
+   * `hypen dev` / `hypen build` build it and load the result.
+   */
+  source: boolean;
+  /**
+   * What the package's modules get beyond `grants`. `"requested"`: whatever
+   * each module's manifest requests (the default for `source` packages — the
+   * same author controls both sides). `"explicit"`: only `grants` (always
+   * the case for installed packages: nothing is granted without a decision).
+   */
+  trust: "requested" | "explicit";
+  /** A prebuilt package to use when a `source` package's toolchain is missing. */
+  fallback: string | undefined;
+  /** Install only these modules / components. `undefined`: everything. */
+  only: string[] | undefined;
+  /** Renames of exported modules: name in the package → name in the app. */
+  as: ReadonlyMap<string, string>;
+  /** The recorded grant decisions, by the module's name in the package. */
+  grants: ReadonlyMap<string, ModuleGrants>;
+}
+
+/** What a module project says about the package it builds. */
+export interface PackageMeta {
+  /** `wasm.name`: the package's name in its manifest. */
+  name: string | undefined;
+  /** `wasm.version`. */
+  version: string | undefined;
+  /** `wasm.description`. */
+  description: string | undefined;
+  /** `wasm.npm`: the npm name `hypen pack` gives the package. */
+  npm: string | undefined;
+  /** `wasm.exports`: names the app may use in its templates. Default: the entry. */
+  exports: string[] | undefined;
+  /**
+   * `wasm.external`: modules this project's modules may name in `reads` /
+   * `dispatches` although the project does not contain them — the app that
+   * installs the package provides them.
+   */
+  external: string[];
+}
+
 /** The parsed `wasm` section. Every field is present; absent input means defaults. */
 export interface WasmConfig {
   /** Explicit source language; `undefined` means detect from the project. */
   language: Language | undefined;
   /** Grants keyed by the module name as written in hypen.json. */
   modules: ReadonlyMap<string, ModuleGrants>;
+  /** Module packages the app uses, by where they come from. */
+  packages: ReadonlyMap<string, PackageDeclaration>;
+  /** The package this project builds, as its author describes it. */
+  package: PackageMeta;
 }
+
+const NO_META: PackageMeta = {
+  name: undefined,
+  version: undefined,
+  description: undefined,
+  npm: undefined,
+  exports: undefined,
+  external: [],
+};
 
 const CONFIG_FILE = "hypen.json";
 
@@ -267,6 +339,101 @@ function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
   return grants;
 }
 
+const PACKAGE_KEYS = ["source", "trust", "fallback", "only", "as", "grants"] as const;
+
+/** A dotted path segment for a key that may contain `.` / `/` / `@`. */
+export function packageField(from: string): string {
+  return `wasm.packages[${JSON.stringify(from)}]`;
+}
+
+function parseNameList(value: unknown, field: string, what: string): string[] {
+  if (!Array.isArray(value) || !value.every((v): v is string => typeof v === "string" && v !== "")) {
+    throw configError(`${field} must be an array of ${what} (strings)`, field, `e.g. ["Checkout"]`);
+  }
+  return [...new Set(value)];
+}
+
+function parsePackage(from: string, raw: unknown): PackageDeclaration {
+  const at = packageField(from);
+  if (from.trim() === "") {
+    throw configError(`wasm.packages has an empty key`, "wasm.packages", `a key names a package ("@acme/checkout") or a path ("./vendor/checkout")`);
+  }
+  if (!isRecord(raw)) {
+    throw configError(`${at} must be an object`, at, `e.g. "${from}": {}  — \`hypen add\` writes it for you`);
+  }
+  let source = false;
+  let trust: PackageDeclaration["trust"] | undefined;
+  let fallback: string | undefined;
+  let only: string[] | undefined;
+  const as = new Map<string, string>();
+  const grants = new Map<string, ModuleGrants>();
+  for (const [key, value] of Object.entries(raw)) {
+    switch (key) {
+      case "source":
+        if (typeof value !== "boolean") {
+          throw configError(`${at}.source must be true or false`, `${at}.source`, `write "source": true to build the module project at ${from}`);
+        }
+        source = value;
+        break;
+      case "trust":
+        if (value !== "requested" && value !== "explicit") {
+          throw configError(
+            `${at}.trust must be "requested" or "explicit" (got ${JSON.stringify(value)})`,
+            `${at}.trust`,
+            `"requested" grants a source package what its own hypen.json declares; "explicit" grants only what ${at}.grants lists`
+          );
+        }
+        trust = value;
+        break;
+      case "fallback":
+        fallback = parsePath(value, `${at}.fallback`, "./modules/checkout/prebuilt");
+        break;
+      case "only":
+        only = parseNameList(value, `${at}.only`, "module / component names");
+        break;
+      case "as":
+        if (!isRecord(value) || !Object.values(value).every((v): v is string => typeof v === "string" && v !== "")) {
+          throw configError(`${at}.as must map a module's name in the package to its name in the app`, `${at}.as`, `e.g. "as": { "Checkout": "Shop" }`);
+        }
+        for (const [name, renamed] of Object.entries(value)) as.set(name, renamed as string);
+        break;
+      case "grants":
+        if (!isRecord(value)) {
+          throw configError(`${at}.grants must be an object keyed by module name`, `${at}.grants`, `e.g. "grants": { "Pricing": { "reads": ["Cart"] } }`);
+        }
+        for (const [name, entry] of Object.entries(value)) {
+          const field = `${at}.grants.${name}`;
+          const parsed = parseModuleGrants(entry, field);
+          if (parsed.prebuilt !== undefined) {
+            throw configError(`${field}.component is not valid here: the package's manifest names its files`, `${field}.component`, `remove "component" / "template" from ${field}`);
+          }
+          grants.set(name, { ...parsed, field });
+        }
+        break;
+      default:
+        throw unknownKey(at, key, PACKAGE_KEYS);
+    }
+  }
+  if (!source && (trust === "requested" || fallback !== undefined)) {
+    const key = trust === "requested" ? "trust" : "fallback";
+    throw configError(
+      `${at}.${key} only applies to a source package ("source": true)`,
+      `${at}.${key}`,
+      trust === "requested"
+        ? `an installed package gets exactly what ${at}.grants records: run \`hypen add ${from}\` to review and record what it requests`
+        : `remove "fallback", or add "source": true if ${from} is a module project in this repository`
+    );
+  }
+  return { from, field: at, source, trust: trust ?? (source ? "requested" : "explicit"), fallback, only, as, grants };
+}
+
+function parseText(value: unknown, field: string, example: string): string {
+  if (typeof value !== "string" || value.trim() === "") {
+    throw configError(`${field} must be a non-empty string`, field, `e.g. ${JSON.stringify(field.split(".").pop())}: ${JSON.stringify(example)}`);
+  }
+  return value;
+}
+
 /**
  * Parse the raw `wasm` section of hypen.json.
  *
@@ -275,7 +442,9 @@ function parseModuleGrants(raw: unknown, at: string): ModuleGrants {
  */
 export function parseWasmConfig(raw: unknown): WasmConfig {
   const modules = new Map<string, ModuleGrants>();
-  if (raw === undefined || raw === null) return { language: undefined, modules };
+  const packages = new Map<string, PackageDeclaration>();
+  const meta: PackageMeta = { ...NO_META, external: [] };
+  if (raw === undefined || raw === null) return { language: undefined, modules, packages, package: meta };
   if (!isRecord(raw)) {
     throw configError(
       `"wasm" must be an object`,
@@ -303,11 +472,40 @@ export function parseWasmConfig(raw: unknown): WasmConfig {
           modules.set(name, parseModuleGrants(grants, `wasm.modules.${name}`));
         }
         break;
+      case "packages":
+        if (value === undefined) break;
+        if (!isRecord(value)) {
+          throw configError(
+            `wasm.packages must be an object keyed by package name or path`,
+            "wasm.packages",
+            `e.g. "packages": { "@acme/checkout": {} } — \`hypen add @acme/checkout\` writes it`
+          );
+        }
+        for (const [from, entry] of Object.entries(value)) packages.set(from, parsePackage(from, entry));
+        break;
+      case "name":
+        meta.name = parseText(value, "wasm.name", "@acme/checkout");
+        break;
+      case "version":
+        meta.version = parseText(value, "wasm.version", "1.0.0");
+        break;
+      case "description":
+        meta.description = parseText(value, "wasm.description", "Checkout modules");
+        break;
+      case "npm":
+        meta.npm = parseText(value, "wasm.npm", "@acme/checkout");
+        break;
+      case "exports":
+        meta.exports = parseNameList(value, "wasm.exports", "component names");
+        break;
+      case "external":
+        meta.external = parseNameList(value, "wasm.external", "module names");
+        break;
       default:
-        throw unknownKey("wasm", key, ["language", "modules"]);
+        throw unknownKey("wasm", key, ["language", "modules"], ["packages", "name", "version", "description", "npm", "exports", "external"]);
     }
   }
-  return { language, modules };
+  return { language, modules, packages, package: meta };
 }
 
 /**
@@ -360,21 +558,27 @@ export function resolveModuleCapabilities(
     );
   }
 
+  const external = config.package.external;
+  const isExternal = (written: string): boolean => external.some((n) => n.toLowerCase() === written.toLowerCase());
   const out = new Map<ModuleName, Capabilities>();
   for (const name of statefulNames) {
     const grants = config.modules.get(name);
     const scopes = (key: "reads" | "dispatches"): ScopeName[] => {
       const resolved: ScopeName[] = [];
       for (const target of grants?.[key] ?? []) {
-        const field = `wasm.modules.${name}.${key}`;
+        const field = `${grants?.field ?? `wasm.modules.${name}`}.${key}`;
         const module = lookup(target);
         if (module === undefined) {
+          // A module the installing app provides (`wasm.external`): part of
+          // what this module REQUESTS (hypen-modules.json), but not of this
+          // project's own app.json — there is no such module to grant here.
+          if (isExternal(target)) continue;
           throw unknownModule(
             field,
             ` names unknown module "${target}"`,
             stateless.has(target)
               ? `"${target}" is stateless (it has no state to ${key === "reads" ? "read" : "dispatch to"}); remove it from ${field}`
-              : `use one of the stateful module names, or remove "${target}" from ${field}`
+              : `use one of the stateful module names, or remove "${target}" from ${field} — or, if "${target}" is a module of the app that will install this package, list it in "wasm.external"`
           );
         }
         const scope = scopeOf(module);
@@ -391,4 +595,36 @@ export function resolveModuleCapabilities(
     });
   }
   return out;
+}
+
+/**
+ * What a module of this project REQUESTS from whoever installs it: its
+ * `wasm.modules.<Name>` declaration, with targets written as module names —
+ * the project's own (as discovered) or the ones listed in `wasm.external`.
+ * Call after {@link resolveModuleCapabilities} (which rejects unknown targets).
+ */
+export function declaredRequests(
+  config: WasmConfig,
+  name: ModuleName,
+  statefulNames: readonly ModuleName[]
+): ModuleRequests {
+  const grants = config.modules.get(name);
+  const named = (targets: readonly string[]): string[] => {
+    const out: string[] = [];
+    for (const target of targets) {
+      const resolved =
+        statefulNames.find((n) => n.toLowerCase() === target.toLowerCase()) ??
+        config.package.external.find((n) => n.toLowerCase() === target.toLowerCase()) ??
+        target;
+      if (!out.includes(resolved)) out.push(resolved);
+    }
+    return out;
+  };
+  return asRequests({
+    reads: named(grants?.reads ?? []),
+    dispatches: named(grants?.dispatches ?? []),
+    storage: grants?.storage ?? [],
+    http: grants?.http ?? false,
+    httpHosts: grants?.httpHosts ?? [],
+  });
 }

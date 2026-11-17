@@ -60,6 +60,10 @@ bun bin/hypen.ts studio           # Test Studio IDE
 | `hypen build` | Production build (browser SPA) |
 | `hypen build --target wasm` | Portable build: per-module `.wasm` components + `.hypen` UI + `app.json`, runnable offline via `hypen-runtime --app` |
 | `hypen generate` | Generate `.hypen/components.generated.ts` |
+| `hypen add <package>` | Install a WASM module package (npm name, directory, manifest, `.tgz`); consent screen or `--yes` / `--grant` / `--deny`; writes `wasm.packages` + `hypen.lock.json` |
+| `hypen remove <package\|Module>` | Undo `hypen add` (never deletes files; `--uninstall` removes the npm dependency) |
+| `hypen modules` (`list`) | Installed module packages: source, version, drift, granted vs requested |
+| `hypen pack` | Module project → npm-publishable package directory (`<outDir>/pack`); publishes nothing |
 | `hypen studio` | Launch Studio IDE |
 | `hypen test` | Launch Studio directly into Test Mode; boots a RemoteServer for the entry module when run inside a project, opens in connect-only mode otherwise |
 | `hypen run android\|ios` | Run on native device/simulator |
@@ -140,6 +144,9 @@ and never exits. Layout, one responsibility per file:
 | `node-stubs.ts` | esbuild plugin stubbing Node built-ins for the TS bundle |
 | `shims/module-shim.ts` | The TS shim (module definition → `hypen:module` exports, plus `context.http` over `hypen:http/deferred`). Runs *inside the guest*: no imports, no Node/Bun APIs. Type-checked by tsc, unit-tested in `tests/wasm-shims.test.ts` |
 | `shim-contract.ts` | Compile-time only: the shim's `ShimHttp` is `@hypen-space/core`'s `ModuleHttp` (what authors type against) |
+| `module-package.ts` | GENERATED copy of `hypen-web/packages/server/src/hosted/module-package.ts` (same sync script; its one differing line is the `./http-grammar.js` import): the `hypen-modules.json` manifest + `hypen.lock.json` model — `ModuleRequests` vs `ModuleGrant` (branded, not interchangeable), `Capability` + `describeCapability` (the one human rendering), `readModulePackage` (shape, path confinement, integrity), `locateModulePackage`, `packageDrift` / `assertNoDrift`. Do not edit |
+| `component-imports.ts` | Reads a component's top-level imports from its bytes (no dependency, nothing executed) and maps them to link-time capabilities (`linkRequirements`) |
+| `packages.ts` | `wasm.packages` in an app: `resolveHosted` (legacy prebuilt + every package → `PrebuiltModule[]` + template-only components; lock/drift, link-time grants, name collisions across packages and with the app, exports), `selectFromPackage` (`only` + closure), `assertRenamesSound` (`as`), `templateRefs`, `appComponents` |
 | `http-grammar.ts` | GENERATED copy of `hypen-web/packages/module-host/src/http.ts` (URL / host-pattern grammar; `bun hypen-web/scripts/sync-http-grammar.ts`, checked by `tests/http-grammar-sync.test.ts`). Do not edit |
 | `shims/module_shim.go` | The Go shim template; a gofmt-valid file whose three `hypen.invalid/...` imports `renderGoShim` replaces |
 
@@ -191,6 +198,53 @@ come from `cargo --message-format=json`; a CLI-provisioned crate `wit/`
 (marked `.hypen-provisioned`) is refreshed when it differs from the WIT for
 the crate's ABI.
 
+**Module packages.** `hypen build --target wasm` also writes
+`<outDir>/wasm/hypen-modules.json` (`describePackage` in `wasm/build.ts`):
+one manifest for the whole output — each stateful module with its `requests`
+(`declaredRequests`: the project's own `wasm.modules.<Name>` declaration,
+targets as names; `wasm.external` lists targets the installing app provides,
+which are requested but left out of this project's `app.json`), `abi` (read
+from the component's imports) and SHA-256 `integrity`; the stateless
+components; `entry`; `exports` (`wasm.exports`, default the entry). Identity
+is `wasm.{name,version,description}` → `package.json` → `Cargo.toml` →
+dirname / `0.0.0` (`packageIdentity`). `checkDeclaredImports` cross-checks a
+built component's imports against its declaration: an undeclared storage
+tier / HTTP import is `UNDECLARED_IMPORT`, an unused declaration a warning.
+
+An app uses packages through `wasm.packages.<from>` (`PackageDeclaration` in
+`config.ts`; the key is an npm name or a path): `grants.<Module>` (the
+recorded decision, same parser as `wasm.modules` entries), `only`, `as`,
+and for a module project in the same repo `source: true` (+ `trust`,
+default `"requested"`: granted what its manifest requests; + `fallback`: a
+built package used when the toolchain is missing or
+`HYPEN_NO_SOURCE_BUILD=1`). `buildSourcePackage` (in `wasm/build.ts`) runs
+`buildWasm` on the module project (`readProjectConfig`, `src/project-config.ts`).
+`resolveHosted` is the single entry for dev (`DevPrebuiltModules.create`
+builds source packages first — a failed one is printed and left out —
+watches their source trees with a content fingerprint, rebuilds debounced,
+and registers package components through `RemoteServer.components()`), the
+wasm build (`withPackageGrants` merges package grants into the config;
+package components ship as stateless entries) and the server-based build
+(`copyHostedFiles`). Installed packages must have a `hypen.lock.json` entry
+(`NOT_RECORDED`); more requests than recorded is `REQUESTS_CHANGED`, changed
+bytes under the recorded version `INTEGRITY_MISMATCH`, an ungranted
+link-time import `UNGRANTED_IMPORT` (field + `hypen add … --grant` fix).
+A renamed (`as`) module is hosted with its template's `module <Name>`
+declaration rewritten (`renameTemplateModule`; the engine keys the scope by
+it) and passed inline (`ui`).
+
+The commands live in `src/modules/`: `add.ts` (`ModuleSpec` union: dir |
+manifest | tarball | npm | installed; `acquire` → `review`: summary,
+`decide` (flags or `Prompter`), dry-run `resolveHosted` on the config about
+to be written, then `saveAppProject`), `remove.ts`, `list.ts`, `pack.ts`,
+`store.ts` (hypen.json + lock, atomic writes), `json-edit.ts` (text edits
+that keep the file's formatting), `tar.ts` (safe `.tgz` extraction: fresh
+directory, no links, no escaping paths), `pm.ts` (package-manager detection;
+every add passes the ignore-scripts flag), `prompter.ts` (`terminalPrompter`
+/ `scriptedPrompter` — tests and transcripts drive the consent flow through
+it). Library code throws `BuildError`; `moduleCommand` in `bin/hypen.ts`
+prints and exits.
+
 Errors: every user-fixable failure is a `BuildError` with a stable `code`
 (`BuildErrorCode` in `src/build-error.ts`), the `module` / `file` / `field` it
 concerns, `tool` (command, exit code, stderr tail) when a subprocess failed,
@@ -203,7 +257,12 @@ that calls `context.http`, built, hosted by a `RemoteServer` and completed
 through a fake `fetch`), `tests/example-wasm-http.test.ts` (examples/wasm-http
 through `hypen dev`),
 `tests/wasm-shims.test.ts`, `tests/wasm-errors.test.ts` (bad paths, driven by
-fake toolchain scripts — no real toolchain needed).
+fake toolchain scripts — no real toolchain needed),
+`tests/module-packages.test.ts` (manifest, build/pack, add/remove/modules,
+drift, dev with installed and source packages — toolchain-free: its module
+projects declare their modules prebuilt; fixtures in
+`tests/helpers/module-package.ts`), `tests/example-wasm-module.test.ts`
+(fallback path by default, cargo build with `HYPEN_WASM_E2E=1`).
 
 ### Studio
 `hypen studio` spawns `studio-ui/` as a child process via `bun --hot`, passing config through environment variables (`HYPEN_PROJECT_DIR`, `HYPEN_COMPONENTS_DIR`, `HYPEN_ENTRY`, etc.).

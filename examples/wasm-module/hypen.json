@@ -4,12 +4,10 @@
   "port": 3000,
   "outDir": "dist",
   "wasm": {
-    "modules": {
-      "Pricing": {
-        "component": "./modules/pricing/pricing.wasm",
-        "template": "./modules/pricing/ui/Pricing/Pricing.hypen",
-        "reads": ["Cart"],
-        "dispatches": ["Cart"]
+    "packages": {
+      "./modules/pricing": {
+        "source": true,
+        "fallback": "./modules/pricing/prebuilt"
       }
     }
   }

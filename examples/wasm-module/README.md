@@ -1,13 +1,12 @@
 # wasm-module
 
-A TypeScript Hypen app that uses a **prebuilt Rust module**. Two modules, two
+A TypeScript Hypen app that uses a **Rust module**. Two modules, two
 languages, one engine:
 
 - **`Cart`** — an ordinary TypeScript module (`src/components/Cart/`).
 - **`Pricing`** — a Rust crate built to a WebAssembly Component
-  (`modules/pricing/`), declared in `hypen.json` and loaded as is. The built
-  `pricing.wasm` (about 110 KB) is committed, so the example runs without a
-  Rust toolchain.
+  (`modules/pricing/`). The app points at that folder; `hypen dev` builds it
+  and loads what it produces.
 
 They talk in both directions:
 
@@ -19,23 +18,53 @@ They talk in both directions:
 | TypeScript → Rust | `Cart`'s "Ask Pricing for a quote" button calls `context.getModule("pricing").dispatch("quote")` | nothing (app code is trusted) |
 | UI → Rust | `Pricing`'s own "Toggle tax" button | nothing |
 
-The grants live in `hypen.json`, next to the paths of the module's files:
+The app's `hypen.json` has one entry for the module project — no paths to
+`.wasm` or `.hypen` files, no list of modules:
 
 ```json
 "wasm": {
-  "modules": {
-    "Pricing": {
-      "component": "./modules/pricing/pricing.wasm",
-      "template": "./modules/pricing/ui/Pricing/Pricing.hypen",
-      "reads": ["Cart"],
-      "dispatches": ["Cart"]
+  "packages": {
+    "./modules/pricing": {
+      "source": true,
+      "fallback": "./modules/pricing/prebuilt"
     }
   }
 }
 ```
 
-Remove `"dispatches"` and add a grinder: the dev server prints which module
-was refused and the field to add.
+`"source": true` means "this is a module project in my repository: build
+it". What `Pricing` may do is declared once, by the module project itself, in
+`modules/pricing/hypen.json`:
+
+```json
+"wasm": {
+  "language": "rust",
+  "external": ["Cart"],
+  "modules": {
+    "Pricing": { "reads": ["Cart"], "dispatches": ["Cart"] }
+  }
+}
+```
+
+(`external` says `Cart` is a module of the app that hosts this one, not of
+this project.) A source package is granted what it declares, so there is
+nothing to repeat in the app. Remove `"dispatches"` there and add a grinder:
+the dev server prints which module was refused and the field to add.
+
+### Without a Rust toolchain
+
+`"fallback"` names a built copy of the package, committed at
+`modules/pricing/prebuilt/` (about 110 KB). When `cargo` or the
+`wasm32-wasip2` target is missing — or with `HYPEN_NO_SOURCE_BUILD=1` —
+`hypen dev` uses it and says so:
+
+```
+  Notice: ./modules/pricing: source builds are disabled (HYPEN_NO_SOURCE_BUILD) — using the prebuilt fallback ./modules/pricing/prebuilt. Changes to its sources are NOT picked up until it is built.
+```
+
+So the example runs on a machine with only Bun, but edits to
+`modules/pricing/src/lib.rs` only take effect once the crate can be built.
+The fallback is a snapshot: after changing the crate, refresh it (below).
 
 ## Run
 
@@ -67,47 +96,53 @@ next to the example, so it always matches the checked-out engine. In your own
 project, drop those `paths` and install the packages:
 `bun add @hypen-space/core @hypen-space/server @hypen-space/module-host`.
 
-## Rebuild the Rust module
+## Working on the Rust module
 
-`modules/pricing/` is a standalone crate and, with its own `hypen.json`, a
-small Hypen project. Either command builds it:
+With a toolchain (`rustup target add wasm32-wasip2`), `hypen dev` builds the
+crate at startup, watches `modules/pricing/` and, when a source file changes,
+rebuilds it and reloads the module in the open page — the cart and the totals
+stay. A compile error is printed and the previous build keeps running.
 
-```bash
-rustup target add wasm32-wasip2
-
-cd modules/pricing
-cargo build --release --target wasm32-wasip2
-cp target/wasm32-wasip2/release/pricing_module.wasm pricing.wasm
-```
+`modules/pricing/` is also a Hypen project of its own:
 
 ```bash
 cd modules/pricing
-bun ../../../../hypen-cli/bin/hypen.ts build --target wasm    # dist/wasm/Pricing.wasm
-cp dist/wasm/Pricing.wasm pricing.wasm
+bun ../../../../hypen-cli/bin/hypen.ts build --target wasm   # dist/wasm/: Pricing.wasm, Pricing.hypen, app.json, hypen-modules.json
+bun ../../../../hypen-cli/bin/hypen.ts pack --name hypen-example-pricing   # dist/pack/: an npm-publishable package
 ```
 
-The second is how a crate gets its `wit/` directory in the first place: the
-CLI writes the `hypen:module` WIT there (marked `.hypen-provisioned`, and
-kept up to date) before it runs cargo. It is committed here so plain `cargo
-build` works.
+`dist/wasm/hypen-modules.json` is the package manifest: the module, the
+SHA-256 of its component, and what it requests (`reads` / `dispatches` on
+`Cart`). `dist/pack/` is what another app would install:
 
-With `hypen dev` running, copying a new `pricing.wasm` into place reloads the
-module in the open page without a reconnect; the cart and the totals stay.
+```bash
+hypen add /path/to/modules/pricing/dist/pack      # shows the requests, asks, writes one hypen.json entry
+```
 
-`*.wasm` is git-ignored repository-wide, so a rebuilt `pricing.wasm` has to
-be staged with `git add -f examples/wasm-module/modules/pricing/pricing.wasm`.
+Refresh the committed fallback after changing the crate:
+
+```bash
+bun run build:pricing     # hypen pack, then copies dist/pack to modules/pricing/prebuilt
+git add -f modules/pricing/prebuilt/Pricing.wasm   # *.wasm is git-ignored repository-wide
+```
+
+The first build also provisions the crate's `wit/` directory (the
+`hypen:module` WIT, marked `.hypen-provisioned` and kept up to date by the
+CLI). It is committed here so plain `cargo build` works too.
 
 ## Files
 
 ```
-hypen.json                          the app; declares Pricing and its grants
+hypen.json                          the app; points at modules/pricing as a source package
 src/components/App/                 entry (TypeScript): lays out Cart and Pricing
 src/components/Cart/                the TypeScript module
 modules/pricing/src/lib.rs          the Rust module
 modules/pricing/ui/Pricing/         its template
-modules/pricing/pricing.wasm        the built component
+modules/pricing/hypen.json          the module project: what Pricing requests
+modules/pricing/prebuilt/           the committed fallback package (hypen pack output)
 scripts/drive.ts                    a 90-line protocol client
 ```
 
 The example is booted and clicked through, in both directions, by
-`hypen-cli/tests/example-wasm-module.test.ts`.
+`hypen-cli/tests/example-wasm-module.test.ts` — on the fallback by default
+(no toolchain is run), and building the crate with `HYPEN_WASM_E2E=1`.

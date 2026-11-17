@@ -1,0 +1,28 @@
+{
+  "hypenModules": 1,
+  "name": "hypen-example-pricing",
+  "version": "0.1.0",
+  "description": "Hypen example: a pricing module built to a WebAssembly Component",
+  "entry": "Pricing",
+  "exports": [
+    "Pricing"
+  ],
+  "modules": [
+    {
+      "name": "Pricing",
+      "component": "Pricing.wasm",
+      "template": "Pricing.hypen",
+      "abi": "0.1",
+      "requests": {
+        "reads": [
+          "Cart"
+        ],
+        "dispatches": [
+          "Cart"
+        ]
+      },
+      "integrity": "sha256-0kA3VGT39sLKW/M+UpRfRDzI7iDTJIyBmCfk80G2VgM="
+    }
+  ],
+  "components": []
+}

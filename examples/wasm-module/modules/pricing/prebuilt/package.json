@@ -1,0 +1,18 @@
+{
+  "name": "hypen-example-pricing",
+  "version": "0.1.0",
+  "description": "Hypen example: a pricing module built to a WebAssembly Component",
+  "keywords": [
+    "hypen",
+    "hypen-module"
+  ],
+  "hypen": {
+    "modules": "hypen-modules.json"
+  },
+  "files": [
+    "Pricing.hypen",
+    "Pricing.wasm",
+    "README.md",
+    "hypen-modules.json"
+  ]
+}

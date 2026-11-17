@@ -87,6 +87,12 @@ export interface DevOptions {
    * edited there reaches the running prebuilt modules without a restart.
    */
   configFile?: string;
+
+  /**
+   * The project root that `wasm.packages` paths (and `hypen.lock.json`)
+   * resolve against. Default: the working directory.
+   */
+  root?: string;
 }
 
 export interface BuildOptions {
@@ -351,9 +357,10 @@ export async function dev(options: DevOptions): Promise<{
     // Mirror actions across all connected clients, like the Bun server.
     .syncActions();
   // Prebuilt (hosted) modules declared in hypen.json (see dev-bun.ts).
-  const prebuilt = new DevPrebuiltModules({
+  const prebuilt = await DevPrebuiltModules.create({
     wasm: options.wasm,
     configFile: options.configFile,
+    componentsDir: resolvedComponentsDir,
     projectRoot,
     serverPackage: serverPkg as HostedServerPackage,
   });
@@ -519,6 +526,7 @@ export async function dev(options: DevOptions): Promise<{
   if (prebuilt.size > 0) {
     console.log(`  ${dim("Prebuilt:")}   ${prebuilt.names.join(", ")} ${dim("(WASM, from hypen.json)")}`);
   }
+  for (const line of prebuilt.packageLines) console.log(`  ${dim("Package:")}    ${line}`);
   console.log("");
 
   onStart?.(serverUrl);

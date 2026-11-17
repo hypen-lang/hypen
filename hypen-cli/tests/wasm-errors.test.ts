@@ -737,6 +737,7 @@ describe("wasm build: staging, publishing and cleanup", () => {
       "Counter.hypen",
       "Counter.wasm",
       "app.json",
+      "hypen-modules.json",
     ]);
     // Byte-for-byte the manifest format hypen-runtime parses.
     expect(readFileSync(join(proj, "dist", "wasm", "app.json"), "utf8")).toBe(EXPECTED_MANIFEST);
@@ -836,6 +837,7 @@ describe("wasm build: staging, publishing and cleanup", () => {
       "Counter.hypen",
       "Counter.wasm",
       "app.json",
+      "hypen-modules.json",
     ]);
   });
 
@@ -865,6 +867,7 @@ describe("wasm build: staging, publishing and cleanup", () => {
       "Counter.hypen",
       "Counter.wasm",
       "app.json",
+      "hypen-modules.json",
     ]);
     expect(readFileSync(join(proj, "dist", "wasm", "app.json"), "utf8")).toBe(EXPECTED_MANIFEST);
   });
