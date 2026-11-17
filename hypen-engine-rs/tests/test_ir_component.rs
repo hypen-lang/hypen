@@ -220,13 +220,12 @@ fn test_expand_very_deep_nesting_10_levels() {
     let expanded = registry.expand(&element);
 
     // THEN: All expanded without stack overflow
-    // After expansion, Level0 becomes Level1, Level1 becomes Level2, etc.
-    // Finally Level9 becomes Text
-    // So the result should be Level1 (since Level0 template returns Level1)
-    assert_element_type(&expanded, "Level1");
-
-    // Verify no stack overflow occurred - if we got here, expansion succeeded
-    // The components are NOT nested as children, each component's template IS the next level
+    // Level0's template root is Level1, whose root is Level2, … and Level9's
+    // is Text. A template root that names a component is a use of that
+    // component like any other, so the chain expands all the way down.
+    // (This asserted "Level1" while a component root was left unexpanded —
+    // the renderer was handed an element type that is a component name.)
+    assert_element_type(&expanded, "Text");
 }
 
 // ============================================================================

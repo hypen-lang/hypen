@@ -138,3 +138,105 @@ export default app
     }
   });
 });
+
+/**
+ * A module used inside ANOTHER module's template (App → Wrap → Inner) keeps
+ * its own state scope and receives its own actions, at any depth and through
+ * control flow, a route or a template-only component. The engine used to
+ * stamp the outer module's scope over everything it expanded, so `Inner`
+ * rendered `null` and its clicks went to `Wrap`.
+ */
+describe("modules nested inside other modules", () => {
+  let server: RemoteServer | null = null;
+  let ws: WebSocket | null = null;
+  afterEach(async () => {
+    ws?.close();
+    await new Promise((r) => setTimeout(r, 30));
+    server?.stop();
+    server = null;
+  });
+
+  const wrap = (name: string, inner: string) =>
+    `module ${name} { Column { Text("${name}: @{state.count}") Button { Text("inc${name}") }.onClick(@actions.increment) ${inner} } }`;
+
+  for (const [label, templates, stateless, names, port] of [
+    ["two modules deep", { Wrap: wrap("Wrap", "Inner()"), Inner: counter("Inner") }, {}, ["Wrap", "Inner"], 4631],
+    [
+      "three modules deep",
+      { Wrap: wrap("Wrap", "Mid()"), Mid: wrap("Mid", "Inner()"), Inner: counter("Inner") },
+      {},
+      ["Wrap", "Mid", "Inner"],
+      4632,
+    ],
+    [
+      "inside If and ForEach",
+      {
+        Wrap: `module Wrap { Column { Text("Wrap: @{state.count}") Button { Text("incWrap") }.onClick(@actions.increment) If(condition: "@{state.show}") { Inner() } ForEach(items: @state.rows, key: "id") { Other() } } }`,
+        Inner: counter("Inner"),
+        Other: counter("Other"),
+      },
+      {},
+      ["Wrap", "Inner", "Other"],
+      4633,
+    ],
+    [
+      "inside a Route of the outer module",
+      {
+        Wrap: `module Wrap { Column { Text("Wrap: @{state.count}") Button { Text("incWrap") }.onClick(@actions.increment) Router { Route(path: "/") { Column { Inner() } } } } }`,
+        Inner: counter("Inner"),
+      },
+      {},
+      ["Wrap", "Inner"],
+      4634,
+    ],
+    [
+      "through a template-only component",
+      { Wrap: wrap("Wrap", "Panel { Inner() }"), Inner: counter("Inner") },
+      { Panel: `Column { Text("panel") Children() }` },
+      ["Wrap", "Inner"],
+      4635,
+    ],
+    [
+      "as the root of the outer module's template",
+      { Wrap: `module Wrap { Inner() }`, Inner: counter("Inner") },
+      {},
+      ["Inner"],
+      4636,
+    ],
+  ] as const) {
+    test(label, async () => {
+      const a = new HypenApp();
+      // A different starting count per module: a binding or a click that
+      // lands in the wrong module's state shows up as the wrong number.
+      const start: Record<string, number> = {};
+      Object.keys(templates).forEach((n, i) => { start[n] = (i + 1) * 10; });
+      for (const [n, ui] of Object.entries(templates)) {
+        a.module(n)
+          .defineState({ count: start[n]!, show: true, rows: [{ id: "r1" }], location: "/" })
+          .onAction("increment", ({ state }) => { state.count++; })
+          .ui(ui);
+      }
+      a.module("App").defineState({ location: "/" }).ui(`module App { Column { Wrap() } }`);
+      server = new RemoteServer().app(a).components(stateless);
+      await server.listen(port);
+      const c = connect(port);
+      ws = c.ws;
+      await c.opened;
+      await c.until(() => names.every((n) => texts(c.messages).includes(`${n}: ${start[n]}`)));
+      for (const n of names) {
+        const before = texts(c.messages).length;
+        c.ws.send(JSON.stringify({
+          type: "dispatchAction",
+          module: "App",
+          action: "__hypen_dispatch",
+          payload: { node: buttonFor(c.messages, `inc${n}`), action: "increment" },
+        }));
+        await c.until(() => texts(c.messages).includes(`${n}: ${start[n]! + 1}`));
+        // The click changed its own module and nothing else.
+        expect(texts(c.messages).slice(before)).toEqual([`${n}: ${start[n]! + 1}`]);
+      }
+      expect(texts(c.messages).some((t) => String(t).includes("null"))).toBe(false);
+      expect(c.messages.filter((m) => m.type === "actionError")).toEqual([]);
+    });
+  }
+});

@@ -927,13 +927,15 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
         if let Some(first_child) = component.children.first() {
             let mut ir = ast_to_ir_node(first_child);
             let scope = component.name.to_lowercase();
-            // `propagate_module_scope_ir_node` handles every IRNode variant —
+            // The scope stamp covers every IRNode variant —
             // plain Element but also Router / ForEach / Conditional. The
             // Router case matters for `module App { Router { ... } }`
             // templates where the top-level child is a Router (not an
             // Element): discovery + dependency registration both need the
-            // enclosing scope set.
-            propagate_module_scope_ir_node(&mut ir, &scope);
+            // enclosing scope set. Only unscoped nodes are claimed: a
+            // `module Y { ... }` written inline inside this one has already
+            // stamped its own subtree and keeps it.
+            fill_module_scope_ir_node(&mut ir, &scope);
             return ir;
         }
     }
@@ -2138,6 +2140,37 @@ pub(crate) fn propagate_module_scope_element(element: &mut Element, scope: &str)
     element.module_scope = Some(scope.to_string());
     for ir_child in &mut element.ir_children {
         propagate_module_scope_ir_node(ir_child, scope);
+    }
+}
+
+/// Set `module_scope` on every node of `node` that has none yet.
+///
+/// This is how a module claims what its expansion produced without taking
+/// over a module nested inside it: by the time the outer module runs this,
+/// the inner module's subtree is already stamped with the inner scope (its
+/// own expansion ran first), while the elements a stateless component
+/// contributed are still unscoped and so fall to the enclosing module.
+pub(crate) fn fill_module_scope_ir_node(node: &mut IRNode, scope: &str) {
+    crate::ir::walk::walk_ir_mut(node, &mut |n| {
+        let slot = match n {
+            IRNode::Element(el) => &mut el.module_scope,
+            IRNode::ForEach { module_scope, .. }
+            | IRNode::Conditional { module_scope, .. }
+            | IRNode::Router { module_scope, .. } => module_scope,
+        };
+        if slot.is_none() {
+            *slot = Some(scope.to_string());
+        }
+    });
+}
+
+/// [`fill_module_scope_ir_node`] for an element and its descendants.
+pub(crate) fn fill_module_scope_element(element: &mut Element, scope: &str) {
+    if element.module_scope.is_none() {
+        element.module_scope = Some(scope.to_string());
+    }
+    for ir_child in &mut element.ir_children {
+        fill_module_scope_ir_node(ir_child, scope);
     }
 }
 

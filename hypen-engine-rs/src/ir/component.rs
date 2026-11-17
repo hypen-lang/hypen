@@ -515,7 +515,9 @@ impl ComponentRegistry {
                         self.expand_ir_node_with_context(&root, child_context.as_deref());
                     if comp_is_module {
                         if let Some(ref scope) = comp_module_name {
-                            super::expand::propagate_module_scope_ir_node(&mut node, scope);
+                            // Unscoped nodes only: a module nested in this
+                            // one keeps its own scope (see below).
+                            super::expand::fill_module_scope_ir_node(&mut node, scope);
                         }
                     }
                     expanded.ir_children = vec![node];
@@ -543,21 +545,55 @@ impl ComponentRegistry {
                     context_path,
                 );
 
-                // Recursively expand ir_children with the new context
-                let child_context_ref = child_context.as_deref();
-                expanded.ir_children = expanded
-                    .ir_children
-                    .iter()
-                    .map(|child| self.expand_ir_node_with_context(child, child_context_ref))
-                    .collect();
+                // A module scopes its template so the reconciler resolves
+                // `@{state.xxx}` against this module's state. Two steps,
+                // around the expansion of what the template uses:
+                //
+                // 1. Before: everything written in the template, and the
+                //    children the caller put in its slots, is this module's.
+                // 2. After: the elements stateless components contributed
+                //    (still unscoped) are this module's too.
+                //
+                // A module used inside this one is expanded between the two
+                // and stamps its own subtree, which step 2 leaves alone — so
+                // nesting depth does not matter. Stamping everything after
+                // the expansion instead would hand the inner module's
+                // bindings to this module's state.
+                let module_scope = if comp_is_module {
+                    comp_module_name.as_deref()
+                } else {
+                    None
+                };
+                if let Some(scope) = module_scope {
+                    super::expand::propagate_module_scope_element(&mut expanded, scope);
+                }
 
-                // If this component is a module, set module_scope on the
-                // expanded element and all its descendants so the reconciler
-                // resolves @{state.xxx} against this module's state.
-                if comp_is_module {
-                    if let Some(ref scope) = comp_module_name {
-                        super::expand::propagate_module_scope_element(&mut expanded, scope);
-                    }
+                let child_context_ref = child_context.as_deref();
+
+                // The template's root may itself be a component
+                // (`module Checkout { Panel { Cart {} } }`): expand it as the
+                // use it is, in this component's context. A root that names
+                // this component is a primitive being wrapped, never a
+                // recursive use.
+                let mut expanded = if expanded.element_type != element.element_type
+                    && (self
+                        .get(&expanded.element_type, child_context_ref)
+                        .is_some()
+                        || self.try_resolve(&expanded.element_type, child_context_ref))
+                {
+                    self.expand_with_context(&expanded, child_context_ref)
+                } else {
+                    // Recursively expand ir_children with the new context
+                    expanded.ir_children = expanded
+                        .ir_children
+                        .iter()
+                        .map(|child| self.expand_ir_node_with_context(child, child_context_ref))
+                        .collect();
+                    expanded
+                };
+
+                if let Some(scope) = module_scope {
+                    super::expand::fill_module_scope_element(&mut expanded, scope);
                 }
 
                 expanded
@@ -599,7 +635,9 @@ impl ComponentRegistry {
 
         let mut node = self.expand_ir_node_with_context(&root, child_context.as_deref());
         if let Some(scope) = module_scope {
-            super::expand::propagate_module_scope_ir_node(&mut node, &scope);
+            // Unscoped nodes only, so a module nested under this root keeps
+            // its own scope.
+            super::expand::fill_module_scope_ir_node(&mut node, &scope);
         }
         Some(node)
     }

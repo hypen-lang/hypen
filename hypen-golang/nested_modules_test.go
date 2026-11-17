@@ -394,3 +394,53 @@ func TestNestedModule_BindActionWorks(t *testing.T) {
 		t.Errorf("expected query='hello', got %v", query)
 	}
 }
+
+// ========================================================================
+// C. Modules nested inside other modules' templates (real WASI engine)
+// ========================================================================
+
+// A module used inside ANOTHER module's template (App → Wrap → Mid → Inner)
+// keeps its own state scope at any depth. The engine used to stamp the outer
+// module's scope over everything it expanded, so Inner's bindings resolved
+// against Wrap's state and rendered null.
+func TestNestedModule_ModuleInsideAModuleKeepsItsScope(t *testing.T) {
+	engine := newTestEngine(t)
+
+	for name, source := range map[string]string{
+		"Wrap":  `module Wrap { Column { Text("wrap=@{state.w}") Mid {} } }`,
+		"Mid":   `module Mid { Panel { Inner {} } }`,
+		"Panel": `Column { Text("panel") Children() }`,
+		"Inner": `module Inner { Text("inner=@{state.n}") }`,
+	} {
+		if err := engine.RegisterComponent(name, source, name); err != nil {
+			t.Fatalf("register %s: %v", name, err)
+		}
+	}
+	engine.SetModule("App", []string{}, []string{"a"}, map[string]any{"a": 1})
+	engine.RegisterModule("Wrap", []string{}, []string{"w"}, map[string]any{"w": 2})
+	engine.RegisterModule("Mid", []string{}, []string{}, map[string]any{})
+	engine.RegisterModule("Inner", []string{}, []string{"n"}, map[string]any{"n": 3})
+
+	patches, err := engine.RenderSource(`module App { Column { Text("app=@{state.a}") Wrap {} } }`)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	var texts []string
+	for _, p := range patches {
+		if p.Type != "create" {
+			continue
+		}
+		if text, ok := p.Props["0"].(string); ok {
+			texts = append(texts, text)
+		}
+	}
+	want := []string{"app=1", "wrap=2", "panel", "inner=3"}
+	if len(texts) != len(want) {
+		t.Fatalf("texts = %v, want %v", texts, want)
+	}
+	for i := range want {
+		if texts[i] != want[i] {
+			t.Fatalf("texts = %v, want %v", texts, want)
+		}
+	}
+}
