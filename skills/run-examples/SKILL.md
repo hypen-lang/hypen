@@ -81,7 +81,20 @@ icons to `wss://<worker>.<subdomain>.workers.dev/ws`.)
    installed wrangler's ProxyWorker (`patch_wrangler_proxy`). Deployed
    Workers take it from `wrangler.jsonc`.
 
-4. **Testing unreleased engine/SDK changes (`--local`).** The script then
+4. **A Worker that serves static assets can't use the device plane.** Any
+   `assets` block in `wrangler.jsonc` puts Cloudflare's asset router in
+   front of the Worker, and the router terminates the WebSocket and
+   negotiates permessage-deflate itself — `no_web_socket_compression` and
+   `run_worker_first` don't help, so a deployed app warns "device plane
+   disabled on this connection". home-screen therefore serves its
+   wallpapers from its `FILES` R2 bucket (`assets/wallpapers/<version>/`,
+   `src/wallpapers.ts`). Locally, `dev-examples.sh` seeds wrangler's
+   emulated R2 with `bun run wallpapers:upload` (once; delete
+   `.wrangler/state` to redo); running home-screen by hand, run that
+   yourself or the wallpapers 404. A deploy needs
+   `bun run wallpapers:upload --remote` once per `WALLPAPER_ASSET_VERSION`.
+
+5. **Testing unreleased engine/SDK changes (`--local`).** The script then
    overwrites each example's `node_modules/hypen-engine` with
    `hypen-engine-rs/pkg/web` (build it with `cd hypen-engine-rs &&
    ./build-wasm.sh`; the script refuses to start without it) and

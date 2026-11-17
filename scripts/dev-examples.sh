@@ -32,7 +32,14 @@
 #      flag to the installed wrangler's ProxyWorker. Local dev only; deployed
 #      Workers take the flag from wrangler.jsonc.
 #
-#   4. (--local only) To test unreleased engine/SDK changes, the installed
+#   4. home-screen serves its wallpapers from its R2 bucket (not Workers
+#      Static Assets — the asset router would negotiate permessage-deflate on
+#      /ws and switch the device plane off). wrangler dev emulates R2 under
+#      .wrangler/state, so the script seeds it once with
+#      `bun run wallpapers:upload` (public/wallpapers -> local R2; skipped
+#      when already done, delete .wrangler/state to redo).
+#
+#   5. (--local only) To test unreleased engine/SDK changes, the installed
 #      hypen-engine and @hypen-space/{core,web,cf} are overwritten with this
 #      checkout's builds: hypen-engine-rs/pkg/web (build it with
 #      `cd hypen-engine-rs && ./build-wasm.sh`) and the hypen-web package
@@ -210,13 +217,19 @@ for name in "${SELECTED[@]}"; do
   (cd "$dir" && bun install --silent)
   patch_wrangler_proxy "$dir"
   if [[ $LOCAL -eq 1 ]]; then
-    # Overlay this checkout's engine + @hypen-space builds (gotcha 4).
+    # Overlay this checkout's engine + @hypen-space builds (gotcha 5).
     touch "$dir/node_modules/.hypen-local-overlay"
     rm -rf "$dir/node_modules/hypen-engine"
     cp -rL "$ENGINE_DIR/pkg/web" "$dir/node_modules/hypen-engine"
     for short in core web cf; do
       sync_local_pkg "$dir" "$short"
     done
+  fi
+  if [[ "$name" == "home-screen" ]]; then
+    # Gotcha 4: wallpapers come from (local) R2. A no-op once seeded.
+    echo "==> Seeding home-screen wallpapers into local R2..."
+    (cd "$dir" && bun run --silent wallpapers:upload) \
+      || echo "    (wallpaper upload failed — the launcher runs, its wallpapers 404)" >&2
   fi
 done
 

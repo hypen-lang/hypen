@@ -45,6 +45,11 @@ describe("app endpoints", () => {
       food: "ws://localhost:8792/ws",
       social: "ws://localhost:8793/ws",
       hypeflix: "ws://localhost:8795/ws",
+      weather: "ws://localhost:8796/ws",
+      photos: "ws://localhost:8797/ws",
+      messages: "ws://localhost:8798/ws",
+      radio: "ws://localhost:8799/ws",
+      news: "ws://localhost:8800/ws",
     });
     expect(template).not.toContain("workers.dev");
     expect(wallpaper.startsWith("http://localhost:8787/wallpapers/")).toBe(true);

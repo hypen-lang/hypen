@@ -6,6 +6,7 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "wallpapers:download": "bun run scripts/download-wallpapers.ts",
+    "wallpapers:upload": "bun run scripts/upload-wallpapers.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

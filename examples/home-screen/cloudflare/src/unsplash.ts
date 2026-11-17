@@ -9,12 +9,14 @@
  * `images.unsplash.com` is an imgix endpoint: the crop, pixel size, quality and
  * encoding are query parameters, so one photo id yields every rendition we
  * need. `scripts/download-wallpapers.ts` materializes those renditions as AVIF
- * files before deployment. At runtime the browser talks only to our Worker.
+ * files, and `scripts/upload-wallpapers.ts` puts them into the Worker's R2
+ * bucket (src/wallpapers.ts serves them). At runtime the browser talks only
+ * to our Worker.
  *
  * Nothing here needs an API key. To refresh the set, pick new photos from
  * https://unsplash.com/t/wallpapers, update `WALLPAPER_PHOTOS`, run
- * `bun run wallpapers:download`, and bump `WALLPAPER_ASSET_VERSION` so clients
- * receive the new immutable files.
+ * `bun run wallpapers:download`, bump `WALLPAPER_ASSET_VERSION` so clients
+ * receive the new immutable files, and `bun run wallpapers:upload --remote`.
  */
 
 import { HOME_ORIGIN } from "./endpoints";

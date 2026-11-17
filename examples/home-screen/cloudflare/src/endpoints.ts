@@ -37,6 +37,6 @@ export function appEndpoint(worker: string, localPort: number): string {
     : `ws://${localHost}:${localPort}/ws`;
 }
 
-/** Absolute origin serving this worker's `public/` assets (wallpapers). */
+/** Absolute origin of this worker, which serves the wallpapers (from R2, see wallpapers.ts). */
 export const HOME_ORIGIN = (env.HYPEN_HOME_ORIGIN ?? "").trim().replace(/\/$/, "")
   || (DEPLOYED ? `https://hypen-home-screen.${subdomain}.workers.dev` : `http://${localHost}:${LAUNCHER_PORT}`);
