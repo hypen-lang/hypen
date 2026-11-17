@@ -117,6 +117,8 @@ Hypen separates UI and logic:
 
 The Hypen engine (written in Rust, compiled to WASM) parses your templates, manages state, and generates minimal patches that platform-specific renderers apply to the native UI.
 
+A module does not have to be TypeScript: it can also be a [WASM module](/docs/guide/wasm-modules), compiled from Rust, Go or TypeScript to a WebAssembly Component, installed with `hypen add` and run sandboxed next to your TypeScript modules.
+
 ## Developer Tools
 
 Hypen includes a complete development environment:

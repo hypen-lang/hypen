@@ -849,6 +849,8 @@ remote.NewRemoteServer().
 | `.DisableAutoRouter()` | Don't wire `Router { Route ... }` blocks automatically |
 | `.AllowedOrigins(origins...)` | Browser `Origin` allowlist for the WebSocket upgrade |
 | `.Authenticate(func(*http.Request) bool)` | Admit or refuse each upgrade |
+| `.AllowUnboundClientActions(names...)` | Bare action names clients may send with no node behind them, e.g. `"navigateBack"` (a back-button action). Other client actions run only as UI events from a node that declares them; `router.*` is always accepted. See [Client actions](/docs/servers/typescript#client-actions) |
+| `.AllowAnyUnboundClientActions()` | Accept any bare application action name (the old behaviour; never `__hypen_*` names) |
 | `.OnConnection(callback)` | Called when a client connects |
 | `.OnDisconnection(callback)` | Called when a client disconnects |
 | `.OnSessionCreate(callback)` | Called with each new `*RemoteSession` |

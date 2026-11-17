@@ -217,6 +217,13 @@ The runtime wraps state in a reactive proxy. Direct mutations (`state.count++`) 
 
 ## 7. WASM Compatibility
 
+> **Module ABI.** Modules compiled to WASM implement the `hypen:module` WIT
+> contract in [`wit/`](wit/README.md) (v0.1, synchronous) and
+> [`wit-v0_2/`](wit-v0_2/) (v0.2, Component Model async); how the engine hosts
+> them is in [`wit/ENGINE_INTEGRATION.md`](wit/ENGINE_INTEGRATION.md). The
+> `hypen:engine` sketch below describes the engine-facing interface of this RFC
+> and is not that contract.
+
 ### 7.1 ABI Definition (WIT)
 
 The engine is compiled to WASM and exposes an engine-centric interface. Host languages (JS/TS, Go, Python) call into the engine and provide callbacks for patches and actions.
@@ -381,10 +388,15 @@ Each module has its own lifecycle and state. Cross-module access is explicit thr
 
 - JS/TS modules run inside the host language sandbox.  
 - WASM modules run in isolated instances with:
-  - no ambient file/network access;
-  - explicit capability imports (e.g., `state`, `emit`);
-  - memory/time limits per instance.
-- Remote UI connections are authenticated and signed (nonce + HMAC) to prevent spoofed actions.
+  - no ambient file or network access (a real filesystem and sockets are never linked);
+  - explicit, deny-by-default capability grants (storage tiers, HTTP with an
+    optional host allowlist, cross-module `reads` / `dispatches`);
+  - memory/time limits per instance on the native host.
+  See the WASM Module Security docs page for what is and is not protected.
+- Remote UI servers treat clients as untrusted: an action runs only when it is
+  addressed to a live node that declares it (bare names only from a server-side
+  allowlist). Connection admission (`allowedOrigins`, `authenticate`) is the
+  server's configuration.
 
 ---
 

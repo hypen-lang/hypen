@@ -1,111 +1,112 @@
-# Hypen WIT Specs
+# `hypen:module` — the WASM module contract
 
-WebAssembly Interface Types (WIT) defining the contract between **Hypen
-modules** (WASM Component guests) and **Hypen hosts** (engine + platform).
+WebAssembly Interface Types (WIT) defining the contract between a **Hypen
+module compiled to a WebAssembly Component** (the guest) and a **Hypen host**
+(the engine plus a platform module host). A module built against it — from
+Rust, Go (TinyGo) or TypeScript (componentize-js) — runs unchanged on every
+host listed below.
 
-These are the cross-language, cross-platform interfaces that make a single
-`.wasm` module run on web (via jco), iOS (WasmKit / AOT), Android (wasmtime),
-desktop, and server.
+User documentation: the
+[WASM Modules guide](../hypen-docs/content/docs/guide/wasm-modules.mdx) and the
+[security model](../hypen-docs/content/docs/guide/wasm-module-security.mdx).
+How the engine and the hosts run modules:
+[ENGINE_INTEGRATION.md](ENGINE_INTEGRATION.md). How a module is authored and
+built: [AUTHORING_MODEL.md](AUTHORING_MODEL.md). Old design and handover notes:
+[HISTORY.md](HISTORY.md) (historical, may be inaccurate).
 
-Status: **v0.1.0 strawman.** Not wired into any consumer yet — these files
-exist to anchor design discussion and codegen targets.
+## The contract in one paragraph
 
-## Layout
+A module is a **pure reducer** plus capability imports. The engine owns the
+module's state: it passes the state (JSON bytes) into every call and takes the
+new state back from the result, so a module has no hidden state between calls.
+It exports `init(config) -> state`, `dispatch(state, action) -> reducer-output`,
+the lifecycle calls `on-activated` / `on-deactivated` / `on-destroyed`, and
+`actions()` (the action names it handles, used to wire routing). A
+`reducer-output` carries the new state, effects the host performs after the
+call (`navigate`, `delay`, `log`) and follow-up actions (`emit`). Everything
+else a module can reach is an **import**, and every import beyond `local`
+storage (and, in v0.2, the clock) needs a grant in the module's manifest.
+
+## Layout and versions
 
 ```
-wit/
-├── hypen-module.wit              package hypen:module@0.1.0
+wit/                           hypen:module@0.1.0 — synchronous; the default
+├── hypen-module.wit           worlds `module` and `module-x`
 └── deps/
-    ├── hypen-storage/
-    │   └── storage.wit           package hypen:storage@0.1.0
-    ├── hypen-engine/
-    │   └── state.wit             package hypen:engine@0.1.0  (cross-module state)
-    └── hypen-http/
-        └── http.wit              package hypen:http@0.1.0    (deferred HTTP)
+    ├── hypen-storage/storage.wit   hypen:storage@0.1.0  (local / app / cloud)
+    ├── hypen-engine/state.wit      hypen:engine@0.1.0   (cross-module read / dispatch / subscribe)
+    └── hypen-http/http.wit         hypen:http@0.1.0     (deferred HTTP)
+
+wit-v0_2/                      hypen:module@0.2.0 — Component Model async (WASI 0.3)
+├── hypen-module.wit           same worlds; state-producing exports are `async func`
+└── deps/
+    ├── hypen-storage/storage.wit   hypen:storage@0.2.0  (async ops, stream<u8> blob buckets)
+    ├── hypen-engine/state.wit      hypen:engine@0.2.0
+    ├── hypen-http/http.wit         hypen:http@0.2.0     (`send` stays a sync func)
+    └── hypen-time/time.wit         hypen:time@0.2.0     (now-ms, monotonic-ms, async sleep-ms)
 ```
 
-### One source of truth
+Two directories because one WIT package root cannot hold two versions of the
+same package. **v0.1 is the default and frozen**: new capability packages are
+added to v0.2 only. The native host runs both ABIs side by side (`DualHost`
+sniffs each component); the JS module host runs v0.1 only.
 
-`wit/` (v0.1) and [`wit-v0_2/`](../wit-v0_2/) (v0.2) are canonical — the
-engine's `bindgen!` and the fixture modules read them directly. The CLI
-package vendors copies (`hypen-cli/wit/`, `hypen-cli/wit-v0_2/`, and
-`hypen-cli/wit-tinygo/`, which adds TinyGo's `tinygo-module` world and the
-WASI 0.2.0 deps it needs) because the published package has no repo root.
-Never edit those copies: edit `wit/` or `wit-v0_2/`, run
-`scripts/sync-wit.sh` to regenerate them, and if the contract changed,
-rebuild the engine's `.wasm` fixtures
-(`hypen-engine-rs/tests/fixtures/README.md`). `scripts/sync-wit.sh --check`
-fails on drift; CI (Rust › Format) and `hypen-cli/tests/wit-sync.test.ts`
-run it. The TinyGo-only parts of `wit-tinygo/` are listed in the script's
-`TINYGO_OWNED` table and `hypen-cli/wit-tinygo/README.md`.
+| World | Exports | Imports |
+|-------|---------|---------|
+| `module` | `init`, `dispatch`, `on-activated`, `on-deactivated`, `on-destroyed`, `actions` | `hypen:storage/{local,app,cloud}` (v0.2 adds `hypen:time/clock`) |
+| `module-x` | as `module` | `module` + `hypen:engine/state` + `hypen:http/deferred` |
+| `tinygo-module` (vendored copy only, see below) | as `module` | `module` + `hypen:http/deferred` + the `wasi:cli` / `wasi:io` / … imports TinyGo's runtime brings in |
 
-`hypen-module.wit` is the root package: what every Hypen module *exports*
-(reducer ABI + lifecycle) and which capabilities it *imports*.
+An import the guest never calls is not in its binary, so a module built
+against `module-x` that does not use HTTP is not affected by the `http` grant.
+Blocking `wasi:http` is deliberately **not** part of the contract: a module
+may import it through its language's HTTP client, under the same `http`
+grant.
 
-`deps/hypen-storage/storage.wit` is the storage capability — three sister
-interfaces, one per visibility scope (`local` / `app` / `cloud`), each with
-KV + blob.
+### Capabilities and grants
 
-Validated end-to-end:
+| Interface | Grant (manifest field) | Checked |
+|-----------|------------------------|---------|
+| `hypen:storage/local` | always granted; partitioned by module name | — |
+| `hypen:storage/app`, `/cloud` | `storage: ["app", "cloud"]` | link time (an ungranted import fails instantiation, naming the import and the grant) |
+| `hypen:engine/state` `read` / `subscribe` | `reads: [module]` | every call (`permission-denied`) |
+| `hypen:engine/state` `dispatch` | `dispatches: [module]` | every call, and again by the engine when it folds the output |
+| `hypen:http/deferred`, `wasi:http` | `http: true`, narrowed by `httpHosts: [pattern]` | link time; the allowlist per request and per redirect hop |
+| `hypen:time/clock` (v0.2) | always granted; hosts may substitute a virtual clock | — |
 
-- `wasm-tools component wit wit/` — parses, resolves, round-trips, encodes
-  to a 7.2 KB binary component descriptor; `wasm-tools validate` accepts it.
-- `wit-bindgen rust wit/ --world module --generate-all` — generates ~6.9k
-  lines of Rust bindings.
-- A stub Rust module implementing `Guest` against the generated bindings
-  compiles cleanly to a **66 KB WASM Component** for `wasm32-wasip2`.
-  Inspecting the resulting binary with `wasm-tools component wit`
-  shows the expected 5 reducer/lifecycle exports plus only the storage
-  imports actually called (tree-shaking works).
-- `wit-bindgen go wit/ --world module` and `wit-bindgen c wit/ --world module`
-  both succeed, producing per-scope Go packages
-  (`hypen_storage_local` / `_app` / `_cloud`) and a C header + canonical-ABI
-  object file. Capability-as-interface scoping survives codegen across
-  three guest languages.
+Manifests are **deny by default**: an absent field grants nothing. The
+manifest is whatever the embedder registers the module with (the
+`hypen.json` `wasm.modules` / `wasm.packages` grants, a `RemoteServer`
+`wasmModule({ grants })`, a `hypen-runtime` `app.json` entry or `--grant-*`
+flags, a UniFFI `HypenModuleHost` grants object). A package's
+`hypen-modules.json` lists what modules *request*; it never grants anything.
 
-## HTTP: deferred requests (`hypen:http/deferred`)
+### Deferred HTTP (`hypen:http/deferred`)
 
-A reducer is synchronous, so it cannot wait for a response. `hypen:http` lets
-it *queue* one instead — the same "do X, then dispatch Y" pattern as the
-`delay` effect:
-
-```wit
-send: func(req: request, then: string, tag: option<string>) -> result<_, error>;
-```
-
-`send` returns as soon as the request is queued. The host performs it after
-the reducer returns and dispatches the module's own action `then` with the
-outcome as its JSON payload (`tag` is echoed back):
+A synchronous reducer cannot wait for a response, so it queues one:
+`send(request, then, tag)` returns at once; the host performs the request
+after the reducer returns and dispatches the module's own action `then` with
+the outcome as a JSON payload:
 
 ```jsonc
-// a response was read — any status; 404 and 500 are completed exchanges
 { "ok": true, "status": 200, "headers": { "content-type": "text/plain" },
   "body": "…", "bodyEncoding": "utf8" /* or "base64" */, "tag": "t-1" }
-// no response
 { "ok": false, "error": { "kind": "timeout", "message": "…" }, "tag": "t-1" }
 ```
 
-`error.kind` is one of `network`, `timeout`, `denied`, `too-large`,
-`invalid-response`. Every request `send` accepted gets exactly one completion
-(unless the module is destroyed or reloaded first). The normative text —
-payload, header rules, bounds — is the comment block at the top of
-[`deps/hypen-http/http.wit`](deps/hypen-http/http.wit).
-
-**Grant.** The manifest's `http: true` (the same switch as blocking
-`wasi:http`); importing the interface without it is a link-time denial.
-`httpHosts` optionally narrows the grant to a list of host patterns —
-`api.example.com`, `*.example.com` (subdomains, not the apex),
-either with `:port`, or an IP literal; empty or absent means any host. The
-scheme is always `http` or `https`. The allowlist is checked when a request
-is queued (`permission-denied` names the host), again by the engine before
-any embedder sees the request, and by the embedder on every redirect hop. On
-the native host it also applies to blocking `wasi:http` requests.
+`error.kind` is `network`, `timeout`, `denied`, `too-large` or
+`invalid-response`; any HTTP status is `ok: true`. Every request `send`
+accepted gets exactly one completion unless the module is destroyed or
+reloaded first. The normative text (payload, header rules, bounds) is the
+comment block at the top of [`deps/hypen-http/http.wit`](deps/hypen-http/http.wit);
+when to use it rather than `wasi:http` is in
+[AUTHORING_MODEL.md, "HTTP: blocking vs deferred"](AUTHORING_MODEL.md#http-blocking-vs-deferred).
 
 | Bound | Value |
 |---|---|
 | requests queued per reducer call | 16 |
 | requests in flight per module | 32 (`Engine::set_module_http_in_flight_limit`) |
-| URL | 8 KiB, ASCII, no credentials |
+| URL | 8 KiB, ASCII, `http`/`https`, no credentials |
 | request headers | 64, 16 KiB of names + values; `host`, `content-length`, `connection`, `transfer-encoding`, `keep-alive`, `upgrade`, `te`, `trailer`, `expect`, `proxy-*` refused |
 | request body | 1 MiB |
 | `then`, `tag` | 256 bytes each |
@@ -113,45 +114,57 @@ the native host it also applies to blocking `wasi:http` requests.
 | response body | 4 MiB (`too-large` beyond) |
 | redirects followed | 5 |
 
-It is declared in the `module-x` world of both contract versions
-(`hypen:http@0.1.0` / `@0.2.0`; `send` is a plain sync func in both). When to
-use it rather than `wasi:http`: [AUTHORING_MODEL.md, "HTTP: blocking vs
-deferred"](AUTHORING_MODEL.md#http-blocking-vs-deferred).
+`httpHosts` patterns: `api.example.com`, `*.example.com` (subdomains at any
+depth, not the apex), either with `:port`, or an IP literal; empty or absent
+means any host. The grammar lives in one place per language
+(`hypen-engine-rs/src/module_host/http.rs`; its TypeScript port
+`hypen-web/packages/module-host/src/http.ts`, copied into the CLI and checked
+by a sync test).
 
-## Scope model
+## One source of truth: `scripts/sync-wit.sh`
 
-Capability grants happen at the *interface* level, not as runtime parameters.
-A module that imports `hypen:storage/app` without a manifest grant fails to
-instantiate — denial is a link-time fact, not a runtime check.
+`wit/` and `wit-v0_2/` are canonical: the engine's `bindgen!` and the fixture
+modules read them directly. The CLI package vendors copies because the
+published `@hypen-space/cli` has no repo root:
 
-| Interface              | Visibility                  | Granted by default? |
-|------------------------|-----------------------------|---------------------|
-| `hypen:storage/local`  | This module, this device    | Yes                 |
-| `hypen:storage/app`    | All modules in this app     | No (manifest opt-in)|
-| `hypen:storage/cloud`  | User's devices (synced)     | No (manifest opt-in)|
+| Generated copy | From |
+|----------------|------|
+| `hypen-cli/wit/` | `wit/` |
+| `hypen-cli/wit-v0_2/` | `wit-v0_2/` |
+| `hypen-cli/wit-tinygo/` | `wit/` plus the TinyGo-owned `tinygo-module` world and WASI 0.2.0 deps (listed in the script's `TINYGO_OWNED` table and `hypen-cli/wit-tinygo/README.md`) |
 
-Module-private isolation for `local` is enforced by the host: every key is
-transparently prefixed with the module name before reaching the platform
-store. A module cannot escape its scope because the scope is bound at
-instantiation, not in the call signature.
+Never edit the copies. After changing the contract:
 
-## Platform backend mapping
+```bash
+scripts/sync-wit.sh            # regenerate the vendored copies
+scripts/sync-wit.sh --check    # what CI runs (Rust › Format, and hypen-cli/tests/wit-sync.test.ts): exit 1 on drift
+```
 
-| (scope, tier)           | iOS                                  | Android                          | Web                                    |
-|-------------------------|--------------------------------------|----------------------------------|----------------------------------------|
-| local + persistent      | `Library/<bundle>/<module>/`         | `filesDir/<module>/`             | IndexedDB scoped to `${origin}#${module}` |
-| local + cache           | `Caches/<module>/`                   | `cacheDir/<module>/`             | Cache API                              |
-| local + secure          | Keychain w/ module access group      | EncryptedSharedPreferences       | IDB + WebCrypto                        |
-| app + persistent        | `Library/Application Support/shared/`| `filesDir/shared/`               | IDB shared bucket                      |
-| cloud + persistent      | `NSUbiquitousKeyValueStore` / CloudKit | Auto Backup + DataStore        | Hypen sync service                     |
-| * + temp                | `tmp/`                               | `cacheDir/.session/`             | sessionStorage / in-memory             |
+Then rebuild the engine's fixture components (below) if the change affects
+them. Only `*.wit` files are mirrored; the Markdown here is not.
 
-## Roadmap
+## Where the hosts live
 
-- **v0.1** (this file): storage scopes, cross-module state, direct
-  `wasi:http` imports, JSON state.
-- **v0.2**: structured `value` variant for state (replaces `json` alias)
-  once per-action JSON parsing shows up on profiles, Component Model
-  preview 3 async for streaming HTTP bodies.
-- **v0.3**: `hypen:permissions`, `hypen:keychain`, capability composition once
-  WIT lands interface inheritance.
+| Host | Code | Runs |
+|------|------|------|
+| Engine side (routing, grants, cascade, deferred HTTP admission) | `hypen-engine-rs/src/hosted/` | every embedding |
+| Native wasmtime host (`module-loader` feature) | `hypen-engine-rs/src/module_host/wasmtime/`, `dual.rs` | v0.1 and v0.2; Pulley interpreter option for targets without JIT |
+| `hypen-runtime` reference binary (`runtime-bin` feature) | `hypen-engine-rs/src/bin/hypen_runtime/` | `.wasm` + `.hypen` apps from the command line, REPL or `--serve` |
+| JS module host | `hypen-web/packages/module-host` (`@hypen-space/module-host`) | v0.1, in Node, Bun and browsers (jco transpile) |
+| TypeScript server integration | `hypen-web/packages/server/src/hosted/` | hosted modules next to TS modules in `RemoteServer` / `hypen dev` |
+| UniFFI module host | `hypen-engine-rs/src/uniffi/module_host.rs` (`HypenModuleHost`) | Kotlin / Swift embedders |
+| Kotlin host library | `hypen-host-kotlin/` | **experimental, unverified**: stale generated bindings, no CI |
+
+Build side: `hypen-cli/src/wasm/` (`hypen build --target wasm`, packages) and
+`hypen-cli/src/modules/` (`hypen add` / `remove` / `modules` / `pack`).
+
+## Fixtures
+
+Prebuilt components used by the tests live in
+`hypen-engine-rs/tests/fixtures/`, with their sources under `src/`.
+[`hypen-engine-rs/tests/fixtures/README.md`](../hypen-engine-rs/tests/fixtures/README.md)
+says which source builds which fixture and gives the rebuild commands (Rust:
+`cargo build --target wasm32-wasip2 --release` per crate; JS: `jco
+componentize`; Go: TinyGo `wasip2`). `*.wasm` is gitignored, so stage a
+rebuilt fixture with `git add -f`, and refresh the copies inside the `app*/`
+fixture directories.

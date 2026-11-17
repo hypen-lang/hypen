@@ -1,0 +1,76 @@
+---
+title: WASM Module Security
+description: What a hosted WASM module can and cannot do, what each grant allows, how storage is isolated, and what the sandbox does not protect against
+---
+
+# Security model for hosted WASM modules
+
+A [hosted WASM module](/docs/guide/wasm-modules) is code you did not necessarily write, running inside your app. This page states what it is allowed to do, who decides, and where the protection ends. Read it before you install a package from someone else or grant a module network access on a server.
+
+## Deny by default
+
+A module starts with nothing. Without a grant it can:
+
+- compute over its own state, which the engine hands it on every call and takes back from the result (it has no other state that survives a call);
+- use its own `local` storage, which no other module can see;
+- read the clock, and ask for engine effects (navigate, a delayed follow-up action, emit an action to itself).
+
+Everything else is a **grant**, written by the app owner where the module is declared (`hypen.json` `wasm.modules.<Name>` or `wasm.packages.<package>.grants`, or `grants` in `wasmModule()`). A package's manifest (`hypen-modules.json`) lists what its modules **request**; a request is never a grant. `hypen add` shows the requests and records your decision, and a server using `loadWasmPackage()` grants only what you pass in `grants`.
+
+| Grant | Allows | Enforced |
+|-------|--------|----------|
+| `reads: ["Cart"]` | Reading `Cart`'s state, and subscribing to changes of a path in it | On every call. A refused call fails with `permission-denied` |
+| `dispatches: ["Cart"]` | Running `Cart`'s action handlers, with the module as `action.sender`. Reserved `__hypen_*` actions are never deliverable this way | On every call, and again by the engine when it applies the module's output |
+| `storage: ["app"]` | The `app` storage tier: shared by every module of the same owner that holds this grant | At link time: a component that imports the tier without the grant does not start |
+| `storage: ["cloud"]` | The `cloud` tier (today an in-memory stand-in: nothing is synced across devices) | At link time |
+| `http: true` | Outbound HTTP: [deferred requests](/docs/guide/wasm-modules#http-requests) (`hypen:http/deferred`) and blocking `wasi:http` | At link time |
+| `httpHosts: [...]` | Narrows `http` to an allowlist of host patterns. Absent or empty means any host | Per request: when it is queued, again by the engine, and on every redirect hop |
+
+Interfaces a module can never import: `wasi:sockets` (no raw network) and a real filesystem (`wasi:filesystem` is linked with no directories, so language runtimes that import it load but cannot open a file). On the native host, environment variables and command-line arguments are empty; for the JS host see [What is not protected](#what-is-not-protected).
+
+A grant may name a TypeScript module as well as another hosted module: `reads` hands over a snapshot of that module's state, `dispatches` runs its ordinary `onAction` handler. A `dispatches` grant is therefore as strong as the target's handlers: `hypen add` marks it with "it can run Cart's action handlers".
+
+## Installing a package
+
+- **Nothing runs on install.** `hypen add` installs npm packages with lifecycle scripts disabled; a module package is data (components, templates, a manifest).
+- **Integrity.** Each component's SHA-256 is in the manifest and is checked whenever the manifest is read. `hypen.lock.json` records what you reviewed; a package that later requests more, changes bytes under the same version, or was never reviewed stops `hypen dev`, `hypen build` and `loadWasmPackage()` until you review it again (see [Upgrades and drift](/docs/guide/wasm-modules#upgrades-and-drift)).
+- **Names cannot be hijacked.** Only the names a package exports enter your app's namespace; everything else is installed under the package's namespace, so a package cannot replace one of your modules by shipping a module of the same name.
+
+## Storage isolation
+
+- `local` is partitioned by the module's installed name: two modules never share `local` data, whatever namespaces and keys they use.
+- `app` is shared by the modules that hold the `app` grant **for the same owner**.
+- On a server the owner is the **session** by default, with an in-memory store: one user never sees another user's data, and nothing survives a restart. Choose a different owner (for example the user id) with `hostedModules({ storage })`; sessions that resolve to the same key share data, so derive the key from something the client cannot forge. See [Storage is per session by default](/docs/guide/wasm-modules#storage-is-per-session-by-default).
+- Quotas: 1 MiB per value and 5 MiB per partition (`local` per module, `app` shared). Over the quota a write fails with `quota-exceeded`.
+- Blob storage is not implemented on any host (calls fail with `unavailable`).
+
+## Network access on a server
+
+`@hypen-space/server` (and `hypen dev`) performs a module's deferred HTTP requests itself, so it adds rules the module cannot bypass:
+
+- **Private networks are off limits by default.** A URL whose host is `localhost` or a loopback, link-local or private IP address is refused unless the module's `httpHosts` names that exact host (a wildcard does not count). This keeps an `http` grant away from cloud metadata services and internal ports. Turn it off with `hostedModules({ privateNetwork: "allow" })` only when every module is your own.
+- **Redirects are re-checked.** The server follows at most five, and applies the allowlist, the private-network rule and your `onHttpRequest` hook before each hop. `Authorization` and `Cookie` are dropped when a redirect changes origin.
+- **An egress hook.** `hostedModules({ onHttpRequest })` sees every request and redirect hop and can refuse it; `fetch` lets you route module traffic through a proxy.
+- **Bounds.** 16 requests per handler call, 32 in flight per module, 8 performed at once per session, 1 MiB request body, 4 MiB response, 120 s at most per request. The full table is under [HTTP requests](/docs/guide/wasm-modules#http-requests).
+
+URLs are parsed once, by the engine, with a strict grammar (ASCII only, no `user:pass@`, IPv4 only as a dotted quad), and the request is sent to that parse, so the host that was checked is the host that is contacted.
+
+## Client actions are authorized
+
+Independent of hosted modules, a Remote UI server treats its clients as untrusted: a client action runs only when it is addressed to a live node that declares it (`.onClick(@actions.x)`, `.bind(...)`). A client cannot dispatch to a module's handler by name, write an arbitrary state path, or reach a hosted module through an action no node on its screen carries. See [Client actions](/docs/servers/typescript#client-actions).
+
+## What is not protected
+
+Know these limits before you run modules you do not trust:
+
+- **DNS-level SSRF.** The private-network rule reads the URL, not DNS: a public name that resolves to a private address is not caught. If modules are untrusted, resolve and pin addresses in your own `fetch`, or send module egress through a proxy that does.
+- **The native dev runtime has no private-network rule.** `hypen-runtime` performs requests to `localhost` and private addresses whenever the module holds `http` (narrowed only by `httpHosts`). It is a development tool: its `--serve` mode answers only loopback requests from its own origin, but it is not a hardened server.
+- **Blocking `wasi:http` in the JS host** goes through the host's `wasi:http` shim. `httpHosts` applies to it, but the server's private-network rule, redirect checks and `onHttpRequest` hook apply only to deferred requests. On a server, grant `http` only to modules that use the deferred form.
+- **The server process's environment in the JS host (known issue).** On Node and Bun the JS module host currently links the standard `wasi:cli` shims, which hand a module the server's environment variables and arguments and let it end the process through `wasi:cli/exit`. Until this is fixed, do not run untrusted modules in a server process that holds secrets in its environment.
+- **CPU and memory in the JS host.** The JS module host (`hypen dev`, `RemoteServer`) runs a module's handler on the server's own thread and does not bound its time or memory: a module that loops forever blocks the process. The native host bounds each call (5 s by default) and an instance's total memory (256 MiB by default), and a module that exceeds either is killed and replaced.
+- **Granted capabilities are fully usable.** A module with `dispatches: ["Cart"]` can run any of `Cart`'s handlers with any payload, as often as it likes. Grant `dispatches` only to modules you would let call those handlers, and validate payloads in handlers that a module can reach.
+- **Side channels and resource use** (timing, how much storage or bandwidth a module consumes within its quotas) are not isolated.
+
+## Reporting a vulnerability
+
+See [SECURITY.md](https://github.com/hypen-lang/hypen/blob/main/SECURITY.md).

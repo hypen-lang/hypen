@@ -154,6 +154,7 @@ connect over the same URL.
 | `componentTemplates` | Templates for components not on the registry |
 | `resources` | SVG bundle for `Icon(@resources.foo)` |
 | `syncActions` | Mirror actions/state across sockets sharing a DO (default `false`) |
+| `unboundClientActions` | Bare action names clients may send with no node behind them, e.g. `["navigateBack"]` (default none; `router.*` is always accepted). Client actions are otherwise accepted only as UI events from a node that declares them: see [Client actions](/docs/servers/typescript#client-actions) |
 | `doClassName` | Exported DO class name (default `"AppDO"`) |
 | `binding` | DO binding name (default `"HYPEN_DO"`) |
 | `getRoutingKey` | Pick the DO instance per request |

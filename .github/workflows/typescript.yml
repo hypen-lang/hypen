@@ -20,6 +20,15 @@ on:
       - "hypen-engine-rs/Cargo.toml"
       - "hypen-engine-rs/copy-wasm-artifacts.sh"
       - "Cargo.lock"
+      # WASM module hosting: the CLI vendors the WIT (tests/wit-sync.test.ts),
+      # module-host and CLI tests load the engine's fixture components, and
+      # the CLI tests boot examples/wasm-module and examples/wasm-http.
+      - "wit/**"
+      - "wit-v0_2/**"
+      - "scripts/sync-wit.sh"
+      - "hypen-engine-rs/tests/fixtures/**"
+      - "examples/wasm-module/**"
+      - "examples/wasm-http/**"
       - ".github/workflows/typescript.yml"
   pull_request:
     branches: [main, develop]
@@ -40,6 +49,15 @@ on:
       - "hypen-engine-rs/Cargo.toml"
       - "hypen-engine-rs/copy-wasm-artifacts.sh"
       - "Cargo.lock"
+      # WASM module hosting: the CLI vendors the WIT (tests/wit-sync.test.ts),
+      # module-host and CLI tests load the engine's fixture components, and
+      # the CLI tests boot examples/wasm-module and examples/wasm-http.
+      - "wit/**"
+      - "wit-v0_2/**"
+      - "scripts/sync-wit.sh"
+      - "hypen-engine-rs/tests/fixtures/**"
+      - "examples/wasm-module/**"
+      - "examples/wasm-http/**"
       - ".github/workflows/typescript.yml"
 
 jobs:
@@ -179,7 +197,8 @@ jobs:
         working-directory: hypen-cli
 
   # `hypen build --target wasm` end to end (tests/build-wasm.test.ts with
-  # HYPEN_WASM_E2E=1): the TS pipeline (esbuild bundle -> jco componentize,
+  # HYPEN_WASM_E2E=1, plus the two examples' tests, which then build their
+  # source packages with cargo / jco instead of using the fallback): the TS pipeline (esbuild bundle -> jco componentize,
   # jco from the CLI's own dependencies) and the Rust pipeline (cargo,
   # wasm32-wasip2). The Go pipeline needs tinygo + wit-bindgen-go, which are
   # not installed here, so those tests skip with a warning; the TinyGo file
@@ -231,7 +250,7 @@ jobs:
       - name: Run wasm build e2e
         run: |
           set -o pipefail
-          HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts 2>&1 | tee build-wasm-e2e.log
+          HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts tests/example-wasm-module.test.ts tests/example-wasm-http.test.ts 2>&1 | tee build-wasm-e2e.log
           if grep -Eq '^ *[1-9][0-9]* skip' build-wasm-e2e.log; then
             echo "::error::build-wasm e2e skipped tests (jco/esbuild or core/server not resolvable)"
             exit 1
@@ -242,6 +261,37 @@ jobs:
           fi
         shell: bash
         working-directory: hypen-cli
+
+  # @hypen-space/module-host in a real browser (headless Chromium through
+  # the workspace's playwright-core): jco transpile in the page, storage on
+  # localStorage, the http gate, deferred HTTP performed by the page.
+  # HYPEN_BROWSER_TEST_REQUIRED=1 turns the harness's "Chromium not found"
+  # SKIP into a failure. Uses the committed fixture components, not the
+  # freshly built engine, so it does not wait for build-wasm.
+  module-host-browser:
+    name: Module host (browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: latest
+
+      - name: Install dependencies
+        run: bun install
+        working-directory: hypen-web
+
+      # The browser build matching the installed playwright-core version.
+      - name: Install Chromium (headless shell)
+        run: bunx playwright-core install --with-deps chromium-headless-shell
+        working-directory: hypen-web
+
+      - name: Run browser tests
+        run: bun run test:browser
+        env:
+          HYPEN_BROWSER_TEST_REQUIRED: "1"
+        working-directory: hypen-web/packages/module-host
 
   lsp:
     name: LSP Build

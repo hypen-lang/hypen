@@ -466,6 +466,10 @@ const server = await new RemoteServer()
 | `.disableAutoRouter()` | Turn off the per-session router that is wired from `Router { Route ... }` blocks. |
 | `.exposeStats(enabled?)` | Who may read `/__hypen__/stats` (see [Health & Stats](#health--stats)). |
 | `.syncActions()` | Replay every client's actions on every other client's session. |
+| `.allowUnboundClientActions(names)` | Bare action names clients may send with no node behind them (see [Client actions](#client-actions)). |
+| `.wasmModules(...defs)` | Register [hosted WASM modules](#hosted-wasm-modules) (`wasmModule()`, `loadWasmModules()`, `loadWasmPackage().modules`). |
+| `.hostedModules(options)` | Storage owner, HTTP policy and error reporting for hosted modules. |
+| `.components(templates)` | Extra template-only components, e.g. a WASM package's `components`. |
 | `.listen(port?)` | Start the Bun HTTP + WebSocket server. Returns `Promise<this>`. |
 | `.prepare()` / `.createSession(transport)` / `.createHandler()` | Host sessions on your own WebSocket stack instead of `listen()`. |
 | `.stop()` | Stop the server. |
@@ -522,6 +526,61 @@ clients that don't offer the extension (for example iOS
 
 Set `compression: false` to opt out, which is handy when you want to read the
 raw wire in a proxy or packet capture.
+
+## Client actions
+
+A client is untrusted: whatever it sends in a `dispatchAction` message could have been written by hand. `RemoteServer` therefore runs a client action only when it arrives as a UI event addressed to a live node that declares it (`.onClick(@actions.save)`, `.bind(@state.name)`), which is what every Hypen renderer sends. Refused, with a warning and no handler call:
+
+- a bare application name (`"save"`) that no node carries,
+- a pre-scoped name (`__hypen_scoped:<scope>:<name>`),
+- a bare reserved write (`__hypen_bind`, `__hypen_reorder`, `__hypen_pin`), which would otherwise write any state path.
+
+`router.push`, `router.replace`, `router.back` and `router.forward` are always accepted by name.
+
+Some actions legitimately have no node behind them: the web client's back-button action (`navigation.backAction`, `"navigateBack"` by default), Android's `NavigationOptions(backAction = …)`, or a command your own client sends with `RemoteEngine.dispatchAction("refresh")`. List them:
+
+```typescript
+await new RemoteServer()
+  .source("./src/components")
+  // The browser back button has no node behind it.
+  .allowUnboundClientActions(["navigateBack"])
+  .listen(3000);
+```
+
+A listed name can be sent by any connected client at any time, whatever is on its screen, so list only actions that are safe under that assumption. `allowUnboundClientActions("any")` restores the old by-name behaviour for application actions (never for `__hypen_*` names). On Cloudflare the same list is the `unboundClientActions` option of `defineHypenWorker` / the Durable Object config.
+
+<Callout type="warn">
+**Upgrading:** this check is new. If your clients dispatch actions by name — the web client's `navigation: { backAction }` option, `navigateBack` handlers, custom native clients — those actions are now refused until you list them with `allowUnboundClientActions([...])`. UI events from Hypen renderers need no change.
+</Callout>
+
+## Hosted WASM modules
+
+A `RemoteServer` can run modules compiled to WebAssembly Components (from Rust, Go or TypeScript) next to your TypeScript modules, in the same engine. They render, route and talk to your modules like any other module, but only through the capabilities you grant them.
+
+```bash
+bun add @hypen-space/module-host     # the sandbox the server loads for hosted modules
+```
+
+```typescript
+import { RemoteServer, loadWasmPackage } from "@hypen-space/server";
+
+const checkout = loadWasmPackage("@acme/checkout", {
+  grants: { Pricing: { reads: ["Cart"], dispatches: ["Cart"] } },
+});
+
+await new RemoteServer()
+  .source("./src/components")
+  .wasmModules(checkout.modules)
+  .components(checkout.components)
+  .hostedModules({
+    storage: (session) => ({ key: session.props?.userId ?? session.id }),
+    storageDir: "./data/modules",
+    onError: (failure) => console.error(failure.module, failure.message, failure.hint),
+  })
+  .listen(3000);
+```
+
+`hypen dev` does the same from `hypen.json` (`hypen add`). See [WASM Modules](/docs/guide/wasm-modules) for packages, grants, HTTP and failures, and [WASM Module Security](/docs/guide/wasm-module-security) before running modules you did not write.
 
 ## Session Management
 
@@ -973,6 +1032,8 @@ The same image works on Fly.io, Railway, Render and other container hosts; point
 
 ### Production Checklist
 
+- List the bare action names your clients send (`allowUnboundClientActions`, see [Client actions](#client-actions))
+- With hosted WASM modules: review the [security model](/docs/guide/wasm-module-security), keep the default `privateNetwork` rule, and choose a storage owner
 - Set `allowedOrigins` and/or `authenticate` (the startup warning then goes away)
 - Set appropriate session TTL for your use case
 - Use `/__hypen__/health` for load balancer checks
@@ -992,5 +1053,6 @@ The same image works on Fly.io, Railway, Render and other container hosts; point
 - [State & Modules Guide](/docs/guide/state) — Deep dive into state management
 - [Error Handling](/docs/guide/error-handling) — Error recovery patterns
 - [Routing Guide](/docs/guide/routing) — Declarative navigation
+- [WASM Modules](/docs/guide/wasm-modules) — Hosting modules built to WebAssembly Components
 - [Web Adapter](/docs/adapters/web) — Client-side DOM and Canvas renderers
 - [Go SDK](/docs/servers/golang) — Alternative server SDK in Go

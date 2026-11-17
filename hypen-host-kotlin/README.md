@@ -79,4 +79,4 @@ is additive: it hosts *WASM component* modules (built from TS/Rust/Go/…)
 on-device. The two ship a copy of the same generated `uniffi.hypen_engine`
 namespace; if an app ever needs both in one process, the generated bindings
 should be consolidated into a shared artifact both depend on (tracked in
-`wit/WASM_ENGINE_HANDOVER.md`).
+`wit/HISTORY.md`).

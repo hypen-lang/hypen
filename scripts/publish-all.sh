@@ -15,7 +15,7 @@ set -e
 #   3. Build WASM (+ auto-copy to SDK locations)
 #   4. Build npm packages (core, web, server, web-engine, device-web, device-fake, agent, module-host, cf, lsp, cli) with type declarations
 #   5. Publish Rust crates (parser -> tailwind-parse -> engine)
-#   6. Publish npm packages (hypen-engine -> core -> web -> server -> web-engine -> device-web -> device-fake -> agent -> module-host -> cf -> lsp -> cli)
+#   6. Publish npm packages (hypen-engine -> core -> module-host -> web -> server -> web-engine -> device-web -> device-fake -> agent -> cf -> lsp -> cli)
 #
 # Flags:
 #   --skip-tests     Skip test step
@@ -293,7 +293,7 @@ fi
 echo ""
 
 # ============================================================================
-# Step 6: Publish npm packages (order: hypen-engine -> core -> web -> server -> web-engine -> device-web -> device-fake -> agent -> module-host -> cf -> lsp -> cli)
+# Step 6: Publish npm packages (order: hypen-engine -> core -> module-host -> web -> server -> web-engine -> device-web -> device-fake -> agent -> cf -> lsp -> cli)
 # ============================================================================
 
 if [ "$SKIP_NPM" = true ]; then
@@ -310,6 +310,12 @@ else
   echo -e "  Publishing @hypen-space/core..."
   cd "$ROOT_DIR/hypen-web/packages/core" && npm publish --access public
   echo -e "  ${GREEN}✓ @hypen-space/core published${NC}"
+
+  # module-host has no @hypen-space/* deps. It goes before server, which names
+  # it as an optional peer dependency (hosted WASM modules).
+  echo -e "  Publishing @hypen-space/module-host..."
+  cd "$ROOT_DIR/hypen-web/packages/module-host" && npm publish --access public
+  echo -e "  ${GREEN}✓ @hypen-space/module-host published${NC}"
 
   echo -e "  Publishing @hypen-space/web..."
   cd "$ROOT_DIR/hypen-web/packages/web" && npm publish --access public
@@ -336,12 +342,6 @@ else
   echo -e "  Publishing @hypen-space/agent..."
   cd "$ROOT_DIR/hypen-web/packages/agent" && npm publish --access public
   echo -e "  ${GREEN}✓ @hypen-space/agent published${NC}"
-
-  # module-host has no @hypen-space/* deps; publish it before cf/lsp/cli so
-  # anything that comes to depend on it resolves from npm.
-  echo -e "  Publishing @hypen-space/module-host..."
-  cd "$ROOT_DIR/hypen-web/packages/module-host" && npm publish --access public
-  echo -e "  ${GREEN}✓ @hypen-space/module-host published${NC}"
 
   echo -e "  Publishing @hypen-space/cf..."
   cd "$ROOT_DIR/hypen-web/packages/cf" && npm publish --access public

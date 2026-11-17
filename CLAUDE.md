@@ -7,32 +7,35 @@ Hypen is a declarative UI language and runtime for building cross-platform appli
 ## Repository Structure
 
 ```
-hypen-engine-rs/
+hypen/
 ├── parser/                      # Rust parser (Chumsky combinators)
-├── hypen-engine-rs/             # Core reactive engine (Rust -> WASM)
+├── hypen-engine-rs/             # Core reactive engine (Rust -> WASM); module hosting (src/hosted, src/module_host), hypen-runtime binary (runtime-bin feature)
 ├── hypen-sdk-rs/                # Rust SDK for embedding Hypen
 ├── hypen-web/                   # TypeScript/Bun Web SDK
 │   ├── packages/core/           # @hypen-space/core - Platform-agnostic runtime (types, app, state, router - NO WASM)
 │   ├── packages/web/            # @hypen-space/web - DOM & Canvas renderers (pure patch consumers)
-│   ├── packages/server/         # @hypen-space/server - Node.js WASM engine, loader, discovery, RemoteServer
+│   ├── packages/server/         # @hypen-space/server - Node.js WASM engine, loader, discovery, RemoteServer, hosted WASM modules (src/hosted)
 │   ├── packages/web-engine/     # @hypen-space/web-engine - Browser WASM engine, Hypen orchestrator
-│   └── packages/module-host/    # @hypen-space/module-host - Browser/Node host for WASM-component modules (jco transpile, capability gating)
-├── hypen-cli/                   # @hypen-space/cli - CLI tools (init, dev, build)
+│   ├── packages/module-host/    # @hypen-space/module-host - Browser/Node host for WASM-component modules (jco transpile, capability gating)
+│   └── packages/{cf,device-web,device-fake,agent}/  # Cloudflare Workers, device plane (browser host, fake), agent interface
+├── hypen-cli/                   # @hypen-space/cli - CLI tools (init, dev, build, build --target wasm, add/remove/modules/pack)
 ├── hypen-docs/                  # Fumadocs/Next.js documentation site
 ├── hypen-renderer-android/      # Android/Kotlin native renderer
 ├── hypen-renderer-swift/        # iOS/SwiftUI native renderer
+├── hypen-renderer-desktop/      # Native desktop renderer (Rust)
+├── hypen-browser/               # Hypen Browser desktop shell / `hypen run desktop` runner
 ├── hypen-server-swift/          # Swift server SDK
 ├── hypen-kotlin/                # Kotlin/JVM SDK (module system with Kotlin DSL)
-├── hypen-host-kotlin/           # Kotlin/JVM host library for WASM-component modules (UniFFI -> engine module host)
+├── hypen-host-kotlin/           # EXPERIMENTAL, unverified: Kotlin/JVM host library for WASM-component modules over UniFFI (stale generated bindings, no CI)
 ├── hypen-golang/                # Go implementation (module system)
 ├── hypen-lsp/                   # Language Server Protocol implementation
-├── wit/, wit-v0_2/              # `hypen:module` WIT contract (v0.1 sync, v0.2 CM-async) + WASM module hosting docs
+├── wit/, wit-v0_2/              # `hypen:module` WIT contract (v0.1 sync, v0.2 CM-async); wit/README.md is the entry point for WASM module hosting docs
 ├── tailwind-parse/              # Tailwind CSS class parser (Rust)
 ├── component-gallery-server/    # Component gallery & screenshot testing
 ├── engine-compatibility-tests/  # Cross-SDK compatibility test suite
-├── examples/                    # Example projects
+├── examples/                    # Example projects (wasm-module: Rust module in a TS app; wasm-http: deferred HTTP from a TS-built module)
 ├── skills/                      # Claude Code skills for Hypen development
-└── scripts/                     # Build & utility scripts
+└── scripts/                     # Build & utility scripts (sync-wit.sh keeps hypen-cli's vendored WIT in sync)
 ```
 
 ## Development Commands
@@ -278,6 +281,8 @@ export default app
 - **Arc-Shared Props**: `Props` (raw, with bindings) and `ResolvedProps` (resolved JSON values, on `InstanceNode` and `Patch::Create`) are `Arc<IndexMap<...>>`. Cloning a node's props into a `Create` patch, or snapshotting old props before a dirty re-render, is an `Arc::clone` rather than a deep copy. Other per-render clones should be scrutinised — prefer moves and `&mut` over `.clone()` unless a shared-ownership handoff genuinely requires it.
 - **First-Class Control Flow**: ForEach/When/If are IR-level types, not runtime hacks. Exhaustive pattern matching catches missing cases at compile time.
 - **Proxy-Based State (SDK)**: TypeScript Proxy tracks mutations automatically. The `deleteProperty` trap correctly tracks `delete` operations. The `in` operator (`has` trap) is not tracked. The traps record dirty roots and the flush diffs only those subtrees (O(edit), not O(state)) via the TS port of the engine's canonical diff (`@hypen-space/core/diff` — pinned to `portable/diff.rs` by the cross-SDK fixtures, a differential fuzz suite, and the `HYPEN_DIFF_ORACLE=1` runtime cross-check).
+- **Hosted WASM Modules**: a module's logic can be a WebAssembly Component (`hypen:module` WIT in `wit/`) that the engine drives through a `ModuleHost` (wasmtime natively, `@hypen-space/module-host` in JS) next to in-process modules, in the same engine and state tree. Grants are deny-by-default. Map and design: `wit/README.md`, `wit/ENGINE_INTEGRATION.md`; internals: `hypen-engine-rs/CLAUDE.md`.
+- **Client Actions Are Untrusted**: Remote UI input goes through the engine's client entry (`dispatch_client_action` / JS `resolveClientAction`), which only accepts an envelope from a live node that declares the action; never feed wire input to `dispatch_action`. Bare names a client legitimately sends (a back action) are a server-side allowlist (`RemoteServer.allowUnboundClientActions`).
 - **Renderer-Agnostic Patches**: All renderers (DOM, Canvas, iOS, Android) receive the same Patch format.
 
 ## Common Workflows

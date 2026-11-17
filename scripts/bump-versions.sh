@@ -64,6 +64,15 @@ update_dep() {
     fi
 }
 
+# Helper: update a ">=" floor (peer dependencies released in lockstep)
+# Usage: update_dep_floor <file> <package-name> <old-version> <new-version>
+update_dep_floor() {
+    local file=$1 pkg=$2 old=$3 new=$4
+    if [ -f "$file" ]; then
+        sed_inplace "s/\"$pkg\": \">=$old\"/\"$pkg\": \">=$new\"/" "$file"
+    fi
+}
+
 # Helper: update a dependency version in a package.json (exact, no caret)
 # Usage: update_dep_exact <file> <package-name> <old-version> <new-version>
 update_dep_exact() {
@@ -188,6 +197,9 @@ echo "  ✓ hypen-web/packages/web/package.json"
 # @hypen-space/server (depends on core)
 update_version "$ROOT_DIR/hypen-web/packages/server/package.json" "$OLD" "$NEW"
 update_dep "$ROOT_DIR/hypen-web/packages/server/package.json" "@hypen-space\/core" "$OLD" "$NEW"
+# Optional peer: hosted WASM modules. The server calls module-host APIs that
+# move with each release, so the floor follows the release (published first).
+update_dep_floor "$ROOT_DIR/hypen-web/packages/server/package.json" "@hypen-space\/module-host" "$OLD" "$NEW"
 echo "  ✓ hypen-web/packages/server/package.json"
 
 # @hypen-space/web-engine (depends on core, web)

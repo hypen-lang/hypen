@@ -461,6 +461,18 @@ val server = HypenServer {
 
 > **Just one module for a demo?** Every SDK also accepts a single-module shortcut (TS: `new RemoteServer().module(name, def)`, where `def` comes from `app.defineState(...).ui(template)`; Swift: `RemoteServer(moduleDefinition:)`, etc.). Prefer the `HypenApp` registry once you have more than one module or want routing/nesting.
 
+## WASM modules
+
+A module's logic can also be a **WebAssembly Component** — written in Rust, Go or TypeScript against the [`hypen:module` contract](wit/README.md) — that runs sandboxed next to your TypeScript modules, with only the capabilities you grant it. Build and publish one from a module project, then install it in an app:
+
+```bash
+hypen build --target wasm     # in the module project: dist/wasm/*.wasm + templates + hypen-modules.json
+hypen pack                    # dist/pack/: an npm-publishable package (publishes nothing)
+hypen add @acme/checkout      # in the app: review what each module requests, grant, record in hypen.json + hypen.lock.json
+```
+
+Then use it like any module (`Checkout {}` in a template) under `hypen dev` or `RemoteServer` (add `@hypen-space/module-host` to the app). See the [WASM Modules guide](https://docs.hypen.space/docs/guide/wasm-modules), the [security model](https://docs.hypen.space/docs/guide/wasm-module-security), and [`examples/wasm-module`](examples/wasm-module) / [`examples/wasm-http`](examples/wasm-http). The same components also run without a server in the `hypen-runtime` reference binary (`cargo build --release --features runtime-bin --bin hypen-runtime` in `hypen-engine-rs/`; `hypen-runtime --app dist/wasm/app.json`).
+
 ## How It Works
 
 ```
@@ -483,8 +495,9 @@ The engine is renderer-agnostic. All platforms receive the same patch format.
 | `parser/` | Hypen DSL parser (Chumsky combinators) | Rust |
 | `hypen-sdk-rs/` | Rust server SDK (crate: `hypen-server`) | Rust |
 | `hypen-engine-rs/` | Core reactive engine, reconciler, WASM build | Rust |
-| `hypen-web/` | Web SDK — @hypen-space/core (runtime), @hypen-space/web (DOM & Canvas), @hypen-space/web-engine (browser WASM), @hypen-space/server (Node.js WASM) | TypeScript |
-| `hypen-cli/` | CLI tools (`init`, `dev`, `build`, `studio`) | TypeScript |
+| `hypen-web/` | Web SDK — @hypen-space/core (runtime), @hypen-space/web (DOM & Canvas), @hypen-space/web-engine (browser WASM), @hypen-space/server (Node.js WASM), @hypen-space/module-host (host for WASM-component modules), plus cf, device-web, device-fake, agent | TypeScript |
+| `hypen-cli/` | CLI tools (`init`, `dev`, `build`, `build --target wasm`, `add` / `remove` / `modules` / `pack`, `studio`) | TypeScript |
+| `wit/`, `wit-v0_2/` | The `hypen:module` WIT contract for WASM-component modules (v0.1 sync, v0.2 Component Model async) and its docs | WIT |
 | `hypen-renderer-swift/` | iOS/macOS native renderer | Swift |
 | `hypen-renderer-android/` | Android native renderer | Kotlin |
 | `hypen-renderer-desktop/` | Native desktop renderer | Rust |
@@ -493,6 +506,7 @@ The engine is renderer-agnostic. All platforms receive the same patch format.
 | `hypen-server-swift/` | Swift server SDK (`HypenServer`) | Swift |
 | `hypen-kotlin/` | Kotlin/JVM SDK with Kotlin DSL | Kotlin |
 | `hypen-golang/` | Go SDK (module system) | Go |
+| `hypen-host-kotlin/` | Kotlin/JVM host library for WASM-component modules over UniFFI — **experimental, unverified** (stale generated bindings, not built in CI) | Kotlin |
 | `hypen-lsp/` | Language Server Protocol implementation | TypeScript |
 | `tailwind-parse/` | Tailwind CSS class parser | Rust |
 | `hypen-docs/` | Documentation site (Fumadocs) | Markdown |
@@ -536,6 +550,7 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for detailed development workflows and gu
 - [SPEC.md](SPEC.md) — RFC-0001: Stateful module system specification
 - [Parser README](parser/README.md) — Parser architecture and usage
 - [Engine README](hypen-engine-rs/README.md) — Engine architecture and API
+- [WIT contract](wit/README.md) and [module hosting architecture](wit/ENGINE_INTEGRATION.md) — WASM-component modules
 - [CLI README](hypen-cli/README.md) — CLI commands and project structure
 - [Core SDK README](hypen-web/packages/core/README.md) — TypeScript SDK documentation
 - [Node Server SDK README](hypen-web/packages/server/README.md)

@@ -55,6 +55,10 @@ Hypen supports server-side rendering where the engine runs on your server and st
 
 The TypeScript SDK is the primary one: `hypen init`, `hypen dev` and Studio are built on it.
 
+The TypeScript server can also host [WASM modules](/docs/guide/wasm-modules): modules compiled to WebAssembly Components (from Rust, Go or TypeScript) that run sandboxed next to your TypeScript modules, with only the capabilities you grant ([security model](/docs/guide/wasm-module-security)).
+
+Clients are untrusted. The TypeScript, Cloudflare and Go servers run a client action only when a node on the client's screen declares it; actions a client sends by bare name (such as a back-button action) must be listed. See [Client actions](/docs/servers/typescript#client-actions).
+
 ## Quick Start
 
 ```typescript

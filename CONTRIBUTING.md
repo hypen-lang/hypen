@@ -47,10 +47,15 @@ subshell so you can paste them in order without ending up in the wrong directory
 # WASM module hosting (not in the default build; CI runs these in rust.yml's
 # `module-host` job). The wasmtime build is large: CARGO_PROFILE_DEV_DEBUG=0
 # and CARGO_PROFILE_TEST_DEBUG=0 keep the target dir manageable.
-(cd hypen-engine-rs && cargo test --features runtime-bin --test test_module_host \
-  --test test_module_host_async --test test_module_host_routing --test test_module_host_cascade \
-  --bin hypen-runtime --test test_hypen_runtime --test test_hypen_runtime_hardening)
+# (The default-feature module-host suites — routing, cascade, client action
+# authorization, nested module scope — already run in plain `cargo test`.)
+(cd hypen-engine-rs && cargo test --features runtime-bin --bin hypen-runtime \
+  --test test_module_host --test test_module_host_async --test test_module_host_http \
+  --test test_hypen_runtime --test test_hypen_runtime_hardening --test test_hypen_runtime_http)
+(cd hypen-engine-rs && cargo test --features uniffi,module-loader --test test_uniffi_host)
 (cd hypen-engine-rs && cargo check --target wasm32-unknown-unknown --features module-loader-bridged)
+# The reference runtime binary: target/debug/hypen-runtime (see hypen-engine-rs/README.md)
+(cd hypen-engine-rs && cargo build --features runtime-bin --bin hypen-runtime)
 
 # Build the WASM targets (same as `bun run build:wasm` from the root)
 hypen-engine-rs/build-wasm.sh
@@ -92,7 +97,17 @@ For CLI work:
 (cd hypen-cli && bun test)
 # `hypen build --target wasm` end to end (needs `rustup target add wasm32-wasip2`;
 # the Go pipeline additionally needs tinygo + wit-bindgen-go and skips without them)
-(cd hypen-cli && HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts)
+(cd hypen-cli && HYPEN_WASM_E2E=1 bun test tests/build-wasm.test.ts \
+  tests/example-wasm-module.test.ts tests/example-wasm-http.test.ts)
+```
+
+`@hypen-space/module-host` also runs in a real browser (headless Chromium via
+the workspace's `playwright-core`). Without a browser it prints `SKIP`;
+CI sets `HYPEN_BROWSER_TEST_REQUIRED=1` so a missing browser fails:
+
+```bash
+(cd hypen-web && bunx playwright-core install chromium-headless-shell)   # once
+(cd hypen-web/packages/module-host && bun run test:browser)
 ```
 
 The studio's LSP integration tests (`studio-ui/src/lib/lsp-server.test.ts`)
@@ -261,6 +276,43 @@ We use [Conventional Commits](https://www.conventionalcommits.org/):
 - Add doc comments to public APIs
 - Update `hypen-docs/` for user-facing changes
 - Include code examples
+
+## Releasing
+
+Releases are cut by `.github/workflows/release.yml` (inputs or `publish:*` PR
+labels); `scripts/publish-all.sh` is the local equivalent. Versions come from
+`scripts/bump-versions.sh`, which also moves the `@hypen-space/*` dependency
+ranges between packages (including `@hypen-space/server`'s optional peer
+`@hypen-space/module-host`, released in lockstep).
+
+npm packages publish in dependency order — the same list in `release.yml`,
+`scripts/publish-all.sh` and `scripts/publish-npm.sh`:
+
+`hypen-engine` → `core` → `module-host` → `web` → `server` → `web-engine` →
+`device-web` → `device-fake` → `agent` → `cf` → `lsp` → `cli`
+
+When adding or changing a package, keep the three lists, the
+`bump-versions.sh` entries and `hypen-web`'s `typecheck` / `build` scripts in
+step.
+
+Release checklist:
+
+- [ ] `scripts/bump-versions.sh <version>` and commit the result.
+- [ ] **New npm package?** `release.yml` publishes with npm trusted
+      publishing (OIDC, no token), which can only be configured for a package
+      that already exists on npm. Before the first CI release that includes a
+      new `@hypen-space/*` package: publish its first version by hand
+      (`npm login`, then `npm publish --access public` in the package
+      directory, from a clean build of the release commit), then on npmjs.com
+      open the package's *Settings → Trusted publishing* and add this
+      repository with the workflow file `release.yml`. Until then the CI
+      publish step fails for that package. (As of this writing
+      `@hypen-space/module-host` is not on npm yet: its first release needs
+      this.)
+- [ ] Changelog: move `CHANGELOG.md`'s "Unreleased" entries under the new
+      version.
+- [ ] After publishing, check that `npm view @hypen-space/<pkg>@<version>`
+      resolves for every package in the list above.
 
 ## Questions?
 

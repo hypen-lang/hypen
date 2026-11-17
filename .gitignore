@@ -105,8 +105,12 @@ examples/device-lab/results*/**/*.bin
 examples/device-lab/results*/**/*.ips
 
 # --- Internal-only: excluded from the public hypen mirror ---
-docs/
-rfcs/
+# Anchored to the repo root: the internal design notes live in /docs and /rfcs
+# of the private tree. An unanchored `docs/` also matched documentation SOURCE
+# (hypen-docs/content/docs, hypen-web/docs, hypen-engine-rs/docs, …), so new
+# pages there were silently untracked.
+/docs/
+/rfcs/
 examples/device-lab/results/
 examples/device-lab/results-*/
 examples/device-lab/sample.txt

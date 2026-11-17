@@ -367,20 +367,70 @@ jobs:
         shell: bash
         working-directory: hypen-engine-rs
 
+      # Every integration test whose [[test]] entry in Cargo.toml requires
+      # `module-loader` or `runtime-bin` must be listed here (plain `cargo
+      # test` skips them). Listed rather than `--tests` because each test
+      # binary links wasmtime; the default-feature module-host suites
+      # (routing, cascade, client action authorization, nested module scope)
+      # already ran in the `test` job and are not rebuilt here.
       - name: Test module host + hypen-runtime
         run: >-
           cargo test --features runtime-bin
+          --bin hypen-runtime
           --test test_module_host
           --test test_module_host_async
-          --bin hypen-runtime
-          --test test_module_host_routing
-          --test test_module_host_cascade
+          --test test_module_host_http
           --test test_hypen_runtime
           --test test_hypen_runtime_hardening
+          --test test_hypen_runtime_http
+        working-directory: hypen-engine-rs
+
+      # A [[test]] gated on `module-loader`/`runtime-bin` that is missing from
+      # the list above would silently never run in CI: fail instead.
+      - name: Every feature-gated module-host test is listed
+        run: |
+          set -euo pipefail
+          listed="test_module_host test_module_host_async test_module_host_http test_hypen_runtime test_hypen_runtime_hardening test_hypen_runtime_http test_uniffi_host"
+          gated=$(python3 - <<'PY'
+          import tomllib
+          with open("Cargo.toml", "rb") as f:
+              cargo = tomllib.load(f)
+          for t in cargo.get("test", []):
+              feats = set(t.get("required-features", []))
+              if feats & {"module-loader", "runtime-bin"}:
+                  print(t["name"])
+          PY
+          )
+          for t in $gated; do
+            case " $listed " in
+              *" $t "*) ;;
+              *) echo "::error::$t requires module-loader/runtime-bin but is not run by rust.yml (module-host job)"; exit 1 ;;
+            esac
+          done
+        shell: bash
+        working-directory: hypen-engine-rs
+
+      # The UniFFI module host (`HypenModuleHost`, src/uniffi/module_host.rs)
+      # compiles only with `uniffi,module-loader`.
+      - name: Test UniFFI module host
+        run: cargo test --features uniffi,module-loader --test test_uniffi_host
         working-directory: hypen-engine-rs
 
       - name: Clippy module host (warnings are errors)
         run: cargo clippy --features runtime-bin --all-targets -- -D warnings
+        working-directory: hypen-engine-rs
+
+      # Gating on errors, and on warnings in the UniFFI module-host files
+      # (the rest of the uniffi build is held to the `check` job's rules).
+      - name: Clippy UniFFI module host
+        run: |
+          set -o pipefail
+          cargo clippy --features uniffi,module-loader --all-targets --message-format=short 2>&1 | tee clippy-uniffi-host.log
+          if grep -E '(src/uniffi/module_host|tests/test_uniffi_host)[^:]*:[0-9]+:[0-9]+: (warning|error)' clippy-uniffi-host.log; then
+            echo "::error::clippy warnings in the UniFFI module host"
+            exit 1
+          fi
+        shell: bash
         working-directory: hypen-engine-rs
 
       - name: Check bridged host (wasm32)

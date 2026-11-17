@@ -9,3 +9,23 @@ hypen-cli/wit/** linguist-generated=true
 hypen-cli/wit-v0_2/** linguist-generated=true
 hypen-cli/wit-tinygo/** linguist-generated=true
 hypen-cli/wit-tinygo/README.md linguist-generated=false
+
+# Generated copies of the deferred-HTTP grammar and the module-package model
+# (sources: hypen-web/packages/module-host/src/http.ts and
+# hypen-web/packages/server/src/hosted/module-package.ts; regenerate with
+# `bun hypen-web/scripts/sync-http-grammar.ts`, drift-checked by tests).
+hypen-web/packages/core/src/http.ts linguist-generated=true
+hypen-cli/src/wasm/http-grammar.ts linguist-generated=true
+hypen-cli/src/wasm/module-package.ts linguist-generated=true
+
+# Engine build output committed for the SDKs (hypen-engine-rs/build-wasm.sh,
+# copy-wasm-artifacts.sh) and generated UniFFI bindings
+# (scripts/generate-bindings.sh). Rebuild, never hand-edit.
+hypen-web/packages/server/wasm-node/hypen_engine* linguist-generated=true
+hypen-web/packages/web-engine/wasm-browser/hypen_engine* linguist-generated=true
+hypen-web/tests/fixtures/wasm-web-glue/** linguist-generated=true
+hypen-kotlin/src/main/kotlin/uniffi/hypen_engine/hypen_engine.kt linguist-generated=true
+hypen-host-kotlin/src/main/kotlin/uniffi/hypen_engine/hypen_engine.kt linguist-generated=true
+hypen-server-swift/Sources/HypenEngine/hypen_engine.swift linguist-generated=true
+hypen-server-swift/Sources/hypen_engineFFI/hypen_engineFFI.h linguist-generated=true
+hypen-web/packages/core/src/remote/device/generated.ts linguist-generated=true

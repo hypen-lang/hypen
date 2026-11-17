@@ -30,6 +30,8 @@ The parser turns Hypen source into an AST. The engine lowers that into its inter
 - `hypen-lsp/`: language server
 - `hypen-docs/`: docs site
 - `engine-compatibility-tests/`: cross-SDK compatibility tests
+- `wit/`, `wit-v0_2/`: the `hypen:module` WIT contract for modules compiled to WebAssembly Components
+- `hypen-host-kotlin/`: experimental, unverified Kotlin host library for those modules (not in CI)
 
 ## Shared Engine Model
 
@@ -41,6 +43,10 @@ Hypen uses a shared-engine model for multi-module applications.
 - Parent and child modules share the engine while keeping separate state scopes.
 
 This is the core composition model across SDKs. The SDK layer manages module lifecycle and action routing; the engine operates on the merged state tree plus the rendered templates.
+
+## Hosted WASM Modules
+
+A module's logic can also be a WebAssembly Component implementing the `hypen:module` contract. The engine drives it through a `ModuleHost` (wasmtime natively and in the `hypen-runtime` binary; `@hypen-space/module-host` in Node, Bun and browsers) next to in-process SDK modules, in the same shared engine: the engine keeps the state, the component is a pure reducer, and every capability beyond its own storage is a deny-by-default grant. See [wit/README.md](wit/README.md) and [wit/ENGINE_INTEGRATION.md](wit/ENGINE_INTEGRATION.md).
 
 ## SDK Layer
 
