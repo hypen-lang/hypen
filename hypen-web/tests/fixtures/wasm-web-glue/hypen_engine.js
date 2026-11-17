@@ -965,10 +965,14 @@ export class WasmEngine {
      *   `JsModuleHost`, `prepare()`d) under in the module host. Defaults to
      *   `scope` as given.
      * - `manifest`: `{ name?, version?, storage?, reads?, dispatches?,
-     *   http? }`. `reads` / `dispatches` become the scope's grants, enforced
-     *   by the engine; they may name in-process modules. Omitted = no
-     *   cross-module access. The whole manifest is handed to the host's
-     *   `register` (with empty bytes: the component must already be there).
+     *   http?, httpHosts?, aliases? }`. `reads` / `dispatches` become the
+     *   scope's grants, enforced by the engine; they may name in-process
+     *   modules. Omitted = no cross-module access. `aliases`
+     *   (`{ name: scope }`) says which scope a name in those lists stands
+     *   for when it is not the scope of that name: the module and the host
+     *   keep the names, the engine translates (`ScopeAliases`). The whole
+     *   manifest is handed to the host's `register` (with empty bytes: the
+     *   component must already be there).
      * - `config`: the module's `init` config — JSON-encoded, or a
      *   `Uint8Array` passed as is. Omitted = `{}`.
      * - `actions`: an action-list override; omitted = the module's own
@@ -1985,6 +1989,42 @@ export function pathSet(value_json, path, new_value_json) {
         return getStringFromWasm0(ptr4, len4);
     } finally {
         wasm.__wbindgen_free(deferred5_0, deferred5_1, 1);
+    }
+}
+
+/**
+ * Rename the components a template refers to: every tag named `from`
+ * (and the template's own `module` / `component` declaration) becomes
+ * `to`, for each entry of `renames` (`{ from: to }` as a JSON string).
+ * Strings, comments, bindings and argument values are never touched. See
+ * [`crate::template_rename::rename_template_components`].
+ *
+ * Throws `{ type: "parseError" }` when the template does not parse and
+ * `{ type: "renameError" }` for an invalid or conflicting rename.
+ * @param {string} source
+ * @param {string} renames_json
+ * @returns {string}
+ */
+export function renameTemplateComponents(source, renames_json) {
+    let deferred4_0;
+    let deferred4_1;
+    try {
+        const ptr0 = passStringToWasm0(source, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ptr1 = passStringToWasm0(renames_json, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len1 = WASM_VECTOR_LEN;
+        const ret = wasm.renameTemplateComponents(ptr0, len0, ptr1, len1);
+        var ptr3 = ret[0];
+        var len3 = ret[1];
+        if (ret[3]) {
+            ptr3 = 0; len3 = 0;
+            throw takeFromExternrefTable0(ret[2]);
+        }
+        deferred4_0 = ptr3;
+        deferred4_1 = len3;
+        return getStringFromWasm0(ptr3, len3);
+    } finally {
+        wasm.__wbindgen_free(deferred4_0, deferred4_1, 1);
     }
 }
 

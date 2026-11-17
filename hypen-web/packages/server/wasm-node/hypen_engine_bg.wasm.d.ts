@@ -29,6 +29,7 @@ export const pathGet: (a: number, b: number, c: number, d: number) => [number, n
 export const pathHas: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const pathMove: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const pathSet: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const renameTemplateComponents: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const sessionStep: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const wasmdevicebroker_admitsBackground: (a: number, b: number, c: number) => number;
 export const wasmdevicebroker_cancel: (a: number, b: number, c: number) => [number, number];

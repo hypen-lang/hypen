@@ -16,6 +16,7 @@ export const pathGet: (a: number, b: number, c: number, d: number) => [number, n
 export const pathHas: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const pathMove: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
 export const pathSet: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+export const renameTemplateComponents: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const sessionStep: (a: number, b: number, c: number, d: number) => [number, number, number, number];
 export const wasmengine_a11yRules: (a: number) => [number, number];
 export const wasmengine_checkAccessibility: (a: number, b: number, c: number) => [number, number, number];

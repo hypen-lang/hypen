@@ -432,6 +432,18 @@ export function pathMove(value_json: string, from_path: string, from: number, to
 export function pathSet(value_json: string, path: string, new_value_json: string): string;
 
 /**
+ * Rename the components a template refers to: every tag named `from`
+ * (and the template's own `module` / `component` declaration) becomes
+ * `to`, for each entry of `renames` (`{ from: to }` as a JSON string).
+ * Strings, comments, bindings and argument values are never touched. See
+ * [`crate::template_rename::rename_template_components`].
+ *
+ * Throws `{ type: "parseError" }` when the template does not parse and
+ * `{ type: "renameError" }` for an invalid or conflicting rename.
+ */
+export function renameTemplateComponents(source: string, renames_json: string): string;
+
+/**
  * Advance the session state machine by one event.
  *
  * `state_json` and `event_json` must deserialise to
@@ -459,6 +471,7 @@ export interface InitOutput {
     readonly pathHas: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly pathMove: (a: number, b: number, c: number, d: number, e: number, f: number, g: number, h: number) => [number, number, number, number];
     readonly pathSet: (a: number, b: number, c: number, d: number, e: number, f: number) => [number, number, number, number];
+    readonly renameTemplateComponents: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly sessionStep: (a: number, b: number, c: number, d: number) => [number, number, number, number];
     readonly wasmengine_a11yRules: (a: number) => [number, number];
     readonly wasmengine_checkAccessibility: (a: number, b: number, c: number) => [number, number, number];
