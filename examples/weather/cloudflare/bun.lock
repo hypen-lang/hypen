@@ -7,7 +7,7 @@
       "dependencies": {
         "@hypen-space/cf": "0.6.7",
         "@hypen-space/core": "0.6.7",
-        "@hypen-space/web": "0.6.5",
+        "@hypen-space/web": "0.6.7",
         "hypen-engine": "0.6.7",
       },
       "devDependencies": {
@@ -98,7 +98,7 @@
 
     "@hypen-space/device-web": ["@hypen-space/device-web@0.6.7", "", { "dependencies": { "@hypen-space/core": "^0.6.7" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-kPsOAXJppsvJ4XNZT2R42CsuvDGmOGud9sc8/NuhnzcyGWeC0cwpZ2puJoLTvrjRbeWu+KMIOsFYK1jXHUUFLQ=="],
 
-    "@hypen-space/web": ["@hypen-space/web@0.6.5", "", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.6.5", "taffy-layout": "^2.0.3" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-pI0ulb5ZV1EkjgSeMKnlHDXeybB5/7JMJ64UPRXIwyPpxYpWW++jzHI5OTt2sGS6/ugPWUJpFB/1bLIIy20XPg=="],
+    "@hypen-space/web": ["@hypen-space/web@0.6.7", "", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.6.7", "taffy-layout": "^2.0.3" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-bTOmfB4u+8LS/RPxFHuVypM1KkbFWfti3qkJNuBnBM2O+yYrRwU97BhM6jMT8p6Nn8okKmywJ9dlbu91cugd3g=="],
 
     "@img/colour": ["@img/colour@1.1.0", "", {}, "sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ=="],
 
@@ -217,7 +217,5 @@
     "youch": ["youch@4.1.0-beta.10", "", { "dependencies": { "@poppinss/colors": "^4.1.5", "@poppinss/dumper": "^0.6.4", "@speed-highlight/core": "^1.2.7", "cookie": "^1.0.2", "youch-core": "^0.3.3" } }, "sha512-rLfVLB4FgQneDr0dv1oddCVZmKjcJ6yX6mS4pU82Mq/Dt9a3cLZQ62pDBL4AUO+uVrCvtWz3ZFUL2HFAFJ/BXQ=="],
 
     "youch-core": ["youch-core@0.3.3", "", { "dependencies": { "@poppinss/exception": "^1.2.2", "error-stack-parser-es": "^1.0.5" } }, "sha512-ho7XuGjLaJ2hWHoK8yFnsUGy2Y5uDpqSTq1FkHLK4/oqKtyUU1AFbOOxY4IpC9f0fTLjwYbslUz0Po5BpD1wrA=="],
-
-    "@hypen-space/cf/@hypen-space/web": ["@hypen-space/web@0.6.7", "", { "dependencies": { "@chenglou/pretext": "^0.0.3", "@hypen-space/core": "^0.6.7", "taffy-layout": "^2.0.3" }, "peerDependencies": { "typescript": "^5" }, "optionalPeers": ["typescript"] }, "sha512-bTOmfB4u+8LS/RPxFHuVypM1KkbFWfti3qkJNuBnBM2O+yYrRwU97BhM6jMT8p6Nn8okKmywJ9dlbu91cugd3g=="],
   }
 }
