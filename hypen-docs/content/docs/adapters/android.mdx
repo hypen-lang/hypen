@@ -82,6 +82,10 @@ The connection also survives Activity recreation (rotation, the system destroyin
 
 Routed pages fill the width only if they ask for it. Give page roots `w-full` (or `.fillMaxWidth()`), as the `hypen init` scaffold does, or they shrink to their content.
 
+## Color Scheme
+
+The client reports the device's light/dark setting to the server, which a server-side [theme](/docs/guide/theming) follows while its preference is `"system"`. `HypenApp` reads it from the configuration and reports changes; set `RemoteEngineConfig.colorScheme` (`AUTO` by default, or `LIGHT` / `DARK` / `OFF`) to override, or call `RemoteEngine.setColorScheme` when you drive the engine yourself.
+
 ## Requirements
 
 - minSdk 24+

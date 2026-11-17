@@ -238,6 +238,12 @@ pub(crate) fn resolve_single_value(
             // JSON, so the variant never reaches the wire.
             resolve_state_switch(path, cases, default.as_ref(), state)?
         }
+        Value::SchemeSwitch { cases, default } => {
+            // The chosen entry resolves like any other value (it may be a
+            // binding or a template); no entry means the prop is ABSENT.
+            let entry = pick_scheme_entry(cases, default.as_deref(), data_sources)?;
+            resolve_single_value(entry, state, item, data_sources)?
+        }
     };
     Some(resolved_value)
 }
@@ -265,6 +271,23 @@ pub fn resolve_state_switch(
     label
         .and_then(|l| cases.get(&l).cloned())
         .or_else(|| default.cloned())
+}
+
+/// Pick the entry of a [`Value::SchemeSwitch`]: the theme's active scheme
+/// (`appearance.scheme`) selects the matching case. No theme, a non-string
+/// scheme, or a scheme without a case falls back to `default`; `None` means
+/// the prop resolves to absent.
+pub fn pick_scheme_entry<'a>(
+    cases: &'a IndexMap<String, Value>,
+    default: Option<&'a Value>,
+    data_sources: Option<&IndexMap<String, serde_json::Value>>,
+) -> Option<&'a Value> {
+    data_sources
+        .and_then(|ds| ds.get(crate::ir::node::SCHEME_PROVIDER))
+        .and_then(|appearance| appearance.get(crate::ir::node::SCHEME_PATH))
+        .and_then(serde_json::Value::as_str)
+        .and_then(|scheme| cases.get(scheme))
+        .or(default)
 }
 
 #[cfg(test)]

@@ -448,7 +448,9 @@ impl Semantics {
         .any(|key| {
             matches!(
                 element.props.get(*key),
-                Some(Value::Binding(_)) | Some(Value::TemplateString { .. })
+                Some(Value::Binding(_))
+                    | Some(Value::TemplateString { .. })
+                    | Some(Value::SchemeSwitch { .. })
             )
         });
 
@@ -500,7 +502,7 @@ impl Semantics {
         // `hoisted_name_template`) is the full concatenation, including any
         // own text, so it supersedes the own-prop keys when present.
         let keys: &[&str] = match self.role {
-            Some(Role::Img) => &["alt"],
+            Some(Role::Img) => &["alt", "alt.0"],
             Some(Role::Video) => &["title", "title.0", "label", "alt"],
             Some(Role::Checkbox) | Some(Role::Switch) => &["0", "label"],
             _ => &["__a11yName", "0", "text"],
@@ -615,7 +617,11 @@ fn derive_accessible_name(
         Some(TextCollection::Static(label)) => (Some(label), Some(true), None),
         // A dynamic label — author-supplied, so not "missing", just resolved
         // later at reconcile.
-        Some(TextCollection::Templated { .. }) => (None, None, None),
+        // A scheme-switched label (`.label({default: "Close", dark: …})`) is
+        // likewise explicit, and picked per color scheme at reconcile.
+        Some(TextCollection::Templated { .. }) | Some(TextCollection::Branching) => {
+            (None, None, None)
+        }
         // No usable explicit label → fall back to content-derived name.
         _ => {
             let (name, missing) = derive_name(role, element);
@@ -974,6 +980,19 @@ fn classify_text_value(value: &Value) -> TextCollection {
             template: template.clone(),
             bindings: bindings.clone(),
         },
+        // A scheme-switched value (`.label({default: "Close", dark: …})`,
+        // `.alt({…})`): the entry is picked per color scheme at reconcile, so
+        // when any entry is nameable the name is deferred like a branch.
+        Value::SchemeSwitch { .. } => {
+            if value
+                .scheme_entries()
+                .any(|entry| !matches!(classify_text_value(entry), TextCollection::Empty))
+            {
+                TextCollection::Branching
+            } else {
+                TextCollection::Empty
+            }
+        }
         // Empty strings, non-string statics, actions, resources → no name.
         _ => TextCollection::Empty,
     }

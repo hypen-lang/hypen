@@ -33,6 +33,7 @@ import type {
   PatchMessage,
   DispatchActionMessage,
   ViewportMessage,
+  ColorSchemeMessage,
   UpdateStateMessage,
   SubscribeStateMessage,
   StateUpdateMessage,
@@ -148,6 +149,15 @@ export interface RemoteEngineOptions {
    */
   navigation?: boolean | NavigationOptions;
   /**
+   * The system color scheme reported to the server, which a server-side
+   * theme follows while its preference is `"system"`. `"auto"` (default)
+   * reads `prefers-color-scheme` where the runtime has `matchMedia` and
+   * reports changes as they happen; elsewhere nothing is sent. `"light"` /
+   * `"dark"` report a fixed value (native hosts update it with
+   * `setColorScheme`); `false` reports nothing.
+   */
+  colorScheme?: "auto" | "light" | "dark" | false;
+  /**
    * Device Capability Protocol endpoint (RFC 001). When set, `hello`
    * carries its advertisement, server → client device messages and binary
    * frames are routed to it, and it is detached on every socket close.
@@ -232,6 +242,9 @@ export class RemoteEngine implements Disposable {
 
   /** Device Capability Protocol endpoint (RFC 001), or null for legacy wire. */
   private device: DeviceEndpoint | null = null;
+  /** The system color scheme last reported (or to report in the next hello). */
+  private colorScheme: "light" | "dark" | null = null;
+  private unwatchColorScheme: (() => void) | null = null;
   /**
    * The socket the device endpoint is currently attached to. Device traffic
    * from any other (older) socket is never routed into the endpoint (§2.5).
@@ -270,6 +283,9 @@ export class RemoteEngine implements Disposable {
     };
     this.sessionOptions = options.session;
     this.device = options.device ?? null;
+    const colorScheme = options.colorScheme ?? "auto";
+    if (colorScheme === "light" || colorScheme === "dark") this.colorScheme = colorScheme;
+    else if (colorScheme === "auto") this.watchColorScheme();
     this.headersOption = options.headers;
     this.protocolsOption =
       options.protocols === undefined ? undefined : Array.isArray(options.protocols) ? options.protocols : [options.protocols];
@@ -455,6 +471,40 @@ export class RemoteEngine implements Disposable {
   }
 
   /**
+   * Report the system color scheme to the server (and remember it for the
+   * next hello). Hosts without `matchMedia` — native shells, tests — call
+   * this when the platform's appearance changes.
+   */
+  setColorScheme(scheme: "light" | "dark"): void {
+    if (scheme === this.colorScheme) return;
+    this.colorScheme = scheme;
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+    const message: ColorSchemeMessage = { type: "colorScheme", scheme };
+    this.ws.send(JSON.stringify(message));
+  }
+
+  /** Follow `prefers-color-scheme` for the lifetime of this engine. */
+  private watchColorScheme(): void {
+    const matchMedia = (globalThis as {
+      matchMedia?: (q: string) => {
+        matches: boolean;
+        addEventListener?: (type: "change", l: (e: { matches: boolean }) => void) => void;
+        removeEventListener?: (type: "change", l: (e: { matches: boolean }) => void) => void;
+      };
+    }).matchMedia;
+    if (typeof matchMedia !== "function") return;
+    try {
+      const query = matchMedia.call(globalThis, "(prefers-color-scheme: dark)");
+      this.colorScheme = query.matches ? "dark" : "light";
+      const onChange = (e: { matches: boolean }) => this.setColorScheme(e.matches ? "dark" : "light");
+      query.addEventListener?.("change", onChange);
+      this.unwatchColorScheme = () => query.removeEventListener?.("change", onChange);
+    } catch {
+      // No usable media queries: nothing is reported.
+    }
+  }
+
+  /**
    * Send hello message to establish session
    */
   private sendHello(): void {
@@ -469,6 +519,7 @@ export class RemoteEngine implements Disposable {
       persistKey: this.sessionOptions?.persistKey,
       ...(sessionId && this.resumeToken ? { resumeToken: this.resumeToken } : {}),
       ...(this.device && this.deviceSocket === this.ws ? { device: this.device.advertisement } : {}),
+      ...(this.colorScheme ? { colorScheme: this.colorScheme } : {}),
     };
 
     this.ws.send(JSON.stringify(hello));
@@ -504,6 +555,8 @@ export class RemoteEngine implements Disposable {
    */
   dispose(): void {
     this.disconnect();
+    this.unwatchColorScheme?.();
+    this.unwatchColorScheme = null;
     if (this.navigationDisposable) {
       this.navigationDisposable.dispose();
       this.navigationDisposable = null;

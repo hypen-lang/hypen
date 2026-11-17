@@ -17,6 +17,8 @@ struct Fake {
     mounted: Mutex<bool>,
     /// `HypenModule::asset_origin` (`None`: an in-process module).
     origin: Option<Arc<str>>,
+    /// Every `set_color_scheme` call, in order.
+    schemes: Mutex<Vec<bool>>,
 }
 
 impl Fake {
@@ -53,6 +55,9 @@ impl HypenModule for Fake {
     }
     fn asset_origin(&self) -> Option<Arc<str>> {
         self.origin.clone()
+    }
+    fn set_color_scheme(&self, dark: bool) {
+        self.schemes.lock().unwrap().push(dark);
     }
 }
 
@@ -904,4 +909,22 @@ fn a_nodeless_ui_envelope_never_carries_an_embed_id_to_the_window() {
         )]
     );
     assert!(h.conn(0).actions.lock().unwrap().is_empty());
+}
+
+#[test]
+fn the_window_color_scheme_reaches_the_root_live_embeds_and_later_embeds() {
+    let mut h = Harness::new();
+    // Reported before any embed exists: the root hears it.
+    h.module.set_color_scheme(true);
+    assert_eq!(*h.root.schemes.lock().unwrap(), vec![true]);
+
+    // An embed connected afterwards is told the current scheme on connect.
+    h.root.push(launcher_frame());
+    h.take();
+    assert_eq!(*h.conn(0).schemes.lock().unwrap(), vec![true]);
+
+    // A change reaches the root and every live embed.
+    h.module.set_color_scheme(false);
+    assert_eq!(*h.root.schemes.lock().unwrap(), vec![true, false]);
+    assert_eq!(*h.conn(0).schemes.lock().unwrap(), vec![true, false]);
 }

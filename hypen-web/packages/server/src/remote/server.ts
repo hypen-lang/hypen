@@ -37,6 +37,7 @@ import type {
 } from "@hypen-space/core/app";
 import { resolveModuleDefinition } from "@hypen-space/core/app";
 import type { I18n } from "@hypen-space/core/i18n";
+import type { Theme } from "@hypen-space/core/theme";
 import type {
   RemoteMessage,
   RemoteClient,
@@ -228,6 +229,7 @@ export class RemoteServer {
   private _deviceBrokerFactory: WasmDeviceBrokerFactory | null = null;
   private _resources: Record<string, string> = {};
   private _i18n: I18n | null = null;
+  private _theme: Theme | null = null;
   private _app: HypenApp | null = null;
   private _host: SessionHost | null = null;
   /**
@@ -271,6 +273,7 @@ export class RemoteServer {
       get ui() { return server._ui; },
       get resources() { return server._resources; },
       get i18n() { return server._i18n; },
+      get theme() { return server._theme; },
       get app() { return server._app; },
       get syncActions() { return server._syncActions; },
       get deviceDisabled() { return server._deviceOffReason !== null; },
@@ -480,6 +483,25 @@ export class RemoteServer {
    */
   i18n(i18n: I18n): this {
     this._i18n = i18n;
+    return this;
+  }
+
+  /**
+   * Register the app's theme (`createTheme(...)`). Every session gets its
+   * own fork — an independent scheme preference over the shared tokens —
+   * published as the `theme` / `appearance` data sources before the first
+   * render and reachable from handlers as `context.theme`.
+   *
+   * @example
+   * ```typescript
+   * new RemoteServer()
+   *   .module("App", appModule)
+   *   .theme(createTheme({ tokens, schemes: { dark } }))
+   *   .listen(3000);
+   * ```
+   */
+  theme(theme: Theme): this {
+    this._theme = theme;
     return this;
   }
 

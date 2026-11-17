@@ -3323,6 +3323,13 @@ impl ApplicationHandler<AppEvent> for App {
             crate::macos::configure_unified_titlebar(&window);
         }
 
+        // Tell the module which color scheme the platform is in, where the
+        // platform says (X11 does not): a remote server's theme follows it.
+        if let Some(theme) = window.theme() {
+            self.module
+                .set_color_scheme(theme == winit::window::Theme::Dark);
+        }
+
         let adapter = AkAdapter::with_event_loop_proxy(event_loop, &window, self.proxy.clone());
         self.ak = Some(adapter);
 
@@ -3543,6 +3550,10 @@ impl ApplicationHandler<AppEvent> for App {
                 self.layout = None;
                 self.damage.add_full();
                 self.redraw();
+            }
+            WindowEvent::ThemeChanged(theme) => {
+                self.module
+                    .set_color_scheme(theme == winit::window::Theme::Dark);
             }
             WindowEvent::ScaleFactorChanged { .. } => {
                 // The platform changed our HiDPI scale (window dragged

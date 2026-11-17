@@ -86,6 +86,9 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
     /// corresponding `module X { ... }` component template.
     public var appRegistry: HypenApp = .shared
 
+    /// The app's theme (`theme(_:)`); every session forks it.
+    var _theme: Theme? = nil
+
     /// Set once `prepare()` has validated configuration. Idempotent.
     var prepared = false
 
@@ -302,6 +305,23 @@ public final class RemoteServer: @unchecked Sendable, SessionHost {
         lock.lock()
         defer { lock.unlock() }
         onSessionCreateCallbacks.append(callback)
+        return self
+    }
+
+    /// Register the app's theme (`createTheme`). Every session gets its own
+    /// fork — its own color scheme preference over the shared tokens —
+    /// published as the `theme` / `appearance` data sources before the first
+    /// render and reachable from action handlers as `ctx.theme`.
+    ///
+    /// ```swift
+    /// let server = RemoteServer()
+    ///     .theme(createTheme(tokens: tokens, schemes: ["dark": dark]))
+    /// ```
+    @discardableResult
+    public func theme(_ theme: Theme) -> RemoteServer {
+        lock.lock()
+        defer { lock.unlock() }
+        _theme = theme
         return self
     }
 
@@ -852,6 +872,12 @@ extension RemoteServer {
         defer { lock.unlock() }
         if _moduleDefinition != nil { return nil }
         return moduleConfig?.onAction
+    }
+
+    /// The theme registered with `theme(_:)`, if any.
+    public var appTheme: Theme? {
+        lock.lock(); defer { lock.unlock() }
+        return _theme
     }
 
     /// Device settings for new sessions: the defaults (or the

@@ -28,6 +28,7 @@ const entrypoints = [
   "./src/context.ts",
   "./src/datasource.ts",
   "./src/i18n.ts",
+  "./src/theme.ts",
   "./src/remote/index.ts",
   "./src/remote/client.ts",
   "./src/remote/device/index.ts",

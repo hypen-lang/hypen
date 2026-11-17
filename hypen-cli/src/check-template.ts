@@ -13,6 +13,9 @@
  *   unknown-action      `@actions.x` with no `onAction("x")` on the module
  *   unknown-component   not built in, and no component of that name exists
  *   item-outside-loop   `@item…` where no ForEach/List/Grid can supply a row
+ *   unknown-theme-token `@theme.x.y` not defined by the project's theme file
+ *                       (in every scheme, or only in some); also alias
+ *                       problems inside the theme file itself
  *   unknown-ignore-rule a `// hypen-check-ignore` id that is not a rule
  *                       (decided by the engine)
  *
@@ -64,6 +67,17 @@ import {
   formatHypenParseError,
   parseEngineErrorPositions,
 } from "./dev-diagnostics.js";
+import {
+  classifyThemeToken,
+  loadThemeFile,
+  nearestToken,
+  resolveAllSchemes,
+  unreferenceableKeys,
+  type ResolvedScheme,
+} from "./theme.js";
+
+/** Provider name `createTheme` publishes the resolved tokens under. */
+const THEME_PROVIDER = "theme";
 
 /**
  * Rule ids this checker expects the engine binding to know (Rust
@@ -76,6 +90,7 @@ export const EXPECTED_CHECK_RULES: readonly string[] = [
   "unknown-action",
   "unknown-component",
   "item-outside-loop",
+  "unknown-theme-token",
   "unknown-ignore-rule",
 ];
 
@@ -369,6 +384,11 @@ export interface TemplateCheckInput {
   otherModulesComplete?: boolean;
   /** hypen.json `check.ignoreRules`. */
   ignoreRules?: readonly string[];
+  /**
+   * The project's theme file, resolved for every scheme. Absent when the
+   * project has none (or it failed to load): `@theme.*` is then not judged.
+   */
+  theme?: readonly ResolvedScheme[];
 }
 
 function suppressedFor(ref: TemplateRef, rule: string, ignore: ReadonlySet<string>): boolean {
@@ -504,10 +524,38 @@ export function evaluateTemplate(input: TemplateCheckInput): {
         );
         break;
       }
-      case "dataSource":
+      case "dataSource": {
         // Providers are registered at runtime (plugins, host setContext);
-        // not statically knowable, so never flagged.
+        // not statically knowable, so never flagged — except `theme`, whose
+        // tokens the project's theme file declares.
+        if (ref.root !== THEME_PROVIDER || !input.theme) break;
+        // As for state paths: a `${…}` interpolation in an inline template's
+        // `@{theme.color.${k}}` is a runtime-only key, so only the group
+        // before it is judged.
+        const hole = ref.path.findIndex((seg) => seg.includes(INTERPOLATION_IDENT));
+        const path = hole < 0 ? ref.path : ref.path.slice(0, hole);
+        if (path.length === 0) break;
+        const shown = hole < 0 ? ref.name : `${THEME_PROVIDER}.${path.join(".")}`;
+        const verdict = classifyThemeToken(input.theme, path);
+        if (verdict === "ok") break;
+        if (verdict.definedIn.length === 0) {
+          const near = hole < 0 ? nearestToken(input.theme, path) : null;
+          emit(
+            ref,
+            "unknown-theme-token",
+            `@${shown} is not defined in the theme file — it renders as empty` +
+              (near ? ` (did you mean @theme.${near}?)` : ""),
+          );
+        } else {
+          emit(
+            ref,
+            "unknown-theme-token",
+            `@${shown} is defined only for ${verdict.definedIn.join(", ")}; it renders as ` +
+              `empty in ${verdict.missingIn.join(", ")} — give it a base value in "tokens"`,
+          );
+        }
         break;
+      }
     }
   }
 
@@ -522,6 +570,27 @@ function diagnosticToFinding(d: TemplateCheckDiagnostic): TemplateFinding {
 // ---------------------------------------------------------------------------
 // Reporting
 // ---------------------------------------------------------------------------
+
+/**
+ * Findings about the theme file itself: alias problems (a missing target or
+ * a cycle), each reported once with the schemes it occurs in.
+ */
+export function themeFileFindings(schemes: readonly ResolvedScheme[]): TemplateFinding[] {
+  const where = new Map<string, string[]>();
+  for (const s of schemes) {
+    for (const problem of s.problems) {
+      const list = where.get(problem) ?? [];
+      list.push(s.scheme);
+      where.set(problem, list);
+    }
+  }
+  return [...where.entries()].map(([problem, inSchemes]) => ({
+    rule: "unknown-theme-token",
+    elementType: "theme",
+    message:
+      inSchemes.length === schemes.length ? problem : `${problem} (scheme ${inSchemes.join(", ")})`,
+  }));
+}
 
 /** A finding paired with its (display) file. */
 export interface FileTemplateFinding {
@@ -681,6 +750,8 @@ export async function runTemplateCheck(opts: {
   files?: string[];
   entry?: string;
   ignoreRules?: string[];
+  /** hypen.json `theme`: path of the theme file (default `theme.json`). */
+  theme?: string;
 }): Promise<number> {
   const { projectRoot } = opts;
   const componentsDir = opts.componentsDir ?? projectRoot;
@@ -785,6 +856,34 @@ export async function runTemplateCheck(opts: {
   const skipped: Array<{ file: string; status: ModuleStatus }> = [];
   let suppressedCount = 0;
 
+  // The theme file: its own alias problems are findings; its tokens are
+  // what `@theme.*` references are judged against.
+  const themeStatus = loadThemeFile(projectRoot, opts.theme);
+  const themeNotes: string[] = [];
+  let themeSchemes: ResolvedScheme[] | undefined;
+  let themeFailed = false;
+  if (themeStatus.kind === "failed") {
+    themeFailed = true;
+    console.error(`  ${themeStatus.file}: ${themeStatus.reason}; @theme references were not checked.`);
+  } else if (themeStatus.kind === "loaded") {
+    themeSchemes = resolveAllSchemes(themeStatus.theme);
+    const fileFindings = themeFileFindings(themeSchemes);
+    if ((opts.ignoreRules ?? []).includes("unknown-theme-token")) {
+      suppressedCount += fileFindings.length;
+    } else {
+      for (const finding of fileFindings) findings.push({ file: themeStatus.file, finding });
+    }
+    const unreferenceable = unreferenceableKeys(themeStatus.theme);
+    if (unreferenceable.length > 0) {
+      themeNotes.push(
+        `Note: ${themeStatus.file}: ${unreferenceable.length} token key` +
+          `${unreferenceable.length === 1 ? "" : "s"} cannot be referenced from a template ` +
+          `(letters, digits and "_" only): ${unreferenceable.join(", ")}`,
+      );
+    }
+  }
+  let uncheckedThemeRefs = 0;
+
   for (const file of targets) {
     const report = reports.get(file);
     if (!report) continue;
@@ -811,7 +910,13 @@ export async function runTemplateCheck(opts: {
       otherModules,
       otherModulesComplete,
       ignoreRules: opts.ignoreRules,
+      theme: themeSchemes,
     });
+    if (!themeSchemes) {
+      uncheckedThemeRefs += report.refs.filter(
+        (r) => r.kind === "dataSource" && r.root === THEME_PROVIDER,
+      ).length;
+    }
     suppressedCount += result.suppressedCount;
     for (const finding of result.findings) findings.push({ file: display(file), finding });
   }
@@ -823,6 +928,13 @@ export async function runTemplateCheck(opts: {
       : lines;
   for (const line of printable) console.log(`  ${line}`);
   for (const line of formatSkipNotes(skipped)) console.log(`  ${line}`);
+  for (const line of themeNotes) console.log(`  ${line}`);
+  if (uncheckedThemeRefs > 0 && themeStatus.kind === "none") {
+    console.log(
+      `  Note: ${uncheckedThemeRefs} @theme reference${uncheckedThemeRefs === 1 ? " was" : "s were"} ` +
+        `not checked: the project has no theme file (theme.json, or hypen.json "theme").`,
+    );
+  }
   if (unloadedOthers.length > 0) {
     console.log(
       `  Note: ${unloadedOthers.length} other module${unloadedOthers.length === 1 ? "" : "s"} ` +
@@ -837,5 +949,5 @@ export async function runTemplateCheck(opts: {
   }
 
   if (count > 0) return count;
-  return failedTargets.length > 0 ? COULD_NOT_CHECK : 0;
+  return failedTargets.length > 0 || themeFailed ? COULD_NOT_CHECK : 0;
 }

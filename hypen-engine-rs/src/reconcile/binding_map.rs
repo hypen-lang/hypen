@@ -92,6 +92,10 @@ fn value_depends_on_item(value: &Value, item_name: &str) -> bool {
                 s.contains(dot) || s.contains(bare)
             })
         }
+        // A scheme switch reads the item when any of its entries does.
+        Value::SchemeSwitch { .. } => value
+            .scheme_entries()
+            .any(|entry| value_depends_on_item(entry, item_name)),
         _ => false,
     }
 }
@@ -522,10 +526,20 @@ pub(crate) fn apply_compiled_row(
             return false;
         }
 
-        // Same substitution + resolution the full pass performs.
+        // Same substitution + resolution the full pass performs — against
+        // the state of the module that owns the node, which is not the
+        // primary module's for a row inside a nested module.
         let new_raw = replace_value_item_bindings(&entry.value, item, item_name);
-        let new_resolved =
-            resolve_prop_value(&entry.prop, &new_raw, ctx.state, None, ctx.data_sources);
+        let Some(scope) = ctx.tree.get(node_id).map(|n| n.module_scope.clone()) else {
+            return false;
+        };
+        let state = ctx.effective_state(scope.as_deref());
+        let new_resolved = resolve_prop_value(&entry.prop, &new_raw, state, None, ctx.data_sources);
+        // A raw value that is still live after substitution (a scheme switch,
+        // a template mixing item and state) is re-resolved by later dirty
+        // passes, so the node must hold the CURRENT row's substitution even
+        // when this pass changes nothing visible.
+        let stays_live = !matches!(new_raw, Value::Static(_));
 
         let Some(node) = ctx.tree.get_mut(node_id) else {
             return false;
@@ -534,6 +548,9 @@ pub(crate) fn apply_compiled_row(
         match new_resolved {
             Some(resolved) => {
                 if node.props.get(entry.prop.as_str()) == Some(&resolved) {
+                    if stays_live {
+                        node.raw_props.insert(&entry.prop, new_raw);
+                    }
                     continue;
                 }
                 // Both maps are layered: a prop already overridden on this
@@ -549,6 +566,9 @@ pub(crate) fn apply_compiled_row(
             None => {
                 // `.states` switch resolving to ABSENT: drop the prop.
                 if node.props.shift_remove(entry.prop.as_str()).is_none() {
+                    if stays_live {
+                        node.raw_props.insert(&entry.prop, new_raw);
+                    }
                     continue;
                 }
                 node.raw_props.insert(&entry.prop, new_raw);
@@ -672,6 +692,23 @@ pub(crate) fn build_row_prototype(
                 Value::StateSwitch { path, .. } => {
                     bindings.push(super::diff::state_switch_binding(path));
                 }
+                Value::SchemeSwitch { .. } => {
+                    bindings.push(crate::ir::node::scheme_switch_binding());
+                    for entry in value.scheme_entries() {
+                        match entry {
+                            Value::Binding(b)
+                                if !b.is_item()
+                                    && !super::item_bindings::is_alias_binding(b, item_name) =>
+                            {
+                                bindings.push(b.clone())
+                            }
+                            Value::TemplateString { bindings: bs, .. } => {
+                                bindings.extend(bs.iter().filter(|b| !b.is_item()).cloned());
+                            }
+                            _ => {}
+                        }
+                    }
+                }
                 _ => {}
             }
             if value_depends_on_item(value, item_name) {
@@ -757,12 +794,13 @@ pub(crate) fn instantiate_row_from_proto(
             // raw base holds every template key, so each raw entry
             // SHADOWS its template value in place — the same position a
             // re-insert of an existing key kept.
+            let row_state = ctx.effective_state(proto_node.module_scope.as_deref());
             let mut resolved_overlay = Vec::with_capacity(proto_node.item_entries.len());
             let mut raw_overlay = Vec::with_capacity(proto_node.item_entries.len());
             for (prop, raw_value) in &proto_node.item_entries {
                 let new_raw = replace_value_item_bindings(raw_value, item, item_name);
                 if let Some(v) =
-                    resolve_prop_value(prop, &new_raw, ctx.state, None, ctx.data_sources)
+                    resolve_prop_value(prop, &new_raw, row_state, None, ctx.data_sources)
                 {
                     resolved_overlay.push((Arc::clone(prop), v));
                 }

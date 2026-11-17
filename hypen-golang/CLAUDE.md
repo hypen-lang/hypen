@@ -23,7 +23,8 @@ hypen-golang/
 ├── discovery.go          # Component file discovery
 ├── errors.go             # Error types
 ├── doc.go                # Package documentation
-├── wasm_engine.go        # WASM engine via Wazero
+├── wasm_engine.go        # WASM engine via Wazero (SetContext/RemoveContext: data-source contexts)
+├── theme.go              # Theme: design tokens + color schemes, published as the `theme` / `appearance` contexts
 ├── *_test.go             # test files (device_plane_test.go: Device() on contexts, activation lifecycle, resume tokens)
 ├── device/               # Handler-facing device API (RFC 001): ctx.Device() → Device (Supports/Version/Request/
 │                         #   Stream/Save/RequestAs + Permissions/Gallery/Files/Camera/Mic/Bluetooth helpers),

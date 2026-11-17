@@ -63,6 +63,8 @@ type WasmEngine struct {
 	fnGetLastError         api.Function
 	fnClearLastError       api.Function
 	fnSetListViewport      api.Function
+	fnSetContext           api.Function
+	fnRemoveContext        api.Function
 	fnAlloc                api.Function
 	fnFree                 api.Function
 
@@ -200,6 +202,8 @@ func NewWasmEngine(config WasmEngineConfig) (*WasmEngine, error) {
 	engine.fnGetLastError = module.ExportedFunction("hypen_get_last_error")
 	engine.fnClearLastError = module.ExportedFunction("hypen_clear_last_error")
 	engine.fnSetListViewport = module.ExportedFunction("hypen_set_list_viewport")
+	engine.fnSetContext = module.ExportedFunction("hypen_set_context")
+	engine.fnRemoveContext = module.ExportedFunction("hypen_remove_context")
 	engine.fnAlloc = module.ExportedFunction("wasi_alloc")
 	engine.fnFree = module.ExportedFunction("wasi_free")
 
@@ -1091,6 +1095,85 @@ func (e *WasmEngine) UpdateModuleState(scope string, patch map[string]any) ([]Pa
 	}
 	if len(results) > 0 && results[0] != 0 {
 		return nil, newWasmError("update_module_state", results[0])
+	}
+
+	patches, err := e.getPatches()
+	if err == nil && len(patches) > 0 && e.patchCallback != nil {
+		e.patchCallback(patches)
+	}
+	return patches, err
+}
+
+// SetContext sets (or replaces) the named data-source context and re-renders
+// the nodes bound to it: templates read it as `@name.path` /
+// `@{name.path}`. data must marshal to a JSON object. The engine diffs the
+// new data against the previous one, so only bindings whose value changed
+// produce patches. Like UpdateState, the patches are returned and also
+// delivered to the patch callback.
+//
+// Safe to call from an action handler: handlers run after the engine call
+// that dispatched them has returned (see DispatchAction).
+func (e *WasmEngine) SetContext(name string, data any) ([]Patch, error) {
+	jsonBytes, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.fnSetContext == nil {
+		return nil, &EngineError{Code: ErrState, Message: "hypen_set_context not available in WASM module"}
+	}
+
+	namePtr, nameSize, err := e.writeString(name)
+	if err != nil {
+		return nil, err
+	}
+	defer e.freePtr(namePtr, nameSize)
+	dataPtr, dataSize, err := e.writeString(string(jsonBytes))
+	if err != nil {
+		return nil, err
+	}
+	defer e.freePtr(dataPtr, dataSize)
+
+	results, err := e.fnSetContext.Call(e.ctx, uint64(namePtr), uint64(nameSize), uint64(dataPtr), uint64(dataSize))
+	if err != nil {
+		return nil, &EngineError{Code: ErrState, Message: "set context call failed", Cause: err}
+	}
+	if len(results) > 0 && results[0] != 0 {
+		return nil, newWasmError("set_context", results[0])
+	}
+
+	patches, err := e.getPatches()
+	if err == nil && len(patches) > 0 && e.patchCallback != nil {
+		e.patchCallback(patches)
+	}
+	return patches, err
+}
+
+// RemoveContext drops the named data-source context and re-renders the
+// nodes bound to it (their bindings resolve to null).
+func (e *WasmEngine) RemoveContext(name string) ([]Patch, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+
+	if e.fnRemoveContext == nil {
+		return nil, &EngineError{Code: ErrState, Message: "hypen_remove_context not available in WASM module"}
+	}
+
+	ptr, size, err := e.writeString(name)
+	if err != nil {
+		return nil, err
+	}
+	defer e.freePtr(ptr, size)
+
+	results, err := e.fnRemoveContext.Call(e.ctx, uint64(ptr), uint64(size))
+	if err != nil {
+		return nil, &EngineError{Code: ErrState, Message: "remove context call failed", Cause: err}
+	}
+	if len(results) > 0 && results[0] != 0 {
+		return nil, newWasmError("remove_context", results[0])
 	}
 
 	patches, err := e.getPatches()

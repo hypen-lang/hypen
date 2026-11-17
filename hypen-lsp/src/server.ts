@@ -33,6 +33,8 @@ import { TextDocument } from "vscode-languageserver-textdocument";
 import { parseHypenDocument, getContextAtPosition, isInString, initWasmParser, isWasmParserAvailable } from "./parser";
 import { a11yDiagnostics, initWasmEngine } from "./a11y";
 import { tailwindDiagnostics } from "./tailwind";
+import { findTheme, themeDiagnostics } from "./theme";
+import { fileURLToPath } from "url";
 import { computeQuickFix } from "./quickfix";
 
 // Create a connection for the server
@@ -225,6 +227,16 @@ async function validateTextDocument(textDocument: TextDocument): Promise<void> {
   // `.tw("absolute …")` & friends: CSS positioning is a hard error in the
   // engine's Tailwind parser (Hypen has no positioning model); mirror it here.
   diagnostics.push(...tailwindDiagnostics(text));
+
+  // `@theme.x.y` against the project's theme file (theme.json / hypen.json
+  // "theme"); silent when the project has none.
+  if (textDocument.uri.startsWith("file:")) {
+    try {
+      diagnostics.push(...themeDiagnostics(text, findTheme(fileURLToPath(textDocument.uri))));
+    } catch {
+      // A malformed URI or unreadable project never blocks other diagnostics.
+    }
+  }
 
   // Send the computed diagnostics to VSCode
   connection.sendDiagnostics({ uri: textDocument.uri, diagnostics });

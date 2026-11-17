@@ -1,6 +1,8 @@
 use hypen_engine::Patch;
 use serde::{Deserialize, Serialize};
 
+use crate::theme::SystemScheme;
+
 /// All messages in the remote UI protocol.
 ///
 /// Serializes with `"type"` discriminator in camelCase, matching the
@@ -129,6 +131,70 @@ fn clamped_u32<'de, D: serde::Deserializer<'de>>(d: D) -> Result<u32, D::Error> 
             Ok(f.min(u32::MAX as f64) as u32)
         }
         _ => Err(D::Error::custom("expected a non-negative integer")),
+    }
+}
+
+/// Client → Server: the client's system color scheme changed (the user
+/// flipped the OS between light and dark):
+/// `{"type":"colorScheme","scheme":"light"|"dark"}`. The initial value
+/// travels in the hello, as the optional member `"colorScheme"`
+/// ([`HELLO_COLOR_SCHEME`]).
+///
+/// Per client: a [`RemoteSession`](super::RemoteSession) feeds it to its
+/// theme ([`Theme::set_system_scheme`](crate::theme::Theme::set_system_scheme)),
+/// which re-renders only while the session's preference is `"system"`.
+/// Ignored when the session has no theme, before `hello`, or when `scheme`
+/// is not `"light"` / `"dark"`. Servers that predate it ignore the unknown
+/// message type.
+///
+/// This is its own type rather than a [`RemoteMessage`] variant (and
+/// `hello.colorScheme` is not a field of [`RemoteMessage::Hello`]) so that
+/// code matching or building `RemoteMessage` exhaustively keeps compiling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ColorSchemeMessage {
+    pub scheme: SystemScheme,
+}
+
+/// The optional `hello` member carrying the client's system color scheme
+/// (`"light"` / `"dark"`). It seeds the session theme's system scheme
+/// before the first render, so a `"system"` preference paints the right
+/// scheme from the first frame.
+pub const HELLO_COLOR_SCHEME: &str = "colorScheme";
+
+/// A client-reported system color scheme, or `None` for anything else.
+fn parse_color_scheme(value: Option<&serde_json::Value>) -> Option<SystemScheme> {
+    match value?.as_str()? {
+        "light" => Some(SystemScheme::Light),
+        "dark" => Some(SystemScheme::Dark),
+        _ => None,
+    }
+}
+
+impl ColorSchemeMessage {
+    pub fn new(scheme: SystemScheme) -> Self {
+        Self { scheme }
+    }
+
+    /// The wire text, for a client to send.
+    pub fn to_json(&self) -> String {
+        serde_json::json!({ "type": "colorScheme", "scheme": self.scheme.as_str() }).to_string()
+    }
+
+    /// Decode a `colorScheme` message. `None` for any other message and for
+    /// a malformed one (a `scheme` that is not `"light"` / `"dark"`).
+    pub fn from_json(json: &str) -> Option<Self> {
+        let value: serde_json::Value = serde_json::from_str(json).ok()?;
+        if value.get("type")?.as_str()? != "colorScheme" {
+            return None;
+        }
+        parse_color_scheme(value.get("scheme")).map(Self::new)
+    }
+
+    /// The `colorScheme` member of a `hello` message's text, when it is
+    /// `"light"` or `"dark"`; `None` when absent or anything else.
+    pub fn from_hello(json: &str) -> Option<SystemScheme> {
+        let value: serde_json::Value = serde_json::from_str(json).ok()?;
+        parse_color_scheme(value.get(HELLO_COLOR_SCHEME))
     }
 }
 

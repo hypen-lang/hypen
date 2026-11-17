@@ -614,6 +614,27 @@ fn replace_value_item_bindings_ext(
         {
             replace_static_item_bindings_with_name(s, item, item_name)
         }
+        // A scheme switch substitutes entry by entry and stays a switch: the
+        // scheme is still chosen at resolution time, per row.
+        Value::SchemeSwitch { cases, default } => Value::SchemeSwitch {
+            cases: cases
+                .iter()
+                .map(|(scheme, entry)| {
+                    (
+                        scheme.clone(),
+                        replace_value_item_bindings_ext(entry, item, item_name, parsed_item),
+                    )
+                })
+                .collect(),
+            default: default.as_deref().map(|entry| {
+                Box::new(replace_value_item_bindings_ext(
+                    entry,
+                    item,
+                    item_name,
+                    parsed_item,
+                ))
+            }),
+        },
         _ => value.clone(),
     }
 }

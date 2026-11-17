@@ -103,6 +103,13 @@ pub(crate) fn evaluate_value(
             crate::reconcile::resolve::resolve_state_switch(path, cases, default.as_ref(), state)
                 .unwrap_or(serde_json::Value::Null)
         }
+        Value::SchemeSwitch { cases, default } => {
+            // Only ever lowered onto applicator props; resolve consistently
+            // if one reaches a conditional position.
+            crate::reconcile::resolve::pick_scheme_entry(cases, default.as_deref(), data_sources)
+                .map(|entry| evaluate_value(entry, state, data_sources))
+                .unwrap_or(serde_json::Value::Null)
+        }
     }
 }
 
@@ -189,7 +196,10 @@ fn pattern_matches(
             evaluate_expression_pattern(template, evaluated_value, data_sources)
         }
         // Actions/resources/state-switches don't make sense as patterns
-        Value::Action(_) | Value::Resource(_) | Value::StateSwitch { .. } => false,
+        Value::Action(_)
+        | Value::Resource(_)
+        | Value::StateSwitch { .. }
+        | Value::SchemeSwitch { .. } => false,
     }
 }
 

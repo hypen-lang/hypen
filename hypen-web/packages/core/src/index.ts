@@ -219,6 +219,27 @@ export type {
 } from "./i18n.js";
 
 // ============================================================================
+// THEME
+// ============================================================================
+
+export {
+  Theme,
+  createTheme,
+  resolveTokenAliases,
+  THEME_TOKENS_PROVIDER,
+  THEME_META_PROVIDER,
+  SYSTEM_SCHEME,
+} from "./theme.js";
+export type {
+  ThemeOptions,
+  ThemeMeta,
+  ThemeChangeListener,
+  Tokens,
+  TokenValue,
+  SystemColorScheme,
+} from "./theme.js";
+
+// ============================================================================
 // REMOTE UI
 // ============================================================================
 

@@ -173,6 +173,10 @@ struct Inner {
     /// (tab or parent embed); torn down when the host node is
     /// Removed or the owning tab closes.
     embeds: IndexMap<String, Embed>,
+    /// The window's system color scheme (`true` = dark), once the window
+    /// reported one ([`HypenModule::set_color_scheme`]). Every tab and
+    /// embed connection is told it, so each server's theme can follow it.
+    color_scheme: Option<bool>,
     /// Monotonic counter for embed marker allocation. Never reused, so
     /// a stale action name can't route to a fresh embed.
     next_embed_id: u64,
@@ -203,6 +207,7 @@ impl Inner {
             tabs: IndexMap::new(),
             active_tab_id: None,
             embeds: IndexMap::new(),
+            color_scheme: None,
             next_embed_id: 1,
             detached_parents: std::collections::HashMap::new(),
             tree: Tree::with_prop_retention(shadow_prop),
@@ -445,6 +450,10 @@ impl BrowserModule {
 
         log::info!("hypen-browser: opening {url} in {tab_id}");
         let remote = Arc::new(RemoteModule::connect(url, "App"));
+        let scheme = self.inner.lock().expect("inner poisoned").color_scheme;
+        if let Some(dark) = scheme {
+            remote.set_color_scheme(dark);
+        }
 
         // Patch callback — rewrites the tab's IDs and re-roots inserts
         // onto the shell's viewport. The closure must look the tab up
@@ -926,6 +935,24 @@ impl HypenModule for BrowserModule {
         Some(Arc::from(
             hypen_renderer_desktop::paint::image::NO_LOCAL_ASSETS_ORIGIN,
         ))
+    }
+
+    /// The shell is local (its host owns its theme); every open tab and
+    /// embed is a remote connection whose server's theme follows the
+    /// window's scheme. Remembered for tabs and embeds opened later.
+    fn set_color_scheme(&self, dark: bool) {
+        let remotes: Vec<Arc<RemoteModule>> = {
+            let mut g = self.inner.lock().expect("inner poisoned");
+            g.color_scheme = Some(dark);
+            g.tabs
+                .values()
+                .filter_map(|t| t.remote.clone())
+                .chain(g.embeds.values().filter_map(|e| e.remote.clone()))
+                .collect()
+        };
+        for remote in remotes {
+            remote.set_color_scheme(dark);
+        }
     }
 
     /// A windowed list's viewport report goes to the stream that owns the
@@ -1787,6 +1814,10 @@ fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
         }
     };
     let remote = Arc::new(RemoteModule::connect(url, "App"));
+    let scheme = inner.lock().expect("inner poisoned").color_scheme;
+    if let Some(dark) = scheme {
+        remote.set_color_scheme(dark);
+    }
 
     let inner_for_patches = Arc::clone(inner);
     let marker_for_patches = marker.clone();

@@ -150,7 +150,14 @@ class CompatibilityTest {
             // corpora are replayed through the Rust broker by their own
             // runners (space.hypen.remote.device.DeviceBrokerTranscriptReplayTest /
             // DeviceBrokerConformanceTest).
-            .onEnter { dir -> dir.name != "portable" && dir.name != "variant" && !isDeviceFixtureRoot(fixturesDir, dir) }
+            // Skip `fixtures/theme/` likewise (that directory only): its
+            // cases are token-resolution tables for the SDK's `Theme`, not
+            // DSL test cases, and are run by ThemeTest.
+            .onEnter { dir ->
+                dir.name != "portable" && dir.name != "variant" &&
+                    !isDeviceFixtureRoot(fixturesDir, dir) &&
+                    dir.canonicalFile != File(fixturesDir, "theme").canonicalFile
+            }
             .filter { it.isFile && it.extension == "json" }
             // Skip state-transform fixtures that live beside test-case
             // fixtures (`dnd/path-move.json`, fixtures/dnd/README.md): they

@@ -121,6 +121,16 @@ data class RemoteEngineConfig(
      * it is not authentication.
      */
     val origin: String? = null,
+    /**
+     * The system color scheme reported to the server, which a server-side
+     * theme follows while its preference is "system". [ColorSchemeReporting.AUTO]
+     * (default) follows the device under `HypenApp`; [ColorSchemeReporting.LIGHT] /
+     * [ColorSchemeReporting.DARK] report a fixed value; [ColorSchemeReporting.OFF]
+     * reports nothing. `HypenApp` re-reads this on every recomposition, so a
+     * host can switch it while connected; a host driving a [RemoteEngine]
+     * itself calls [RemoteEngine.setColorScheme].
+     */
+    val colorScheme: ColorSchemeReporting = ColorSchemeReporting.AUTO,
 ) {
     init {
         headers.keys.forEach(::requireAllowedHeader)
@@ -145,7 +155,7 @@ data class RemoteEngineConfig(
             "maxReconnectAttempts=$maxReconnectAttempts, connectTimeoutMs=$connectTimeoutMs, readTimeoutMs=$readTimeoutMs, " +
             "writeTimeoutMs=$writeTimeoutMs, pingIntervalMs=$pingIntervalMs, enableLogging=$enableLogging, " +
             "headers=${headers.keys.map { "$it: <redacted>" }}, headersProvider=${if (headersProvider != null) "<set>" else "null"}, " +
-            "origin=$origin)"
+            "origin=$origin, colorScheme=$colorScheme)"
 
     companion object {
         /**

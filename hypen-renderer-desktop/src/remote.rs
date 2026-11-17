@@ -50,7 +50,8 @@ use crate::device::{origin_of, DesktopDevice, DeviceConfig, DriverMsg, WireOut};
 use crate::module::HypenModule;
 use hypen_engine::device::{device_message_type, is_oversize_device_text, top_level_member_text};
 use hypen_engine::Patch;
-use hypen_server::remote::RemoteMessage;
+use hypen_server::remote::{ColorSchemeMessage, RemoteMessage, HELLO_COLOR_SCHEME};
+use hypen_server::theme::SystemScheme;
 use serde::Deserialize;
 use serde_json::Value;
 use std::sync::{Arc, Mutex};
@@ -147,6 +148,12 @@ pub(crate) struct Inner {
     /// Lowers the server's `RegisterTemplate` / `Instantiate` before
     /// stamping, so template-instantiated nodes carry the origin too.
     expander: hypen_engine::TemplateExpander,
+    /// The window's system color scheme, once the window reported one
+    /// ([`HypenModule::set_color_scheme`]). Sent in every hello and, on a
+    /// change while connected, as a `colorScheme` message.
+    color_scheme: Option<SystemScheme>,
+    /// Wakes the worker when `color_scheme` changes.
+    color_scheme_changed: Arc<tokio::sync::Notify>,
 }
 
 /// Make a server's patch batch carry its owner: lower templates, stamp
@@ -810,6 +817,11 @@ async fn run_session(
         device.as_deref().map(DesktopDevice::hello_device),
     );
     let hello_text = hello.to_json().map_err(|e| format!("encode Hello: {e}"))?;
+    let (mut reported_scheme, scheme_changed) = {
+        let g = inner.lock().expect("remote inner poisoned");
+        (g.color_scheme, Arc::clone(&g.color_scheme_changed))
+    };
+    let hello_text = with_color_scheme(hello_text, reported_scheme);
     sink.send(WsMsg::Text(hello_text))
         .await
         .map_err(|e| format!("send Hello: {e}"))?;
@@ -841,6 +853,22 @@ async fn run_session(
                     return Ok(SessionEnd::Disconnected);
                 }
             },
+
+            // The window's system scheme changed: tell the server, once per
+            // actual change (the hello already carried the value it had).
+            _ = scheme_changed.notified() => {
+                let current = inner.lock().expect("remote inner poisoned").color_scheme;
+                if current != reported_scheme {
+                    reported_scheme = current;
+                    if let Some(scheme) = current {
+                        let text = ColorSchemeMessage::new(scheme).to_json();
+                        if let Err(e) = sink.send(WsMsg::Text(text)).await {
+                            log::warn!("remote: send colorScheme: {e}");
+                            return Ok(SessionEnd::Disconnected);
+                        }
+                    }
+                }
+            }
 
             outgoing = outbound.recv() => match outgoing {
                 Some(msg) => {
@@ -923,6 +951,16 @@ pub(crate) fn build_hello(
         device,
         resume_token,
     }
+}
+
+/// Add `"colorScheme"` to an encoded hello. The member is spliced into the
+/// text rather than re-encoded, so the `device` member keeps the exact bytes
+/// the server negotiates from.
+pub(crate) fn with_color_scheme(hello_text: String, scheme: Option<SystemScheme>) -> String {
+    let (Some(scheme), Some(body)) = (scheme, hello_text.strip_suffix('}')) else {
+        return hello_text;
+    };
+    format!("{body},\"{HELLO_COLOR_SCHEME}\":\"{}\"}}", scheme.as_str())
 }
 
 /// Route one text message: device messages (and over-limit text claiming a
@@ -1133,6 +1171,21 @@ impl HypenModule for RemoteModule {
         };
         if let Err(e) = self.outbound.send(msg) {
             log::warn!("remote: action dispatch dropped (worker gone): {e}");
+        }
+    }
+
+    /// Remembered for every (re)connect's hello; a change while connected
+    /// wakes the worker, which sends a `colorScheme` message.
+    fn set_color_scheme(&self, dark: bool) {
+        let scheme = if dark {
+            SystemScheme::Dark
+        } else {
+            SystemScheme::Light
+        };
+        let mut g = self.inner.lock().expect("remote inner poisoned");
+        if g.color_scheme != Some(scheme) {
+            g.color_scheme = Some(scheme);
+            g.color_scheme_changed.notify_one();
         }
     }
 
@@ -1722,6 +1775,59 @@ mod tests {
         let json = serde_json::to_value(&hello).expect("encode");
         assert_eq!(json["type"], "hello");
         assert_eq!(json["sessionId"], "resume-me");
+    }
+
+    #[test]
+    fn hello_carries_the_color_scheme_once_the_window_reported_one() {
+        let hello = build_hello(Some("resume-me".into()), None, None)
+            .to_json()
+            .expect("encode");
+        assert_eq!(with_color_scheme(hello.clone(), None), hello);
+        let dark: Value =
+            serde_json::from_str(&with_color_scheme(hello.clone(), Some(SystemScheme::Dark)))
+                .expect("still valid JSON");
+        assert_eq!(dark["type"], "hello");
+        assert_eq!(dark["sessionId"], "resume-me");
+        assert_eq!(dark["colorScheme"], "dark");
+        // Everything before the new member is byte-identical.
+        let spliced = with_color_scheme(hello.clone(), Some(SystemScheme::Light));
+        assert!(spliced.starts_with(hello.strip_suffix('}').unwrap()));
+        assert!(spliced.ends_with(",\"colorScheme\":\"light\"}"));
+    }
+
+    #[test]
+    fn set_color_scheme_records_the_scheme_and_wakes_the_worker_only_on_change() {
+        let (tx, _rx) = mpsc::unbounded_channel::<RemoteMessage>();
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        let module = RemoteModule {
+            module_name: "App".into(),
+            inner: Arc::clone(&inner),
+            outbound: tx,
+            asset_origin: "http://test.invalid".into(),
+        };
+        let changed = Arc::clone(&inner.lock().unwrap().color_scheme_changed);
+        let woken = || {
+            use std::future::Future;
+            use std::task::{Context, Poll, Waker};
+            let mut cx = Context::from_waker(Waker::noop());
+            let notified = changed.notified();
+            tokio::pin!(notified);
+            matches!(notified.as_mut().poll(&mut cx), Poll::Ready(()))
+        };
+
+        assert_eq!(inner.lock().unwrap().color_scheme, None);
+        assert!(!woken());
+        module.set_color_scheme(true);
+        assert_eq!(inner.lock().unwrap().color_scheme, Some(SystemScheme::Dark));
+        assert!(woken(), "a change wakes the worker");
+        module.set_color_scheme(true);
+        assert!(!woken(), "an unchanged scheme does not");
+        module.set_color_scheme(false);
+        assert_eq!(
+            inner.lock().unwrap().color_scheme,
+            Some(SystemScheme::Light)
+        );
+        assert!(woken());
     }
 
     #[test]

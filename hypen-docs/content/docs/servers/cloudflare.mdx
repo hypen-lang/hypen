@@ -163,6 +163,16 @@ connect over the same URL.
 | `serveClient` / `clients` | Serve a browser UI |
 | `title` | `<title>` for served pages (default `"Hypen"`) |
 
+## Theming
+
+Pass the app's theme to `defineHypenWorker`. Each session forks it, follows its client's system scheme, and gets its scheme preference back from the session snapshot after hibernation.
+
+```typescript
+export default defineHypenWorker({ module: appModule, wasm, theme });
+```
+
+See the [Theming guide](/docs/guide/theming) for tokens, schemes, aliases and the theme file.
+
 ## Session Routing
 
 Each distinct routing key gets its own Durable Object — its own engine

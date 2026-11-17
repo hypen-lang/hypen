@@ -31,6 +31,7 @@ export type {
   PatchMessage,
   DispatchActionMessage,
   ViewportMessage,
+  ColorSchemeMessage,
   StateUpdateMessage,
   UpdateStateMessage,
   SubscribeStateMessage,

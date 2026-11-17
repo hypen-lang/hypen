@@ -83,5 +83,6 @@ export const EXPECTED_TEMPLATE_CHECK_RULES: readonly string[] = [
   "unknown-action",
   "unknown-component",
   "item-outside-loop",
+  "unknown-theme-token",
   "unknown-ignore-rule",
 ];

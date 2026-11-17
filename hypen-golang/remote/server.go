@@ -73,6 +73,8 @@ type RemoteServer struct {
 	// off via DisableAutoRouter() when the host wants bespoke wiring
 	// inside OnSessionCreate.
 	autoRouter bool
+	// theme is the app's theme (Theme()); every session forks it.
+	theme *core.Theme
 
 	server   *http.Server
 	upgrader websocket.Upgrader
@@ -187,6 +189,12 @@ func (h serverSessionHost) SessionManager() *core.SessionManager {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
 	return h.s.sessionManager
+}
+
+func (h serverSessionHost) Theme() *core.Theme {
+	h.s.mu.RLock()
+	defer h.s.mu.RUnlock()
+	return h.s.theme
 }
 
 func (h serverSessionHost) deviceSettings() *deviceSettings {
@@ -634,6 +642,19 @@ func (s *RemoteServer) OnConnection(callback ServerConnectionCallback) *RemoteSe
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onConnectionCallbacks = append(s.onConnectionCallbacks, callback)
+	return s
+}
+
+// Theme registers the app's theme (core.NewTheme). Every session forks it
+// — its own scheme preference over the shared tokens — and publishes the
+// fork to its engine as the `theme` / `appearance` data sources before the
+// first render, so templates read `@theme.color.primary` and one client's
+// scheme switch never touches another's. Handlers reach the session's fork
+// as ctx.Theme() (or ctx.Context.GetTheme()); hosts as RemoteSession.Theme().
+func (s *RemoteServer) Theme(theme *core.Theme) *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.theme = theme
 	return s
 }
 

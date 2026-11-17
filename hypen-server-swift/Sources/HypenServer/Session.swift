@@ -82,6 +82,17 @@ public final class Session: @unchecked Sendable {
         set { lock.lock(); defer { lock.unlock() }; _props = newValue }
     }
 
+    private var _themePreference: String?
+
+    /// The color scheme preference this session's theme was last switched
+    /// to (a scheme name or "system"); nil until it changes. Kept on the
+    /// session so it survives a suspend / resume, and dropped with the
+    /// session when it expires.
+    var themePreference: String? {
+        get { lock.lock(); defer { lock.unlock() }; return _themePreference }
+        set { lock.lock(); defer { lock.unlock() }; _themePreference = newValue }
+    }
+
     public init(id: String, ttl: TimeInterval, props: [String: Any] = [:]) {
         self.id = id
         self.ttl = ttl

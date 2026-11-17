@@ -705,6 +705,10 @@ struct State {
     policy: EmbedPolicy,
     /// Origin of the window's own module (`None`: an in-process module).
     root_origin: Option<Arc<str>>,
+    /// The window's system color scheme (`true` = dark), once reported
+    /// ([`HypenModule::set_color_scheme`]); told to every embed connected
+    /// from then on.
+    color_scheme: Option<bool>,
 }
 
 /// Side effects collected under the lock and run after it is released.
@@ -1254,6 +1258,10 @@ impl Core {
             }
         });
         let module = (self.connector)(&url, rule, signal);
+        let scheme = self.lock().color_scheme;
+        if let Some(dark) = scheme {
+            module.set_color_scheme(dark);
+        }
         let weak = Arc::downgrade(self);
         let batch_prefix = prefix.clone();
         module.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
@@ -1456,6 +1464,21 @@ impl HypenModule for EmbeddingModule {
 
     fn asset_origin(&self) -> Option<Arc<str>> {
         self.root.asset_origin()
+    }
+
+    /// The window module and every live embed (each its own server, whose
+    /// theme follows the window's scheme); embeds connected later are told
+    /// it on connect.
+    fn set_color_scheme(&self, dark: bool) {
+        self.root.set_color_scheme(dark);
+        let modules: Vec<Arc<dyn HypenModule>> = {
+            let mut g = self.core.lock();
+            g.color_scheme = Some(dark);
+            g.embeds.values().filter_map(|e| e.module.clone()).collect()
+        };
+        for module in modules {
+            module.set_color_scheme(dark);
+        }
     }
 }
 

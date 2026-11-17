@@ -29,42 +29,99 @@ fn css_to_camel_case(name: &str) -> String {
     result
 }
 
-/// Expand Tailwind classes into CSS properties
-/// Returns a Vec of (prop_name, value) pairs with `.0` suffix,
-/// consistent with regular applicator props.
-/// CSS hyphenated names are converted to camelCase.
+/// Variant key `hypen-tailwind-parse` files `dark:` utilities under; also
+/// the scheme name the resulting switch matches.
+const TAILWIND_DARK_VARIANT: &str = "dark";
+
+/// Tailwind classes expanded into prop keys (`.0`-suffixed like regular
+/// applicator props, CSS names camelCased) and their CSS values.
+struct TailwindProps {
+    /// Base utilities and the renderer-resolved variants (suffix notation:
+    /// `padding@md.0` for responsive, `backgroundColor:hover.0` for state),
+    /// in class order.
+    plain: Vec<(String, String)>,
+    /// `dark:` utilities, keyed by the prop they override: the base prop, or
+    /// — combined with a breakpoint or state (`dark:md:…`, `dark:hover:…`) —
+    /// that variant's prop (`<prop>@md.0`, `<prop>:hover.0`).
+    dark: Vec<(String, String)>,
+}
+
+/// Expand Tailwind classes into CSS properties.
 ///
 /// Positioning classes (`absolute`, `relative`, `top-0`, …) are a hard error
 /// from the Tailwind crate — Hypen has no CSS positioning model — and are
 /// surfaced as `Err(message)` so the caller can fail the element loudly.
-fn expand_tailwind_classes(classes: &str) -> Result<Vec<(String, Value)>, String> {
+fn expand_tailwind_classes(classes: &str) -> Result<TailwindProps, String> {
     let output = hypen_tailwind_parse::parse_classes(classes)
         .map_err(|e| format!(".tw(\"{classes}\"): {e}"))?;
-    let mut props = Vec::new();
+    let mut props = TailwindProps {
+        plain: Vec::new(),
+        dark: Vec::new(),
+    };
 
-    // Add base properties (no variant)
     for css_prop in &output.base {
-        let camel = css_to_camel_case(&css_prop.property);
-        props.push((
-            format!("{}.0", camel),
-            Value::Static(serde_json::Value::String(css_prop.value.clone())),
+        props.plain.push((
+            format!("{}.0", css_to_camel_case(&css_prop.property)),
+            css_prop.value.clone(),
         ));
     }
-
-    // Add variant properties with suffix notation
-    // e.g., "padding@md.0" for responsive, "backgroundColor:hover.0" for state
     for (variant_key, css_props) in &output.variants {
+        let is_dark = variant_key.contains(TAILWIND_DARK_VARIANT);
+        let suffix = variant_key.replace(TAILWIND_DARK_VARIANT, "");
         for css_prop in css_props {
-            let camel = css_to_camel_case(&css_prop.property);
-            let prop_key = format!("{}{}.0", camel, variant_key);
-            props.push((
-                prop_key,
-                Value::Static(serde_json::Value::String(css_prop.value.clone())),
-            ));
+            let key = format!("{}{}.0", css_to_camel_case(&css_prop.property), suffix);
+            let target = if is_dark {
+                &mut props.dark
+            } else {
+                &mut props.plain
+            };
+            target.push((key, css_prop.value.clone()));
         }
     }
 
     Ok(props)
+}
+
+/// Insert one expanded Tailwind value into a node's props.
+///
+/// `dark:` is engine-resolved: it becomes the `dark` case of a scheme switch
+/// over whatever the prop already is — its value from the same class string,
+/// an earlier `.tw()` or a plain applicator (`.color("#111").tw("dark:…")`)
+/// — exactly like `.prop({ default: …, dark: … })`. A plain value in turn
+/// replaces only the default of a switch that is already there, so neither
+/// order of base and `dark:` utilities loses the other.
+fn insert_tailwind_prop(props: &mut Props, key: String, css_value: String, dark: bool) {
+    let value = Value::Static(serde_json::Value::String(css_value));
+    let dark_case = |value: Value| {
+        let mut cases = indexmap::IndexMap::new();
+        cases.insert(TAILWIND_DARK_VARIANT.to_string(), value);
+        cases
+    };
+    let merged = match (props.get(&key).cloned(), dark) {
+        (Some(Value::SchemeSwitch { cases, .. }), false) => Value::SchemeSwitch {
+            cases,
+            default: Some(Box::new(value)),
+        },
+        (Some(Value::SchemeSwitch { mut cases, default }), true) => {
+            cases.insert(TAILWIND_DARK_VARIANT.to_string(), value);
+            Value::SchemeSwitch { cases, default }
+        }
+        (Some(base), true) => Value::SchemeSwitch {
+            cases: dark_case(value),
+            // An action, a resource or a `.states` switch cannot be an entry.
+            default: matches!(
+                base,
+                Value::Static(_) | Value::Binding(_) | Value::TemplateString { .. }
+            )
+            .then(|| Box::new(base)),
+        },
+        (None, true) => Value::SchemeSwitch {
+            cases: dark_case(value),
+            default: None,
+        },
+        (_, false) => value,
+    };
+    props.insert(key, merged);
 }
 
 /// Extract all @{state.xxx} and @{item.xxx} bindings from a template string
@@ -236,8 +293,13 @@ fn process_applicators(
                 };
                 match expand_tailwind_classes(&class_string) {
                     Ok(expanded) => {
-                        for (prop_key, prop_value) in expanded {
-                            props.insert(prop_key, prop_value);
+                        // Plain values first, so a `dark:` utility finds the
+                        // value it overrides wherever it sits in the string.
+                        for (key, css_value) in expanded.plain {
+                            insert_tailwind_prop(props, key, css_value, false);
+                        }
+                        for (key, css_value) in expanded.dark {
+                            insert_tailwind_prop(props, key, css_value, true);
                         }
                     }
                     Err(message) => {
@@ -388,11 +450,13 @@ fn process_applicators(
                 ..
             } = &applicator.arguments.arguments[0]
             {
-                if !map.is_empty()
-                    && map
-                        .keys()
-                        .all(|k| crate::portable::variant::is_variant_token(k))
-                {
+                if is_variant_map(map) {
+                    // Color-scheme keys (`light` / `dark`, and custom scheme
+                    // names beside a `default`) are resolved by the engine,
+                    // not the renderer: together with `default` they become
+                    // ONE scheme-switched base prop (`<name>.0`), on top of
+                    // which breakpoint / state variants layer as usual.
+                    let scheme_base = lower_scheme_variants(&applicator.name, map);
                     // Emit in canonical precedence order (default, then
                     // breakpoints ascending, then states). The parser's map is
                     // a `HashMap`, so its iteration order is arbitrary — and
@@ -404,7 +468,16 @@ fn process_applicators(
                     entries.sort_by_key(|(variant, _)| {
                         crate::portable::variant::variant_token_rank(variant)
                     });
+                    if let Some(base) = &scheme_base {
+                        props.insert(format!("{}.0", applicator.name), base.clone());
+                    }
                     for (variant, value) in entries {
+                        if is_scheme_key(map, variant)
+                            || (scheme_base.is_some()
+                                && variant == crate::portable::variant::DEFAULT_KEY)
+                        {
+                            continue;
+                        }
                         let prop_key = if variant == crate::portable::variant::DEFAULT_KEY {
                             format!("{}.0", applicator.name)
                         } else if crate::portable::variant::is_breakpoint(variant) {
@@ -674,6 +747,24 @@ fn apply_states_applicator(
                 Value::Static(v) => {
                     static_props.insert(key.clone(), v.clone());
                 }
+                // A pose holds one literal per prop, so a scheme switch
+                // (`.tw("bg-white dark:bg-black")`, `{ default: …, dark: … }`)
+                // keeps its literal default and loses the scheme values —
+                // dropping the whole prop would take the base value with it.
+                Value::SchemeSwitch {
+                    default: Some(default),
+                    ..
+                } if matches!(**default, Value::Static(_)) => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".states: color-scheme values are not supported inside onState({}); prop '{}' uses its default in every scheme",
+                        label,
+                        key
+                    );
+                    if let Value::Static(v) = &**default {
+                        static_props.insert(key.clone(), v.clone());
+                    }
+                }
                 _ => {
                     crate::log_warn!(
                         LogScope::Engine,
@@ -701,6 +792,23 @@ fn apply_states_applicator(
         for key in &union {
             let default = match props.get(key.as_str()) {
                 Some(Value::Static(v)) => Some(v.clone()),
+                // The pose switch holds one literal default, so a
+                // scheme-switched base keeps its literal default and stops
+                // following the scheme rather than vanishing outside poses.
+                Some(Value::SchemeSwitch {
+                    default: Some(default),
+                    ..
+                }) if matches!(**default, Value::Static(_)) => {
+                    crate::log_warn!(
+                        LogScope::Engine,
+                        ".states: '{}' has color-scheme values and a pose overrides it; outside the poses it uses its default in every scheme",
+                        key
+                    );
+                    match &**default {
+                        Value::Static(v) => Some(v.clone()),
+                        _ => None,
+                    }
+                }
                 Some(_) => {
                     crate::log_warn!(
                         LogScope::Engine,
@@ -995,12 +1103,15 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
             // on as junk props (which would otherwise be silently dropped by
             // the renderer's CSS fallback).
             // A *dynamic* `.label(...)` (`.label("@{state.x ? 'a' : 'b'}")`,
-            // `.label("Colour @{item.color}")` in a ForEach) is kept: its
-            // bindings must register as dependencies and resolve at
-            // reconcile, where `Semantics::with_resolved_name` reads it.
+            // `.label("Colour @{item.color}")` in a ForEach, or a
+            // scheme-switched `.label({default: "Close", dark: …})`) is
+            // kept: its bindings must register as dependencies and resolve
+            // at reconcile, where `Semantics::with_resolved_name` reads it.
             if !matches!(
                 element.props.get("label.0"),
-                Some(Value::Binding(_)) | Some(Value::TemplateString { .. })
+                Some(Value::Binding(_))
+                    | Some(Value::TemplateString { .. })
+                    | Some(Value::SchemeSwitch { .. })
             ) {
                 element.props.remove("label.0");
             }
@@ -1932,7 +2043,9 @@ pub(crate) fn parser_value_to_ir(value: &ParserValue) -> Value {
                     Value::Resource(s) => serde_json::json!(format!("@resources.{}", s)),
                     // Unreachable: parser_value_to_ir never produces a
                     // StateSwitch — it only exists via `.states` lowering.
-                    Value::StateSwitch { .. } => serde_json::Value::Null,
+                    Value::StateSwitch { .. } | Value::SchemeSwitch { .. } => {
+                        serde_json::Value::Null
+                    }
                 })
                 .collect();
             Value::Static(serde_json::json!(converted))
@@ -1964,7 +2077,7 @@ pub(crate) fn parser_value_to_ir(value: &ParserValue) -> Value {
                     }
                     // Unreachable: parser_value_to_ir never produces a
                     // StateSwitch — it only exists via `.states` lowering.
-                    Value::StateSwitch { .. } => {}
+                    Value::StateSwitch { .. } | Value::SchemeSwitch { .. } => {}
                 }
             }
             Value::Static(serde_json::Value::Object(json_map))
@@ -2051,6 +2164,94 @@ pub(crate) fn propagate_module_scope_ir_node(node: &mut IRNode, scope: &str) {
             *module_scope = Some(scope.to_string());
         }
     });
+}
+
+/// True when a single-map applicator argument is the VARIANT form
+/// (`.padding({ default: 8, md: 16 })`) rather than an ordinary object
+/// argument: every key is a breakpoint, a state, `default`, `light` or
+/// `dark` — or the map has a `default` and every other key is an identifier,
+/// which then names a custom color scheme (`sepia`). Without a `default`, an
+/// unknown key keeps the map an ordinary argument (`.shadow({ blur: 8 })`).
+fn is_variant_map(map: &std::collections::HashMap<String, ParserValue>) -> bool {
+    use crate::portable::variant::{is_scheme_token, is_variant_token, DEFAULT_KEY};
+
+    let is_identifier = |k: &str| {
+        let mut chars = k.chars();
+        chars
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+    };
+    let has_default = map.contains_key(DEFAULT_KEY);
+    !map.is_empty()
+        && map
+            .keys()
+            .all(|k| is_variant_token(k) || is_scheme_token(k) || (has_default && is_identifier(k)))
+}
+
+/// Whether `key` of a variant-form map names a color scheme: `light` /
+/// `dark`, or — beside a `default` — any key that is not a breakpoint or
+/// state token.
+fn is_scheme_key(map: &std::collections::HashMap<String, ParserValue>, key: &str) -> bool {
+    use crate::portable::variant::{is_scheme_token, is_variant_token, DEFAULT_KEY};
+
+    is_scheme_token(key) || (map.contains_key(DEFAULT_KEY) && !is_variant_token(key))
+}
+
+/// Lower the color-scheme keys of a variant-form map
+/// (`.color({ default: "#111", dark: "#fff", sepia: "#5b4636" })`) into the
+/// scheme-switched base value for `<name>.0`. `None` when the map has no
+/// scheme key — or when an entry cannot be a prop value (an action or a
+/// resource), in which case the scheme keys are dropped with a warning and
+/// `default` is lowered as usual.
+///
+/// Entries may be literals, bindings (`@theme.color.ink`, `@state.accent`,
+/// `@item.color`) or template strings; the chosen one resolves like any
+/// other prop value.
+fn lower_scheme_variants(
+    applicator: &str,
+    map: &std::collections::HashMap<String, ParserValue>,
+) -> Option<Value> {
+    use crate::portable::variant::{DEFAULT_KEY, SCHEMES};
+
+    let mut schemes: Vec<&String> = map.keys().filter(|k| is_scheme_key(map, k)).collect();
+    if schemes.is_empty() {
+        return None;
+    }
+    // `light`, `dark`, then custom schemes by name — independent of the
+    // parser's map order.
+    schemes.sort_by_key(|k| {
+        (
+            SCHEMES
+                .iter()
+                .position(|s| s == &k.as_str())
+                .unwrap_or(SCHEMES.len()),
+            k.as_str(),
+        )
+    });
+
+    let entry = |key: &str, value: &ParserValue| match parser_value_to_ir(value) {
+        v @ (Value::Static(_) | Value::Binding(_) | Value::TemplateString { .. }) => Some(v),
+        _ => {
+            crate::log_warn!(
+                crate::logger::LogScope::Engine,
+                ".{}: '{}' cannot be an action or a resource when the map has color-scheme keys; the scheme values are ignored",
+                applicator,
+                key
+            );
+            None
+        }
+    };
+
+    let default = match map.get(DEFAULT_KEY) {
+        Some(value) => Some(Box::new(entry(DEFAULT_KEY, value)?)),
+        None => None,
+    };
+    let mut cases = indexmap::IndexMap::new();
+    for scheme in schemes {
+        cases.insert(scheme.clone(), entry(scheme, &map[scheme])?);
+    }
+    Some(Value::SchemeSwitch { cases, default })
 }
 
 #[cfg(test)]

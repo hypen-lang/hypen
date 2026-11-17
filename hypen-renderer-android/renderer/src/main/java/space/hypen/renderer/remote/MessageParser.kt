@@ -51,6 +51,9 @@ class MoshiMessageParser : MessageParser {
     private val viewportAdapter: JsonAdapter<ViewportMessage> =
         moshi.adapter(ViewportMessage::class.java)
 
+    private val colorSchemeAdapter: JsonAdapter<ColorSchemeMessage> =
+        moshi.adapter(ColorSchemeMessage::class.java)
+
     private val helloAdapter: JsonAdapter<HelloMessage> =
         moshi.adapter(HelloMessage::class.java)
 
@@ -222,6 +225,7 @@ class MoshiMessageParser : MessageParser {
             is StateUpdateMessage -> stateUpdateAdapter.toJson(message)
             is DispatchActionMessage -> dispatchActionAdapter.toJson(message)
             is ViewportMessage -> viewportAdapter.toJson(message)
+            is ColorSchemeMessage -> colorSchemeAdapter.toJson(message)
             is HelloMessage -> helloAdapter.toJson(message)
             is SessionAckMessage -> sessionAckAdapter.toJson(message)
             is SessionExpiredMessage -> sessionExpiredAdapter.toJson(message)

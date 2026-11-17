@@ -49,6 +49,56 @@ pub enum Value {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default: Option<serde_json::Value>,
     },
+    /// Color-scheme-switched value, produced only by the value-map applicator
+    /// form with scheme keys — `.color({ default: "#111", dark: "#fff" })` —
+    /// and by Tailwind `dark:` utilities; never by the parser. The active
+    /// scheme is read from the theme's `appearance.scheme` data source
+    /// ([`SCHEME_PROVIDER`] / [`SCHEME_PATH`]) and picks the matching case; a
+    /// miss — including no theme registered at all — falls back to `default`,
+    /// and with no default the prop resolves to *absent*, exactly like
+    /// [`Value::StateSwitch`].
+    ///
+    /// Engine-internal for the same reason: the chosen entry is resolved like
+    /// any other prop value, so resolved props and patches carry an ordinary
+    /// value and no renderer ever sees this variant.
+    ///
+    /// Entries are leaf values — a literal, a binding or a template string —
+    /// never another switch. Code that walks a prop's bindings (dependency
+    /// registration, row substitution, reference reporting) must walk
+    /// [`Value::scheme_entries`] too.
+    SchemeSwitch {
+        /// Scheme name (`"light"`, `"dark"`, or a custom scheme) → value.
+        cases: IndexMap<String, Value>,
+        /// The `default:` entry of the map, when it had one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default: Option<Box<Value>>,
+    },
+}
+
+impl Value {
+    /// The entries of a [`Value::SchemeSwitch`] (cases, then the default);
+    /// empty for every other value.
+    pub fn scheme_entries(&self) -> impl Iterator<Item = &Value> {
+        let (cases, default) = match self {
+            Value::SchemeSwitch { cases, default } => (Some(cases), default.as_deref()),
+            _ => (None, None),
+        };
+        cases
+            .into_iter()
+            .flat_map(|cases| cases.values())
+            .chain(default)
+    }
+}
+
+/// Data-source provider a theme publishes its active scheme under.
+pub const SCHEME_PROVIDER: &str = "appearance";
+/// Key of the active scheme name inside [`SCHEME_PROVIDER`].
+pub const SCHEME_PATH: &str = "scheme";
+
+/// The binding a [`Value::SchemeSwitch`] depends on (`appearance.scheme`):
+/// registered in the dependency graph so a scheme change dirties the node.
+pub fn scheme_switch_binding() -> Binding {
+    Binding::data_source(SCHEME_PROVIDER, vec![SCHEME_PATH.to_string()])
 }
 
 /// First-class IR node - distinguishes between regular elements and control flow constructs

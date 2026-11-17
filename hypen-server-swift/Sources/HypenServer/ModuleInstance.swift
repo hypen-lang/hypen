@@ -53,6 +53,27 @@ public final class ModuleInstance: @unchecked Sendable {
     /// The connection's device plane, when one was negotiated.
     private var devicePlane: DevicePlane?
 
+    /// The theme installed with `attachTheme(_:)`, if any.
+    private var attachedTheme: Theme?
+
+    /// The theme handlers of this module see as `ctx.theme`: the one
+    /// installed with `attachTheme(_:)`, else the global context's.
+    public var theme: Theme? {
+        lock.lock()
+        let own = attachedTheme
+        lock.unlock()
+        return own ?? globalContext?.theme
+    }
+
+    /// Install (or, with nil, remove) the theme this module's action
+    /// handlers reach as `ctx.theme`. It does not publish anything: pair it
+    /// with `theme.attach(engine)`.
+    public func attachTheme(_ theme: Theme?) {
+        lock.lock()
+        attachedTheme = theme
+        lock.unlock()
+    }
+
     /// Create a module instance backed by an existing native engine.
     ///
     /// All action dispatch routes through `engine.dispatchAction(...)` and
@@ -208,7 +229,8 @@ public final class ModuleInstance: @unchecked Sendable {
                     state: self.state,
                     context: self.globalContext,
                     router: self.contextRouter,
-                    device: self.deviceContext()
+                    device: self.deviceContext(),
+                    theme: self.theme
                 )
                 self.callAction(name) { h(ctx) }
             }
@@ -227,7 +249,8 @@ public final class ModuleInstance: @unchecked Sendable {
                     state: self.state,
                     context: self.globalContext,
                     router: self.contextRouter,
-                    device: self.deviceContext()
+                    device: self.deviceContext(),
+                    theme: self.theme
                 )
                 Task { [weak self] in
                     guard let self = self else { return }
@@ -429,7 +452,8 @@ public final class ModuleInstance: @unchecked Sendable {
                 state: state,
                 context: globalContext,
                 router: contextRouter,
-                device: deviceContext()
+                device: deviceContext(),
+                theme: theme
             )
             ctx.device.beginHandlerScope()
             await asyncHandler(ctx)
