@@ -75,6 +75,9 @@ type RemoteServer struct {
 	autoRouter bool
 	// theme is the app's theme (Theme()); every session forks it.
 	theme *core.Theme
+	// unboundClientActions is the bare action names clients may send with
+	// no node behind them (AllowUnboundClientActions); zero = strict.
+	unboundClientActions UnboundClientActions
 
 	server   *http.Server
 	upgrader websocket.Upgrader
@@ -195,6 +198,12 @@ func (h serverSessionHost) Theme() *core.Theme {
 	h.s.mu.RLock()
 	defer h.s.mu.RUnlock()
 	return h.s.theme
+}
+
+func (h serverSessionHost) UnboundClientActions() UnboundClientActions {
+	h.s.mu.RLock()
+	defer h.s.mu.RUnlock()
+	return h.s.unboundClientActions
 }
 
 func (h serverSessionHost) deviceSettings() *deviceSettings {
@@ -668,6 +677,40 @@ func (s *RemoteServer) DisableAutoRouter() *RemoteServer {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.autoRouter = false
+	return s
+}
+
+// AllowUnboundClientActions accepts these bare action names from clients.
+//
+// A client is untrusted: by default an action it sends runs only as a
+// `__hypen_dispatch` envelope addressed to a live node that declares it
+// (what every Hypen renderer sends for a UI event), plus the four
+// `router.*` actions (push, replace, back, forward). A client that sends an
+// action by bare name — the TypeScript web client's `navigation.backAction`
+// (default "navigateBack"), a custom client's command, the Go
+// RemoteEngine.DispatchAction — needs that name listed here; such an action
+// is then dispatchable by any connected client at any time, whatever is on
+// its screen, so list only names that are safe under that assumption.
+// `__hypen_*` names (a pre-scoped `__hypen_scoped:…`, a bare `__hypen_bind`)
+// are never accepted outside an envelope. Each call replaces the previous
+// list (and turns AllowAnyUnboundClientActions off); no names restores the
+// strict default.
+func (s *RemoteServer) AllowUnboundClientActions(names ...string) *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unboundClientActions = UnboundClientActions{Names: append([]string(nil), names...)}
+	return s
+}
+
+// AllowAnyUnboundClientActions restores the pre-admission behaviour for
+// application names: a client may send any bare name (dispatched if exactly
+// one module handles it). `__hypen_*` names are still refused outside an
+// envelope, and envelopes are still authorised against the addressed node.
+// Prefer AllowUnboundClientActions with the names you need.
+func (s *RemoteServer) AllowAnyUnboundClientActions() *RemoteServer {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.unboundClientActions = UnboundClientActions{Any: true}
 	return s
 }
 
@@ -1304,6 +1347,12 @@ func Serve(options ServeOptions) *RemoteServer {
 		server.Config(config)
 	}
 
+	if options.AllowAnyUnboundClientActions {
+		server.AllowAnyUnboundClientActions()
+	} else if len(options.UnboundClientActions) > 0 {
+		server.AllowUnboundClientActions(options.UnboundClientActions...)
+	}
+
 	if options.OnConnection != nil {
 		server.OnConnection(options.OnConnection)
 	}
@@ -1327,6 +1376,12 @@ type ServeOptions struct {
 	OnAction        ActionHandler
 	OnConnection    ServerConnectionCallback
 	OnDisconnection ServerConnectionCallback
+	// UnboundClientActions are bare action names clients may send with no
+	// node behind them (RemoteServer.AllowUnboundClientActions).
+	UnboundClientActions []string
+	// AllowAnyUnboundClientActions accepts any bare application name
+	// (RemoteServer.AllowAnyUnboundClientActions).
+	AllowAnyUnboundClientActions bool
 }
 
 // admissions is the set of upgrade requests Admit accepted, held weakly:

@@ -391,7 +391,10 @@ func createTestServer(t *testing.T) (*RemoteServer, *httptest.Server) {
 			}
 			return state
 		}).
-		UI("Text('Count: @{state.count}')")
+		UI("Text('Count: @{state.count}')").
+		// The Go RemoteEngine client dispatches by bare name: listed
+		// explicitly, as a server must for such clients.
+		AllowUnboundClientActions("increment")
 
 	// Create HTTP test server
 	mux := http.NewServeMux()
@@ -929,7 +932,9 @@ func compressionTestServer(t *testing.T, configure func(*RemoteServer)) (*Remote
 			}
 			return state
 		}).
-		UI("Text('Count: @{state.count}')")
+		UI("Text('Count: @{state.count}')").
+		// Clients here dispatch by bare name (see createTestServer).
+		AllowUnboundClientActions("increment")
 
 	if configure != nil {
 		configure(server)

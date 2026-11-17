@@ -5,7 +5,8 @@
 // host does not implement transaction stamping, but the key is a
 // renderer→host directive either way — module handlers must never observe
 // it. handleDispatchAction strips it before both the engine path and the
-// legacy ModuleConfig.OnAction shim.
+// legacy ModuleConfig.OnAction shim (from a renderer envelope's inner
+// payload too).
 package remote
 
 import (
@@ -56,7 +57,7 @@ func TestDispatchAction_StripsReservedAnimateKeyBeforeHandler(t *testing.T) {
 			seen <- payload
 			return state
 		}).
-		UI(`Text("hi")`)
+		UI(`Button { Text("hi") }.onClick(@actions.doThing)`)
 	if err := s.Prepare(); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -73,12 +74,21 @@ func TestDispatchAction_StripsReservedAnimateKeyBeforeHandler(t *testing.T) {
 		t.Fatalf("Receive hello: %v", err)
 	}
 
+	init := waitForMessage(t, transport, MessageTypeInitialTree, 5*time.Second)
+	if init == nil {
+		t.Fatal("no initialTree")
+	}
+	// A renderer click: the stamp rides on the envelope's inner payload.
 	dispatch, _ := json.Marshal(map[string]any{
 		"type":   "dispatchAction",
-		"action": "doThing",
+		"action": uiActionEnvelope,
 		"payload": map[string]any{
-			"postId":           "p1",
-			reservedAnimateKey: "spring",
+			"node":   firstCreated(t, init.(*InitialTreeMessage).Patches, "Button"),
+			"action": "doThing",
+			"payload": map[string]any{
+				"postId":           "p1",
+				reservedAnimateKey: "spring",
+			},
 		},
 	})
 	if err := sess.Receive(dispatch); err != nil {

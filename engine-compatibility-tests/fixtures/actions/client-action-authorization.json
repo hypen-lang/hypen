@@ -7,7 +7,7 @@
 
   "skip": {
     "reason": "Needs the engine's client entry (route_client_action: JS resolveClientAction / WASI hypen_dispatch_client_action / UniFFI dispatch_client_action) in the shipped artifacts and a dispatchClientAction step in the runner",
-    "sdks": ["typescript", "golang", "kotlin"]
+    "sdks": ["typescript", "kotlin"]
   },
 
   "input": {

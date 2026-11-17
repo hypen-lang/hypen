@@ -68,6 +68,14 @@ func csSession(t *testing.T, s *RemoteServer, hello map[string]any, before ...ma
 	return sess, tr, init.(*InitialTreeMessage).Patches
 }
 
+// csClick clicks the "pin" button (node) with the scheme as payload.
+func csClick(t *testing.T, sess *RemoteSession, node, scheme string) {
+	t.Helper()
+	if err := sess.Receive(envelopeMessage(node, "pin", scheme)); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+}
+
 func csSend(t *testing.T, sess *RemoteSession, msg map[string]any) {
 	t.Helper()
 	data, _ := json.Marshal(msg)
@@ -151,9 +159,10 @@ func TestColorScheme_MessageRerendersOnlyTheChangedProp(t *testing.T) {
 }
 
 func TestColorScheme_ExplicitPreferenceMakesItANoOp(t *testing.T) {
-	sess, tr, _ := csSession(t, csServer(t), map[string]any{"colorScheme": "dark"})
+	sess, tr, init := csSession(t, csServer(t), map[string]any{"colorScheme": "dark"})
+	pin := firstCreated(t, init, "Button")
 
-	csSend(t, sess, map[string]any{"type": "dispatchAction", "action": "pin", "payload": "light"})
+	csClick(t, sess, pin, "light")
 	if patches := csPatches(csDrain(tr)); !patchesMention(patches, csLight) {
 		t.Fatalf("handler's SetScheme(light) was not rendered: %+v", patches)
 	}
@@ -169,7 +178,7 @@ func TestColorScheme_ExplicitPreferenceMakesItANoOp(t *testing.T) {
 	}
 
 	// Back to "system": the remembered report takes effect.
-	csSend(t, sess, map[string]any{"type": "dispatchAction", "action": "pin", "payload": "system"})
+	csClick(t, sess, pin, "system")
 	if patches := csPatches(csDrain(tr)); !patchesMention(patches, csDark) {
 		t.Fatalf("returning to system did not follow the reported scheme: %+v", patches)
 	}
@@ -240,8 +249,8 @@ func TestColorScheme_ReportBeforeTheForkIsApplied(t *testing.T) {
 
 func TestColorScheme_ResumeKeepsThePreference(t *testing.T) {
 	server := csServer(t)
-	first, tr, _ := csSession(t, server, nil)
-	csSend(t, first, map[string]any{"type": "dispatchAction", "action": "pin", "payload": "dark"})
+	first, tr, init := csSession(t, server, nil)
+	csClick(t, first, firstCreated(t, init, "Button"), "dark")
 	csDrain(tr)
 	id := first.SessionID()
 	if id == "" {

@@ -25,8 +25,10 @@ type attachCartState struct {
 }
 
 const attachTestUI = `module App {
-	Text("total: @{state.total}")
-	Button("@actions.addToCart") { Text("Add") }
+	Column {
+		Text("total: @{state.total}")
+		Button("@actions.addToCart") { Text("Add") }
+	}
 }`
 
 // attachFixture is one prepared server plus one hello-completed user
@@ -36,6 +38,8 @@ type attachFixture struct {
 	session   *RemoteSession
 	transport *ChannelTransport
 	sessionID string
+	// button is the wire id of the Add button (carries @actions.addToCart).
+	button string
 }
 
 func newAttachFixture(t *testing.T) *attachFixture {
@@ -74,7 +78,8 @@ func newAttachFixture(t *testing.T) *attachFixture {
 	if ack == nil {
 		t.Fatal("no sessionAck")
 	}
-	if waitForMessage(t, transport, MessageTypeInitialTree, 5*time.Second) == nil {
+	init := waitForMessage(t, transport, MessageTypeInitialTree, 5*time.Second)
+	if init == nil {
 		t.Fatal("no initialTree")
 	}
 	select {
@@ -91,6 +96,7 @@ func newAttachFixture(t *testing.T) *attachFixture {
 		session:   sess,
 		transport: transport,
 		sessionID: ack.(*SessionAckMessage).SessionID,
+		button:    firstCreated(t, init.(*InitialTreeMessage).Patches, "Button"),
 	}
 }
 
@@ -274,7 +280,7 @@ func TestAttach_WireIdenticalToClick(t *testing.T) {
 		t.Fatalf("after agent dispatch total = %v, want 1", total)
 	}
 
-	click, _ := json.Marshal(map[string]any{"type": "dispatchAction", "action": "addToCart"})
+	click := clickMessage(fx.button, "addToCart")
 	if err := fx.session.Receive(click); err != nil {
 		t.Fatalf("Receive click: %v", err)
 	}
@@ -301,7 +307,7 @@ func TestAttach_AgentAndClickSerialize(t *testing.T) {
 	}
 
 	const perSide = 15
-	click, _ := json.Marshal(map[string]any{"type": "dispatchAction", "action": "addToCart"})
+	click := clickMessage(fx.button, "addToCart")
 
 	// Drain concurrently so the 64-slot transport buffer never blocks a
 	// dispatcher.

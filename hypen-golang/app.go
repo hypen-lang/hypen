@@ -102,6 +102,17 @@ type IEngine interface {
 	// UI-driven dispatch (WebSocket → engine → registered closure).
 	// Returns ErrActionNotFound if no handler is registered for the name.
 	DispatchAction(name string, payload any) error
+	// DispatchClientAction is the entry for an action that crossed a trust
+	// boundary — what a Remote UI client sent over the wire. Unlike
+	// DispatchAction (the same-trust-domain entry, which runs a registered
+	// `__hypen_scoped:<scope>:<name>` as given, a bare name one module
+	// handles, and a bare `__hypen_bind` state write) it accepts only a
+	// `__hypen_dispatch` envelope `{node, action, payload}` whose node is
+	// live, attached and itself carries the binding (or, for
+	// `__hypen_bind` / `__hypen_reorder` / `__hypen_pin`, the `.bind` / pin
+	// declaration). Everything else is refused with ErrActionNotFound
+	// before any handler runs.
+	DispatchClientAction(name string, payload any) error
 }
 
 // ActionContext provides context about the dispatched action

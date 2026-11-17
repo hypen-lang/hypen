@@ -40,6 +40,7 @@ type WasmEngine struct {
 	fnRegisterModule            api.Function
 	fnRegisterAction            api.Function
 	fnDispatchAction            api.Function
+	fnDispatchClientAction      api.Function
 	fnRegisterPrimitive         api.Function
 	fnRegisterDefaultPrimitives api.Function
 	fnRegisterComponent         api.Function
@@ -180,6 +181,7 @@ func NewWasmEngine(config WasmEngineConfig) (*WasmEngine, error) {
 	engine.fnRegisterModule = module.ExportedFunction("hypen_register_module")
 	engine.fnRegisterAction = module.ExportedFunction("hypen_register_action")
 	engine.fnDispatchAction = module.ExportedFunction("hypen_dispatch_action")
+	engine.fnDispatchClientAction = module.ExportedFunction("hypen_dispatch_client_action")
 	engine.fnRegisterPrimitive = module.ExportedFunction("hypen_register_primitive")
 	engine.fnRegisterDefaultPrimitives = module.ExportedFunction("hypen_register_default_primitives")
 	engine.fnRegisterComponent = module.ExportedFunction("hypen_register_component")
@@ -576,9 +578,52 @@ func (e *WasmEngine) DispatchAction(name string, payload any) error {
 	return nil
 }
 
+// DispatchClientAction is DispatchAction for input that crossed a trust
+// boundary — an action a Remote UI client put on the wire. It goes through
+// the engine's client entry (`hypen_dispatch_client_action`,
+// route_client_action): only a `__hypen_dispatch` envelope
+// `{node, action, payload}` is accepted, and its node must be live, attached
+// and itself carry the binding (`.onClick(@actions.x)`, or the `.bind` /
+// pin declaration for `__hypen_bind` / `__hypen_reorder` / `__hypen_pin`).
+// A `__hypen_scoped:` name, a bare name and every other `__hypen_*` name are
+// refused with an *EngineError (ErrActionNotFound) carrying the engine's
+// reason, before any handler runs. The resolved action then runs its
+// registered handler exactly like DispatchAction.
+func (e *WasmEngine) DispatchClientAction(name string, payload any) error {
+	action, err := e.ResolveClientAction(name, payload)
+	if err != nil {
+		return err
+	}
+	if action == nil {
+		return nil // authorised, but nothing queued (no registered handler)
+	}
+	if handler, ok := e.actionHandlers[action.Name]; ok && handler != nil {
+		handler(*action)
+	}
+	return nil
+}
+
+// ResolveClientAction authorises a client action through the engine's
+// client entry (see DispatchClientAction) and returns the resolved action
+// WITHOUT running its handler — a `__hypen_scoped:<scope>:<name>` name with
+// the envelope's inner payload (the WASI ABI does not carry the sender
+// node back). Returns (nil, nil)
+// when the action is authorised but the engine queued nothing for the host.
+// The result is trusted input for DispatchAction.
+func (e *WasmEngine) ResolveClientAction(name string, payload any) (*Action, error) {
+	if e.fnDispatchClientAction == nil {
+		return nil, &EngineError{Code: ErrActionNotFound, Message: "hypen_dispatch_client_action not available in WASM module"}
+	}
+	return e.dispatchAndReadActionVia(e.fnDispatchClientAction, "dispatch_client_action", name, payload)
+}
+
 // dispatchAndReadAction sends the action to WASM and reads the pending action
 // from the action buffer. Holds the mutex only for WASM calls.
 func (e *WasmEngine) dispatchAndReadAction(name string, payload any) (*Action, error) {
+	return e.dispatchAndReadActionVia(e.fnDispatchAction, "dispatch_action", name, payload)
+}
+
+func (e *WasmEngine) dispatchAndReadActionVia(fn api.Function, op, name string, payload any) (*Action, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 
@@ -598,12 +643,15 @@ func (e *WasmEngine) dispatchAndReadAction(name string, payload any) (*Action, e
 	}
 	defer e.freePtr(ptr, size)
 
-	results, err := e.fnDispatchAction.Call(e.ctx, uint64(ptr), uint64(size))
+	results, err := fn.Call(e.ctx, uint64(ptr), uint64(size))
 	if err != nil {
-		return nil, &EngineError{Code: ErrActionNotFound, Message: "dispatch action call failed", Cause: err}
+		return nil, &EngineError{Code: ErrActionNotFound, Message: op + " call failed", Cause: err}
 	}
 	if len(results) > 0 && results[0] != 0 {
-		return nil, newWasmError("dispatch_action", results[0])
+		if op == "dispatch_client_action" {
+			return nil, newClientActionError(results[0], e.readLastError())
+		}
+		return nil, newWasmError(op, results[0])
 	}
 
 	return e.readPendingActionLocked()

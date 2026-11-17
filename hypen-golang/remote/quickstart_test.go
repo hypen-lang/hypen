@@ -52,6 +52,37 @@ func patchesMention(patches []Patch, text string) bool {
 	return strings.Contains(string(data), text)
 }
 
+// firstCreated is the wire id of the first created node of elementType.
+func firstCreated(t *testing.T, patches []Patch, elementType string) string {
+	t.Helper()
+	for _, p := range patches {
+		if p.Type == "create" && p.ElementType == elementType {
+			return p.ID
+		}
+	}
+	t.Fatalf("no %s created in %+v", elementType, patches)
+	return ""
+}
+
+// clickMessage is the dispatchAction a renderer sends for a click on node.
+func clickMessage(node, action string) []byte {
+	return envelopeMessage(node, action, map[string]any{"type": "click"})
+}
+
+// envelopeMessage is a renderer's dispatchAction for `action` on node.
+func envelopeMessage(node, action string, payload any) []byte {
+	raw, _ := json.Marshal(map[string]any{
+		"type":   "dispatchAction",
+		"action": uiActionEnvelope,
+		"payload": map[string]any{
+			"node":    node,
+			"action":  action,
+			"payload": payload,
+		},
+	})
+	return raw
+}
+
 func helloSession(t *testing.T, s *RemoteServer) (*RemoteSession, *ChannelTransport) {
 	t.Helper()
 	transport := NewChannelTransport(64)
@@ -111,8 +142,8 @@ func TestInlineUI_RendersWithoutSource(t *testing.T) {
 	}
 	<-sess.Ready()
 
-	act, _ := json.Marshal(map[string]any{"type": "dispatchAction", "action": "increment"})
-	if err := sess.Receive(act); err != nil {
+	// What the web client sends for a click on the + button.
+	if err := sess.Receive(clickMessage(firstCreated(t, init.Patches, "Button"), "increment")); err != nil {
 		t.Fatalf("Receive dispatch: %v", err)
 	}
 	pm := waitForMessage(t, tr, MessageTypePatch, 5*time.Second)
@@ -124,6 +155,8 @@ func TestInlineUI_RendersWithoutSource(t *testing.T) {
 	}
 }
 
+// A legacy client that sends the bare name: accepted because the server
+// lists it (AllowUnboundClientActions), and handled by the map-style shim.
 func TestLegacyOnAction_InlineUIRendersAndUpdates(t *testing.T) {
 	s := NewRemoteServer().
 		WithState("Counter", map[string]any{"count": 0}).
@@ -133,7 +166,8 @@ func TestLegacyOnAction_InlineUIRendersAndUpdates(t *testing.T) {
 			}
 			return state
 		}).
-		UI(qsTemplate)
+		UI(qsTemplate).
+		AllowUnboundClientActions("increment")
 	sess, tr := helloSession(t, s)
 
 	msg := waitForMessage(t, tr, MessageTypeInitialTree, 5*time.Second)
@@ -305,7 +339,9 @@ func TestListenAndServe_ReturnsBindError(t *testing.T) {
 }
 
 // The DOM renderer sends clicks as a `__hypen_dispatch` envelope; the
-// legacy map-style OnAction shim must see the plain action name.
+// legacy map-style OnAction shim must see the plain action name — and only
+// when the addressed node really carries that action (the engine's client
+// entry), never for a made-up node or action.
 func TestLegacyOnAction_UnwrapsRendererEnvelope(t *testing.T) {
 	var got []string
 	s := NewRemoteServer().
@@ -319,21 +355,34 @@ func TestLegacyOnAction_UnwrapsRendererEnvelope(t *testing.T) {
 		}).
 		UI(qsTemplate)
 	sess, tr := helloSession(t, s)
-	if waitForMessage(t, tr, MessageTypeInitialTree, 5*time.Second) == nil {
+	init := waitForMessage(t, tr, MessageTypeInitialTree, 5*time.Second)
+	if init == nil {
 		t.Fatal("no initialTree")
 	}
 	<-sess.Ready()
+	patches := init.(*InitialTreeMessage).Patches
+	button := firstCreated(t, patches, "Button")
 
-	act, _ := json.Marshal(map[string]any{
-		"type":   "dispatchAction",
-		"action": "__hypen_dispatch",
-		"payload": map[string]any{
-			"node":    "1",
-			"action":  "increment",
-			"payload": map[string]any{"type": "click"},
-		},
-	})
-	if err := sess.Receive(act); err != nil {
+	// Refused: a node that does not carry the action, an action the
+	// button does not carry, a node id never issued, a bare name.
+	for _, raw := range [][]byte{
+		clickMessage(firstCreated(t, patches, "Text"), "increment"),
+		clickMessage(button, "reset"),
+		clickMessage("424242", "increment"),
+	} {
+		if err := sess.Receive(raw); err != nil {
+			t.Fatalf("Receive: %v", err)
+		}
+	}
+	bare, _ := json.Marshal(map[string]any{"type": "dispatchAction", "action": "increment"})
+	if err := sess.Receive(bare); err != nil {
+		t.Fatalf("Receive: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("refused dispatches reached the shim: %v", got)
+	}
+
+	if err := sess.Receive(clickMessage(button, "increment")); err != nil {
 		t.Fatalf("Receive dispatch: %v", err)
 	}
 	pm := waitForMessage(t, tr, MessageTypePatch, 5*time.Second)
@@ -345,20 +394,14 @@ func TestLegacyOnAction_UnwrapsRendererEnvelope(t *testing.T) {
 	}
 }
 
-func TestUnwrapUIAction(t *testing.T) {
-	cases := []struct {
-		name    string
-		payload any
-		want    string
-	}{
-		{"increment", nil, "increment"},
-		{"__hypen_dispatch", map[string]any{"action": "save", "payload": 1}, "save"},
-		{"__hypen_dispatch", map[string]any{"action": "__hypen_bind"}, "__hypen_dispatch"},
-		{"__hypen_dispatch", "not-a-map", "__hypen_dispatch"},
-	}
-	for _, c := range cases {
-		if got, _ := unwrapUIAction(c.name, c.payload); got != c.want {
-			t.Errorf("unwrapUIAction(%q, %v) = %q, want %q", c.name, c.payload, got, c.want)
-		}
+func TestTemplateActionNames(t *testing.T) {
+	got := templateActionNames(
+		`Column { Button("@actions.increment") { Text("+") } Button(onClick: @actions.decrement) }`,
+		`Row { Button { Text("x") }.onClick(@actions.increment) Input().bind(@state.name) }`,
+		`Text("@actions.__hypen_bind") Button(onClick: @actions.todo.add)`,
+	)
+	want := []string{"decrement", "increment", "todo.add"}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("templateActionNames = %v, want %v", got, want)
 	}
 }

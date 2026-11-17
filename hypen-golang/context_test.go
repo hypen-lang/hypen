@@ -79,6 +79,12 @@ func (e *FakeEngine) DispatchAction(name string, payload any) error {
 	return nil
 }
 
+// DispatchClientAction implements IEngine.DispatchClientAction. The
+// FakeEngine models no render tree, so it refuses every client action.
+func (e *FakeEngine) DispatchClientAction(name string, payload any) error {
+	return &EngineError{Code: ErrActionNotFound, Message: "client action refused: FakeEngine has no render tree"}
+}
+
 // DispatchActionAs is a FakeEngine-only helper that lets tests specify
 // a sender field on the dispatched Action. Not part of IEngine.
 func (e *FakeEngine) DispatchActionAs(name string, payload any, sender string) {

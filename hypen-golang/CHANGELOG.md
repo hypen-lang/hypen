@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security (breaking)
+- **Remote client actions are admitted before they run.** Every Remote UI
+  `dispatchAction` used to reach the engine's permissive entry verbatim, so a
+  client could send a raw `__hypen_scoped:<scope>:<name>` and run any
+  registered action of any module, a bare name one module handles, a bare
+  `__hypen_bind` / `__hypen_reorder` / `__hypen_pin` that wrote an arbitrary
+  state path (`{path: "isAdmin", value: true}`), or an envelope naming any
+  action of a module from any of its nodes. Now (`remote/client_action.go`,
+  mirroring the TypeScript server):
+  - a `__hypen_dispatch` envelope goes through the engine's client entry —
+    new `core.WasmEngine.DispatchClientAction` / `ResolveClientAction`
+    (WASI `hypen_dispatch_client_action`) and `IEngine.DispatchClientAction`:
+    the node must be live, attached and itself carry the binding (or the
+    `.bind` / pin declaration for the reserved writes);
+  - `router.push|replace|back|forward` are accepted by name;
+  - other bare names are refused unless listed with the new
+    `RemoteServer.AllowUnboundClientActions(names...)` (or
+    `ServeOptions.UnboundClientActions`); `AllowAnyUnboundClientActions()`
+    (`ServeOptions.AllowAnyUnboundClientActions`) accepts any application
+    name; `__hypen_scoped:*` and bare `__hypen_*` names are never accepted;
+  - a refusal runs nothing, sends nothing and is logged
+    (`action "<name>" refused — <reason>`); `ClientActionRefusedError` and
+    `UnboundClientActions` are the public types.
+  The legacy map-style `OnAction` shim no longer unwraps envelopes itself
+  (`unwrapUIAction` is gone): an envelope reaches it only through the client
+  entry, which needs the action referenced as `@actions.<name>` in the
+  server's templates. Host-side dispatch (`ModuleInstance.DispatchAction`,
+  timers, `Attach` agents via `DispatchExternal`) is unchanged.
+  `MockEngine` models the client entry over nodes a test declares
+  (`DeclareNodeAction` / `RemoveNode`).
+
+  **Migration:** renderers that send envelopes (the built-in web client, the
+  TypeScript DOM/Canvas renderers, the native renderers) need nothing. A
+  client that dispatches bare names — the Go `RemoteEngine.DispatchAction`,
+  a custom client, the TypeScript web client's opt-in
+  `navigation.backAction` (default `"navigateBack"`) — needs those names
+  listed: `server.AllowUnboundClientActions("increment", "navigateBack")`.
+  Any custom `IEngine` implementation must add `DispatchClientAction`.
+
 ### Added
 - **`clearChildren` patch** (`core.PatchClearChildren`,
   `{"type":"clearChildren","id":…}`; contract in
@@ -36,7 +75,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   initialTree carried `patches: []`.
 - Map-style `WithState(...).OnAction(...)` / `remote.Serve` servers now render
   through the engine too, re-render on every action (patches + stateUpdate),
-  and unwrap the DOM renderer's `__hypen_dispatch` envelope for the handler.
+  and unwrap the DOM renderer's `__hypen_dispatch` envelope for the handler
+  (superseded: envelopes are now admitted by the engine's client entry, see
+  Security above).
   `Attach` still returns `ErrNoEngine` for them (no guarded action surface).
 
 ### Added

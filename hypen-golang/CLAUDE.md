@@ -33,7 +33,10 @@ hypen-golang/
     ├── server.go         # WebSocket server (device plane on by default: ConfigureDevice/DisableDevice;
     │                     #   AllowedOrigins/Authenticate + Admit: admission when configured; startup warnings)
     ├── session.go        # Per-connection session (hello.device, sessionAck.device + resumeToken, dispatch queue,
-    │                     #   `viewport` → this engine's SetListViewport, patches only: virtualization contract §4)
+    │                     #   `viewport` → this engine's SetListViewport, patches only: virtualization contract §4;
+    │                     #   dispatchNow: client action admission, see "Client actions" below)
+    ├── client_action.go  # Admission of wire actions: UnboundClientActions policy, ClientActionRefusedError,
+    │                     #   admitUnboundClientAction, legacy-shim action-name harvest (client_action_test.go)
     ├── session_device.go # Device handshake/attach, session module owners, dispatch provenance, state merge
     ├── device_plane.go   # DeviceConfig + sessionDevice: pumps socket ⇄ Rust broker, tick() timer, sinks
     ├── dispatch_queue.go # FIFO dispatch slot; device waits yield it (device.Waiter)
@@ -87,6 +90,34 @@ Same module pattern as all Hypen SDKs:
 - **ObservableState** — reactive state with path-based tracking
 - **WasmEngine** — WASM engine access via Wazero runtime
 - **Remote Server/Client** — WebSocket-based patch streaming
+
+## Client actions (Remote UI wire input is untrusted)
+
+The engine has two action entries (`hypen-engine-rs/CLAUDE.md` "Two action entries"):
+`DispatchAction` (WASI `hypen_dispatch_action`) is the same-trust-domain one — it runs a registered
+`__hypen_scoped:<scope>:<name>` as given, a bare name one module handles and a bare `__hypen_bind`
+state write — and `DispatchClientAction` / `ResolveClientAction` (WASI `hypen_dispatch_client_action`)
+is for input that crossed a trust boundary: only a `__hypen_dispatch` envelope whose live, attached
+node itself carries the binding (or the `.bind` / pin declaration for `__hypen_bind` /
+`__hypen_reorder` / `__hypen_pin`). `IEngine` has both; `MockEngine` models the client entry over
+nodes a test declares (`DeclareNodeAction`), so test the real rule against the wazero engine.
+
+Every `dispatchAction` a client sends goes through `RemoteSession.dispatchNow`, which admits it
+first (Go port of `hypen-web/packages/core/src/remote/client-action.ts`): an envelope →
+`engine.DispatchClientAction`; `router.push|replace|back|forward` by name; any other bare name only
+if the server lists it (`RemoteServer.AllowUnboundClientActions(names...)`, `ServeOptions.
+UnboundClientActions`; `AllowAnyUnboundClientActions()` = any application name; the policy reaches
+sessions through the optional `UnboundClientActionsHost` interface, strict when absent);
+`__hypen_scoped:*` and bare `__hypen_*` are always refused. A refusal runs nothing, sends nothing
+and is logged as a warning. The legacy map-style `OnAction` shim gets one engine handler per
+`@actions.<name>` its templates reference (`registerLegacyActionHandlers`), so its envelopes go
+through the same client entry. Host-originated dispatch keeps its entries:
+`ModuleInstance.DispatchAction` (`DispatchAction`), agents (`DispatchExternal`, the guarded external
+surface). Never route wire input to `DispatchAction` unadmitted; tests that drive a session should
+send envelopes addressed to real node ids from the initialTree (`firstCreated` / `clickMessage` in
+`remote/quickstart_test.go`) or opt in explicitly with `AllowUnboundClientActions`.
+`../engine-compatibility-tests/runners/golang/client_action_test.go` drives the shared
+`dispatchClientAction` fixture steps on the real engine.
 
 ## Device plane (RFC 001) on the remote server
 

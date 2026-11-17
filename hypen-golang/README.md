@@ -247,8 +247,35 @@ client := remote.NewRemoteEngine("ws://localhost:3000/ws", nil).
 client.Connect()
 defer client.Disconnect()
 
+// Sends the bare name "increment": the server must list it (below).
 client.DispatchAction("increment", nil)
 ```
+
+**Client actions are untrusted.** A remote client is a renderer on someone
+else's device, so the server admits what it sends before anything runs:
+
+- A `__hypen_dispatch` envelope `{node, action, payload}` (what every Hypen
+  renderer, including the built-in web client, sends for a UI event) goes
+  through the engine's client entry (`WasmEngine.DispatchClientAction`, WASI
+  `hypen_dispatch_client_action`): the node must be live, attached and itself
+  declare the action (`.onClick(@actions.save)`, or `.bind(...)` / a pinboard
+  for `__hypen_bind` / `__hypen_reorder` / `__hypen_pin`). An envelope naming
+  an action its node does not carry, or a node never rendered for this
+  client, is refused.
+- `router.push`, `router.replace`, `router.back` and `router.forward` are
+  accepted by name.
+- Any other bare name is refused unless the server lists it:
+  `server.AllowUnboundClientActions("increment", "navigateBack")`
+  (`ServeOptions.UnboundClientActions`). `AllowAnyUnboundClientActions()`
+  restores the old accept-any-application-name behaviour.
+- A pre-scoped `__hypen_scoped:<scope>:<name>` and a bare `__hypen_*` name
+  (e.g. `__hypen_bind` with `{path: "isAdmin", value: true}`) are always
+  refused.
+
+A refused action runs no handler and sends nothing; the server logs
+`Session <id>: action "<name>" refused — <reason>`. Host code that is not the
+rendered UI (timers, `ModuleInstance.DispatchAction`, agents via `Attach`)
+keeps its own entries.
 
 ### Device Capabilities (RFC 001, provisional)
 
@@ -514,7 +541,8 @@ fmt.Println(btn.Template)
 | Type | Description |
 |------|-------------|
 | `RemoteEngine` | WebSocket client for remote UI |
-| `RemoteServer` | WebSocket server for streaming apps |
+| `RemoteServer` | WebSocket server for streaming apps (`AllowUnboundClientActions` / `AllowAnyUnboundClientActions`: bare client action names it accepts) |
+| `UnboundClientActions` / `ClientActionRefusedError` | A server's bare-name policy / a refused client action |
 | `Patch` | DOM operation (create, update, remove) |
 | `Message` | Protocol message types |
 | `AgentHandle` | Non-owning, guarded agent view of one live session — `RemoteServer.Attach(sessionID)` |

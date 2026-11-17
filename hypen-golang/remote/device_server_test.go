@@ -285,7 +285,8 @@ func TestDeviceNegotiatedWithoutAnyEnableCall(t *testing.T) {
 	core.App.Clear()
 	t.Cleanup(func() { core.App.Clear() })
 	rec := newRecorder()
-	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI)
+	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI).
+		AllowAnyUnboundClientActions() // handlers dispatched by name (see newDevServer)
 	if !srv.DeviceEnabled() || !srv.CompressionEnabled() {
 		t.Fatalf("defaults: DeviceEnabled %v CompressionEnabled %v", srv.DeviceEnabled(), srv.CompressionEnabled())
 	}
@@ -1257,7 +1258,8 @@ func TestDeviceLateHelloAfterGrace(t *testing.T) {
 	core.App.Clear()
 	t.Cleanup(func() { core.App.Clear() })
 	rec := newRecorder()
-	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI)
+	srv := NewRemoteServer().WithDefinition(devApp(rec, nil)).Source(t.TempDir()).UI(devUI).
+		AllowAnyUnboundClientActions() // handlers dispatched by name (see newDevServer)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		up := srv.Upgrader()
@@ -1301,7 +1303,8 @@ func newGraceDevServer(t *testing.T, def *core.ModuleDefinition, ui string, comp
 	if components != nil {
 		dir = writeComponents(t, components)
 	}
-	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui)
+	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui).
+		AllowAnyUnboundClientActions() // handlers dispatched by name (see newDevServer)
 	mux := http.NewServeMux()
 	mux.HandleFunc("/ws", func(w http.ResponseWriter, r *http.Request) {
 		up := srv.Upgrader()

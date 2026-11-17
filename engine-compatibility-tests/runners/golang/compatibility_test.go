@@ -200,7 +200,12 @@ func TestEngineCompatibility(t *testing.T) {
 			case "dnd":
 				runDndFixture(t, fixturePath)
 			case "actions":
-				runActionTest(t, tc)
+				if hasClientActionSteps(tc) {
+					// Needs the rendered tree: the real engine.
+					runClientActionFixture(t, fixturePath)
+				} else {
+					runActionTest(t, tc)
+				}
 			case "lifecycle":
 				runLifecycleTest(t, tc)
 			case "state":

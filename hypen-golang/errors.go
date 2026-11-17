@@ -166,3 +166,25 @@ func newWasmError(operation string, code uint64) *EngineError {
 		return &EngineError{Code: ErrRender, Message: fmt.Sprintf("%s failed with code: %d", operation, code)}
 	}
 }
+
+// newClientActionError maps a hypen_dispatch_client_action return code to an
+// EngineError. Code 4 is the client entry's refusal (not an envelope, node
+// not live, node does not carry the binding, reserved name); detail is the
+// engine's reason.
+func newClientActionError(code uint64, detail string) *EngineError {
+	switch code {
+	case 1:
+		return &EngineError{Code: ErrActionNotFound, Message: "invalid action string"}
+	case 2:
+		return &EngineError{Code: ErrActionNotFound, Message: "invalid action JSON"}
+	case 3:
+		return &EngineError{Code: ErrNotInitialized, Message: "engine not initialized"}
+	case 4:
+		if detail == "" {
+			detail = "action is not bound on the addressed node"
+		}
+		return &EngineError{Code: ErrActionNotFound, Message: "client action refused: " + detail}
+	default:
+		return &EngineError{Code: ErrActionNotFound, Message: fmt.Sprintf("dispatch_client_action failed with code %d: %s", code, detail)}
+	}
+}

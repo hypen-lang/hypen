@@ -1070,6 +1070,9 @@ func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 
 	// Discover and register components (only when a source dir is set).
 	registeredComponents := make(map[string]bool)
+	// Every template this engine renders from, for the legacy shim's
+	// action-name harvest (registerLegacyActionHandlers).
+	templates := []string{ui}
 	if sourceDir != "" {
 		discovered, discErr := core.DiscoverComponents(sourceDir, nil)
 		if discErr != nil {
@@ -1080,6 +1083,7 @@ func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 					logServer.Error("Failed to register component %s: %v", comp.Name, regErr)
 				} else {
 					registeredComponents[comp.Name] = true
+					templates = append(templates, comp.Template)
 				}
 			}
 		}
@@ -1100,6 +1104,8 @@ func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 		}
 		if regErr := engine.RegisterComponent(name, def.Template, ""); regErr != nil {
 			logServer.Error("Failed to register module component %s: %v", name, regErr)
+		} else {
+			templates = append(templates, def.Template)
 		}
 	}
 
@@ -1192,6 +1198,9 @@ func (s *RemoteSession) buildEngineAndInitialPatches() []Patch {
 	// Action handlers. Must be registered before renderSource so the
 	// initial render sees the action scope.
 	s.registerActionHandlers(engine, moduleName, primaryDef)
+	if s.usesLegacyShim() {
+		s.registerLegacyActionHandlers(engine, templates)
+	}
 
 	enginePatches, err := engine.RenderSource(ui)
 	patches := []Patch{}
@@ -1616,7 +1625,11 @@ func (s *RemoteSession) installQueue() {
 	s.dispatchMu.Unlock()
 }
 
-// dispatchNow runs one renderer dispatch (the caller serialises).
+// dispatchNow runs one client dispatch (the caller serialises). Wire input
+// is untrusted, so it is admitted first (client_action.go): an envelope is
+// authorised by the engine's client entry against the live tree, a bare
+// name against the server's unbound-client-action policy. Nothing a client
+// sends reaches the engine's permissive DispatchAction unadmitted.
 func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 	s.mu.Lock()
 	destroyed := s.destroyed
@@ -1627,7 +1640,7 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 
 	// Strip the reserved transaction-animation stamp BEFORE either path —
 	// engine-routed handlers and the legacy OnAction shim both receive the
-	// payload from here.
+	// payload from here (an envelope carries it on its inner payload).
 	payload = stripReservedAnimateKey(payload)
 
 	s.mu.Lock()
@@ -1635,17 +1648,39 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 	s.mu.Unlock()
 
 	moduleName := s.host.ModuleName()
-	module := s.host.Module()
 
-	// Map-style handler (WithState/Serve + OnAction): no per-action
-	// handlers are registered on the engine, so run the ModuleConfig shim.
-	// Framework actions (two-way binding, reorder, pin) still go through
-	// the engine, whose reserved handlers are registered for every module.
-	legacy := s.usesLegacyShim()
-	if legacy {
-		actionName, payload = unwrapUIAction(actionName, payload)
+	if actionName == uiActionEnvelope {
+		if env, ok := payload.(map[string]any); ok {
+			env["payload"] = stripReservedAnimateKey(env["payload"])
+		}
+		if engine == nil {
+			s.refuseClientAction(&ClientActionRefusedError{
+				Action: envelopeInnerAction(payload),
+				Reason: "no rendered tree to address",
+			})
+			return
+		}
+		// The client entry authorises the envelope against the node it
+		// addresses and runs the resolved handler — an engine handler, a
+		// reserved write, or (legacy shim) registerLegacyActionHandlers'.
+		if err := engine.DispatchClientAction(actionName, payload); err != nil {
+			s.refuseClientAction(&ClientActionRefusedError{
+				Action: envelopeInnerAction(payload),
+				Reason: err.Error(),
+			})
+			return
+		}
+		s.sendStateUpdate(moduleName)
+		return
 	}
-	if engine != nil && (!legacy || strings.HasPrefix(actionName, "__hypen")) {
+
+	if err := admitUnboundClientAction(actionName, s.unboundClientActions()); err != nil {
+		s.refuseClientAction(err)
+		return
+	}
+
+	// An admitted bare name is trusted input from here on.
+	if engine != nil && !s.usesLegacyShim() {
 		if err := engine.DispatchAction(actionName, payload); err != nil {
 			logServer.Error("Engine DispatchAction failed: %v", err)
 		}
@@ -1654,31 +1689,17 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 	}
 
 	// Legacy path: the ModuleConfig.OnAction shim.
-	if module == nil || module.OnAction == nil {
+	if !s.applyLegacyAction(actionName, payload) {
 		return
 	}
-	s.mu.Lock()
-	currentState := s.stateCopyLocked()
-	s.mu.Unlock()
-	newState := module.OnAction(actionName, payload, currentState)
-	if newState == nil {
-		return
-	}
-	s.mu.Lock()
-	s.state = newState
-	s.mu.Unlock()
 	if engine != nil {
-		// Re-render: the patch callback ships the patches and bumps the
-		// revision; the stateUpdate below carries that same revision.
-		if _, err := engine.UpdateState(newState); err != nil {
-			logServer.Error("Engine UpdateState failed: %v", err)
-		}
 		s.sendStateUpdate(moduleName)
 		return
 	}
 	s.mu.Lock()
 	s.revision++
 	rev := s.revision
+	newState := s.stateCopyLocked()
 	s.mu.Unlock()
 	_ = s.Send(&StateUpdateMessage{
 		Type:     MessageTypeStateUpdate,
@@ -1688,29 +1709,73 @@ func (s *RemoteSession) dispatchNow(actionName string, payload any) {
 	})
 }
 
+// refuseClientAction reports a client action the server will not run. The
+// message is dropped (no reply, no disconnect), like any other bad client
+// message.
+func (s *RemoteSession) refuseClientAction(err error) {
+	if refused, ok := err.(*ClientActionRefusedError); ok {
+		logServer.Warn("Session %s: action %q refused — %s", s.ID, refused.Action, refused.Reason)
+		return
+	}
+	logServer.Warn("Session %s: action refused — %v", s.ID, err)
+}
+
+// unboundClientActions is the host's policy for bare client action names;
+// strict when the host does not carry one.
+func (s *RemoteSession) unboundClientActions() UnboundClientActions {
+	if h, ok := s.host.(UnboundClientActionsHost); ok {
+		return h.UnboundClientActions()
+	}
+	return UnboundClientActions{}
+}
+
+// applyLegacyAction runs the map-style ModuleConfig.OnAction shim for an
+// admitted action and, when it returns a new state, stores it and
+// re-renders (the patch callback ships the patches and bumps the
+// revision). Reports whether the state was replaced.
+func (s *RemoteSession) applyLegacyAction(actionName string, payload any) bool {
+	module := s.host.Module()
+	if module == nil || module.OnAction == nil {
+		return false
+	}
+	s.mu.Lock()
+	currentState := s.stateCopyLocked()
+	s.mu.Unlock()
+	newState := module.OnAction(actionName, payload, currentState)
+	if newState == nil {
+		return false
+	}
+	s.mu.Lock()
+	s.state = newState
+	engine := s.engine
+	s.mu.Unlock()
+	if engine != nil {
+		if _, err := engine.UpdateState(newState); err != nil {
+			logServer.Error("Engine UpdateState failed: %v", err)
+		}
+	}
+	return true
+}
+
+// registerLegacyActionHandlers gives the map-style OnAction shim one engine
+// handler per `@actions.<name>` its templates reference, so a renderer's
+// `__hypen_dispatch` envelope is authorised by the engine's client entry
+// (the node must carry that binding) and then runs the shim with the plain
+// action name. Without a handler the client entry has nothing to resolve
+// the envelope to.
+func (s *RemoteSession) registerLegacyActionHandlers(engine *core.WasmEngine, templates []string) {
+	for _, name := range templateActionNames(templates...) {
+		name := name
+		engine.OnAction("__hypen_scoped::"+name, func(action core.Action) {
+			s.applyLegacyAction(name, action.Payload)
+		})
+	}
+}
+
 // uiActionEnvelope is the engine's UI dispatch entry point: renderers send
 // `{node, action, payload}` under this name and the engine resolves the
 // owning module (hypen-engine-rs action_routing::UI_ACTION).
 const uiActionEnvelope = "__hypen_dispatch"
-
-// unwrapUIAction turns a renderer's `__hypen_dispatch` envelope into the
-// plain action name + payload the legacy ModuleConfig.OnAction shim
-// expects. Reserved framework actions keep the envelope so the engine can
-// resolve them. Anything else passes through unchanged.
-func unwrapUIAction(name string, payload any) (string, any) {
-	if name != uiActionEnvelope {
-		return name, payload
-	}
-	env, ok := payload.(map[string]any)
-	if !ok {
-		return name, payload
-	}
-	inner, _ := env["action"].(string)
-	if inner == "" || strings.HasPrefix(inner, "__") {
-		return name, payload
-	}
-	return inner, env["payload"]
-}
 
 func (s *RemoteSession) stateCopyLocked() map[string]any {
 	out := make(map[string]any, len(s.state))

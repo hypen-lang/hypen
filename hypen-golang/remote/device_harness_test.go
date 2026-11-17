@@ -40,7 +40,10 @@ func newDevServer(t *testing.T, cfg *DeviceConfig, def *core.ModuleDefinition, u
 	if components != nil {
 		dir = writeComponents(t, components)
 	}
-	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui)
+	// The device tests' client plays the user by dispatching handlers by
+	// name (no rendered node per handler): an explicit opt-in to bare
+	// names — admission itself is covered by client_action_test.go.
+	srv := NewRemoteServer().WithDefinition(def).Source(dir).UI(ui).AllowAnyUnboundClientActions()
 	if cfg == nil {
 		srv.DisableDevice()
 	} else {

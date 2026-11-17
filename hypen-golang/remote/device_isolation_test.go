@@ -50,6 +50,7 @@ func byoServer(t *testing.T, auths *atomic.Int32) (*RemoteServer, func(path stri
 	core.App.Clear()
 	t.Cleanup(func() { core.App.Clear() })
 	srv := NewRemoteServer().WithDefinition(devApp(newRecorder(), nil)).Source(t.TempDir()).UI(devUI).
+		AllowAnyUnboundClientActions(). // handlers dispatched by name (see newDevServer)
 		AllowedOrigins("https://app.example").
 		Authenticate(func(r *http.Request) bool {
 			auths.Add(1)

@@ -297,7 +297,9 @@ func TestAutoWire_PrimaryIsVisibleToRoutedModules(t *testing.T) {
 	server := NewRemoteServer().
 		WithDefinition(appDef).
 		Source(dir).
-		UI(`module App { Router { Route(path: "/") { Home() } } }`)
+		UI(`module App { Router { Route(path: "/") { Home() } } }`).
+		// The probe is sent by name (no node renders it): opted in.
+		AllowUnboundClientActions("checkApp")
 	if err := server.Prepare(); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}
@@ -424,7 +426,9 @@ func TestNestedRouterAutoWire_NestedRouterInChildTemplate(t *testing.T) {
 	server := NewRemoteServer().
 		WithDefinition(appDef).
 		Source(dir).
-		UI(primaryUI)
+		UI(primaryUI).
+		// The probe is sent by name (no node renders it): opted in.
+		AllowUnboundClientActions("probe")
 	if err := server.Prepare(); err != nil {
 		t.Fatalf("Prepare: %v", err)
 	}

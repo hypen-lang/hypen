@@ -40,6 +40,17 @@
 //
 //	client.DispatchAction("increment", nil)
 //
+// # Client actions are untrusted
+//
+// A client's dispatchAction runs only when admitted (client_action.go): a
+// `__hypen_dispatch` envelope must address a live node that itself declares
+// the action (checked by the engine's client entry,
+// core.WasmEngine.DispatchClientAction); router.push/replace/back/forward
+// are accepted by name; any other bare name only if the server lists it
+// with RemoteServer.AllowUnboundClientActions (the client above needs
+// AllowUnboundClientActions("increment")) or AllowAnyUnboundClientActions.
+// `__hypen_scoped:*` names and bare `__hypen_*` names are always refused.
+//
 // # Protocol
 //
 // The Remote UI protocol uses JSON messages over WebSocket:

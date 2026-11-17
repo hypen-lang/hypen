@@ -1,7 +1,6 @@
 package remote
 
 import (
-	"encoding/json"
 	"testing"
 	"time"
 
@@ -41,10 +40,14 @@ func TestRemoteServerTheme_PerSessionFork(t *testing.T) {
 
 	a, trA := helloSession(t, server)
 	b, trB := helloSession(t, server)
-	for _, tr := range []*ChannelTransport{trA, trB} {
+	var toggleA string
+	for i, tr := range []*ChannelTransport{trA, trB} {
 		msg := waitForMessage(t, tr, MessageTypeInitialTree, 5*time.Second)
 		if msg == nil || !patchesMention(msg.(*InitialTreeMessage).Patches, "#111111") {
 			t.Fatalf("initialTree does not carry the light token: %+v", msg)
+		}
+		if i == 0 {
+			toggleA = firstCreated(t, msg.(*InitialTreeMessage).Patches, "Button")
 		}
 	}
 	<-a.Ready()
@@ -54,8 +57,7 @@ func TestRemoteServerTheme_PerSessionFork(t *testing.T) {
 		t.Fatalf("sessions must each hold their own fork: a=%p b=%p host=%p", a.Theme(), b.Theme(), theme)
 	}
 
-	act, _ := json.Marshal(map[string]any{"type": "dispatchAction", "action": "toggle"})
-	if err := a.Receive(act); err != nil {
+	if err := a.Receive(clickMessage(toggleA, "toggle")); err != nil {
 		t.Fatalf("Receive dispatch: %v", err)
 	}
 	pm := waitForMessage(t, trA, MessageTypePatch, 5*time.Second)
