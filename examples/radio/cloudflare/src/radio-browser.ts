@@ -10,6 +10,8 @@
 // Only metadata (JSON) passes through the worker. Audio is never proxied:
 // the client's media element connects straight to the station's stream URL.
 
+import { tintFor } from "./tint";
+
 export const USER_AGENT = "HypenRadioExample/1.0 (open-source Hypen UI example app)";
 
 const SERVER_LIST_URL = "https://all.api.radio-browser.info/json/servers";
@@ -64,6 +66,10 @@ export interface Station {
   playable: boolean;
   /** Why a station can't be played here ("" when playable). */
   unplayableReason: string;
+  /** Deep per-station colour (hashed from the id) for backdrops — see tint.ts. */
+  tint: string;
+  /** Its bright partner: the monogram artwork fill and glows. */
+  glow: string;
 }
 
 export interface Category {
@@ -205,6 +211,7 @@ export function normalize(raw: RawStation): Station {
     clicks: raw.clickcount || 0,
     playable: reason === "",
     unplayableReason: reason,
+    ...tintFor(raw.stationuuid),
   };
 }
 

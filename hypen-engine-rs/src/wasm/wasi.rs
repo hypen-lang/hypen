@@ -33,7 +33,7 @@ use crate::{
     ir::{ast_to_ir_node, IRNode},
     lifecycle::ModuleInstance,
     reconcile::Patch,
-    wasm::shared::{format_parse_errors, render_subtree_into, NodeIdIndex},
+    wasm::shared::{format_parse_errors, NodeIdIndex},
 };
 
 use super::ffi::{ActionPayload, ModuleConfig, SparseStateUpdate};
@@ -364,7 +364,6 @@ pub extern "C" fn hypen_render_into(
         };
 
         let ir_node = ast_to_ir_node(component);
-        let expanded = engine.core.component_registry.expand_ir_node(&ir_node);
 
         // O(1) lookup via the node-ID index
         let parent_id = match engine.node_id_index.lookup(parent_id_str) {
@@ -380,8 +379,7 @@ pub extern "C" fn hypen_render_into(
             }
         };
 
-        let mut patches = Vec::new();
-        render_subtree_into(&mut engine.core, parent_id, &expanded, &state, &mut patches);
+        let patches = engine.core.render_subtree_into(parent_id, &ir_node, &state);
         engine.emit_patches(patches);
         0
     })

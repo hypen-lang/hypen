@@ -439,6 +439,98 @@ describe("DOM Column cross-axis sizing contract", () => {
     expect(node("section").style.alignSelf).toBe("stretch");
   });
 
+  test("a Stack with a percentage-width child fills its Column (Food hero image)", () => {
+    // examples/food-ordering RestaurantDetail: Column { Stack { Image.w-full
+    // .h(220); SafeArea { Row.w-full } } }. The Stack used to pass no demand,
+    // so it stayed content-sized (the image's aspect-ratio width at h-56,
+    // ~300px of a 430px screen) and the 100% resolved against THAT.
+    const { node } = renderTree(
+      [
+        ["page", "Column", {}],
+        ["body", "Column", {}],
+        ["hero", "Stack", {}],
+        ["image", "Image", { src: "hero.jpg", "width.0": "100%", "height.0": 220 }],
+        ["chrome", "SafeArea", { edges: ["top"] }],
+        ["bar", "Row", { "width.0": "100%", "justifyContent.0": "space-between" }],
+        ["title", "Text", { 0: "Napoli Pizzeria" }],
+      ],
+      [
+        ["page", "body"],
+        ["body", "hero"],
+        ["hero", "image"],
+        ["hero", "chrome"],
+        ["chrome", "bar"],
+        ["body", "title"],
+      ],
+    );
+
+    expect(node("hero").style.alignSelf).toBe("stretch");
+    expect(node("hero").dataset.hypenHorizontalWidthDemand).toBe("true");
+    expect(node("body").style.alignSelf).toBe("stretch");
+    expect(node("image").style.width).toBe("100%");
+    // The sibling Text keeps its intrinsic width.
+    expect(node("title").style.alignSelf).toBeUndefined();
+  });
+
+  test("a Stack of fixed-size children keeps its content size (avatar + badge)", () => {
+    const { node } = renderTree(
+      [
+        ["page", "Column", {}],
+        ["avatar", "Stack", { horizontalAlignment: "end", verticalAlignment: "end" }],
+        ["face", "Column", { width: 54, height: 54 }],
+        ["dot", "Box", { width: 16, height: 16 }],
+      ],
+      [
+        ["page", "avatar"],
+        ["avatar", "face"],
+        ["avatar", "dot"],
+      ],
+    );
+
+    expect(node("avatar").style.alignSelf).toBeUndefined();
+    expect(node("avatar").dataset.hypenHorizontalWidthDemand).toBeUndefined();
+    expect(node("page").dataset.hypenHorizontalWidthDemand).toBeUndefined();
+  });
+
+  test("a fixed-width Stack terminates its percentage child's demand", () => {
+    const { node } = renderTree(
+      [
+        ["page", "Column", {}],
+        ["tile", "Stack", { width: 148, height: 148 }],
+        ["art", "Image", { src: "a.jpg", width: "100%", height: "100%" }],
+      ],
+      [
+        ["page", "tile"],
+        ["tile", "art"],
+      ],
+    );
+
+    expect(node("tile").style.width).toBe("148px");
+    expect(node("tile").style.alignSelf).toBeUndefined();
+    expect(node("page").dataset.hypenHorizontalWidthDemand).toBeUndefined();
+  });
+
+  test("Stack demand is withdrawn when the percentage child leaves", () => {
+    const { renderer, node } = renderTree(
+      [
+        ["page", "Column", {}],
+        ["hero", "Stack", {}],
+        ["image", "Image", { src: "hero.jpg", width: "100%", height: 220 }],
+        ["badge", "Box", { width: 20, height: 20 }],
+      ],
+      [
+        ["page", "hero"],
+        ["hero", "image"],
+        ["hero", "badge"],
+      ],
+    );
+    expect(node("hero").style.alignSelf).toBe("stretch");
+
+    renderer.applyPatches([{ type: "remove", id: "image" } as Patch]);
+    expect(node("hero").style.alignSelf).toBeFalsy();
+    expect(node("hero").dataset.hypenHorizontalWidthDemand).toBeUndefined();
+  });
+
   test("Stack alignment is resolved as grid alignment before insertion", () => {
     const { node } = renderTree(
       [

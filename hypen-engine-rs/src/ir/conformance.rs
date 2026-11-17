@@ -221,7 +221,9 @@ fn collect_ids(node: &IRNode, scope: &mut IdScope, out: &mut Vec<A11yDiagnostic>
         IRNode::Element(element) => {
             if matches!(
                 element.props.get("id.0"),
-                Some(Value::Binding(_)) | Some(Value::TemplateString { .. })
+                Some(Value::Binding(_))
+                    | Some(Value::TemplateString { .. })
+                    | Some(Value::SchemeSwitch { .. })
             ) {
                 scope.has_dynamic = true;
             }

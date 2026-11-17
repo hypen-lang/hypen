@@ -21,6 +21,11 @@
  *
  * Findings print as `<file>:<line>:<col>: check[<rule>] <elementType> — <message>`.
  *
+ * Single-file components are covered too: a `.ts` module's inline
+ * `.ui(\`…\`)` / `.ui(hypen\`…\`)` templates are extracted
+ * (`check-inline.ts`), checked against that same module, and reported at
+ * their position in the `.ts` file.
+ *
  * Conservative by design — a check that fires on correct code gets turned
  * off. State paths are never flagged through `null`, arrays, primitives, or
  * empty objects (all plausibly populated later); actions are only judged
@@ -49,8 +54,19 @@ import type {
   TemplateRef,
   TemplateRefsReport,
 } from "@hypen-space/core";
-import { COULD_NOT_CHECK, findHypenFiles } from "./check.js";
-import { formatHypenParseError } from "./dev-diagnostics.js";
+import { COULD_NOT_CHECK, findCheckFiles } from "./check.js";
+import {
+  extractInlineTemplates,
+  formatInlineParseError,
+  INTERPOLATION_IDENT,
+  isInlineTemplateCandidate,
+  mapToTs,
+} from "./check-inline.js";
+import {
+  engineErrorMessage,
+  formatHypenParseError,
+  parseEngineErrorPositions,
+} from "./dev-diagnostics.js";
 import {
   classifyThemeToken,
   loadThemeFile,
@@ -107,10 +123,13 @@ export function detectTemplateRuleDrift(
 /**
  * Component name a `.hypen` file registers under, per the discovery
  * conventions: `Name/component.hypen` and `Name/index.hypen` → `Name`;
- * `Name.hypen` → `Name`.
+ * `Name.hypen` → `Name`. A single-file component `Name.ts` (inline
+ * `.ui(\`…\`)` template) → `Name`.
  */
 export function componentNameForFile(file: string): string {
-  const base = basename(file, ".hypen");
+  const base = isInlineTemplateCandidate(file)
+    ? basename(file).replace(/\.(?:ts|tsx|mts)$/, "")
+    : basename(file, ".hypen");
   if (base === "component" || base === "index") {
     return basename(dirname(file));
   }
@@ -123,6 +142,8 @@ export function componentNameForFile(file: string): string {
  * `Name.hypen` ↔ `Name.ts`), or `null` when there is none.
  */
 export function moduleFileFor(file: string): string | null {
+  // A single-file component is its own module.
+  if (isInlineTemplateCandidate(file)) return existsSync(file) ? file : null;
   const candidate = join(dirname(file), `${basename(file, ".hypen")}.ts`);
   return existsSync(candidate) ? candidate : null;
 }
@@ -454,7 +475,12 @@ export function evaluateTemplate(input: TemplateCheckInput): {
       }
       case "state": {
         if (!facts || !ownedBy(ref, component)) break;
-        const root = ref.path[0];
+        // A `${…}` interpolation inside an inline template's `@{…}` expression
+        // (`@{state.user.${F}}`) is a runtime-only key: only the path before
+        // it is knowable, so the check stops there.
+        const hole = ref.path.findIndex((seg) => seg.includes(INTERPOLATION_IDENT));
+        const path = hole < 0 ? ref.path : ref.path.slice(0, hole);
+        const root = path[0];
         if (!root || root.startsWith("__") || input.moduleNames?.has(root.toLowerCase())) break;
         // A non-object initial state says nothing about which keys exist.
         if (!isPlainObject(facts.initialState)) break;
@@ -471,14 +497,14 @@ export function evaluateTemplate(input: TemplateCheckInput): {
           );
           break;
         }
-        const verdicts = candidates.map((m) => classifyStatePath(m.initialState, ref.path));
+        const verdicts = candidates.map((m) => classifyStatePath(m.initialState, path));
         const first = verdicts[0];
         if (typeof first === "object" && verdicts.every((v) => typeof v === "object")) {
-          const parent = ref.path.slice(0, first.unknownAt).join(".");
+          const parent = path.slice(0, first.unknownAt).join(".");
           emit(
             ref,
             "unknown-state-path",
-            `@state.${ref.name}: "${ref.path[first.unknownAt]}" is not a key of ` +
+            `@state.${ref.name}: "${path[first.unknownAt]}" is not a key of ` +
               `state.${parent} in the initial state — check the spelling`,
           );
         }
@@ -502,22 +528,29 @@ export function evaluateTemplate(input: TemplateCheckInput): {
         // Providers are registered at runtime (plugins, host setContext);
         // not statically knowable, so never flagged — except `theme`, whose
         // tokens the project's theme file declares.
-        if (ref.root !== THEME_PROVIDER || !input.theme || ref.path.length === 0) break;
-        const verdict = classifyThemeToken(input.theme, ref.path);
+        if (ref.root !== THEME_PROVIDER || !input.theme) break;
+        // As for state paths: a `${…}` interpolation in an inline template's
+        // `@{theme.color.${k}}` is a runtime-only key, so only the group
+        // before it is judged.
+        const hole = ref.path.findIndex((seg) => seg.includes(INTERPOLATION_IDENT));
+        const path = hole < 0 ? ref.path : ref.path.slice(0, hole);
+        if (path.length === 0) break;
+        const shown = hole < 0 ? ref.name : `${THEME_PROVIDER}.${path.join(".")}`;
+        const verdict = classifyThemeToken(input.theme, path);
         if (verdict === "ok") break;
         if (verdict.definedIn.length === 0) {
-          const near = nearestToken(input.theme, ref.path);
+          const near = hole < 0 ? nearestToken(input.theme, path) : null;
           emit(
             ref,
             "unknown-theme-token",
-            `@${ref.name} is not defined in the theme file — it renders as empty` +
+            `@${shown} is not defined in the theme file — it renders as empty` +
               (near ? ` (did you mean @theme.${near}?)` : ""),
           );
         } else {
           emit(
             ref,
             "unknown-theme-token",
-            `@${ref.name} is defined only for ${verdict.definedIn.join(", ")}; it renders as ` +
+            `@${shown} is defined only for ${verdict.definedIn.join(", ")}; it renders as ` +
               `empty in ${verdict.missingIn.join(", ")} — give it a base value in "tokens"`,
           );
         }
@@ -640,12 +673,71 @@ export function combineOutcomes(a: number, b: number): number {
 }
 
 // ---------------------------------------------------------------------------
+// Inline templates
+// ---------------------------------------------------------------------------
+
+/**
+ * Template facts for one checked file: the binding's report for a `.hypen`
+ * file, or the merged reports of a `.ts` module's inline templates with
+ * every location mapped back to the `.ts` file. Throws an `Error` whose
+ * message is a printable `file:line:col: parse error …` head when a
+ * template fails to parse, or when a `.ts` file has no inline template.
+ */
+export function templateRefsForFile(
+  templateRefs: (source: string) => TemplateRefsReport,
+  file: string,
+  display: string,
+  source: string,
+): TemplateRefsReport {
+  if (!isInlineTemplateCandidate(file)) {
+    try {
+      return templateRefs(source);
+    } catch (e) {
+      throw new Error(formatHypenParseError(display, source, e)[0]);
+    }
+  }
+  const templates = extractInlineTemplates(source);
+  if (templates.length === 0) {
+    throw new Error(`${display}: no inline .ui(\`…\`) template found to check`);
+  }
+  const merged: TemplateRefsReport = {
+    refs: [],
+    diagnostics: [],
+    declaredComponents: [],
+    importedComponents: [],
+  };
+  for (const template of templates) {
+    let report: TemplateRefsReport;
+    try {
+      report = templateRefs(template.source);
+    } catch (e) {
+      const message = engineErrorMessage(e);
+      const errors = parseEngineErrorPositions(message);
+      throw new Error(
+        errors.length > 0
+          ? formatInlineParseError(display, source, template, errors)[0]
+          : `${display}: inline template: ${message}`,
+      );
+    }
+    const relocate = <T extends { line?: number; col?: number }>(item: T): T => {
+      const at = mapToTs(source, template, item as T & { span?: { start: number } });
+      return at ? { ...item, line: at.line, col: at.col } : item;
+    };
+    merged.refs.push(...report.refs.map(relocate));
+    merged.diagnostics.push(...report.diagnostics.map(relocate));
+    merged.declaredComponents.push(...report.declaredComponents);
+    merged.importedComponents.push(...report.importedComponents);
+  }
+  return merged;
+}
+
+// ---------------------------------------------------------------------------
 // Runner
 // ---------------------------------------------------------------------------
 
 /**
- * Run the template checks over `files` (or every `.hypen` file under the
- * components directory). The whole project — `componentsDir` when it exists,
+ * Run the template checks over `files` (or every `.hypen` file and inline
+ * `.ui(\`…\`)` template under the components directory). The whole project — `componentsDir` when it exists,
  * else the project root, plus the directories of explicit targets — is
  * scanned to learn which components exist and which are rendered in loops,
  * even when only some files are checked. Returns the finding count, or
@@ -664,7 +756,7 @@ export async function runTemplateCheck(opts: {
   const { projectRoot } = opts;
   const componentsDir = opts.componentsDir ?? projectRoot;
   const scanRoot = existsSync(componentsDir) ? componentsDir : projectRoot;
-  const targets = opts.files ?? findHypenFiles(scanRoot);
+  const targets = opts.files ?? findCheckFiles(scanRoot);
   if (targets.length === 0) return 0;
 
   const { Engine } = await import("@hypen-space/server");
@@ -691,7 +783,7 @@ export async function runTemplateCheck(opts: {
     if (relative(scanRoot, dir).startsWith("..")) roots.add(dir);
   }
   const projectFiles = new Set<string>(targets);
-  for (const root of roots) for (const f of findHypenFiles(root)) projectFiles.add(f);
+  for (const root of roots) for (const f of findCheckFiles(root)) projectFiles.add(f);
 
   const knownComponents = new Set<string>();
   for (const root of roots) for (const n of findSingleFileComponentNames(root)) knownComponents.add(n);
@@ -711,13 +803,18 @@ export async function runTemplateCheck(opts: {
     let source = "";
     try {
       source = readFileSync(file, "utf-8");
-      report = binding.templateRefs!(source);
+      report = templateRefsForFile(
+        (src) => binding.templateRefs!(src),
+        file,
+        display(file),
+        source,
+      );
     } catch (e: any) {
       // Only checked targets count as "couldn't check"; another project
       // file failing to parse only narrows the usage graph. (The a11y pass
       // already printed the parse error with a code frame, so one line.)
       if (targetSet.has(file)) {
-        const [head] = formatHypenParseError(display(file), source, e);
+        const head = e instanceof Error ? e.message : formatHypenParseError(display(file), source, e)[0];
         console.error(`  template check skipped — ${head}`);
         failedTargets.push(display(file));
       }

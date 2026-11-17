@@ -68,6 +68,20 @@ Stack {
 }
 ```
 
+A Stack is as large as its largest child. Inside a Column it keeps that
+content size, unless a child asks for a percentage width: then the Stack fills
+the Column's width (like a Column would) and the percentage resolves against it.
+
+```hypen
+Column {
+    // Full-width hero: the Stack fills the Column because the image is w-full.
+    Stack {
+        Image(src: "@{state.heroUrl}").tw("w-full h-56").objectFit("cover")
+        Row { Button { Text("Back") } }.tw("w-full p-4")
+    }
+}
+```
+
 ### Grid
 
 Arranges a bound collection in a grid — data-driven, like `List`.

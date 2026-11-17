@@ -94,6 +94,37 @@ describe("Heading level", () => {
     setProp(renderer, "h", "level", 2);
     expect(el.getAttribute("aria-level")).toBeFalsy();
   });
+
+  // Canvas, desktop, SwiftUI and Compose all re-size a heading whose level
+  // changes; the DOM keeps its <hN> (re-tagging would orphan the node map)
+  // but must LOOK like the new level too, not only announce it.
+  test("a reactive level change applies the new level's size and weight", () => {
+    const { renderer } = makeRenderer();
+    const el = create(renderer, "h", "Heading", { level: 1, "0": "T" });
+    expect(el.dataset.hypenLevel).toBeUndefined();
+
+    setProp(renderer, "h", "level.0", 4);
+    expect((renderer as any).nodes.get("h")).toBe(el);
+    expect(el.tagName.toLowerCase()).toBe("h1");
+    expect(el.dataset.hypenLevel).toBe("4");
+
+    const sheet = document.getElementById("hypen-heading-level-styles");
+    expect(sheet).toBeTruthy();
+    const css = String(sheet!.textContent);
+    // h4's user-agent size, bold — and zero specificity (`:where`), so any
+    // author styling (.fontSize(), a Tailwind text-* class) still wins.
+    expect(css).toContain(
+      ':where([data-hypen-type="heading"][data-hypen-level="4"]) { font-size: 1em; font-weight: bold; margin-block: 1.33em; }'
+    );
+    expect(css).toContain('[data-hypen-level="1"]) { font-size: 2em;');
+    expect(css).toContain('[data-hypen-level="6"]) { font-size: 0.67em;');
+    expect(css).not.toMatch(/(^|\})\s*\[data-hypen/);
+
+    // Back at the tag's own level: the tag's UA size applies again.
+    setProp(renderer, "h", "level", 1);
+    expect(el.dataset.hypenLevel).toBeUndefined();
+    expect(el.getAttribute("aria-level")).toBeFalsy();
+  });
 });
 
 describe("reactive updates reach handlers (COMPONENT_HTML_ATTRS)", () => {

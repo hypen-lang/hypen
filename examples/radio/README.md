@@ -26,15 +26,16 @@ examples/radio/
         ├── radio-browser.ts      # API client: server list, User-Agent, search, categories, click counting
         ├── player.ts             # shared player state + start/stop/favourite + ICY polling
         ├── icy.ts                # ICY metadata reader (first StreamTitle block, then hang up)
-        ├── art.ts                # /art/<uuid>: validated favicon, or a generated monogram tile
+        ├── art.ts                # /art/<uuid>: validated favicon, or a generated dot-matrix monogram tile
+        ├── tint.ts               # per-station colour pair (hashed from the id) shared by artwork and backdrops
         ├── visitor.ts            # hypen_radio cookie, request.cf.country → AsyncLocalStorage scope
         ├── library-store.ts      # persists only favourites / recents / last station
         ├── screen-actions.ts     # play / openStation / back shared by screen modules
-        ├── ui.ts                 # shared DSL fragments (station rows, headers, skeletons)
+        ├── ui.ts                 # design tokens + shared DSL fragments (rows, tiles, dial, notices, skeletons)
         ├── icons.ts              # inline SVG icon resources
         └── components/
             ├── App.ts            # shell: Router, mini-player, tab bar, /library, /player, the Video
-            ├── Discover.ts       # popular near you, top clicked, trending, genre shortcuts
+            ├── Discover.ts       # featured local station, local/trending carousels, the top chart, browse entry points
             ├── Categories.ts     # /browse/genres|countries|languages with filter
             ├── StationList.ts    # /list/:kind/:value
             ├── Search.ts         # /search (debounced name search)
@@ -53,6 +54,30 @@ bun run typecheck
 
 In the phone launcher, embed it with `HypenApp("ws://localhost:8799/ws")`.
 Deploy with `bunx wrangler login && bun run deploy`.
+
+## Design
+
+A studio at night: warm near-black, cream type, and one signal red that is
+reserved for "on air" (the live dot, the stop button, the dial needle).
+Headlines are heavy and tight; technical facts (codec, bitrate, chart
+positions) are set in a monospace face like a tuner readout, and an FM dial
+scale recurs as the house rule.
+
+- **Colour comes from the stations.** Each station has a stable colour pair
+  hashed from its id (`tint.ts`). It fills the generated artwork and backs
+  the featured card, the station page and the player.
+- **Generated artwork.** A station without a usable logo gets its initials on
+  a dot-matrix display over broadcast rings. The letters are drawn as
+  circles, not SVG `<text>`, so the tile is the same in every renderer.
+- **Layout.** Carousels of artwork tiles, a numbered chart, and colour-blocked
+  browse grids. From the `md` breakpoint the tab bar becomes a left rail,
+  lists run in two columns, grids in four, and the player splits into
+  artwork and controls side by side. The shell is a reversed column that
+  turns into a row, so nothing is shown or hidden per breakpoint.
+- **Portability.** The desktop renderer has one sans face and no letter
+  spacing, text-transform, flex-wrap or blur. Capitals are typed as capitals,
+  chips sit in scrolling rows or grids, wrapped text is set flush left, and
+  flags lead their text run.
 
 ## How audio playback works
 
@@ -164,10 +189,13 @@ back to US. Countries, genres and languages can always be browsed by hand.
   module's `router.push("/player")`, to an inline route with no module behind
   it, does nothing. The shell navigates by writing `state.location`, which
   works and keeps the URL in sync.
+- **Assigning `[]` to a list that had rows leaves the old rows on screen**
+  with the published packages. Lists that can become empty (search results,
+  favourites, recents, station lists) are wrapped in an `If`, so they are
+  unmounted instead (`stationRows(..., when)` in `ui.ts`).
 - **`Link` isn't a registered primitive** in the published engine, so the
   station website is shown as text.
 - **Canvas renderer:**
   - `Heading` isn't painted, so section titles are missing on `/canvas`.
-  - SVG `<text>` in the monogram artwork tiles isn't drawn.
   - Image corner radii aren't clipped.
   - Playback works.

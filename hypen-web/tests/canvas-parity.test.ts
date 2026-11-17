@@ -384,6 +384,28 @@ describe("Gallery sizing and border applicators", () => {
     expect(input.layout!.width).toBe(200);
   });
 
+  test("a Stack carries a percentage child's width demand (Food hero image)", () => {
+    const image = makeNode("image", "image", { src: "hero.jpg", "width.0": "100%", "height.0": 220 });
+    const hero = makeNode("hero", "stack", {}, [image]);
+    const page = makeNode("page", "column", { width: 400, height: 300 }, [hero]);
+
+    computeLayout(ctx, page, 400, 300, 0, 0);
+
+    expect(hero.layout!.width).toBe(400);
+    expect(image.layout!.width).toBe(400);
+  });
+
+  test("a Stack of fixed-size children stays content-sized", () => {
+    const face = makeNode("face", "column", { width: 54, height: 54 });
+    const dot = makeNode("dot", "box", { width: 16, height: 16 });
+    const avatar = makeNode("avatar", "stack", {}, [face, dot]);
+    const page = makeNode("page", "column", { width: 400, height: 300 }, [avatar]);
+
+    computeLayout(ctx, page, 400, 300, 0, 0);
+
+    expect(avatar.layout!.width).toBe(54);
+  });
+
   test("a Spacer makes its wrapping Row consume the available list width", () => {
     const label = makeNode("label", "text", { 0: "Item 1" });
     const spacer = makeNode("spacer", "spacer", {});

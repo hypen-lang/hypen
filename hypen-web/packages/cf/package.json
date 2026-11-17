@@ -25,7 +25,7 @@
   ],
   "scripts": {
     "build": "bun run build.ts",
-    "build:client": "bun build client/generic-client.ts --outdir dist/client --target browser --minify --entry-naming generic.js",
+    "build:client": "bun run client/build-client.ts",
     "build:types": "tsc --emitDeclarationOnly",
     "prepublishOnly": "bun run build",
     "typecheck": "bunx tsc --noEmit",

@@ -2,6 +2,10 @@
 name = "hypen-renderer-desktop"
 version.workspace = true
 edition.workspace = true
+# The default features' locked dependency graph needs 1.90 (avif-parse
+# 2.1; cosmic-text / wide 1.89; the crate itself uses `slice::as_chunks`,
+# 1.88). The `video` feature's gstreamer 0.25 bindings need 1.92.
+rust-version = "1.90"
 license.workspace = true
 repository.workspace = true
 authors.workspace = true
@@ -16,7 +20,7 @@ readme = "README.md"
 # each can be compiled out (`default-features = false`), and the host then
 # stops advertising it. System build packages per OS: see README "Device
 # capabilities".
-default = ["camera", "mic", "bluetooth"]
+default = ["camera", "mic", "bluetooth", "avif"]
 # `camera.capture`: nokhwa (V4L2 / AVFoundation / Media Foundation) frames,
 # photos as JPEG through `image`, video as fragmented H.264 MP4 through
 # OpenH264 (built from its bundled source) and the crate's own muxer.
@@ -39,10 +43,20 @@ mimalloc = ["dep:mimalloc"]
 # progressive MP4/WebM streams inline via a playbin → RGBA appsink
 # pipeline (see `src/media/`); without it the renderer keeps the
 # poster + play-glyph presentation byte-for-byte.
-video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video"]
+video = ["dep:gstreamer", "dep:gstreamer-app", "dep:gstreamer-video", "dep:url"]
 # Native development HUD showing presented FPS plus this process's CPU and
 # resident-memory usage. Entirely compiled out of production builds.
 dev-overlay = ["dep:sysinfo"]
+# AVIF image decoding (`Image` src, `url(...)` backgrounds; the
+# home-screen example's wallpapers are AVIF). On by default and needs no
+# system library: the container is parsed by `avif-parse` and the AV1
+# payload decoded by `rav1d` (a Rust port of dav1d) built without its
+# assembly, so `cargo` alone builds it. Without the feature an AVIF source
+# fails to decode and the element keeps its placeholder / background.
+avif = ["dep:rav1d", "dep:avif-parse"]
+# rav1d's hand-written x86 / ARM assembly (dav1d's SIMD kernels): several
+# times faster AV1 decoding, but the build then needs `nasm` on x86.
+avif-asm = ["avif", "rav1d/asm"]
 
 [dependencies]
 hypen-engine = { version = "0.6.7", path = "../hypen-engine-rs" }
@@ -73,7 +87,7 @@ accesskit_winit = "0.32.2"
 arboard = "3"
 
 # Phase 11: WebSocket client for connecting to a Hypen RemoteServer.
-tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros", "net"] }
 # `rustls-tls-webpki-roots` gives us TLS without a native libssl dep —
 # required for `wss://` URLs (e.g. workers.dev deployments). Without
 # it, `connect_async` returns an "unsupported url scheme" error and
@@ -89,9 +103,20 @@ futures-util = "0.3"
 rfd = "0.17"
 sha2 = "0.10"
 
-# Phase 13: Image / Icon element decoding. PNG + JPEG cover the
-# example apps; everything else is a placeholder until we wire HTTP.
-image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp"] }
+# Phase 13: Image / Icon element decoding. PNG + JPEG + WebP cover the
+# example apps' own assets; ICO, GIF and BMP are what third-party
+# favicons (Radio's station art) come as.
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "ico", "gif", "bmp"] }
+
+# Feature `avif`: pure-Rust AVIF (see the feature comment above). rav1d's
+# default features include its assembly, which needs `nasm`; the
+# `avif-asm` feature opts back in. The workspace `[patch.crates-io]`s
+# rav1d to `third_party/rav1d` (entry points `extern "C-unwind"`, so a
+# rav1d panic is caught per decode); [patch] only applies inside this
+# workspace, so a build that pulls this crate in from elsewhere must
+# apply the same patch, or a malformed AVIF can abort the process.
+rav1d = { version = "1.1", optional = true, default-features = false, features = ["bitdepth_8", "bitdepth_16"] }
+avif-parse = { version = "2.1", optional = true }
 
 # Phase 14: blocking HTTP client for the image-fetch worker thread.
 # ureq is small (no tokio dep) and lives entirely on the worker, so
@@ -101,6 +126,15 @@ ureq = { version = "2.10", features = ["tls"] }
 # Phase 15: parse the `d` attribute of pre-resolved SVG icon paths
 # the engine emits for `Icon` elements. svgtypes is small + focused.
 svgtypes = "0.15"
+# SVG images (`data:image/svg+xml` glyphs, `.svg` sources). Only the
+# `text` feature: `<text>` is shaped with the renderer's own font index
+# (handed over in `text::svg_font_db`); no system-font scan of its own,
+# no external raster loads.
+resvg = { version = "0.50", default-features = false, features = ["text"] }
+# The fontdb resvg's text layer links (cosmic-text links 0.23). Listed
+# only to enable `fs`, so file-backed faces from the renderer's font scan
+# can be handed over by path instead of being read into memory.
+fontdb-svg = { package = "fontdb", version = "0.24", default-features = false, features = ["std", "fs"] }
 
 # Re-exported by winit; pinned here so we can implement raw-window-handle for
 # the wgpu surface without version-mismatch grief.
@@ -144,11 +178,30 @@ dirs = "5"
 # cosmic-text's default `FontSystem::new()` (which indexes every font
 # discoverable on the host). Same version cosmic-text 0.19 pulls in.
 fontdb = "0.23"
+# Font line metrics for CSS `line-height: normal` (`text::normal_line_height`).
+# Same version fontdb 0.23 already links.
+ttf-parser = "0.25"
 
 # Resolve the user's locale so the slim font db matches what cosmic-
 # text would have set internally. Already a transitive dep of cosmic-
 # text 0.19; pinned here for direct use.
 sys-locale = "0.3"
+
+# Text shaping tailoring (`src/text.rs`): UAX #14 break opportunities, so
+# the shaper's breaks can be narrowed to the ones a browser takes (no
+# break after `/` inside a URL), and the Unicode emoji properties that
+# decide which clusters use the colour-emoji face. Both are already in the
+# build (cosmic-text pulls unicode-linebreak; url → idna pulls
+# icu_properties with its compiled data).
+unicode-linebreak = "0.1.5"
+icu_properties = "2"
+# `text-transform: capitalize` like Blink: UAX #29 word starts (an `_` or
+# an apostrophe inside a word does not start a new one) mapped with ICU's
+# simple titlecase (`u_totitle`). unicode-segmentation is already in the
+# build (via cosmic-text); icu_casemap is pinned to the ICU4X release the
+# rest of the build uses.
+unicode-segmentation = "1.12"
+icu_casemap = "~2.2"
 
 # Process CPU/RSS sampling for the opt-in development HUD. Keep only the
 # system feature: disk, network, users, and hardware sensors are irrelevant.
@@ -180,6 +233,9 @@ btleplug = { version = "0.13.2", optional = true }
 gstreamer = { version = "0.25", optional = true }
 gstreamer-app = { version = "0.25", optional = true }
 gstreamer-video = { version = "0.25", optional = true }
+# Feature `video`: resolves the variant playlists an HLS master names
+# for the restricted pipeline's playlist check (already in the build via ureq).
+url = { version = "2", optional = true }
 
 # macOS-only: reach into the CAMetalLayer wgpu/raw-window-metal create
 # under the NSView so we can set `presentsWithTransaction = YES`. That

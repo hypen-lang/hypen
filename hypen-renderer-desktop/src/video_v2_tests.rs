@@ -254,6 +254,7 @@ fn sticky_error_marker_wins_over_everything() {
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Error);
 }
 
+#[cfg(not(feature = "video"))]
 #[test]
 fn poster_probe_failure_is_the_feature_off_error_state() {
     let poster = "https://cdn.example.com/__video_v2_probe_fail.jpg";
@@ -263,6 +264,61 @@ fn poster_probe_failure_is_the_feature_off_error_state() {
         ("poster", json!(poster)),
     ]);
     assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Error);
+}
+
+/// A failed or refused POSTER in front of a playable track only hides the
+/// poster: the player stays `idle` (a click plays it — state and click
+/// agree). Behind no playable track (poster-only element, or a refused
+/// track) the poster failure IS the error state. Both kinds of poster
+/// failure — HTTP and refused — behave the same.
+#[cfg(feature = "video")]
+#[test]
+fn poster_failure_in_front_of_a_playable_track_is_not_an_error() {
+    use crate::paint::image::ASSET_ORIGIN_PROP;
+    let http_poster = "https://cdn.example.com/__video_v2_probe_fail_playable.jpg";
+    crate::paint::image::test_seed_failure(http_poster, 404, "Not Found");
+    let n = node(&[
+        ("src", json!("https://cdn/a.mp4")),
+        ("poster", json!(http_poster)),
+    ]);
+    assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Idle);
+    let n = node(&[("poster", json!(http_poster))]);
+    assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Error);
+
+    let n = node(&[
+        (ASSET_ORIGIN_PROP, json!("http://a.test")),
+        ("src", json!("/clip.mp4")),
+        ("poster", json!("file:///etc/hosts")),
+    ]);
+    assert_eq!(
+        player_state(&n, vp(800.0)),
+        VideoPlayerState::Idle,
+        "a refused poster must not put a playable player in error"
+    );
+    let n = node(&[
+        (ASSET_ORIGIN_PROP, json!("http://a.test")),
+        ("poster", json!("file:///etc/hosts")),
+    ]);
+    assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Error);
+    let n = node(&[
+        (ASSET_ORIGIN_PROP, json!("http://a.test")),
+        ("src", json!("file:///etc/passwd")),
+        ("poster", json!("/ok.jpg")),
+    ]);
+    assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Error);
+}
+
+/// A playlist whose `startIndex` entry is refused starts on the next
+/// allowed entry: the player is not stuck in `error`.
+#[test]
+fn refused_start_entry_moves_on_to_the_next_allowed_one() {
+    use crate::paint::image::ASSET_ORIGIN_PROP;
+    let n = node(&[
+        (ASSET_ORIGIN_PROP, json!("http://a.test")),
+        ("playlist", json!(["/ep1.mp4", "file:///etc/passwd", "/ep3.mp4"])),
+        ("startIndex", json!(1)),
+    ]);
+    assert_eq!(player_state(&n, vp(800.0)), VideoPlayerState::Idle);
 }
 
 #[cfg(not(feature = "video"))]

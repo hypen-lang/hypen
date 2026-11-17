@@ -197,6 +197,49 @@ interface StateStore<T = unknown> {
 }
 ```
 
+### Custom stores on Cloudflare
+
+Every Durable Object of a class runs in one isolate and shares one module
+definition, so one store object. `durableObjectStore` hands each DO a copy
+bound to that DO's own storage (its `__forStorage` hook), so one visitor's
+save can never land in another visitor's DO.
+
+To customise a `durableObjectStore` (save only some fields, migrate the value
+on load, skip unchanged writes), build the store with `deriveStore`. It wraps
+each DO's bound copy, so the custom store is per DO too, including any state
+kept in its closure:
+
+```typescript
+import { deriveStore, durableObjectStore, withKey } from "@hypen-space/cf";
+
+const prefsStore = deriveStore<AppState, Prefs>(
+  durableObjectStore<Prefs>(withKey(() => "prefs")),
+  (inner) => {
+    let lastSaved: string | null = null; // per Durable Object
+    return {
+      resolveKey: (state, moduleName, sessionId) => inner.resolveKey(pick(state), moduleName, sessionId),
+      load: async (key) => (await inner.load(key)) as AppState | null,
+      async save(key, state) {
+        const json = JSON.stringify(pick(state));
+        if (json === lastSaved) return;
+        lastSaved = json;
+        await inner.save(key, pick(state));
+      },
+      delete: (key) => inner.delete(key),
+    };
+  },
+);
+```
+
+A hand-written wrapper without `__forStorage` still works: the Durable Object
+runs every call into it inside its own storage scope, so the
+`durableObjectStore`s it calls resolve to that DO's storage. The scope follows
+the call across `await`s through `AsyncLocalStorage`, which needs the
+`nodejs_compat` compatibility flag. Without the flag only the part of each
+call before its first `await` is scoped, and the DO logs a warning. Any state
+such a wrapper keeps in its own closure is shared by every DO of the class,
+so prefer `deriveStore`.
+
 ## Deployment
 
 There is no `hypen deploy` command. Where state ends up depends on the store:

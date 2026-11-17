@@ -13,8 +13,11 @@ home-screen/
     │   ├── launcher.ts    # APPS list + generated home-screen DSL + module
     │   ├── endpoints.ts   # local (default) vs deployed app URLs
     │   ├── unsplash.ts    # wallpaper photos + the per-breakpoint crop ladder
+    │   ├── wallpapers.ts  # serves /wallpapers/<version>/*.avif from R2
     │   ├── geo.ts         # request.cf geo + Open-Meteo weather
     │   └── worker.ts      # defineHypenWorker wiring
+    ├── public/wallpapers/ # wallpaper renditions (source for the R2 upload)
+    ├── scripts/           # wallpapers:download / wallpapers:upload
     ├── wrangler.jsonc
     ├── package.json
     └── tsconfig.json
@@ -39,7 +42,9 @@ each instance its own inspector port.
 
 Or by hand: each embedded app is a separate worker on its own port. In
 separate terminals (`bun install` once in each directory first; every
-instance needs a distinct `--inspector-port`):
+instance needs a distinct `--inspector-port`). For the launcher, also run
+`bun run wallpapers:upload` once (see [Wallpapers](#wallpapers-r2-not-static-assets)),
+or its wallpapers 404:
 
 | Icon | Example | Port | Command |
 |------|---------|------|---------|
@@ -129,7 +134,8 @@ To keep dev and production data apart, add
 `wrangler dev` (or `scripts/dev-examples.sh` from the repo root) emulates
 the bucket locally, so you don't need to create anything to run the
 example. Objects land under `.wrangler/state/v3/r2/hypen-home-files/`; delete
-`.wrangler/state` (with the server stopped) to start fresh.
+`.wrangler/state` (with the server stopped) to start fresh — then run
+`bun run wallpapers:upload` again (`dev-examples.sh` does it for you).
 
 ### 4. Deploy and verify
 
@@ -138,7 +144,8 @@ bun run deploy
 bunx wrangler r2 bucket info hypen-home-files    # object count and size grow after an upload
 ```
 
-Objects are keyed `drive/<Durable Object id>/<file id>` (one prefix per visitor).
+Drive objects are keyed `drive/<Durable Object id>/<file id>` (one prefix per
+visitor); the wallpapers live under `assets/wallpapers/<version>/`.
 You can also browse them under R2 in the Cloudflare dashboard. If the
 bucket doesn't exist, the deploy fails. Create it (step 1) and deploy again.
 
@@ -149,6 +156,14 @@ Create the Files bucket first (see
 
 ```bash
 bunx wrangler r2 bucket create hypen-home-files
+```
+
+Upload the wallpapers to it — once, and again whenever
+`WALLPAPER_ASSET_VERSION` in `src/unsplash.ts` changes (it only writes
+`assets/wallpapers/<version>/*`, never touches drive data):
+
+```bash
+bun run wallpapers:upload --remote
 ```
 
 Deploy the sibling examples (`bun run deploy` in each), then deploy the
@@ -165,6 +180,24 @@ where `<worker-name>` is that example's `wrangler.jsonc` `name` (`hypen-todo`,
 protocol, hence `wss://`. To point an icon somewhere else entirely, edit its
 `url` in the `APPS` list in `src/launcher.ts`. A plain `bun run deploy`
 without the variable deploys a launcher whose icons point at `localhost`.
+
+## Wallpapers: R2, not static assets
+
+The wallpaper renditions (`public/wallpapers/<version>/<photo>-<rendition>.avif`,
+fetched by `bun run wallpapers:download`) are served by the Worker itself at
+`/wallpapers/<version>/<file>.avif`, read from the `FILES` bucket under
+`assets/wallpapers/` with `Cache-Control: public, max-age=31536000, immutable`,
+`Access-Control-Allow-Origin: *`, an ETag and 304s (`src/wallpapers.ts`).
+`bun run wallpapers:upload` puts them there (`--remote` for the deployed
+bucket, local R2 otherwise).
+
+They are deliberately **not** Workers Static Assets: any `assets` block in
+`wrangler.jsonc` puts Cloudflare's asset router in front of the Worker, and
+the router terminates the `/ws` WebSocket and negotiates permessage-deflate
+itself, ignoring `no_web_socket_compression` (`run_worker_first` doesn't
+help). The browser client then keeps the socket UI-only — "device plane
+disabled on this connection" — and Files can't upload or download. A Worker
+whose WebSocket needs the device plane must not serve static assets.
 
 ## What it shows off
 
@@ -188,9 +221,10 @@ without the variable deploys a launcher whose icons point at `localhost`.
   back shows the new wallpaper instantly). Both choices persist in the
   Durable Object across reloads and deploys.
 - **Responsive wallpapers, from Unsplash** — the photo presets come from
-  Unsplash's [Wallpapers topic](https://unsplash.com/t/wallpapers), hotlinked
-  from `images.unsplash.com` (an imgix endpoint), so one photo id yields as
-  many renditions as we want. The binding is a *value map* rather than a
+  Unsplash's [Wallpapers topic](https://unsplash.com/t/wallpapers). Their
+  imgix endpoint (`images.unsplash.com`) cuts one AVIF rendition per
+  breakpoint, which `bun run wallpapers:download` saves and the Worker serves
+  from R2 (see [Wallpapers](#wallpapers-r2-not-static-assets)). The binding is a *value map* rather than a
   single value:
 
   ```
@@ -201,9 +235,9 @@ without the variable deploys a launcher whose icons point at `localhost`.
   browser downloads only the rule that matches, so a desktop window pulls a
   3072×1728 crop and a phone pulls 1080×1920 — and the *aspect* changes too,
   so a wide window gets a landscape crop instead of a portrait one scaled up.
-  `auto=format` serves AVIF/WebP where supported. No API key: to change the
-  set, swap photo ids into `WALLPAPER_PHOTOS` in `src/unsplash.ts` and the
-  settings picker follows.
+  No API key: to change the set, swap photo ids into `WALLPAPER_PHOTOS` in
+  `src/unsplash.ts`, run `bun run wallpapers:download`, bump
+  `WALLPAPER_ASSET_VERSION` and `bun run wallpapers:upload` (`--remote` too).
 
 - **Files: a personal drive with drag and drop.** The Files icon opens
   the launcher's own `/files` screen: folders, image thumbnails, upload,

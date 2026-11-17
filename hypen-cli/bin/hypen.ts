@@ -79,7 +79,7 @@ const HELP = `${renderBanner(VERSION, "Declarative UI framework CLI")}
     ${pink("dev")}             Start development server
     ${pink("build")}           Build for production
     ${pink("generate")}        Generate component imports
-    ${pink("check")} [path...] Accessibility + template checks over .hypen files
+    ${pink("check")} [path...] Accessibility + template checks over .hypen files and inline .ui() templates
     ${pink("a11y")} [path...]  Accessibility checks only
     ${pink("theme")} export    Export design tokens (CSS, Android, iOS)
     ${pink("studio")}          Open Hypen Studio IDE
@@ -217,13 +217,17 @@ const COMMAND_HELP: Record<string, string> = {
     -o, --outDir <dir>  Output directory (default: theme-export)
 `,
   check: `
-  ${boldPink("hypen check")} ${dim("-")} Check .hypen files: accessibility + template references
+  ${boldPink("hypen check")} ${dim("-")} Check templates: accessibility + template references
 
   ${boldYellow("Usage:")}
     hypen check [path...]      ${dim("(accessibility only: hypen a11y [path...])")}
 
   Paths may be files or directories; with none, the project's components
-  directory is checked. Besides accessibility conformance, each template is
+  directory is checked. Covers .hypen files and the inline .ui(\`…\`) /
+  .ui(hypen\`…\`) templates of .ts modules (findings point into the .ts
+  file; an element containing a non-string \${…} interpolation is not
+  judged, since its content is only known at runtime).
+  Besides accessibility conformance, each template is
   checked against its module and the project:
     unknown-state-path   @state.x not in the module's initial state
     unknown-action       @actions.x with no onAction handler
@@ -244,10 +248,11 @@ const COMMAND_HELP: Record<string, string> = {
   ${boldYellow("Examples:")}
     ${dim("$")} hypen check
     ${dim("$")} hypen check src/components/App/component.hypen
+    ${dim("$")} hypen check src/components/Counter.ts
     ${dim("$")} hypen a11y
 `,
   a11y: `
-  ${boldPink("hypen a11y")} ${dim("-")} Run accessibility conformance over .hypen files
+  ${boldPink("hypen a11y")} ${dim("-")} Run accessibility conformance over .hypen files and inline .ui() templates
 
   ${boldYellow("Usage:")}
     hypen a11y [path...]       ${dim("(hypen check adds template checks)")}
@@ -904,9 +909,9 @@ async function generateComponents() {
  * only).
  *
  * With positional paths, checks exactly those targets (a file is checked
- * as-is, a directory is scanned for `.hypen` sources), resolved against the
- * CWD. With no paths, globs `.hypen` sources under the configured components
- * directory. Findings print per-file; the exit code distinguishes clean (0),
+ * as-is, a directory is scanned for `.hypen` sources and `.ts` modules with
+ * inline `.ui(\`…\`)` templates), resolved against the CWD. With no paths,
+ * scans the configured components directory the same way. Findings print per-file; the exit code distinguishes clean (0),
  * found issues (1), and couldn't-check (2 — missing binding, unparseable
  * file, or a named path that doesn't exist).
  *

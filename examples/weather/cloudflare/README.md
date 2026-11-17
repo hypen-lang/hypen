@@ -79,6 +79,15 @@ forecast API uses), daily min/max come from the hours, and sunrise/sunset
 come from the sunrise equation. UV is not in that model, so its tile shows a
 dash. The footer says when the fallback is in use.
 
+**When Open-Meteo is unreachable.** Timeouts and network errors retry inside
+`fetchJson`, which can take ~30 s, so the screen does not wait for that: after
+12 s on "Loading…" it switches to an error state ("Couldn’t load the forecast
+for …") with a **Retry** button, and a late success still replaces it. The 60 s
+ticker then retries automatically with exponential backoff (1, 2, 4, 8 min,
+then every 10), and Retry tries immediately. If a forecast for the place is
+already on screen, a failed refresh keeps it up behind a "Couldn't refresh the
+forecast" banner instead of replacing it with the error.
+
 ## Deploy
 
 ```bash

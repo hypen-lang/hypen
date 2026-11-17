@@ -800,3 +800,32 @@ fn removing_the_list_element_forgets_it() {
     );
     assert!(lists.is_empty());
 }
+
+/// A padding write `remeasure` queued for the old window must not land
+/// after a newer window's own write: the Calories "My Foods" list was
+/// emptied (`total: 0`) and then re-padded with the 113-item list's
+/// trailing stand-in, pushing its empty-state text off screen.
+#[test]
+fn stale_remeasure_padding_is_dropped_after_a_newer_window() {
+    let mut lists = VirtLists::default();
+    let mut batch = vec![set_window("list", 100, 0, 4)];
+    lists.ingest(&mut batch, 1.0);
+    let g = geom(
+        &[(0.0, 30.0), (40.0, 30.0), (80.0, 30.0), (120.0, 30.0)],
+        0.0,
+    );
+    let stale = lists.remeasure("list", &g, 1, 1.0).expect("repad");
+    assert_eq!(pad_in(&[stale.clone()], "list"), Some((0.0, 96.0 * 40.0)));
+
+    // The list empties before the queued write is applied.
+    let mut batch = vec![set_window("list", 0, 0, 0)];
+    lists.ingest(&mut batch, 1.0);
+    assert_eq!(pad_in(&batch, "list"), Some((0.0, 0.0)));
+
+    let mut late = vec![stale];
+    lists.ingest(&mut late, 1.0);
+    assert!(
+        late.is_empty(),
+        "the stale padding write is dropped: {late:?}"
+    );
+}

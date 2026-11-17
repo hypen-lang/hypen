@@ -12,6 +12,83 @@ zero FPS.
 It samples once per second without forcing the demand-driven renderer to run
 continuously. Production builds do not include the sampler dependency or HUD.
 
+## Web fonts (`fontFamily`)
+
+Like the DOM renderer's `fontFamily` applicator, a windowed app fetches every
+named family in a `fontFamily` list that is not a CSS keyword from Google Fonts
+(`fonts.googleapis.com` CSS, `fonts.gstatic.com` files) and, once it lands,
+prefers it over an installed family of the same name (Chrome's `@font-face`
+precedence). Until then the list resolves past it (`font-display: swap`).
+
+Opting out is one call or one variable — nothing is fetched and lists resolve
+to installed families and their generic keyword:
+
+```rust,ignore
+DesktopApp::new().web_fonts(false).run();
+```
+
+```sh
+HYPEN_WEB_FONTS=0 cargo run --example remote   # 0/off/false/no; 1/on forces it on
+```
+
+The environment variable overrides the builder either way. Because font names
+come from (possibly remote) app content, fetching is bounded: two worker
+threads, at most 24 families per process, names limited to plausible Google
+family names (≤ 64 chars), font files only from `fonts.gstatic.com` (≤ 18 per
+family, ≤ 4 MiB each), and a 48 MiB total budget. Tests and headless
+measurement never fetch.
+
+## Images in remote vs. local mode
+
+`Image` `src`, `url(...)` backgrounds, avatars and Video posters (and, with
+the `video` feature, Video `src`) resolve by mode:
+
+- **Local embedding** (`DesktopApp::run(module)`): the app ships with the
+  binary and is trusted, so a bare path (`assets/a.png`, `/usr/share/...`,
+  `file://...`) is a local file.
+- **Remote** (`DesktopApp::connect(ws://…)`): sources are URLs relative to
+  the server, as in a browser. `/art/x.png` loads
+  `http://<server>/art/x.png` (`wss://` → `https://`); `art/x.png` and
+  `//host/x.png` resolve the same way. A remote app can never make the
+  renderer read a local file: absolute paths are server paths, and any
+  non-HTTP scheme (`file:`, `C:\…`, `blob:`) is refused. SVG images render
+  with nested `<image>` references disabled for the same reason.
+
+SVG sources (`data:image/svg+xml;utf8,…`, base64, or `.svg` URLs) are
+rasterised with resvg; their `<text>` uses the renderer's own system font
+index (generic `serif` / `sans-serif` / `monospace` and `font-weight` resolve
+as in the app's text). AVIF decodes through the default `avif` feature —
+pure Rust (`avif-parse` + `rav1d`), no system library; `avif-asm` enables
+rav1d's assembly (needs `nasm`). Still images decode (major brand `avif`,
+or e.g. `mif1` listing `avif`), with alpha; an animated AVIF that also lists
+`avif` shows its still primary image, unanimated. Grid (tiled) primary
+images and `avis`-only sequences are not supported: the source fails once
+(logged) and keeps its placeholder, like any undecodable image. rav1d panics on
+some malformed bitstreams; the workspace patches it to a vendored copy with
+`extern "C-unwind"` entry points (`third_party/rav1d/PATCHES.md`), so each
+AVIF decodes in-process on its own thread under `catch_unwind` and a panic
+only fails that image (keep `panic = "unwind"`, the default: with
+`panic = "abort"` such a panic ends the app). A decode still running after
+30 s is abandoned (its thread finishes in the background). With
+`default-features = false` and no `avif`, an AVIF source keeps its
+placeholder or background colour.
+
+Text honours `fontFamily` lists the CSS way (`"Georgia, 'Times New Roman',
+serif"`: the first installed family wins; `serif`, `sans-serif`,
+`monospace`, `system-ui` map to the platform's generic faces).
+
+## Screenshots
+
+`DesktopApp::screenshot(path)` captures one frame through the on-screen Vello
+scene and exits. The capture is taken `DesktopApp::screenshot_delay(d)` after
+the first non-empty frame (default 750 ms, enough for local image decodes);
+give apps that fetch data or network images a few seconds:
+
+```bash
+cargo run -p hypen-renderer-desktop --example remote_screenshot -- \
+  ws://localhost:8796/ws out.png App 4s     # or HYPEN_SCREENSHOT_DELAY=4000
+```
+
 ## Status: Phase 15 (tw breakpoints + SVG icon rasterisation)
 
 The renderer drives a real `hypen-server::ModuleInstance<S>` through the

@@ -27,8 +27,8 @@ export default app
   // on the route they were on. The DO is keyed per session in
   // src/worker.ts, so `session()` and `global()` are equivalent here;
   // we pick `session()` to express intent ("one slot per session").
-  // The DO's `state.storage` is wired into this store by
-  // `bindAppStateStore(...)` in src/do.ts on every fetch / wake.
+  // HypenDurableObject hands each DO's module instance a copy of this
+  // store bound to that DO's own storage (no wiring needed here).
   .persist(durableObjectStore<AppState>(session<AppState>()))
   .ui(`
     module App {

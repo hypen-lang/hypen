@@ -35,6 +35,32 @@ function applyVisibleBorderWidth(
   }
 }
 
+const SIDES = ["Top", "Right", "Bottom", "Left"] as const;
+
+const isVisibleStyle = (v: string | undefined): boolean => !!v && v !== "none" && v !== "hidden";
+
+/**
+ * Hypen borders follow Tailwind's model, where every side's width starts at
+ * 0 (preflight) and only the widths the author writes are drawn: `.tw("border-t-2
+ * border-dashed")` is ONE dashed rule on top. In plain CSS a side with a
+ * visible style and no width is `medium` (3px), so once `borderStyle` made
+ * every side dashed, the other three sides drew thick 3px dashes too (the
+ * Calories goal line became a chunky dashed box edge; the desktop renderer
+ * drew the top rule only). When the author set SOME sides' widths, a side
+ * with a visible style but no width of its own is given 0.
+ */
+function zeroUnsetVisibleSides(el: HTMLElement): void {
+  const style = el.style as unknown as Record<string, string>;
+  if (style.borderWidth) return; // a uniform width covers every side
+  const widthSet = SIDES.filter((side) => !!style[`border${side}Width`]);
+  if (widthSet.length === 0 || widthSet.length === SIDES.length) return;
+  for (const side of SIDES) {
+    if (style[`border${side}Width`]) continue;
+    const sideStyle = style[`border${side}Style`] || style.borderStyle;
+    if (isVisibleStyle(sideStyle)) style[`border${side}Width`] = "0px";
+  }
+}
+
 /** Logical corner key → CSS logical radius property (follows `dir`). */
 const LOGICAL_CORNERS: Array<[string, string]> = [
   ["topStart", "border-start-start-radius"],
@@ -101,22 +127,27 @@ export const borderHandlers: Record<string, ApplicatorHandler> = {
 
   borderTopWidth: (el, value) => {
     applyVisibleBorderWidth(el, value, "borderTopWidth", "borderTopStyle");
+    zeroUnsetVisibleSides(el);
   },
 
   borderRightWidth: (el, value) => {
     applyVisibleBorderWidth(el, value, "borderRightWidth", "borderRightStyle");
+    zeroUnsetVisibleSides(el);
   },
 
   borderBottomWidth: (el, value) => {
     applyVisibleBorderWidth(el, value, "borderBottomWidth", "borderBottomStyle");
+    zeroUnsetVisibleSides(el);
   },
 
   borderLeftWidth: (el, value) => {
     applyVisibleBorderWidth(el, value, "borderLeftWidth", "borderLeftStyle");
+    zeroUnsetVisibleSides(el);
   },
 
   borderStyle: (el, value) => {
     el.style.borderStyle = String(value);
+    zeroUnsetVisibleSides(el);
   },
 
   borderRadius: (el, value) => {

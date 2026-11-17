@@ -337,6 +337,22 @@ function axisSizeValue(
   return `${fraction * 100}%`;
 }
 
+/**
+ * Element types that measure and paint as a run of text when they have no
+ * children: `Text`, and `Heading` (whose level-derived default font size and
+ * bold weight come from `inheritedTextProp`). Without Heading here a bare
+ * `Heading("Title", level: 1)` measured 0×0 and painted nothing on canvas.
+ */
+export function isTextLeafType(type: string): boolean {
+  return type === "text" || type === "heading";
+}
+
+/** The text a Text/Heading leaf displays (`props[0]`, else named `text`). */
+export function textLeafContent(props: Record<string, any>): string {
+  const raw = props[0] ?? props.text;
+  return raw === undefined || raw === null ? "" : String(raw);
+}
+
 function borderObject(props: Record<string, any>): Record<string, any> | null {
   return props.border && typeof props.border === "object" ? props.border : null;
 }
@@ -381,7 +397,8 @@ function basePaddingValue(props: Record<string, any>, type: string): any {
   return hasFixedBox && !hasCustomPadding ? 0 : "4 8";
 }
 
-const HORIZONTAL_DEMAND_CARRIERS = new Set(["column", "list", "card"]);
+// Mirrors the DOM `DEMAND_CARRIERS` (cross-axis-width.ts), Stack included.
+const HORIZONTAL_DEMAND_CARRIERS = new Set(["column", "list", "card", "stack"]);
 
 function horizontalWidthKind(node: VirtualNode): "fixed" | "relative" | null {
   const value = axisSizeValue(node.props, "width");
@@ -635,7 +652,7 @@ function buildTaffyStyle(
       if (parentType === "stack") style.justifySelf = self;
     }
   } else if (
-    type === "text" &&
+    isTextLeafType(type) &&
     parentType === "stack" &&
     inheritedTextAlign(node) !== null
   ) {
@@ -1123,8 +1140,12 @@ function buildTree(
   // container with size 0×0, and downstream siblings were placed on top of
   // each other ("1,431 likes" overlapping the caption row was the visible
   // symptom).
-  if (node.type.toLowerCase() === "text" && props[0] && node.children.length === 0) {
-    const text = String(props[0] || "");
+  if (
+    isTextLeafType(node.type.toLowerCase()) &&
+    textLeafContent(props) &&
+    node.children.length === 0
+  ) {
+    const text = textLeafContent(props);
     const fontSize = cssLengthToPx(inheritedTextProp(node, "fontSize")) ?? 16;
     const fontWeight = inheritedTextProp(node, "fontWeight") || "normal";
     const fontFamily = inheritedTextProp(node, "fontFamily") || "system-ui, sans-serif";
@@ -1884,7 +1905,7 @@ function measureFallback(
     else if (height !== null && width === null) width = height * aspect;
   }
 
-  if (type === "text" && node.children.length === 0) {
+  if (isTextLeafType(type) && node.children.length === 0) {
     const maxWidth =
       width !== null
         ? width - insetW

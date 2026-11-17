@@ -114,32 +114,50 @@ Built with Hypen. Explore the apps below or launch them together from the [Home 
 
 <table>
   <tr>
-    <td width="33%" align="center"><a href="https://hypen-home-screen.ian-dae.workers.dev/"><img src=".github/screenshots/apps/home-screen.webp" width="260" alt="Hypen home screen with app icons and a weather widget"></a></td>
-    <td width="33%" align="center"><a href="https://hypen-movie-discovery.ian-dae.workers.dev/"><img src=".github/screenshots/apps/movies.webp" width="260" alt="MovieDB showing its featured film and recommendations"></a></td>
-    <td width="33%" align="center"><a href="https://hypen-food-ordering.ian-dae.workers.dev/"><img src=".github/screenshots/apps/food.webp" width="260" alt="Food Ordering showing restaurant categories and a sushi restaurant"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-home-screen.ian-dae.workers.dev/"><img src=".github/screenshots/apps/home-screen.webp" width="260" alt="Hypen home screen launcher with a clock and weather widget and icons for every example app"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-weather.ian-dae.workers.dev/"><img src=".github/screenshots/apps/weather.webp" width="260" alt="Weather showing a sunny 31° in Cape Town with an hourly chart and 7-day forecast"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-messages.ian-dae.workers.dev/"><img src=".github/screenshots/apps/messages.webp" width="260" alt="Messages showing a #general conversation between three visitors with emoji reactions"></a></td>
   </tr>
   <tr valign="top">
     <td><a href="https://hypen-home-screen.ian-dae.workers.dev/"><b>Home Screen</b></a> · <a href="examples/home-screen">Source</a><br>A launcher that embeds independent Hypen apps, with live weather, wallpapers and settings.</td>
+    <td><a href="https://hypen-weather.ian-dae.workers.dev/"><b>Weather</b></a> · <a href="examples/weather">Source</a><br>Live Open-Meteo forecast with hourly chart, 7-day outlook and saved cities.</td>
+    <td><a href="https://hypen-messages.ian-dae.workers.dev/"><b>Messages</b></a> · <a href="examples/messages">Source</a><br>Real-time rooms and DMs between visitors, with presence, typing and reactions.</td>
+  </tr>
+  <tr>
+    <td width="33%" align="center"><a href="https://hypen-photos.ian-dae.workers.dev/"><img src=".github/screenshots/apps/photos.webp" width="260" alt="Photos library grid of nine imported landscape and animal photos"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-radio.ian-dae.workers.dev/"><img src=".github/screenshots/apps/radio.webp" width="260" alt="Radio Discover screen with a tuner dial, a featured station and popular stations"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-news.ian-dae.workers.dev/"><img src=".github/screenshots/apps/news.webp" width="260" alt="The Daily Hypen front page with Wikipedia's picture of the day and In the news headlines"></a></td>
+  </tr>
+  <tr valign="top">
+    <td><a href="https://hypen-photos.ian-dae.workers.dev/"><b>Photos</b></a> · <a href="examples/photos">Source</a><br>Camera capture and imports over the device plane, albums, EXIF and places.</td>
+    <td><a href="https://hypen-radio.ian-dae.workers.dev/"><b>Radio</b></a> · <a href="examples/radio">Source</a><br>Live internet radio from Radio Browser with a tuner-style player.</td>
+    <td><a href="https://hypen-news.ian-dae.workers.dev/"><b>News</b></a> · <a href="examples/news">Source</a><br>Hacker News that re-ranks live, plus Wikipedia's front page.</td>
+  </tr>
+  <tr>
+    <td width="33%" align="center"><a href="https://hypen-movie-discovery.ian-dae.workers.dev/"><img src=".github/screenshots/apps/movies.webp" width="260" alt="MovieDB showing its featured film and trending movies"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-food-ordering.ian-dae.workers.dev/"><img src=".github/screenshots/apps/food.webp" width="260" alt="Food Ordering showing restaurant categories and a sushi restaurant"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-social.ian-dae.workers.dev/"><img src=".github/screenshots/apps/social.webp" width="260" alt="Hypengram social feed with a stories row and a photo post"></a></td>
+  </tr>
+  <tr valign="top">
     <td><a href="https://hypen-movie-discovery.ian-dae.workers.dev/"><b>MovieDB</b></a> · <a href="examples/movie-discovery">Source</a><br>Browse movies, search the catalog and keep a watchlist.</td>
     <td><a href="https://hypen-food-ordering.ian-dae.workers.dev/"><b>Food Ordering</b></a> · <a href="examples/food-ordering">Source</a><br>Explore restaurants and menus, customize dishes and build a cart.</td>
+    <td><a href="https://hypen-social.ian-dae.workers.dev/"><b>Social</b></a> · <a href="examples/social">Source</a><br>A photo feed with stories, profiles, likes and comments.</td>
   </tr>
   <tr>
-    <td width="33%" align="center"><a href="https://hypen-social.ian-dae.workers.dev/"><img src=".github/screenshots/apps/social.webp" width="260" alt="Hypengram social feed with a photo post"></a></td>
     <td width="33%" align="center"><a href="https://hypen-hypeflix.ian-dae.workers.dev/"><img src=".github/screenshots/apps/hypeflix.webp" width="260" alt="Hypeflix featuring Big Buck Bunny and a movie playlist"></a></td>
-    <td width="33%" align="center"><a href="https://hypen-calorie-counter.ian-dae.workers.dev/"><img src=".github/screenshots/apps/calories.webp" width="260" alt="Calorie Counter showing daily goals, macros and meals"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-calorie-counter.ian-dae.workers.dev/"><img src=".github/screenshots/apps/calories.webp" width="260" alt="Calorie Counter showing daily goals, macros, activity and meals"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-todo.ian-dae.workers.dev/"><img src=".github/screenshots/apps/todo.webp" width="260" alt="Todo with three tasks, one completed"></a></td>
   </tr>
   <tr valign="top">
-    <td><a href="https://hypen-social.ian-dae.workers.dev/"><b>Social</b></a> · <a href="examples/social">Source</a><br>A photo feed with stories, profiles, likes and comments.</td>
     <td><a href="https://hypen-hypeflix.ian-dae.workers.dev/"><b>Hypeflix</b></a> · <a href="examples/hypeflix">Source</a><br>Browse open movies and public-domain films, then play a film or a playlist.</td>
     <td><a href="https://hypen-calorie-counter.ian-dae.workers.dev/"><b>Calorie Counter</b></a> · <a href="examples/calorie-counter">Source</a><br>Track meals, daily calories, macros and activity across several screens.</td>
+    <td><a href="https://hypen-todo.ian-dae.workers.dev/"><b>Todo</b></a> · <a href="examples/todo">Source</a><br>A small reactive task list with two-way input binding and animated updates.</td>
   </tr>
   <tr>
-    <td width="33%" align="center"><a href="https://hypen-todo.ian-dae.workers.dev/"><img src=".github/screenshots/apps/todo.webp" width="260" alt="Todo with three sample tasks, one completed"></a></td>
-    <td width="33%" align="center"><a href="https://hypen-calculator.ian-dae.workers.dev/"><img src=".github/screenshots/apps/calculator.webp" width="260" alt="Calculator with a numeric result and arithmetic keypad"></a></td>
-    <td width="33%" align="center"><a href="https://hypen-home-screen.ian-dae.workers.dev/"><img src=".github/screenshots/apps/files.webp" width="260" alt="Files app showing its toolbar and empty-folder state"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-calculator.ian-dae.workers.dev/"><img src=".github/screenshots/apps/calculator.webp" width="260" alt="Calculator showing a result of 448 above the arithmetic keypad"></a></td>
+    <td width="33%" align="center"><a href="https://hypen-home-screen.ian-dae.workers.dev/"><img src=".github/screenshots/apps/files.webp" width="260" alt="Files app showing three folders in grid view with upload and new-folder controls"></a></td>
   </tr>
   <tr valign="top">
-    <td><a href="https://hypen-todo.ian-dae.workers.dev/"><b>Todo</b></a> · <a href="examples/todo">Source</a><br>A small reactive task list with two-way input binding and animated updates.</td>
     <td><a href="https://hypen-calculator.ian-dae.workers.dev/"><b>Calculator</b></a> · <a href="examples/calculator">Source</a><br>A familiar keypad with arithmetic, percent and sign controls.</td>
     <td><a href="https://hypen-home-screen.ian-dae.workers.dev/"><b>Files</b></a> · <a href="examples/home-screen/cloudflare/src/files.ts">Source</a><br>Open Files in the launcher for folders, uploads, downloads and grid or list views.</td>
   </tr>

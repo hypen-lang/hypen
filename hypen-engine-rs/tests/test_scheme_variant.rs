@@ -712,3 +712,65 @@ fn a_row_entry_bound_to_state_reads_the_module_that_owns_the_row() {
     assert!(!after.contains("PRIMARY"), "{after}");
     assert!(after.contains("SEARCH"), "{after}");
 }
+
+/// Accessible name of every Create of `ty`, then of every SetSemantics.
+fn names(patches: &[Patch], ty: &str) -> (Vec<Option<String>>, Vec<Option<String>>) {
+    let mut created = Vec::new();
+    let mut set = Vec::new();
+    for p in patches {
+        match p {
+            Patch::Create {
+                element_type,
+                semantics,
+                ..
+            } if element_type == ty => {
+                created.push(semantics.as_ref().and_then(|s| s.name.clone()));
+            }
+            Patch::SetSemantics { semantics, .. } => {
+                set.push(semantics.as_ref().and_then(|s| s.name.clone()));
+            }
+            _ => {}
+        }
+    }
+    (created, set)
+}
+
+#[test]
+fn a_scheme_switched_label_names_the_element_and_follows_the_scheme() {
+    // `.label({...})` with scheme keys lowers to a SchemeSwitch on `label.0`.
+    // It is an explicit, dynamic label: kept on the node (not stripped like a
+    // static one), never flagged missing, picked per scheme at reconcile.
+    let mut engine = engine_with(json!({}));
+    engine.set_context("appearance", appearance("light"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r#"Button { Icon("star") }.label({ default: "Save", dark: "Save (dark)" })"#,
+    );
+    let (created, _) = names(&patches.lock().unwrap(), "Button");
+    assert_eq!(created, [Some("Save".to_string())]);
+    let missing = patches.lock().unwrap().iter().any(|p| {
+        matches!(p, Patch::Create { semantics: Some(s), .. } if s.name_missing == Some(true))
+    });
+    assert!(!missing, "a scheme-switched label is not a missing name");
+
+    patches.lock().unwrap().clear();
+    engine.set_context("appearance", appearance("dark"));
+    let (_, set) = names(&patches.lock().unwrap(), "Button");
+    assert_eq!(set, [Some("Save (dark)".to_string())], "got {:?}", patches.lock().unwrap());
+}
+
+#[test]
+fn a_scheme_switched_alt_names_an_image_per_scheme() {
+    let mut engine = engine_with(json!({}));
+    engine.set_context("appearance", appearance("dark"));
+    let (patches, cb) = patch_capture();
+    engine.set_render_callback(cb);
+    render(
+        &mut engine,
+        r#"Image("logo.png").alt({ default: "Logo", dark: "Logo, dark" })"#,
+    );
+    let (created, _) = names(&patches.lock().unwrap(), "Image");
+    assert_eq!(created, [Some("Logo, dark".to_string())]);
+}

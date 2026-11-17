@@ -35,20 +35,13 @@ use std::sync::Arc;
 
 use hypen_renderer_desktop::RemoteModule;
 
-/// Embeds nested deeper than this are refused (with a log line) — a
-/// guard against an app that embeds itself recursively.
-pub const MAX_EMBED_DEPTH: usize = 4;
-
-/// Where the embed's connection currently stands, as far as slot
-/// visibility is concerned. `Loading` until the first patch batch
-/// lands (a socket that's "connected" but hasn't sent a tree yet still
-/// shows the splash), `Error` on a terminal connection failure.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum EmbedStatus {
-    Loading,
-    Connected,
-    Error,
-}
+// The element-level helpers are shared with the desktop renderer's own
+// `HypenApp` support (`hypen_renderer_desktop::embed`), so a window that
+// connects to an app straight away and a browser tab read hosts, URLs and
+// slots the same way.
+pub use hypen_renderer_desktop::embed::{
+    embed_url, is_hypenapp, slot_of, EmbedStatus, MAX_EMBED_DEPTH,
+};
 
 /// One live `HypenApp` embed.
 pub struct Embed {
@@ -80,9 +73,9 @@ pub struct Embed {
     /// redundant Detach/Attach.
     pub detached: HashSet<String>,
     pub status: EmbedStatus,
-    /// Lowers `RegisterTemplate`/`Instantiate` from the embed's server,
-    /// exactly as each tab does for its own stream.
-    pub expander: hypen_engine::TemplateExpander,
+    // No `TemplateExpander` / media-URL rewriting: the embed's
+    // `RemoteModule` delivers template-free, owner-stamped batches
+    // (see `browser::process_tab_patches`).
 }
 
 impl Embed {
@@ -99,7 +92,6 @@ impl Embed {
             error_slot_ids: Vec::new(),
             detached: HashSet::new(),
             status: EmbedStatus::Loading,
-            expander: hypen_engine::TemplateExpander::new(),
         }
     }
 
@@ -158,33 +150,6 @@ impl Embed {
         }
         out
     }
-}
-
-/// `true` when a Create's element type is the HypenApp embed component.
-pub fn is_hypenapp(element_type: &str) -> bool {
-    element_type.eq_ignore_ascii_case("hypenapp")
-}
-
-/// Pull the WebSocket URL off a HypenApp node's props: positional
-/// (`"0"` — what the engine emits for `HypenApp("wss://…")`) or named
-/// (`url`), with the flattened `.0` spellings accepted for safety.
-pub fn embed_url(props: &IndexMap<String, Value>) -> Option<String> {
-    for key in ["0", "0.0", "url", "url.0"] {
-        if let Some(v) = props.get(key).and_then(|v| v.as_str()) {
-            if !v.trim().is_empty() {
-                return Some(v.trim().to_string());
-            }
-        }
-    }
-    None
-}
-
-/// A node's slot tag (`.slot("loading")` flattens to `slot.0`).
-pub fn slot_of(props: &IndexMap<String, Value>) -> Option<&str> {
-    props
-        .get("slot.0")
-        .or_else(|| props.get("slot"))
-        .and_then(|v| v.as_str())
 }
 
 /// `true` for prop keys whose VALUE is an action reference: the bare
@@ -389,6 +354,34 @@ mod tests {
         assert_eq!(out.get("bind"), Some(&json!("e7:query")));
         assert_eq!(out.get("color.0"), Some(&json!("#fff")));
         assert_eq!(out.get("0"), Some(&json!("@somebody")));
+    }
+
+    /// The action rewrite rebuilds the props map; the asset-origin stamp
+    /// the embed's `RemoteModule` put on the node must come through it
+    /// unchanged (it is neither an event key nor `bind`), or the node
+    /// would fall back to the window's scope.
+    #[test]
+    fn rewrite_embed_patch_actions_keeps_the_asset_origin_stamp() {
+        use hypen_renderer_desktop::paint::image::ASSET_ORIGIN_PROP;
+        let p = Patch::Create {
+            id: "1".into(),
+            element_type: "Image".into(),
+            props: props(&[
+                ("src", json!("/poster.png")),
+                ("onClick", json!("@actions.open")),
+                (ASSET_ORIGIN_PROP, json!("https://app.example")),
+            ]),
+            semantics: None,
+        };
+        let Patch::Create { props: out, .. } = rewrite_embed_patch_actions(p, "e7:") else {
+            panic!("expected Create");
+        };
+        assert_eq!(out.get("onClick"), Some(&json!("@actions.e7:open")));
+        assert_eq!(
+            out.get(ASSET_ORIGIN_PROP),
+            Some(&json!("https://app.example"))
+        );
+        assert_eq!(out.get("src"), Some(&json!("/poster.png")));
     }
 
     #[test]

@@ -2,8 +2,10 @@
 //! bindings.
 //!
 //! Both bindings wrap the same `EngineCore` and need identical bookkeeping
-//! on top of it (node-ID indexing for `render_into`, the subtree-reconcile
-//! body, parse-error formatting). Keeping that logic here means adding a
+//! on top of it (node-ID indexing for `render_into`, parse-error
+//! formatting). The subtree reconcile itself is
+//! `EngineCore::render_subtree_into`, so it shares the pre/post passes of
+//! every other reconcile entry point. Keeping that logic here means adding a
 //! new engine capability doesn't require editing two near-identical copies
 //! of the surrounding glue.
 //!
@@ -13,11 +15,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crate::{
-    engine_core::EngineCore,
-    ir::{IRNode, NodeId},
-    reconcile::{create_ir_node_tree_impl, reconcile_ir_node_impl, Patch, ReconcileCtx},
-};
+use crate::{engine_core::EngineCore, ir::NodeId, reconcile::Patch};
 
 /// Maps compact node-ID strings (as emitted in patches) back to their
 /// SlotMap keys so `render_into(parent_id, ...)` can resolve the host's
@@ -80,57 +78,6 @@ impl NodeIdIndex {
             }
         }
     }
-}
-
-/// Reconcile `expanded` into `parent_id`'s subtree and bump the engine
-/// revision — the shared body of `WasmEngine::render_into` /
-/// `hypen_render_into`.
-///
-/// If the parent already has children, the expanded IR is reconciled
-/// against the first child (a stable route swap for `Router`-style
-/// patterns). Otherwise a fresh subtree is created directly under the
-/// parent. Patches are appended to `patches` in either case.
-pub(crate) fn render_subtree_into(
-    core: &mut EngineCore,
-    parent_id: NodeId,
-    expanded: &IRNode,
-    state: &serde_json::Value,
-    patches: &mut Vec<Patch>,
-) {
-    let first_child_id = core
-        .tree
-        .get(parent_id)
-        .and_then(|node| node.children.front().copied());
-
-    let ds = (!core.data_sources.is_empty()).then_some(&core.data_sources);
-    let mods = (!core.modules.is_empty()).then_some(&core.modules);
-
-    match first_child_id {
-        Some(first_child_id) => {
-            let mut ctx = ReconcileCtx {
-                tree: &mut core.tree,
-                state,
-                patches,
-                dependencies: &mut core.dependencies,
-                data_sources: ds,
-                modules: mods,
-            };
-            reconcile_ir_node_impl(&mut ctx, first_child_id, expanded);
-        }
-        None => {
-            let mut ctx = ReconcileCtx {
-                tree: &mut core.tree,
-                state,
-                patches,
-                dependencies: &mut core.dependencies,
-                data_sources: ds,
-                modules: mods,
-            };
-            create_ir_node_tree_impl(&mut ctx, expanded, Some(parent_id), false);
-        }
-    }
-
-    core.revision += 1;
 }
 
 /// Format a batch of parse errors into a single human-readable message.
@@ -202,39 +149,6 @@ mod tests {
         assert_eq!(index.lookup(&str_a), Some(id_a));
         assert_eq!(index.lookup(&str_b), Some(id_b));
         assert!(index.lookup("nonexistent").is_none());
-    }
-
-    /// render_subtree_into must append Create patches (fresh subtree) when
-    /// the parent has no children, and bump core.revision in both paths.
-    #[test]
-    fn render_subtree_into_fresh_subtree_path() {
-        let mut core = EngineCore::new();
-        let parent = core
-            .tree
-            .create_node(&Element::new("Column"), &serde_json::Value::Null);
-        core.tree.set_root(parent);
-
-        let rev_before = core.revision;
-        let mut patches = Vec::new();
-        let child_ir = IRNode::Element(Element::new("Text"));
-        render_subtree_into(
-            &mut core,
-            parent,
-            &child_ir,
-            &serde_json::Value::Null,
-            &mut patches,
-        );
-
-        assert!(
-            patches.iter().any(|p| matches!(p, Patch::Create { .. })),
-            "fresh subtree must emit at least one Create patch; got: {:?}",
-            patches
-        );
-        assert_eq!(
-            core.revision,
-            rev_before + 1,
-            "render_subtree_into must bump revision"
-        );
     }
 
     #[test]

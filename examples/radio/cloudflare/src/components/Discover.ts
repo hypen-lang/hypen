@@ -1,22 +1,32 @@
 import { app } from "@hypen-space/core";
 import { countryName, flagEmoji, searchStations, type Station } from "../radio-browser";
+import { EMPTY_STATION, openPlayer, shell, startStation } from "../player";
 import { currentCountry } from "../visitor";
 import { back, openStation, play } from "../screen-actions";
-import { C, skeletonRows, screen, stationRows } from "../ui";
+import { C, MONO, art, dial, kicker, notice, screen, skeletonRows, skeletonTiles, stationRows, stationTiles } from "../ui";
 
 // Discover: popular near you (request.cf country), top clicked, trending, and
 // entry points into genres / countries / languages.
+//
+// Layout: a masthead with the FM dial; the most-played local station as a
+// featured card in its own colour; local and trending stations as artwork
+// carousels; the worldwide top as a numbered chart.
 
 interface Chip {
   id: string;
   name: string;
 }
 
+type Ranked = Station & { rank: string };
+
 interface DiscoverState {
   country: string;
   countryLabel: string;
+  /** The most-played local station, shown large. */
+  featured: Station;
+  hasFeatured: boolean;
   local: Station[];
-  top: Station[];
+  top: Ranked[];
   trending: Station[];
   loading: boolean;
   failed: boolean;
@@ -27,9 +37,23 @@ interface DiscoverState {
 
 // A handful of real, high-volume Radio Browser tags as quick shortcuts; the
 // full live tag list is one tap away on /browse/genres.
-const QUICK_GENRES = ["pop", "rock", "jazz", "news", "classical", "electronic", "hiphop", "talk", "dance", "80s"];
+const QUICK_GENRES: Chip[] = [
+  { id: "pop", name: "Pop" },
+  { id: "rock", name: "Rock" },
+  { id: "jazz", name: "Jazz" },
+  { id: "news", name: "News" },
+  { id: "classical", name: "Classical" },
+  { id: "electronic", name: "Electronic" },
+  { id: "hiphop", name: "Hip-hop" },
+  { id: "talk", name: "Talk" },
+  { id: "dance", name: "Dance" },
+  { id: "80s", name: "80s" },
+];
 
-const SECTION_SIZE = 5;
+const CAROUSEL_SIZE = 10;
+const CHART_SIZE = 6;
+
+export const rank = (i: number) => String(i + 1).padStart(2, "0");
 
 async function load(state: DiscoverState) {
   state.loading = true;
@@ -39,13 +63,15 @@ async function load(state: DiscoverState) {
   state.countryLabel = `${flagEmoji(country)} ${countryName(country)}`.trim();
   try {
     const [local, top, trending] = await Promise.all([
-      searchStations({ kind: "country", value: country }, SECTION_SIZE),
-      searchStations({ kind: "top" }, SECTION_SIZE),
-      searchStations({ kind: "trending" }, SECTION_SIZE),
+      searchStations({ kind: "country", value: country }, CAROUSEL_SIZE + 1),
+      searchStations({ kind: "top" }, CHART_SIZE),
+      searchStations({ kind: "trending" }, CAROUSEL_SIZE),
     ]);
-    state.local = local;
-    state.hasLocal = local.length > 0;
-    state.top = top;
+    state.hasFeatured = local.length > 0;
+    state.featured = local[0] ?? { ...EMPTY_STATION };
+    state.local = local.slice(1);
+    state.hasLocal = state.local.length > 0;
+    state.top = top.map((s, i) => ({ ...s, rank: rank(i) }));
     state.trending = trending;
   } catch (err) {
     state.failed = true;
@@ -55,47 +81,114 @@ async function load(state: DiscoverState) {
   }
 }
 
-const section = (title: string, icon: string, binding: string, seeAll: string) => `
+const sectionHead = (label: string, title: string, seeAll: string) => `
           Row {
-            Icon(@resources.${icon})
-              .size(16)
-              .color("${C.accent}")
-            Heading("${title}", level: 2)
-              .tw("flex-1 ml-2 text-base font-bold text-left")
-              .color("${C.text}")
+            Column {
+${kicker(label)}
+              Heading("${title}", level: 2)
+                .tw("text-[22px] font-black text-left mt-1 tracking-tight")
+                .color("${C.text}")
+                .maxLines(1)
+                .textOverflow("ellipsis")
+            }
+            .tw("flex-1 min-w-0 items-start")
             Button {
               Text("See all")
-                .tw("text-xs font-semibold")
-                .color("${C.accent}")
+                .tw("text-xs font-bold")
+                .color("${C.text}")
             }
-            .tw("bg-transparent border-0 px-2 py-1")
+            .tw("h-8 px-3.5 ml-3 rounded-full items-center justify-center shrink-0")
+            .border("1px solid ${C.lineStrong}")
+            .tw("bg-transparent hover:bg-white/10")
+            .opacity({ default: 1, active: 0.6 })
             .onClick(@actions.seeAll, to: "${seeAll}")
           }
-          .tw("items-center mt-6 mb-1")
-${stationRows(binding)}`;
+          .tw("items-end mt-9 mb-4 w-full")`;
 
-const browseTile = (label: string, icon: string, to: string) => `
+const browseTile = (label: string, hint: string, icon: string, to: string) => `
             Button {
               Column {
                 Icon(@resources.${icon})
                   .size(20)
                   .color("${C.accent}")
                 Text("${label}")
-                  .tw("text-[13px] font-semibold mt-2")
+                  .tw("text-[15px] font-bold mt-3 text-left")
                   .color("${C.text}")
+                Text("${hint}")
+                  .tw("text-[11px] mt-0.5 text-left")
+                  ${MONO}
+                  .color("${C.faint}")
               }
-              .tw("items-center")
+              .tw("items-start w-full")
             }
-            .tw("flex-1 py-3.5 rounded-2xl border-0 items-center justify-center")
-            .backgroundColor({ default: "${C.surface}", hover: "${C.surface2}" })
+            .tw("flex-1 min-w-0 px-3.5 py-3.5 rounded-[20px] items-stretch")
+            .border("1px solid ${C.line}")
+            .backgroundColor({ default: "${C.surface}", hover: "${C.raised}" })
             .opacity({ default: 1, active: 0.6 })
+            .transition(140, easeOut)
             .onClick(@actions.seeAll, to: "${to}")`;
+
+const featured = `
+          Row {
+            Column {
+${kicker("NO. 1 NEAR YOU", C.text)}
+              Heading("@{state.featured.name}", level: 2)
+                .tw("text-[26px] font-black text-left mt-2 leading-tight tracking-tight w-full")
+                .color("${C.text}")
+                .maxLines(2)
+                .textOverflow("ellipsis")
+              Text("@{state.featured.subtitle}")
+                .tw("text-[13px] mt-1 text-left w-full")
+                .color("rgba(244, 238, 225, 0.82)")
+                .maxLines(1)
+                .textOverflow("ellipsis")
+              Row {
+                Button {
+                  Row {
+                    Icon(@resources.play)
+                      .size(14)
+                      .color("${C.ink}")
+                    Text("Listen live")
+                      .tw("text-sm font-bold ml-2")
+                      .color("${C.ink}")
+                  }
+                  .tw("items-center")
+                }
+                .tw("h-11 px-5 rounded-full border-0 items-center justify-center shrink-0")
+                .backgroundColor({ default: "${C.text}", hover: "#FFFFFF" })
+                .opacity({ default: 1, active: 0.72 })
+                .transition(140, easeOut)
+                .onClick(@actions.playFeatured)
+                Button {
+                  Text("Details")
+                    .tw("text-sm font-bold")
+                    .color("${C.text}")
+                }
+                .tw("h-11 px-4 ml-2 rounded-full items-center justify-center shrink-0")
+                .border("1px solid rgba(244, 238, 225, 0.35)")
+                .tw("bg-transparent hover:bg-white/10")
+                .opacity({ default: 1, active: 0.6 })
+                .onClick(@actions.openStation, id: "@{state.featured.id}")
+              }
+              .tw("items-center mt-4")
+            }
+            .tw("flex-1 min-w-0 items-start")
+${art("@{state.featured.art}", 104, 22, "@{state.featured.name} logo")}
+              .tw("ml-4")
+              .boxShadow("0 14px 30px rgba(0, 0, 0, 0.4)")
+          }
+          .tw("items-center w-full p-5 mt-6 rounded-[28px]")
+          .background("linear-gradient(135deg, @{state.featured.tint} 0%, ${C.surface} 100%)")
+          .border("1px solid ${C.line}")
+          .enter(fade, duration: 240)`;
 
 export default app
   .module("Discover")
   .defineState<DiscoverState>({
     country: "",
     countryLabel: "",
+    featured: { ...EMPTY_STATION },
+    hasFeatured: false,
     local: [],
     top: [],
     trending: [],
@@ -103,7 +196,7 @@ export default app
     failed: false,
     error: "",
     hasLocal: false,
-    genres: QUICK_GENRES.map((g) => ({ id: g, name: g })),
+    genres: QUICK_GENRES,
   })
   .onCreated(async (state) => {
     await load(state);
@@ -112,6 +205,12 @@ export default app
     await load(state);
   })
   .onAction("play", play)
+  .onAction("playFeatured", ({ state, context }) => {
+    const player = shell(context);
+    if (!player || !state.hasFeatured) return;
+    startStation(player, state.featured);
+    openPlayer(context);
+  })
   .onAction("openStation", openStation)
   .onAction("back", back)
   .onAction<{ to?: string }>("seeAll", ({ action, state, context }) => {
@@ -130,110 +229,115 @@ export default app
       "Discover",
       `
           Row {
-            Column {
-              Text("RADIO")
-                .tw("text-[11px] font-bold tracking-widest text-left")
-                .color("${C.accent}")
-              Heading("Discover", level: 1)
-                .tw("text-[26px] font-bold text-left")
-                .color("${C.text}")
-            }
-            .tw("flex-1 items-start")
-            Icon(@resources.radio)
-              .size(26)
-              .color("${C.accent}")
+            Box {}
+              .tw("w-2 h-2 rounded-full mr-2")
+              .backgroundColor("${C.accent}")
+              .animate(pulse, duration: 1600)
+              .hidden()
+${kicker("LIVE RADIO", C.accent, "flex-1")}
+            Text("@{state.countryLabel}")
+              .tw("text-[11px] font-bold")
+              ${MONO}
+              .color("${C.muted}")
           }
-          .tw("items-center pt-6 pb-4")
+          .tw("items-center pt-6 w-full")
+          Heading("Discover", level: 1)
+            .tw("text-[44px] font-black text-left leading-none tracking-tight mt-3 mb-5 w-full")
+            .color("${C.text}")
+${dial()}
 
           Button {
             Row {
               Icon(@resources.search)
-                .size(16)
-                .color("${C.muted}")
+                .size(18)
+                .color("${C.text}")
               Text("Search stations by name")
-                .tw("text-sm ml-2.5 text-left")
+                .tw("text-[15px] ml-3 text-left flex-1")
                 .color("${C.muted}")
             }
-            .tw("items-center")
+            .tw("items-center w-full")
           }
-          .tw("w-full h-11 px-4 rounded-xl border-0 items-start justify-center")
-          .backgroundColor("${C.surface}")
+          .tw("w-full h-[52px] px-5 mt-6 rounded-full items-stretch justify-center")
+          .border("1px solid ${C.lineStrong}")
+          .backgroundColor({ default: "${C.surface}", hover: "${C.raised}" })
           .opacity({ default: 1, active: 0.7 })
           .onClick(@actions.search)
 
-          Row {
-${browseTile("Genres", "tag", "/browse/genres")}
-${browseTile("Countries", "globe", "/browse/countries")}
-${browseTile("Languages", "language", "/browse/languages")}
-          }
-          .tw("mt-4 gap-2.5")
-
-          Row {
-            ForEach(items: @state.genres, key: "id") {
-              Button {
-                Text("#@{item.name}")
-                  .tw("text-xs font-semibold")
-                  .color("${C.text}")
-              }
-              .tw("h-8 px-3.5 mr-2 rounded-full border-0 items-center justify-center shrink-0")
-              .backgroundColor({ default: "${C.accentSoft}", hover: "rgba(255, 90, 54, 0.28)" })
-              .opacity({ default: 1, active: 0.6 })
-              .onClick(@actions.genre, id: "@{item.id}")
-            }
-          }
-          .scrollable("horizontal")
-          .tw("mt-4 flex-row w-full")
-
           If(condition: "@{state.loading}") {
             Column {
-${skeletonRows(6)}
+              Box {}.tw("w-full h-[176px] rounded-[28px] mt-6").backgroundColor("${C.surface}").animate(shimmer)
+              Box {}.tw("h-5 w-48 rounded mt-9 mb-4").backgroundColor("${C.surface}")
+${skeletonTiles(4)}
             }
-            .tw("mt-6 w-full")
+            .tw("w-full")
           }
 
           If(condition: "@{state.failed}") {
-${errorBlock()}
+            Column {
+${notice("alert", "Lost the signal", "@{state.error}", ["Try again", ".onClick(@actions.retry)"], C.accent)}
+            }
+            .tw("w-full mt-3")
+          }
+
+          If(condition: "@{state.hasFeatured}") {
+${featured}
           }
 
           If(condition: "@{state.hasLocal}") {
             Column {
-${section("Popular in @{state.countryLabel}", "map-pin", "local", "/list/country/local")}
-            }
-            .tw("w-full")
-          }
-          If(condition: "@{!state.loading && !state.failed}") {
-            Column {
-${section("Top clicked worldwide", "flame", "top", "/list/top/all")}
-${section("Trending now", "trending", "trending", "/list/trending/all")}
+${sectionHead("POPULAR NEAR YOU", "@{state.countryLabel}", "/list/country/local")}
+${stationTiles("local")}
             }
             .tw("w-full")
           }
 
+          Column {
+${kicker("BROWSE THE DIAL", C.accent, "mb-4")}
+            Row {
+${browseTile("Genres", "by sound", "tag", "/browse/genres")}
+${browseTile("Countries", "by place", "globe", "/browse/countries")}
+${browseTile("Languages", "by tongue", "language", "/browse/languages")}
+            }
+            .tw("gap-2.5 w-full")
+            Row {
+              ForEach(items: @state.genres, key: "id") {
+                Button {
+                  Text("@{item.name}")
+                    .tw("text-[13px] font-bold")
+                    .color("${C.text}")
+                }
+                .tw("h-9 px-4 mr-2 rounded-full items-center justify-center shrink-0")
+                .border("1px solid ${C.lineStrong}")
+                .tw("bg-transparent hover:bg-white/10")
+                .opacity({ default: 1, active: 0.6 })
+                .onClick(@actions.genre, id: "@{item.id}")
+              }
+            }
+            .scrollable("horizontal")
+            .tw("mt-3.5 flex-row w-full pb-1")
+          }
+          .tw("w-full mt-9 items-start")
+
+          If(condition: "@{!state.loading && !state.failed}") {
+            Column {
+${sectionHead("THE CHART", "Top clicked worldwide", "/list/top/all")}
+${stationRows("top", true)}
+${sectionHead("CLIMBING · LAST 24 HOURS", "Trending now", "/list/trending/all")}
+${stationTiles("trending", 132)}
+            }
+            .tw("w-full")
+          }
+
+          If(condition: "@{state.loading}") {
+            Column {
+${skeletonRows(4)}
+            }
+            .tw("mt-8 w-full")
+          }
+
           Text("Station data from the community-run Radio Browser directory (radio-browser.info). Audio streams play directly from each broadcaster.")
-            .tw("text-[11px] mt-8 text-center")
+            .tw("text-[11px] mt-10 text-center leading-4 w-full")
             .color("${C.faint}")
 `,
     ),
   );
-
-function errorBlock(): string {
-  return `
-            Column {
-              Icon(@resources.alert)
-                .size(26)
-                .color("${C.accent}")
-              Text("@{state.error}")
-                .tw("text-sm mt-3 text-center")
-                .color("${C.muted}")
-              Button {
-                Text("Try again")
-                  .tw("text-sm font-semibold")
-                  .color("${C.text}")
-              }
-              .tw("mt-4 h-10 px-5 rounded-xl border-0 items-center justify-center")
-              .backgroundColor("${C.surface2}")
-              .onClick(@actions.retry)
-            }
-            .tw("items-center py-10 px-6 mt-6 rounded-2xl w-full")
-            .backgroundColor("${C.surface}")`;
-}

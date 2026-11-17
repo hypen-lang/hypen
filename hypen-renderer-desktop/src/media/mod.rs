@@ -55,6 +55,13 @@ pub struct PlayOpts {
     /// stream fetch via playbin's `source-setup` signal
     /// (souphttpsrc `extra-headers`).
     pub headers: Vec<(String, String)>,
+    /// Only `http(s)` / `data:` sources may be opened — including ones
+    /// the stream itself names (an HLS / DASH manifest's segment URIs,
+    /// which the demuxer fetches with its own source elements). Set for
+    /// a remote app's node (it carries an asset-origin stamp); the
+    /// pipeline also applies it whenever the window is in a remote
+    /// asset scope. See `gst_pipeline::build`.
+    pub restrict_sources: bool,
 }
 
 /// Event surfaced from a playback pipeline, consumed by the window
@@ -88,13 +95,36 @@ pub(crate) struct PlayerShared {
     /// Set when the bus surfaced an error; painter shows no frame
     /// overlay changes, the window releases the player on the event.
     pub(crate) errored: AtomicBool,
+    /// Pipeline rebuilds spent on GStreamer 1.24's adaptivedemux2
+    /// unexposed-pad EOS race (see `gst_pipeline::is_unexposed_eos_race`),
+    /// carried over to the rebuilt player's slots.
+    pub(crate) race_restarts: std::sync::atomic::AtomicU32,
+}
+
+impl PlayerShared {
+    pub(crate) fn new() -> Arc<Self> {
+        Arc::new(Self {
+            frame: Mutex::new(None),
+            ended: AtomicBool::new(false),
+            errored: AtomicBool::new(false),
+            race_restarts: std::sync::atomic::AtomicU32::new(0),
+        })
+    }
 }
 
 struct Player {
     /// Resolved URL of the playing track.
     url: String,
+    /// The track's source as the app authored it — what event payloads
+    /// report (`url` is the renderer's resolution of it).
+    src: String,
     /// Playlist index of the playing track (0 for single src).
     index: u64,
+    /// The options the pipeline was built with — `restrict_sources`
+    /// resolved (set when the window was in a remote asset scope), so a
+    /// rebuild off the window thread ([`rebuild_after_race`]) is exactly
+    /// as restricted.
+    opts: PlayOpts,
     pipeline: gstreamer::Element,
     shared: Arc<PlayerShared>,
     /// `true` while the user (or an error/EOS) has playback paused.
@@ -206,16 +236,31 @@ pub fn has_playback(node_id: &str) -> bool {
         .contains_key(node_id)
 }
 
-/// The `(url, playlist_index)` of the track the node's player is
-/// currently on. Diverges from the node's `startIndex`-derived track
-/// after a playlist advance — the registry is the source of truth.
-pub fn current_track(node_id: &str) -> Option<(String, u64)> {
+/// The track a node's player is on (see [`current_track`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CurrentTrack {
+    /// The resolved URL the pipeline plays — the track's identity.
+    pub url: String,
+    /// The source as the app authored it — what event payloads carry.
+    pub src: String,
+    /// Playlist index (0 for single src).
+    pub index: u64,
+}
+
+/// The track the node's player is currently on. Diverges from the
+/// node's `startIndex`-derived track after a playlist advance — the
+/// registry is the source of truth.
+pub fn current_track(node_id: &str) -> Option<CurrentTrack> {
     registry()
         .players
         .lock()
         .expect("media registry poisoned")
         .get(node_id)
-        .map(|p| (p.url.clone(), p.index))
+        .map(|p| CurrentTrack {
+            url: p.url.clone(),
+            src: p.src.clone(),
+            index: p.index,
+        })
 }
 
 /// Latest decoded frame for the node, if playback has produced one.
@@ -313,6 +358,35 @@ fn query_position_duration(pipeline: &gstreamer::Element) -> (f64, f64) {
     (position.max(0.0), duration.max(0.0))
 }
 
+/// `true` when `node_id`'s pipeline will take a seek now: it has
+/// finished its state change (no ASYNC change pending — prerolled) into
+/// at least PAUSED, and answers a SEEKING query in TIME with `seekable`.
+/// "The duration is known" is NOT enough: a demuxer can report it before
+/// the pipeline has prerolled, and GStreamer refuses a flushing seek
+/// until it has.
+pub fn seekable(node_id: &str) -> bool {
+    let pipeline = {
+        let players = registry().players.lock().expect("media registry poisoned");
+        match players.get(node_id) {
+            Some(p) => p.pipeline.clone(),
+            None => return false,
+        }
+    };
+    pipeline_seekable(&pipeline)
+}
+
+pub(crate) fn pipeline_seekable(pipeline: &gstreamer::Element) -> bool {
+    let (result, current, pending) = pipeline.state(gstreamer::ClockTime::ZERO);
+    if result.is_err()
+        || pending != gstreamer::State::VoidPending
+        || current < gstreamer::State::Paused
+    {
+        return false;
+    }
+    let mut query = gstreamer::query::Seeking::new(gstreamer::Format::Time);
+    pipeline.query(&mut query) && query.result().0
+}
+
 /// Seek `node_id` to `seconds` (clamped at 0, and to the known duration
 /// when the pipeline can answer). Returns `true` when the seek was
 /// issued. Flushing + key-unit: the same flags the ended-restart and
@@ -379,8 +453,9 @@ pub fn set_playing(node_id: &str, playing: bool) -> Option<bool> {
     Some(playing)
 }
 
-/// Start (or restart) playback of `url` for `node_id`. Any existing
-/// pipeline for the node is torn down first. `playing = false`
+/// Start (or restart) playback of `url` (the resolution of the app's
+/// authored `src`, which event payloads report) for `node_id`. Any
+/// existing pipeline for the node is torn down first. `playing = false`
 /// prerolls paused (first frame shows, no advance).
 ///
 /// Returns `Ok(true)` when playback started, `Ok(false)` when the
@@ -391,6 +466,7 @@ pub fn set_playing(node_id: &str, playing: bool) -> Option<bool> {
 pub fn start(
     node_id: &str,
     url: &str,
+    src: &str,
     index: u64,
     opts: &PlayOpts,
     playing: bool,
@@ -398,12 +474,12 @@ pub fn start(
     // Tear down any prior pipeline for this node OUTSIDE the lock.
     release(node_id);
 
-    let shared = Arc::new(PlayerShared {
-        frame: Mutex::new(None),
-        ended: AtomicBool::new(false),
-        errored: AtomicBool::new(false),
-    });
-    let pipeline = gst_pipeline::build(node_id, url, opts, Arc::clone(&shared))?;
+    let shared = PlayerShared::new();
+    let opts = PlayOpts {
+        restrict_sources: opts.restrict_sources || crate::paint::image::remote_origin().is_some(),
+        ..opts.clone()
+    };
+    let pipeline = gst_pipeline::build(node_id, url, &opts, Arc::clone(&shared))?;
     let target = if playing {
         gstreamer::State::Playing
     } else {
@@ -421,7 +497,9 @@ pub fn start(
     }
     let player = Player {
         url: url.to_string(),
+        src: src.to_string(),
         index,
+        opts,
         pipeline,
         shared,
         paused: !playing,
@@ -438,6 +516,84 @@ pub fn start(
         let _ = old.pipeline.set_state(gstreamer::State::Null);
     }
     Ok(true)
+}
+
+/// Rebuild `node_id`'s player after GStreamer 1.24's adaptivedemux2
+/// unexposed-pad EOS race failed its pipeline (`failed` is that
+/// pipeline's slots; see `gst_pipeline::is_unexposed_eos_race`): a fresh
+/// pipeline for the same track, options and play/pause state — an
+/// in-place `NULL` → `PLAYING` cycle of the failed `playbin3` trips its
+/// output reconfiguration assertion (`gstplaybin3.c` `reconfigure_output:
+/// assertion failed: (combine->sinkpad == NULL)`, an abort). Runs off the
+/// streaming thread (an element `call_async`). Does nothing when the node
+/// has moved on (a new track or a release): the player must still be the
+/// one that failed, checked again under the lock before the swap.
+pub(crate) fn rebuild_after_race(node_id: &str, failed: &Arc<PlayerShared>) {
+    let snapshot = {
+        let players = registry().players.lock().expect("media registry poisoned");
+        match players.get(node_id) {
+            Some(p) if Arc::ptr_eq(&p.shared, failed) => {
+                Some((p.url.clone(), p.opts.clone(), p.paused || p.suspended))
+            }
+            _ => None,
+        }
+    };
+    let Some((url, opts, paused)) = snapshot else {
+        return;
+    };
+    let shared = PlayerShared::new();
+    shared.race_restarts.store(
+        failed.race_restarts.load(Ordering::SeqCst),
+        Ordering::SeqCst,
+    );
+    let rebuilt = gst_pipeline::build(node_id, &url, &opts, Arc::clone(&shared)).and_then(|p| {
+        let target = if paused {
+            gstreamer::State::Paused
+        } else {
+            gstreamer::State::Playing
+        };
+        match p.set_state(target) {
+            Ok(_) => Ok(p),
+            Err(e) => {
+                let _ = p.set_state(gstreamer::State::Null);
+                Err(format!("set_state({target:?}) failed: {e}"))
+            }
+        }
+    });
+    let pipeline = match rebuilt {
+        Ok(p) => p,
+        Err(e) => {
+            log::warn!("video: rebuilding {node_id} after the EOS race failed: {e}");
+            if !failed.errored.swap(true, Ordering::Relaxed) {
+                push_event(
+                    node_id,
+                    MediaEventKind::Error {
+                        code: "resource/NotFound".to_string(),
+                        message: "Couldn't download fragments".to_string(),
+                        status: None,
+                    },
+                );
+            }
+            return;
+        }
+    };
+    let old = {
+        let mut players = registry().players.lock().expect("media registry poisoned");
+        match players.get_mut(node_id) {
+            Some(p) if Arc::ptr_eq(&p.shared, failed) => {
+                p.shared = shared;
+                Some(std::mem::replace(&mut p.pipeline, pipeline))
+            }
+            _ => {
+                drop(players);
+                let _ = pipeline.set_state(gstreamer::State::Null);
+                None
+            }
+        }
+    };
+    if let Some(old) = old {
+        let _ = old.set_state(gstreamer::State::Null);
+    }
 }
 
 /// Toggle play/pause. Returns `Some(now_playing)`; `None` when the
@@ -572,28 +728,13 @@ pub fn release_all() {
 /// JSON `true` or the string `"true"`, under either the named key or
 /// its positional `.0` variant.
 pub(crate) fn prop_truthy(node: &crate::tree::Node, name: &str) -> bool {
-    let zero = format!("{name}.0");
-    let v = node.props.get(&zero).or_else(|| node.props.get(name));
-    match v {
-        Some(v) => v.as_bool() == Some(true) || v.as_str().map(str::trim) == Some("true"),
-        None => false,
-    }
+    crate::layout::media_prop_truthy(node, name)
 }
 
-/// The node's `playlist` prop as an ordered list of URLs. Entries are
-/// trimmed but NOT filtered — indexes must stay aligned with the
-/// authored array (contract payloads carry the index).
-pub(crate) fn resolve_playlist(node: &crate::tree::Node) -> Vec<String> {
-    node.props
-        .get("playlist")
-        .or_else(|| node.props.get("playlist.0"))
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .map(|v| v.as_str().map(str::trim).unwrap_or_default().to_string())
-                .collect()
-        })
-        .unwrap_or_default()
+/// The node's `playlist` prop as ordered sources, index-aligned with
+/// the authored array — see [`crate::layout::resolve_media_playlist`].
+pub(crate) fn resolve_playlist(node: &crate::tree::Node) -> Vec<crate::layout::MediaSource> {
+    crate::layout::resolve_media_playlist(node)
 }
 
 /// Resolve the node's `headers` prop: either a whole JSON object
@@ -627,11 +768,19 @@ pub(crate) fn resolve_headers(node: &crate::tree::Node) -> Vec<(String, String)>
 /// for single-src playback — playlist wrap is queue-level and handled
 /// by the window on `Ended`.
 pub(crate) fn resolve_play_opts(node: &crate::tree::Node) -> PlayOpts {
-    let has_playlist = !resolve_playlist(node).is_empty();
+    let has_playlist = node
+        .props
+        .get("playlist")
+        .or_else(|| node.props.get("playlist.0"))
+        .and_then(|v| v.as_array())
+        .is_some_and(|a| !a.is_empty());
     PlayOpts {
         muted: prop_truthy(node, "muted"),
         looping: prop_truthy(node, "loop") && !has_playlist,
         headers: resolve_headers(node),
+        restrict_sources: node
+            .props
+            .contains_key(crate::paint::image::ASSET_ORIGIN_PROP),
     }
 }
 

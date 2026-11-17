@@ -855,6 +855,254 @@ fn image_element_emits_image_kind_with_src() {
     }
 }
 
+/// hypen-browser's case: ONE window whose tree mixes a local shell with
+/// remote tabs / embeds from several servers, painted under one window
+/// scope. Each remote node must resolve its image-like sources against
+/// the server that streamed it (carried on the node by its
+/// `RemoteModule`), never against the window and never to a local file;
+/// the local shell's own nodes keep their authored local paths.
+#[test]
+fn image_sources_resolve_per_owning_node_not_per_window() {
+    let mut tree = Tree::new();
+    // Local shell node: no owner stamp.
+    tree.apply(&create_patch(
+        "local",
+        "Image",
+        &[("src", json!("/tmp/local.png"))],
+    ));
+    tree.apply(&insert_patch("root", "local"));
+
+    // Two remote apps, stamped exactly as their RemoteModules deliver.
+    let own = |origin: &str, patches: Vec<Patch>| {
+        crate::remote::own_patches(
+            patches,
+            &Arc::from(origin),
+            &mut hypen_engine::TemplateExpander::new(),
+        )
+    };
+    let server_a = own(
+        "http://a.test:8787",
+        vec![
+            create_patch("a_art", "Image", &[("src", json!("/art/1.png"))]),
+            create_patch("a_passwd", "Image", &[("src", json!("/etc/passwd"))]),
+            create_patch("a_file", "Image", &[("src", json!("file:///etc/passwd"))]),
+            create_patch("a_drive", "Avatar", &[("src", json!("C:\\secret.png"))]),
+            create_patch("a_rel", "Avatar", &[("src", json!("etc/passwd"))]),
+            create_patch(
+                "a_bg",
+                "Column",
+                &[("background", json!("url('/bg.png') center / cover"))],
+            ),
+            create_patch(
+                "a_bg_file",
+                "Column",
+                &[("backgroundImage", json!("url(file:///etc/passwd)"))],
+            ),
+            create_patch("a_video", "Video", &[("poster", json!("/etc/hosts"))]),
+            create_patch(
+                "a_video_file",
+                "Video",
+                &[("poster", json!("file:///etc/hosts"))],
+            ),
+        ],
+    );
+    let server_b = own(
+        "https://b.test",
+        vec![create_patch(
+            "b_art",
+            "Image",
+            &[("src", json!("/art/1.png"))],
+        )],
+    );
+    for p in server_a.iter().chain(server_b.iter()) {
+        tree.apply(p);
+        if let Patch::Create { id, .. } = p {
+            tree.apply(&insert_patch("root", id));
+        }
+    }
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let src = |id: &str| match &find_item(&pass, id).kind {
+        ItemKind::Image { src, .. } => src.clone(),
+        other => panic!("expected ItemKind::Image for {id}, got {other:?}"),
+    };
+    assert_eq!(src("local").as_deref(), Some("/tmp/local.png"));
+    assert_eq!(
+        src("a_art").as_deref(),
+        Some("http://a.test:8787/art/1.png")
+    );
+    assert_eq!(src("b_art").as_deref(), Some("https://b.test/art/1.png"));
+    assert_eq!(
+        src("a_passwd").as_deref(),
+        Some("http://a.test:8787/etc/passwd")
+    );
+    assert_eq!(src("a_file"), None, "file: from a remote app is refused");
+    assert_eq!(
+        src("a_drive"),
+        None,
+        "a drive path from a remote app is refused"
+    );
+    assert_eq!(
+        src("a_rel").as_deref(),
+        Some("http://a.test:8787/etc/passwd")
+    );
+    assert_eq!(
+        find_item(&pass, "a_bg").background_image.as_deref(),
+        Some("http://a.test:8787/bg.png")
+    );
+    assert_eq!(find_item(&pass, "a_bg_file").background_image, None);
+    let viewport = vp(800.0);
+    assert_eq!(
+        resolve_media_poster(tree.get("a_video").unwrap(), viewport).as_deref(),
+        Some("http://a.test:8787/etc/hosts")
+    );
+    assert_eq!(
+        resolve_media_poster(tree.get("a_video_file").unwrap(), viewport),
+        None
+    );
+
+    // Whatever the window's scope (local here: no scope entered), no
+    // remote node's source plans as a local file read.
+    for id in ["a_art", "b_art", "a_passwd", "a_rel"] {
+        let key = src(id).unwrap();
+        assert!(
+            matches!(
+                crate::paint::image::plan_source(&key, None),
+                crate::paint::image::SourcePlan::Http(_)
+            ),
+            "{id}: {key}"
+        );
+    }
+}
+
+/// A remote app's Video: sources resolve for LOADING under the node's
+/// own origin, but everything the app hears back (`onPlay` payload,
+/// `ItemKind::Video.src`) carries the source it authored; a `file:` /
+/// drive-path src or playlist entry is an explicit refusal (never an
+/// empty URL a player could be started on) and the player reads
+/// `error`.
+#[test]
+fn remote_video_sources_resolve_per_node_and_report_as_authored() {
+    let own = |patches: Vec<Patch>| {
+        crate::remote::own_patches(
+            patches,
+            &Arc::from("http://a.test:8787"),
+            &mut hypen_engine::TemplateExpander::new(),
+        )
+    };
+    let mut tree = Tree::new();
+    for p in own(vec![
+        create_patch(
+            "v_rel",
+            "Video",
+            &[
+                ("src", json!("/media/a.mp4")),
+                ("onPlay.0", json!("@actions.play")),
+            ],
+        ),
+        create_patch(
+            "v_file",
+            "Video",
+            &[
+                ("src", json!("file:///etc/passwd")),
+                ("onPlay.0", json!("@actions.play")),
+            ],
+        ),
+        create_patch(
+            "v_list",
+            "Video",
+            &[(
+                "playlist",
+                json!(["/ep1.mp4", "file:///etc/passwd", "C:\\x.mp4", "/ep4.mp4"]),
+            )],
+        ),
+    ]) {
+        tree.apply(&p);
+        if let Patch::Create { id, .. } = &p {
+            tree.apply(&insert_patch("root", id));
+        }
+    }
+    let viewport = vp(800.0);
+    let node = |id: &str| tree.get(id).unwrap();
+
+    // Loading: resolved against the node's server. Reporting: authored.
+    assert_eq!(
+        resolve_media_src(node("v_rel"), viewport).0.as_deref(),
+        Some("http://a.test:8787/media/a.mp4")
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let item = find_item(&pass, "v_rel");
+    match &item.kind {
+        ItemKind::Video { src, .. } => assert_eq!(src.as_deref(), Some("/media/a.mp4")),
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+    assert_eq!(
+        item.action_payload.as_ref().expect("play payload")["src"],
+        json!("/media/a.mp4")
+    );
+
+    // A refused src: explicit, never loadable, still reported as authored.
+    let (refused, _) = resolve_media_source(node("v_file"), viewport);
+    assert_eq!(
+        refused,
+        Some(MediaSource::Refused {
+            authored: "file:///etc/passwd".into()
+        })
+    );
+    assert_eq!(resolve_media_src(node("v_file"), viewport).0, None);
+    let refused_item = find_item(&pass, "v_file");
+    match &refused_item.kind {
+        ItemKind::Video { src, .. } => assert_eq!(src.as_deref(), Some("file:///etc/passwd")),
+        other => panic!("expected ItemKind::Video, got {other:?}"),
+    }
+    assert!(
+        refused_item.action.is_none(),
+        "a refused track must not announce onPlay"
+    );
+    assert_eq!(
+        crate::video_v2::player_state(node("v_file"), viewport),
+        crate::video_v2::VideoPlayerState::Error
+    );
+    assert_eq!(
+        crate::video_v2::player_state(node("v_rel"), viewport),
+        crate::video_v2::VideoPlayerState::Idle
+    );
+
+    // Playlist: index-aligned, refused entries explicit, and an advance
+    // skips them (reporting each) instead of starting on "".
+    let list = resolve_media_playlist(node("v_list"));
+    assert_eq!(
+        list.iter().map(MediaSource::url).collect::<Vec<_>>(),
+        vec![
+            Some("http://a.test:8787/ep1.mp4"),
+            None,
+            None,
+            Some("http://a.test:8787/ep4.mp4")
+        ]
+    );
+    let (skipped, next) = next_playlist_track(&list, 0, false);
+    assert_eq!(
+        skipped
+            .iter()
+            .map(|(i, s)| (*i, s.authored()))
+            .collect::<Vec<_>>(),
+        vec![(1, "file:///etc/passwd"), (2, "C:\\x.mp4")]
+    );
+    assert_eq!(next.map(|(i, s)| (i, s.authored())), Some((3, "/ep4.mp4")));
+    // End of queue: done without `loop`, wraps to 0 with it.
+    assert!(next_playlist_track(&list, 3, false).1.is_none());
+    assert_eq!(
+        next_playlist_track(&list, 3, true).1.map(|(i, _)| i),
+        Some(0)
+    );
+    // Only refused entries ahead, wrapping: replays the current track.
+    let two = &list[..2];
+    assert_eq!(next_playlist_track(two, 0, true).1.map(|(i, _)| i), Some(0));
+    assert!(next_playlist_track(&list[1..3], 0, true).1.is_none());
+}
+
 #[test]
 fn image_default_size_when_width_height_unset() {
     // An Image without width/height props uses a sensible default
@@ -2754,8 +3002,8 @@ fn rounded_video_overflow_passes_its_exact_radius_to_controls_slot() {
 
     assert_eq!(controls.clip_to, Some(video.rect));
     assert_eq!(play.clip_to, Some(video.rect));
-    assert_eq!(controls.clip_radius, 32.0);
-    assert_eq!(play.clip_radius, 32.0);
+    assert_eq!(controls.clip_radius, 32.0.into());
+    assert_eq!(play.clip_radius, 32.0.into());
 }
 
 // -----------------------------------------------------------------
@@ -2791,7 +3039,7 @@ fn actionable_clip_item(
         scrollable: None,
         font_weight: 400,
         clip_to,
-        clip_radius: 0.0,
+        clip_radius: crate::style::CornerRadii::ZERO,
         subtree_root: None,
         background_gradient: None,
         background_layers: None,
@@ -5145,7 +5393,8 @@ fn hidden_slots_are_not_hit_testable_but_visible_ones_are() {
     tree.apply(&create_patch(
         "btn",
         "Button",
-        &[("action", json!("@actions.togglePlay"))],
+        // Explicit box: an empty Button has no implicit padding (DOM).
+        &[("action", json!("@actions.togglePlay")), ("size", json!(40))],
     ));
     tree.apply(&insert_patch("ctl", "btn"));
 
@@ -5540,7 +5789,9 @@ fn intent_button_tree(intent: Option<&str>, action: Option<&str>) -> Tree {
         &[("slot.0", json!("controls"))],
     ));
     tree.apply(&insert_patch("vid", "ctl"));
-    let mut props: Vec<(&str, Value)> = Vec::new();
+    // An explicit box: like a DOM `<button>`, an empty Button has no
+    // implicit padding, so without one there is nothing to hit.
+    let mut props: Vec<(&str, Value)> = vec![("size", json!(40))];
     if let Some(i) = intent {
         props.push(("videoIntent.0", json!(i)));
     }
@@ -6199,6 +6450,35 @@ mod paint_refresh {
     #[test]
     fn text_color_flip() {
         assert_refresh_matches(fixture(), &[set_prop("name", "color", json!("#ff0000"))]);
+    }
+
+    #[test]
+    fn text_decoration_toggle_on_the_text() {
+        // A Todo row ticked done: `.textDecoration("line-through")`
+        // arrives as a paint-only SetProp and must strike the text
+        // through without waiting for an unrelated full layout.
+        assert_refresh_matches(
+            fixture(),
+            &[set_prop("name", "textDecoration.0", json!("line-through"))],
+        );
+    }
+
+    #[test]
+    fn text_decoration_removed_from_the_text() {
+        // Un-ticking: the line must go away in place, not linger.
+        let mut tree = fixture();
+        tree.apply(&set_prop("name", "textDecoration.0", json!("line-through")));
+        assert_refresh_matches(tree, &[remove_prop("name", "textDecoration.0")]);
+    }
+
+    #[test]
+    fn text_decoration_propagates_from_an_ancestor_in_place() {
+        // Decorations propagate to descendant text, so a write on the
+        // card must restrike the Text inside it.
+        assert_refresh_matches(
+            fixture(),
+            &[set_prop("card", "textDecorationLine", json!("underline"))],
+        );
     }
 
     #[test]
@@ -8142,13 +8422,18 @@ fn patches_from_dsl(source: &str) -> Vec<Patch> {
 
 /// First node of `element_type` in document order.
 fn first_of_type(tree: &Tree, element_type: &str) -> String {
+    first_of_type_under(tree, "root", element_type)
+}
+
+/// The first `element_type` node at or below `under` (pre-order).
+fn first_of_type_under(tree: &Tree, under: &str, element_type: &str) -> String {
     fn walk(tree: &Tree, id: &str, ty: &str) -> Option<String> {
         if tree.get(id).is_some_and(|n| n.element_type == ty) {
             return Some(id.to_string());
         }
         tree.children_of(id).iter().find_map(|c| walk(tree, c, ty))
     }
-    walk(tree, "root", element_type).unwrap_or_else(|| panic!("no {element_type} in tree"))
+    walk(tree, under, element_type).unwrap_or_else(|| panic!("no {element_type} under {under}"))
 }
 
 fn seed_tall_story_photo(src: &str) {
@@ -9139,4 +9424,3082 @@ fn taffy_clear_children_matches_a_plain_remove_per_child() {
         assert_eq!(rect_of(&pass_a, id), rect_of(&pass_b, id), "{id}");
     }
     assert_eq!(pass_a.items.len(), pass_b.items.len());
+}
+
+// -----------------------------------------------------------------
+// Heading renders as a text leaf (DOM `<h1>`–`<h6>` parity)
+// -----------------------------------------------------------------
+
+fn heading_text_item(pass: &LayoutPass, id: &str) -> (String, f32, u16, Rgba) {
+    let item = find_item(pass, id);
+    match &item.kind {
+        ItemKind::Text {
+            content,
+            font_size,
+            color,
+            ..
+        } => (content.clone(), *font_size, item.font_weight, *color),
+        other => panic!("{id}: Heading should lay out as a Text item, got {other:?}"),
+    }
+}
+
+#[test]
+fn heading_with_own_text_paints_with_level_defaults() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("page", "Column", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "page"));
+    let cases: &[(&str, &[(&str, Value)])] = &[
+        ("h1", &[("0", json!("The Daily Hypen")), ("level", json!(1))]),
+        // Default level is 2, like the DOM's `<h2>` fallback.
+        ("hdef", &[("0", json!("Default"))]),
+        // `.level(3)` arrives as `level.0`.
+        ("h3", &[("0", json!("Three")), ("level.0", json!(3))]),
+        // Out-of-range levels clamp to 1..=6.
+        ("h9", &[("0", json!("Nine")), ("level", json!(9))]),
+        // Named `text:` argument.
+        ("hnamed", &[("text", json!("Named")), ("level", json!(4))]),
+    ];
+    for (id, props) in cases {
+        tree.apply(&create_patch(id, "Heading", props));
+        tree.apply(&insert_patch("page", id));
+    }
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let expect = [
+        ("h1", "The Daily Hypen", 32.0),
+        ("hdef", "Default", 24.0),
+        ("h3", "Three", 18.72),
+        ("h9", "Nine", 10.72),
+        ("hnamed", "Named", 16.0),
+    ];
+    for (id, content, size) in expect {
+        let (c, fs, weight, _) = heading_text_item(&pass, id);
+        assert_eq!(c, content, "{id}");
+        assert!((fs - size).abs() < 0.01, "{id}: font size {fs}, want {size}");
+        assert_eq!(weight, 700, "{id}: headings default to bold");
+        let rect = find_item(&pass, id).rect;
+        assert!(rect.w > 0.0 && rect.h >= size - 0.5, "{id}: measured box {rect:?}");
+    }
+}
+
+#[test]
+fn heading_applicators_override_the_level_defaults() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "h",
+        "Heading",
+        &[
+            ("0", json!("Discover")),
+            ("level", json!(1)),
+            ("fontSize", json!(26)),
+            ("fontWeight", json!("normal")),
+            ("color", json!("#ff0000")),
+        ],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "h"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let (_, fs, weight, color) = heading_text_item(&pass, "h");
+    assert!((fs - 26.0).abs() < 0.01, "fontSize override: {fs}");
+    assert_eq!(weight, 400, "fontWeight override");
+    assert_eq!(color, Rgba(0xff, 0, 0, 0xff));
+}
+
+#[test]
+fn heading_without_own_text_stays_a_container_for_its_children() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("h", "Heading", &[("level", json!(1))]));
+    tree.apply(&insert_patch(ROOT_ID, "h"));
+    add_text(&mut tree, "h", "t", "Child");
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    assert!(matches!(find_item(&pass, "h").kind, ItemKind::Container));
+    let (c, fs, weight, _) = heading_text_item(&pass, "t");
+    assert_eq!(c, "Child");
+    assert!((fs - 32.0).abs() < 0.01);
+    assert_eq!(weight, 700);
+}
+
+/// A `level` that changes after creation re-sizes the heading, like the
+/// Canvas, SwiftUI, Compose and DOM renderers (all re-derive the size from
+/// the current level; the DOM without re-tagging its `<hN>`). The
+/// incremental path (Taffy restyle + paint-only gate)
+/// must agree with a fresh layout — `level` was missing from the layout
+/// prop list, so a live write was treated as paint-only and the size only
+/// caught up on some unrelated full layout.
+#[test]
+fn heading_level_change_after_creation_resizes_incrementally() {
+    use crate::window::paint_only_affected_ids;
+    let initial = vec![
+        create_patch("page", "Column", &[]),
+        insert_patch(ROOT_ID, "page"),
+        create_patch("own", "Heading", &[("0", json!("Own")), ("level", json!(1))]),
+        insert_patch("page", "own"),
+        create_patch("wrap", "Heading", &[("level.0", json!(1))]),
+        insert_patch("page", "wrap"),
+        create_patch("child", "Text", &[("0", json!("Child"))]),
+        insert_patch("wrap", "child"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(430.0)));
+    let mut text = TextEngine::new();
+    let before = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    assert!((heading_text_item(&before, "own").1 - 32.0).abs() < 0.01);
+
+    let change = vec![
+        Patch::SetProp {
+            id: "own".into(),
+            name: "level".into(),
+            value: json!(4),
+        },
+        Patch::SetProp {
+            id: "wrap".into(),
+            name: "level.0".into(),
+            value: json!(5),
+        },
+    ];
+    assert!(
+        paint_only_affected_ids(&change, &[], &tree, false, false, false).is_none(),
+        "a heading level change re-sizes text; it is not paint-only"
+    );
+    tree.apply_batch(&change);
+    assert!(taffy.apply_patches(&change, &tree, 1.0, vp(430.0)));
+    let after = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 2,
+    );
+    let fresh = LayoutPass::compute(&tree, &mut TextEngine::new(), (430, 934), 1.0);
+    for (id, size) in [("own", 16.0), ("child", 13.28)] {
+        let (_, fs, _, _) = heading_text_item(&after, id);
+        assert!((fs - size).abs() < 0.01, "{id}: font size {fs}, want {size}");
+        assert_eq!(
+            find_item(&after, id).rect,
+            find_item(&fresh, id).rect,
+            "{id}: incremental box diverged from a fresh layout"
+        );
+    }
+}
+
+/// `level` is a layout prop ONLY on a Heading: on any other element
+/// (a Progress, a Rating, a custom component's data prop) a `level`
+/// write is paint-only and must not dirty the fit pass / Taffy.
+#[test]
+fn level_is_layout_affecting_only_on_a_heading() {
+    use crate::layout::{is_node_layout_prop_key, patch_affects_layout};
+    use crate::window::paint_only_affected_ids;
+    let mut tree = Tree::new();
+    tree.apply_batch(&[
+        create_patch("h", "Heading", &[("0", json!("Title")), ("level", json!(1))]),
+        insert_patch(ROOT_ID, "h"),
+        create_patch("p", "Progress", &[("level", json!(1))]),
+        insert_patch(ROOT_ID, "p"),
+        create_patch("c", "Column", &[("level.0", json!(1))]),
+        insert_patch(ROOT_ID, "c"),
+    ]);
+    let write = |id: &str, name: &str| Patch::SetProp {
+        id: id.into(),
+        name: name.into(),
+        value: json!(3),
+    };
+    for (id, name, layout) in [
+        ("h", "level", true),
+        ("h", "level.0", true),
+        ("p", "level", false),
+        ("c", "level.0", false),
+    ] {
+        assert_eq!(is_node_layout_prop_key(&tree, id, name), layout, "{id}.{name}");
+        assert_eq!(patch_affects_layout(&write(id, name), &tree), layout, "{id}.{name}");
+        assert_eq!(
+            paint_only_affected_ids(&[write(id, name)], &[], &tree, false, false, false)
+                .is_none(),
+            layout,
+            "{id}.{name}"
+        );
+    }
+    assert!(!crate::layout::is_layout_prop("level"));
+    assert!(!crate::layout::is_inherited_text_measure_key("level"));
+}
+
+// -----------------------------------------------------------------
+// Text decoration (`.textDecoration("line-through")`, Tailwind
+// `underline` / `line-through`, `.underline()` / `.strikethrough()`)
+// -----------------------------------------------------------------
+
+fn text_decoration_of(pass: &LayoutPass, id: &str) -> TextDecoration {
+    match &find_item(pass, id).kind {
+        ItemKind::Text { decoration, .. } => *decoration,
+        other => panic!("{id}: expected Text, got {other:?}"),
+    }
+}
+
+#[test]
+fn text_decoration_props_resolve_onto_the_text_item() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("page", "Column", &[]));
+    tree.apply(&insert_patch(ROOT_ID, "page"));
+    let cases: &[(&str, &[(&str, Value)])] = &[
+        // Todo's done task: `.textDecoration("@{item.done ? 'line-through' : 'none'}")`.
+        ("strike", &[("0", json!("Learn Hypen")), ("textDecoration", json!("line-through"))]),
+        ("none", &[("0", json!("Build")), ("textDecoration", json!("none"))]),
+        // Tailwind `underline` lowers to `text-decoration-line`.
+        ("tw", &[("0", json!("Link")), ("textDecorationLine", json!("underline"))]),
+        // Swift-style boolean applicators.
+        ("flags", &[("0", json!("Both")), ("underline.0", json!(true)), ("strikethrough.0", json!(true))]),
+        (
+            "colored",
+            &[
+                ("0", json!("Red")),
+                ("textDecoration", json!("underline overline")),
+                ("textDecorationColor", json!("#ff0000")),
+            ],
+        ),
+    ];
+    for (id, props) in cases {
+        tree.apply(&create_patch(id, "Text", props));
+        tree.apply(&insert_patch("page", id));
+    }
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+
+    let strike = text_decoration_of(&pass, "strike");
+    assert!(strike.line_through && !strike.underline && !strike.overline);
+    assert!(text_decoration_of(&pass, "none").is_none());
+    let tw = text_decoration_of(&pass, "tw");
+    assert!(tw.underline && !tw.line_through);
+    let flags = text_decoration_of(&pass, "flags");
+    assert!(flags.underline && flags.line_through);
+    let colored = text_decoration_of(&pass, "colored");
+    assert!(colored.underline && colored.overline && !colored.line_through);
+    assert_eq!(colored.color, Some(Rgba(0xff, 0, 0, 0xff)));
+}
+
+#[test]
+fn text_decoration_propagates_from_ancestors() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "row",
+        "Row",
+        &[("textDecoration", json!("line-through"))],
+    ));
+    tree.apply(&insert_patch(ROOT_ID, "row"));
+    // A descendant's `none` can't cancel the ancestor's line (CSS).
+    tree.apply(&create_patch(
+        "t",
+        "Text",
+        &[("0", json!("Done")), ("textDecoration", json!("none"))],
+    ));
+    tree.apply(&insert_patch("row", "t"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    assert!(text_decoration_of(&pass, "t").line_through);
+}
+
+#[test]
+fn decoration_rects_cross_each_wrapped_line_at_the_right_height() {
+    use crate::paint::vello_painter::decoration_rects;
+    let mut text = TextEngine::new();
+    let strike = TextDecoration {
+        line_through: true,
+        ..Default::default()
+    };
+    let one = decoration_rects(&mut text, "Learn Hypen", 16.0, Some(400.0), 400, 16.0, strike);
+    assert_eq!(one.len(), 1, "one line → one strike: {one:?}");
+    let (w, _) = text.measure_weighted_line_height("Learn Hypen", 16.0, None, 400, 16.0);
+    let r = one[0];
+    assert!((r.w - w).abs() < 2.0, "strike spans the glyphs: {r:?} vs width {w}");
+    assert!(r.h >= 1.0);
+    // Inside the line box, in its middle third — not at the baseline.
+    assert!(r.y > 3.0 && r.y + r.h < 13.0, "strike sits mid-glyph: {r:?}");
+
+    let underline = TextDecoration {
+        underline: true,
+        ..Default::default()
+    };
+    let u = decoration_rects(&mut text, "Learn Hypen", 16.0, Some(400.0), 400, 16.0, underline);
+    assert!(u[0].y > r.y + 4.0, "underline below the strike: {u:?} vs {r:?}");
+
+    // Wrapped text decorates every visual line.
+    let wrapped = decoration_rects(
+        &mut text,
+        "alpha beta gamma delta epsilon",
+        16.0,
+        Some(64.0),
+        400,
+        16.0,
+        strike,
+    );
+    assert!(wrapped.len() >= 3, "{wrapped:?}");
+    assert!(wrapped.windows(2).all(|p| p[1].y > p[0].y));
+    assert!(wrapped.iter().all(|r| r.w <= 64.5), "{wrapped:?}");
+
+    assert!(decoration_rects(&mut text, "x", 16.0, None, 400, 16.0, TextDecoration::default())
+        .is_empty());
+}
+
+#[test]
+fn decoration_rects_repaint_does_not_reshape() {
+    use crate::paint::vello_painter::decoration_rects;
+    let mut text = TextEngine::new();
+    let strike = TextDecoration {
+        line_through: true,
+        ..Default::default()
+    };
+    let first = decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, strike);
+    assert_eq!(text.line_runs_shapes, 1);
+    // A repaint of the same Text (every frame it is re-encoded) reuses
+    // the cached line runs — no fresh cosmic-text Buffer.
+    let again = decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, strike);
+    assert_eq!(again, first);
+    assert_eq!(text.line_runs_shapes, 1, "second paint reshaped");
+    // The decoration kind is not a layout input: switching it is free.
+    let under = TextDecoration {
+        underline: true,
+        ..Default::default()
+    };
+    decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, under);
+    assert_eq!(text.line_runs_shapes, 1);
+    // Any layout input (here the wrap width) is part of the key.
+    decoration_rects(&mut text, "Buy milk", 16.0, Some(40.0), 400, 16.0, strike);
+    assert_eq!(text.line_runs_shapes, 2);
+    text.clear_measure_cache();
+    decoration_rects(&mut text, "Buy milk", 16.0, Some(300.0), 400, 16.0, strike);
+    assert_eq!(text.line_runs_shapes, 3, "clear_measure_cache drops line runs too");
+}
+
+/// Same retained-tree gap as the Heading level case, for any ancestor's
+/// inherited `fontSize`: the descendant Text's measure context must be
+/// re-resolved on the incremental path, not only on a full rebuild.
+#[test]
+fn ancestor_font_size_change_remeasures_descendant_text_incrementally() {
+    let initial = vec![
+        create_patch("wrap", "Column", &[("fontSize.0", json!(32))]),
+        insert_patch(ROOT_ID, "wrap"),
+        create_patch("child", "Text", &[("0", json!("Child"))]),
+        insert_patch("wrap", "child"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(430.0)));
+    let mut text = TextEngine::new();
+    let _ = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 1,
+    );
+    let change = vec![Patch::SetProp {
+        id: "wrap".into(),
+        name: "fontSize.0".into(),
+        value: json!(10),
+    }];
+    tree.apply_batch(&change);
+    assert!(taffy.apply_patches(&change, &tree, 1.0, vp(430.0)));
+    let after = LayoutPass::compute_with_state(
+        &mut taffy, &tree, &mut text, (430, 934), 1.0, 0.0, &HashMap::new(), 2,
+    );
+    let fresh = LayoutPass::compute(&tree, &mut TextEngine::new(), (430, 934), 1.0);
+    assert_eq!(find_item(&after, "child").rect, find_item(&fresh, "child").rect);
+}
+
+// -----------------------------------------------------------------
+// DOM parity: aspect-ratio transfer, actionable defaults, named
+// padding, font-family
+// -----------------------------------------------------------------
+
+/// News' picture of the day (`Today.ts`), trimmed: a `w-full` Image with
+/// `.aspectRatio(r)` + `.maxHeight(300)` + `objectFit("cover")` inside a
+/// Link-wrapped card. Chrome keeps the authored width and caps the
+/// ratio-derived height (the photo is cover-cropped); Taffy used to
+/// transfer `max-height` through the ratio into a `max-width`, so a
+/// portrait photo drew 225px wide in a 396px card, and the Link's
+/// implicit Button padding inset the whole card.
+#[test]
+fn picture_of_the_day_fills_its_card_and_crops_to_max_height() {
+    let src = "test://potd-portrait-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Column {{
+                Link(href: "https://example.org", target: "_blank") {{
+                    Column {{
+                        Image(src: "{src}", alt: "potd")
+                            .objectFit("cover")
+                            .aspectRatio("@{{state.aspect}}")
+                            .maxHeight(300)
+                            .tw("w-full")
+                        Column {{ Text("PICTURE OF THE DAY") }}.tw("p-4")
+                    }}
+                    .tw("rounded-3xl overflow-hidden border")
+                }}
+                .tw("block no-underline w-full")
+            }}
+            .tw("px-4 mt-4")
+            .maxWidth(760).width("100%").alignSelf("center")
+        }}
+        .tw("w-full")"#
+        ),
+        json!({ "aspect": 0.75 }),
+    );
+    let mut text = TextEngine::new();
+    for scale in [1.0f32, 2.0] {
+        let pass = LayoutPass::compute(&tree, &mut text, ((430.0 * scale) as u32, (934.0 * scale) as u32), scale);
+        let rect = |ty: &str| pass.item_by_id(&first_of_type(&tree, ty)).expect("laid out").rect;
+        let (link, image) = (rect("Link"), rect("Image"));
+        let card = pass
+            .item_by_id(&tree.children_of(&first_of_type(&tree, "Link"))[0])
+            .expect("card laid out")
+            .rect;
+        assert!(
+            (link.x - 16.0 * scale).abs() < 0.5 && (link.w - 398.0 * scale).abs() < 0.5,
+            "scale={scale}: the Link spans the padded column, no implicit inset: {link:?}"
+        );
+        assert!(
+            (card.x - link.x).abs() < 0.5 && (card.w - link.w).abs() < 0.5,
+            "scale={scale}: a Link has no default padding (DOM <a>): card {card:?} in {link:?}"
+        );
+        assert!(
+            (image.w - (card.w - 2.0 * scale)).abs() < 0.5,
+            "scale={scale}: the authored w-full survives max-height: image {image:?} in card {card:?}"
+        );
+        assert!(
+            (image.h - 300.0 * scale).abs() < 0.5,
+            "scale={scale}: the ratio-derived height is capped at 300: {image:?}"
+        );
+        assert!(
+            card.h < image.h + 80.0 * scale,
+            "scale={scale}: the card hugs the capped photo + caption: card {card:?}, image {image:?}"
+        );
+    }
+}
+
+/// A natural-size image (no authored width) still shrinks both axes
+/// under a max-height, like an `<img>` with only `max-height`.
+#[test]
+fn natural_size_image_still_scales_down_under_max_height() {
+    let src = "test://natural-max-h-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(r#"Column {{ Image(src: "{src}").maxHeight(400) }}.tw("w-full")"#),
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (1200, 2400), 1.0);
+    let image = pass.item_by_id(&first_of_type(&tree, "Image")).unwrap().rect;
+    assert!((image.h - 400.0).abs() < 0.5, "{image:?}");
+    assert!((image.w - 225.0).abs() < 0.5, "keeps 1080:1920 → 225×400, got {image:?}");
+}
+
+/// `keep_authored_size_out_of_ratio_transfer` pins the authored axis's
+/// max to `f32::MAX` (Taffy has no "none" distinct from `auto`, and
+/// `auto` is exactly what invites the transfer). That sentinel can never
+/// be scaled through the ratio: Taffy's `maybe_apply_aspect_ratio` only
+/// fills an axis whose max is unset, and once pinned both are set. So
+/// even ratios whose product with `f32::MAX` overflows to ±inf / NaN
+/// leave every rect finite and the authored axis as authored.
+#[test]
+fn ratio_transfer_sentinel_stays_finite_under_extreme_ratios() {
+    let src = "test://extreme-ratio-1080x1920";
+    seed_tall_story_photo(src);
+    let mut text = TextEngine::new();
+    for ratio in [1e-30f64, 1e-6, 1e-3, 0.75, 1e3, 1e6, 1e30] {
+        for (sizing, authored_w) in [(".width(200).maxHeight(300)", true), (".height(200).maxWidth(300)", false)] {
+            let tree = tree_from_dsl(
+                &format!(
+                    r#"Column {{ Image(src: "{src}").objectFit("cover").aspectRatio("@{{state.r}}"){sizing} }}"#
+                ),
+                json!({ "r": ratio }),
+            );
+            for scale in [1.0f32, 2.0] {
+                let pass = LayoutPass::compute(
+                    &tree,
+                    &mut text,
+                    ((430.0 * scale) as u32, (934.0 * scale) as u32),
+                    scale,
+                );
+                let image = pass.item_by_id(&first_of_type(&tree, "Image")).unwrap().rect;
+                let column = pass.item_by_id(&first_of_type(&tree, "Column")).unwrap().rect;
+                for r in [image, column] {
+                    assert!(
+                        [r.x, r.y, r.w, r.h].iter().all(|v| v.is_finite()),
+                        "ratio {ratio} {sizing} scale {scale}: non-finite rect {r:?}"
+                    );
+                }
+                let (authored, capped) = if authored_w { (image.w, image.h) } else { (image.h, image.w) };
+                assert!(
+                    (authored - 200.0 * scale).abs() < 0.5,
+                    "ratio {ratio} {sizing} scale {scale}: authored axis kept: {image:?}"
+                );
+                assert!(
+                    capped <= 300.0 * scale + 0.5,
+                    "ratio {ratio} {sizing} scale {scale}: the other axis is capped: {image:?}"
+                );
+            }
+        }
+    }
+}
+
+/// DOM Button resets `padding: 0`; Card sets `16px`. Todo's "Add" button
+/// (`Button { Text("Add").padding(10) }`) is the text box plus nothing.
+#[test]
+fn actionable_default_padding_matches_the_dom_components() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Button { Text("Add").padding(10) }
+            Card { Text("Card") }
+            Button { Text("Padded") }.padding(8)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let column = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&column);
+    let rect = |id: &str| pass.item_by_id(id).expect("laid out").rect;
+    for (i, pad) in [(0usize, 0.0f32), (1, 16.0), (2, 8.0)] {
+        let outer = rect(&kids[i]);
+        let inner = rect(&tree.children_of(&kids[i])[0]);
+        assert!(
+            (inner.x - outer.x - pad).abs() < 0.5
+                && (outer.w - inner.w - 2.0 * pad).abs() < 0.5
+                && (outer.h - inner.h - 2.0 * pad).abs() < 0.5,
+            "child #{i}: expected {pad}px padding, outer {outer:?} inner {inner:?}"
+        );
+    }
+}
+
+/// `.padding(horizontal: 14, vertical: 12)` (the Messages inputs) — the
+/// named axis form the DOM, Swift and Android renderers all resolve.
+#[test]
+fn named_axis_padding_reaches_an_input() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Input(placeholder: "e.g. Ada")
+                .padding(horizontal: 14, vertical: 12).fontSize(16)
+                .borderRadius(12).border("1px solid #CBD5E1")
+                .width("100%")
+            Row { Text("x") }.padding(vertical: 4, top: 9, start: 3)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let input = pass.item_by_id(&first_of_type(&tree, "Input")).unwrap();
+    match &input.kind {
+        ItemKind::Input { padding, .. } => assert_eq!(*padding, (14.0, 12.0, 14.0, 12.0)),
+        other => panic!("expected an Input item, got {other:?}"),
+    }
+    assert!(input.rect.h >= 16.0 + 24.0 + 2.0, "padding feeds the box: {:?}", input.rect);
+    let row = first_of_type(&tree, "Row");
+    let pad = crate::style::padding_at(tree.get(&row).unwrap(), vp(430.0));
+    // An explicit edge beats its axis; `start` lands on the left (LTR).
+    assert_eq!((pad.left, pad.top, pad.right, pad.bottom), (3.0, 9.0, 0.0, 4.0));
+}
+
+/// `fontFamily` inherits to Text like CSS `font-family`, and is a layout
+/// input (a serif face measures differently).
+#[test]
+fn font_family_inherits_to_text_items() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("Headline")
+            Text("Mono").fontFamily("ui-monospace, monospace")
+        }.fontFamily("Georgia, 'Times New Roman', serif")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let column = first_of_type(&tree, "Column");
+    let family = |id: &str| match &pass.item_by_id(id).unwrap().kind {
+        ItemKind::Text { font_family, .. } => font_family.clone(),
+        other => panic!("expected Text, got {other:?}"),
+    };
+    let kids = tree.children_of(&column);
+    assert_eq!(family(&kids[0]), crate::text::FontFamily::from_css("Georgia, 'Times New Roman', serif"));
+    assert_eq!(family(&kids[1]), crate::text::FontFamily::from_css("ui-monospace, monospace"));
+    assert!(is_layout_prop("fontFamily") && is_inherited_text_measure_key("fontFamily.0"));
+}
+
+/// Tailwind `font-sans` / `font-serif` / `font-mono` (expanded by the
+/// engine to `fontFamily.0`, or `fontFamily@md.0` under a breakpoint)
+/// set the family on the Text itself and on its descendants, and every
+/// spelling the invalidation predicates accept is one the readers see.
+#[test]
+fn tailwind_font_family_classes_reach_text() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("Serif").tw("font-serif")
+            Text("Mono").tw("font-mono")
+            Text("Sans").tw("font-sans")
+            Column { Text("Inherited") }.tw("font-mono")
+            Text("Responsive").tw("font-sans md:font-serif")
+        }"#,
+        json!({}),
+    );
+    let serif = crate::text::FontFamily::from_css("ui-serif, Georgia, serif");
+    let mono = crate::text::FontFamily::from_css("ui-monospace, monospace");
+    let sans = crate::text::FontFamily::from_css("ui-sans-serif, system-ui, sans-serif");
+    let mut text = TextEngine::new();
+    for (width, responsive) in [(430u32, &sans), (1000, &serif)] {
+        let pass = LayoutPass::compute(&tree, &mut text, (width, 934), 1.0);
+        let family = |id: &str| match &pass.item_by_id(id).unwrap().kind {
+            ItemKind::Text { font_family, .. } => font_family.clone(),
+            other => panic!("expected Text, got {other:?}"),
+        };
+        let kids = tree.children_of(&first_of_type(&tree, "Column"));
+        assert_eq!(&family(&kids[0]), &serif);
+        assert_eq!(&family(&kids[1]), &mono);
+        assert_eq!(&family(&kids[2]), &sans);
+        assert_eq!(&family(&tree.children_of(&kids[3])[0]), &mono, "inherited from the Column");
+        assert_eq!(&family(&kids[4]), responsive, "md: variant at {width}px");
+    }
+    for key in ["fontFamily", "font-family", "fontFamily.0", "fontFamily@md.0"] {
+        assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
+    }
+}
+
+/// `letter-spacing` and `text-transform` inherit like CSS and reach the
+/// Text's shaping settings; `em` resolves against the declaring node's
+/// font size, a bare number is px.
+#[test]
+fn letter_spacing_and_text_transform_inherit_to_text_items() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("7-day forecast").fontSize(12)
+            Text("kicker").tw("text-[10px] tracking-widest")
+            Text("Plain").textTransform("none").letterSpacing("normal")
+            Text("forecast").fontSize(12).letterSpacing("normal")
+            Text("forecast").fontSize(12).letterSpacing("normal").textTransform("none")
+            Text("forecast").fontSize(12).textTransform("none")
+        }.letterSpacing(0.8).textTransform("uppercase")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let family = |id: &str| match &pass.item_by_id(id).unwrap().kind {
+        ItemKind::Text { font_family, .. } => font_family.clone(),
+        other => panic!("expected Text, got {other:?}"),
+    };
+    let kids = tree.children_of(&first_of_type(&tree, "Column"));
+    let inherited = family(&kids[0]);
+    assert_eq!(inherited.transform(), crate::text::TextTransform::Uppercase);
+    assert!((inherited.letter_spacing_em() - 0.8 / 12.0).abs() < 1e-6);
+    let kicker = family(&kids[1]);
+    assert!((kicker.letter_spacing_em() - 0.1).abs() < 1e-6, "tracking-widest = 0.1em");
+    assert_eq!(kicker.transform(), crate::text::TextTransform::Uppercase);
+    let plain = family(&kids[2]);
+    assert_eq!(plain.transform(), crate::text::TextTransform::None);
+    assert_eq!(plain.letter_spacing_em(), 0.0);
+    for key in ["letterSpacing", "letter-spacing.0", "textTransform", "text-transform"] {
+        assert!(is_layout_prop_key(key) && is_inherited_text_measure_key(key), "{key}");
+    }
+    // Both are shaping inputs. The same word at the same size: the
+    // inherited uppercase measures wider than the lowercase source…
+    let width = |i: usize| pass.item_by_id(&kids[i]).unwrap().rect.w;
+    let (upper, lower, spaced) = (width(3), width(4), width(5));
+    assert!(
+        upper > lower * 1.15,
+        "FORECAST ({upper}) should be wider than forecast ({lower})"
+    );
+    // …and the inherited 0.8px letter-spacing adds ~0.8px per glyph.
+    assert!(
+        (spaced - lower - 8.0 * 0.8).abs() < 1.5,
+        "letter-spacing: {spaced} vs {lower}"
+    );
+}
+
+/// A caption beside a username in a Row (Social's post caption) wraps
+/// inside the Row's width like a CSS flex item, instead of overflowing
+/// the card on one line.
+#[test]
+fn text_beside_a_label_in_a_row_wraps_within_the_row() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Row {
+                Text("amara_reads").tw("text-sm font-semibold pr-1")
+                Text("A quiet corner and a book I did not mean to finish today.").tw("text-sm")
+            }.tw("py-1 px-4")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let row = first_of_type(&tree, "Row");
+    let kids = tree.children_of(&row);
+    let row_rect = pass.item_by_id(&row).map(|i| i.rect);
+    let caption = pass.item_by_id(&kids[1]).unwrap().rect;
+    let right = row_rect.map_or(430.0, |r| r.x + r.w - 16.0);
+    assert!(
+        caption.x + caption.w <= right + 0.5,
+        "caption {caption:?} overflows the row content edge {right}"
+    );
+    let col = pass.item_by_id(&first_of_type(&tree, "Column")).map(|i| i.rect);
+    let user = pass.item_by_id(&kids[0]).map(|i| i.rect);
+    assert!(
+        caption.h > 30.0,
+        "caption should wrap to two lines: {caption:?} row {row_rect:?} col {col:?} user {user:?}"
+    );
+}
+
+/// A Text with its own `text-center` fills its vertical parent's width
+/// (the DOM's text fill), so a centred title over a wider sibling sits
+/// in the middle; the parent stays content-sized (text fill is not
+/// width demand), and Row parents keep the Text intrinsic.
+#[test]
+fn text_with_its_own_center_alignment_fills_its_column() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Column {
+                Text("Inception").tw("text-center")
+                Text("A considerably longer line of plain body text")
+            }
+            Row { Text("Row title").tw("text-center") }
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let outer = first_of_type(&tree, "Column");
+    let inner = tree.children_of(&outer)[0].clone();
+    let kids = tree.children_of(&inner);
+    let rect = |id: &str| pass.item_by_id(id).unwrap().rect;
+    let (title, body) = (rect(&kids[0]), rect(&kids[1]));
+    assert!(
+        (title.w - body.w).abs() < 0.5 && (title.x - body.x).abs() < 0.5,
+        "centred title {title:?} should span the column like {body:?}"
+    );
+    let column_w = pass.item_by_id(&inner).map(|i| i.rect.w).unwrap_or(body.w);
+    assert!(column_w < 400.0, "the column stays content-sized: {column_w}");
+    let row = first_of_type(&tree, "Row");
+    let row_title = rect(&tree.children_of(&row)[0]);
+    let (natural, _) = text.measure("Row title", 16.0, None);
+    assert!(row_title.w <= natural + 1.0, "Row keeps the Text intrinsic: {row_title:?}");
+}
+
+// ---------------------------------------------------------------------------
+// Chrome-parity layout & box styling (diff-layout).
+// ---------------------------------------------------------------------------
+
+fn node(tree: &mut Tree, parent: &str, id: &str, element_type: &str, props: &[(&str, Value)]) {
+    tree.apply(&create_patch(id, element_type, props));
+    tree.apply(&insert_patch(parent, id));
+}
+
+/// Calories meal card / Food search row: `Button { Row { …, Column.flex-1,
+/// chevron } }`. The DOM Button is `align-items: flex-start` and the Row is
+/// not auto-stretched outside a vertical carrier, so the Row (and the
+/// chevron) stay content-width instead of spanning the Button.
+#[test]
+fn growing_row_inside_full_width_button_stays_content_width() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "btn",
+        "Button",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "btn", "row", "Row", &[]);
+    node(
+        &mut tree,
+        "row",
+        "grow",
+        "Column",
+        &[("flexGrow", json!(1))],
+    );
+    add_text(&mut tree, "grow", "label", "Breakfast");
+    node(
+        &mut tree,
+        "row",
+        "chev",
+        "Column",
+        &[("width", json!(16)), ("height", json!(16))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let btn = find_item(&pass, "btn");
+    let row = find_item(&pass, "row");
+    let label = find_item(&pass, "label");
+    let chev = find_item(&pass, "chev");
+    assert!(
+        (btn.rect.w - 400.0).abs() < 1.0,
+        "button is full width: {:?}",
+        btn.rect
+    );
+    assert!(
+        row.rect.w < 200.0,
+        "row stays content-width: {:?}",
+        row.rect
+    );
+    assert!(
+        chev.rect.x <= label.rect.x + label.rect.w + 1.0,
+        "chevron follows the text: label={:?} chev={:?}",
+        label.rect,
+        chev.rect
+    );
+}
+
+/// Under a Column the same growing Row is still stretched (DOM vertical
+/// carrier) — the Food search field Row keeps filling its container.
+#[test]
+fn growing_row_inside_column_still_stretches() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "row", "Row", &[]);
+    node(
+        &mut tree,
+        "row",
+        "grow",
+        "Column",
+        &[("flexGrow", json!(1))],
+    );
+    add_text(&mut tree, "grow", "label", "x");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!((find_item(&pass, "row").rect.w - 400.0).abs() < 1.0);
+}
+
+/// Weather 7-day row: a Row with a percentage child nested in a centred
+/// Row must follow the parent's `verticalAlignment("center")` — a Row's
+/// `align-self` is the vertical axis there, so the automatic width stretch
+/// must not apply.
+#[test]
+fn demanding_row_inside_centered_row_is_vertically_centered() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "outer",
+        "Row",
+        &[
+            ("width", json!("100%")),
+            ("height", json!(50)),
+            ("verticalAlignment", json!("center")),
+        ],
+    );
+    node(
+        &mut tree,
+        "outer",
+        "track",
+        "Row",
+        &[("flex", json!(1)), ("height", json!(6))],
+    );
+    node(
+        &mut tree,
+        "track",
+        "fill",
+        "Box",
+        &[("width", json!("40%")), ("height", json!(6))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let outer = find_item(&pass, "outer");
+    let track = find_item(&pass, "track");
+    let centre = track.rect.y + track.rect.h / 2.0 - outer.rect.y;
+    assert!(
+        (centre - 25.0).abs() < 1.0,
+        "track centred: outer={:?} track={:?}",
+        outer.rect,
+        track.rect
+    );
+}
+
+/// `textAlign("center")` Text in a start-aligned Column fills the Column
+/// (DOM `[data-hypen-text-fill]`), so the centred glyphs sit in the middle.
+#[test]
+fn center_aligned_text_fills_start_aligned_column() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "title",
+        "Text",
+        &[("0", json!("Inception")), ("textAlign", json!("center"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "plain",
+        "Text",
+        &[("0", json!("Synopsis"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!((find_item(&pass, "title").rect.w - 400.0).abs() < 1.0);
+    assert!(
+        find_item(&pass, "plain").rect.w < 200.0,
+        "start text stays intrinsic"
+    );
+}
+
+/// ...but not inside a Row, where the DOM rule is cancelled.
+#[test]
+fn center_aligned_text_in_row_keeps_intrinsic_box() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "row",
+        "Row",
+        &[("width", json!("100%")), ("height", json!(40))],
+    );
+    node(
+        &mut tree,
+        "row",
+        "t",
+        "Text",
+        &[("0", json!("Mon")), ("textAlign", json!("center"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let t = find_item(&pass, "t");
+    assert!(
+        t.rect.h < 40.0,
+        "no vertical stretch in a Row: {:?}",
+        t.rect
+    );
+    assert!(
+        t.rect.w < 100.0,
+        "no horizontal fill in a Row: {:?}",
+        t.rect
+    );
+}
+
+/// Calories weekly chart card: a Box is not a DOM width-demand carrier, so
+/// a percentage-width child does not stretch it across its Column.
+#[test]
+fn box_around_percentage_child_stays_content_sized() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "card", "Box", &[("height", json!(100))]);
+    node(
+        &mut tree,
+        "card",
+        "inner",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    add_text(&mut tree, "inner", "label", "Mon");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(
+        find_item(&pass, "card").rect.w < 200.0,
+        "{:?}",
+        find_item(&pass, "card").rect
+    );
+}
+
+/// A List always asks for its Column's width (DOM intrinsic demand).
+#[test]
+fn list_inside_column_stretches_without_demanding_children() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "list", "List", &[]);
+    add_text(&mut tree, "list", "row", "Row 1");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!((find_item(&pass, "list").rect.w - 400.0).abs() < 1.0);
+}
+
+/// `width: calc(100% - 40px)` resolves against the parent's content box
+/// and `alignSelf("center")` places the resolved box (MovieDB search,
+/// News tab bar).
+#[test]
+fn calc_width_resolves_against_parent_and_centers() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "bar",
+        "Row",
+        &[
+            ("width", json!("calc(100% - 40px)")),
+            ("alignSelf", json!("center")),
+            ("height", json!(20)),
+        ],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let bar = find_item(&pass, "bar");
+    assert!((bar.rect.w - 360.0).abs() < 0.5, "{:?}", bar.rect);
+    assert!((bar.rect.x - 20.0).abs() < 0.5, "{:?}", bar.rect);
+}
+
+#[test]
+fn calc_width_honours_max_width() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "bar",
+        "Row",
+        &[
+            ("width", json!("calc(100% - 32px)")),
+            ("maxWidth", json!(300)),
+            ("alignSelf", json!("center")),
+            ("height", json!(20)),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let bar = find_item(&pass, "bar");
+    assert!((bar.rect.w - 300.0).abs() < 0.5, "{:?}", bar.rect);
+    assert!((bar.rect.x - 250.0).abs() < 0.5, "{:?}", bar.rect);
+}
+
+/// Lay out `Column(100%) > <carrier> > Row(calc(100% - 40px)) > Column(200)`
+/// once per viewport width on one `TaffyState` and return each pass's
+/// (carrier width, carrier content width, bar width).
+fn calc_in_content_sized_carrier(carrier: &str, viewports: &[u32]) -> Vec<(f32, f32, f32)> {
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("carrier", carrier, &[]),
+        insert_patch("col", "carrier"),
+        create_patch(
+            "bar",
+            "Row",
+            &[("width", json!("calc(100% - 40px)")), ("height", json!(20))],
+        ),
+        insert_patch("carrier", "bar"),
+        create_patch(
+            "inner",
+            "Column",
+            &[("width", json!(200)), ("height", json!(10))],
+        ),
+        insert_patch("bar", "inner"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(viewports[0] as f32));
+    let mut text = TextEngine::new();
+    viewports
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let pass = LayoutPass::compute_with_state(
+                &mut state,
+                &tree,
+                &mut text,
+                (w, 600),
+                1.0,
+                0.0,
+                &HashMap::new(),
+                i as u64 + 1,
+            );
+            let c = find_item(&pass, "carrier");
+            // None of these carriers has default padding (DOM parity).
+            (c.rect.w, c.rect.w, find_item(&pass, "bar").rect.w)
+        })
+        .collect()
+}
+
+/// CSS: inside a content-sized containing block the percentage behaves as
+/// `auto` for intrinsic sizing, so the carrier sizes from the bar's
+/// content (200) and the calc applies inside it — and stays put on every
+/// relayout. Writing the resolved definite length fed it back into the
+/// carrier's content size and the bar lost 40px per pass.
+#[test]
+fn calc_width_in_content_sized_carrier_is_stable_across_relayouts() {
+    // (A Stack used to be checked here too; it now carries the calc's
+    // width demand and fills its Column — see
+    // `calc_width_in_stack_fills_the_column_stably`.)
+    for carrier in ["Button"] {
+        let passes = calc_in_content_sized_carrier(carrier, &[400, 400, 400, 400]);
+        let (carrier_w, inner_w, bar_w) = passes[0];
+        assert!(
+            (inner_w - 200.0).abs() < 0.5,
+            "{carrier}: carrier sizes from the bar's content: {passes:?}"
+        );
+        assert!(
+            (bar_w - (inner_w - 40.0)).abs() < 0.5,
+            "{carrier}: calc applies inside the carrier: {passes:?}"
+        );
+        for p in &passes[1..] {
+            assert!(
+                (p.0 - carrier_w).abs() < 0.5 && (p.2 - bar_w).abs() < 0.5,
+                "{carrier}: relayout must not shrink the box: {passes:?}"
+            );
+        }
+    }
+}
+
+/// A Stack passes a percentage (here `calc(100% - 40px)`) child's width
+/// demand up like the DOM's `DEMAND_CARRIERS`: its Column stretches it, the
+/// calc resolves against the full width, and relayouts keep it put.
+#[test]
+fn calc_width_in_stack_fills_the_column_stably() {
+    let passes = calc_in_content_sized_carrier("Stack", &[400, 400, 400, 400]);
+    for p in &passes {
+        assert!(
+            (p.0 - 400.0).abs() < 0.5 && (p.2 - 360.0).abs() < 0.5,
+            "{passes:?}"
+        );
+    }
+}
+
+/// A resize re-derives the fraction against the new containing width,
+/// and repeated passes at each size stay put.
+#[test]
+fn calc_width_tracks_resize_without_drift() {
+    let patches = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch(
+            "bar",
+            "Row",
+            &[("width", json!("calc(100% - 40px)")), ("height", json!(20))],
+        ),
+        insert_patch("col", "bar"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(400.0));
+    let mut text = TextEngine::new();
+    let widths: Vec<f32> = [400, 400, 600, 600, 300, 300]
+        .iter()
+        .enumerate()
+        .map(|(i, &w)| {
+            let pass = LayoutPass::compute_with_state(
+                &mut state,
+                &tree,
+                &mut text,
+                (w, 600),
+                1.0,
+                0.0,
+                &HashMap::new(),
+                i as u64 + 1,
+            );
+            find_item(&pass, "bar").rect.w
+        })
+        .collect();
+    let expected = [360.0, 360.0, 560.0, 560.0, 260.0, 260.0];
+    for (got, want) in widths.iter().zip(expected) {
+        assert!((got - want).abs() < 0.5, "{widths:?}");
+    }
+}
+
+#[test]
+fn parse_calc_forms() {
+    use crate::style::{parse_calc, CalcLength};
+    assert_eq!(
+        parse_calc("calc(100% - 40px)", None),
+        Some(CalcLength {
+            percent: 1.0,
+            px: -40.0
+        })
+    );
+    assert_eq!(
+        parse_calc("calc(50% + 1rem - 4px)", None),
+        Some(CalcLength {
+            percent: 0.5,
+            px: 12.0
+        })
+    );
+    assert_eq!(parse_calc("calc(100% * 2)", None), None);
+    assert_eq!(parse_calc("100%", None), None);
+}
+
+/// `.display("none")` removes the node and its subtree from geometry and
+/// from the emitted items; its siblings close the gap.
+#[test]
+fn display_none_hides_subtree_and_takes_no_space() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "col", "Column", &[]);
+    node(
+        &mut tree,
+        "col",
+        "gone",
+        "Column",
+        &[("display", json!("none")), ("height", json!(50))],
+    );
+    add_text(&mut tree, "gone", "inner", "hidden");
+    add_text(&mut tree, "col", "after", "visible");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(pass
+        .items
+        .iter()
+        .all(|it| it.node_id != "gone" && it.node_id != "inner"));
+    assert!(
+        find_item(&pass, "after").rect.y < 1.0,
+        "{:?}",
+        find_item(&pass, "after").rect
+    );
+}
+
+/// Per-side CSS shorthand `.borderTop("1px solid …")` (Weather dividers).
+#[test]
+fn border_top_shorthand_draws_top_side_only() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "row",
+        "Row",
+        &[
+            ("borderTop", json!("1px solid rgba(255, 255, 255, 0.2)")),
+            ("height", json!(20)),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let b = find_item(&pass, "row").border;
+    assert_eq!(b.width, 1.0);
+    assert_eq!(b.sides, crate::style::BORDER_SIDE_TOP);
+    assert_eq!(b.color, Rgba(255, 255, 255, 51));
+}
+
+#[test]
+fn css_box_shadow_lists_parse_in_order() {
+    let layers = parse_css_box_shadow(
+        "0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgba(236, 72, 153, 0.14)",
+        None,
+    );
+    assert_eq!(layers.len(), 2);
+    assert_eq!(
+        (layers[0].y, layers[0].blur, layers[0].spread),
+        (10.0, 15.0, -3.0)
+    );
+    assert_eq!(layers[1].color, Rgba(236, 72, 153, 36));
+    assert!(parse_css_box_shadow("none", None).is_empty());
+    assert!(parse_css_box_shadow("0 0 #0000", None).is_empty());
+    let ring = parse_css_box_shadow("inset 0 0 0 2px #fff", None);
+    assert!(ring[0].inset && ring[0].spread == 2.0);
+}
+
+#[test]
+fn box_shadow_string_prop_reaches_the_item() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "card",
+        "Column",
+        &[
+            ("boxShadow", json!("0 10px 30px rgba(236, 72, 153, 0.14)")),
+            ("height", json!(20)),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let shadow = find_item(&pass, "card").shadow.clone().expect("shadow");
+    assert_eq!(shadow.len(), 1);
+    assert_eq!(shadow[0].color, Rgba(236, 72, 153, 36));
+    assert_eq!(shadow[0].blur, 30.0);
+}
+
+#[test]
+fn dotted_box_shadow_on_button_reaches_the_item() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "fab",
+        "Button",
+        &[
+            ("boxShadow.0", json!("0 10px 24px rgba(236, 72, 153, 0.35)")),
+            ("width.0", json!("56px")),
+            ("height.0", json!("56px")),
+        ],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let shadow = find_item(&pass, "fab").shadow.clone().expect("shadow");
+    assert_eq!(shadow[0].color, Rgba(236, 72, 153, 89));
+}
+
+/// Food restaurant hero: `Stack { Image.tw("w-full h-56"); Row.w-full }`
+/// in a start-aligned Column. The Stack carries its children's width
+/// demand (DOM `DEMAND_CARRIERS` includes `stack`), so the Column
+/// stretches it and both percentages resolve against the full width.
+/// It used to stay content-sized — 224 × 4/3 ≈ 299 of 430 — which is the
+/// Chrome bug desktop had been made to copy.
+#[test]
+fn percentage_width_child_makes_stack_fill_its_column() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "stack", "Stack", &[]);
+    node(
+        &mut tree,
+        "stack",
+        "hero",
+        "Image",
+        &[
+            ("width", json!("100%")),
+            ("height", json!(224)),
+            ("aspectRatio", json!(4.0 / 3.0)),
+        ],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "bar",
+        "Row",
+        &[("width", json!("100%")), ("height", json!(40))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let stack = find_item(&pass, "stack");
+    let hero = find_item(&pass, "hero");
+    let bar = find_item(&pass, "bar");
+    assert!((stack.rect.w - 430.0).abs() < 0.5, "stack={:?}", stack.rect);
+    assert!(
+        (hero.rect.w - stack.rect.w).abs() < 0.5,
+        "hero={:?}",
+        hero.rect
+    );
+    assert!(
+        (bar.rect.w - stack.rect.w).abs() < 0.5 && (bar.rect.y - hero.rect.y).abs() < 0.5,
+        "bar={:?}",
+        bar.rect
+    );
+}
+
+/// Calories weekly chart: the bars List is the Stack's SECOND child and
+/// still sizes the Stack (and the content-sized Box around it).
+#[test]
+fn every_stack_child_contributes_to_the_stack_size() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "stack", "Stack", &[]);
+    node(
+        &mut tree,
+        "stack",
+        "small",
+        "Column",
+        &[("width", json!(10)), ("height", json!(10))],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "big",
+        "Column",
+        &[("width", json!(150)), ("height", json!(60))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let stack = find_item(&pass, "stack");
+    assert!(
+        (stack.rect.w - 150.0).abs() < 0.5 && (stack.rect.h - 60.0).abs() < 0.5,
+        "{:?}",
+        stack.rect
+    );
+    assert!((find_item(&pass, "big").rect.y - stack.rect.y).abs() < 0.5);
+}
+
+/// Social "Your story": `Stack { ringed avatar, badge }` with
+/// `.horizontalAlignment("end").verticalAlignment("end")` puts the badge in
+/// the bottom-right corner (grid `justify-items` / `align-items: end`).
+#[test]
+fn stack_end_alignment_pins_badge_to_bottom_right() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "stack",
+        "Stack",
+        &[
+            ("horizontalAlignment", json!("end")),
+            ("verticalAlignment", json!("end")),
+        ],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "avatar",
+        "Column",
+        &[("width", json!(60)), ("height", json!(60))],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "badge",
+        "Column",
+        &[("width", json!(20)), ("height", json!(20))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let avatar = find_item(&pass, "avatar").rect;
+    let badge = find_item(&pass, "badge").rect;
+    assert!(
+        (badge.x + badge.w - (avatar.x + avatar.w)).abs() < 0.5,
+        "badge={badge:?} avatar={avatar:?}"
+    );
+    assert!(
+        (badge.y + badge.h - (avatar.y + avatar.h)).abs() < 0.5,
+        "badge={badge:?} avatar={avatar:?}"
+    );
+}
+
+/// A decoded 800×600 photo, `h-56` (14rem) and `w-full`, in a Stack that
+/// stays content-sized (a Row child), plus the back / favourite Row: the
+/// Stack's box depends on the image's natural size. When that image
+/// lands AFTER the first layout, the state must report itself stale so
+/// the window recomputes instead of repainting the cached layout (the
+/// hero stayed as wide as its button bar, 112px, in the capture).
+#[test]
+fn late_image_load_marks_layout_stale_and_resizes_the_stack() {
+    let src = "/layout-tests/food-hero-late-800x600.png";
+    // In a Row the Stack is a content-sized flex item (no cross-axis fill),
+    // so its width really does come from the image's natural ratio. (In a
+    // Column it now fills: `percentage_width_child_makes_stack_fill_its_column`.)
+    let patches = vec![
+        create_patch("col", "Row", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("stack", "Stack", &[]),
+        insert_patch("col", "stack"),
+        create_patch(
+            "hero",
+            "Image",
+            &[
+                ("src", json!(src)),
+                ("width.0", json!("100%")),
+                ("height.0", json!("14rem")),
+            ],
+        ),
+        insert_patch("stack", "hero"),
+        create_patch(
+            "bar",
+            "Row",
+            &[
+                ("width.0", json!("100%")),
+                ("paddingLeft.0", json!("16px")),
+                ("paddingRight.0", json!("16px")),
+            ],
+        ),
+        insert_patch("stack", "bar"),
+        create_patch(
+            "b1",
+            "Button",
+            &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+        ),
+        insert_patch("bar", "b1"),
+        create_patch(
+            "b2",
+            "Button",
+            &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+        ),
+        insert_patch("bar", "b2"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&patches);
+    let mut state = TaffyState::new();
+    state.apply_patches(&patches, &tree, 1.0, vp(430.0));
+    let mut text = TextEngine::new();
+    let mut compute = |state: &mut TaffyState| {
+        LayoutPass::compute_with_state(
+            state,
+            &tree,
+            &mut text,
+            (430, 900),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            1,
+        )
+    };
+    let before = compute(&mut state);
+    assert!(
+        (find_item(&before, "stack").rect.w - 112.0).abs() < 1.0,
+        "before load the bar sizes the Stack: {:?}",
+        find_item(&before, "stack").rect
+    );
+    assert!(!state.media_intrinsics_stale(), "nothing landed yet");
+
+    crate::paint::image::test_seed_decoded(
+        src,
+        std::sync::Arc::new(tiny_skia::Pixmap::new(800, 600).unwrap()),
+    );
+    crate::paint::image::bump_image_load_generation_for_test();
+    assert!(
+        state.media_intrinsics_stale(),
+        "a landed natural size the hero's style waited on must invalidate the cached layout"
+    );
+    let after = compute(&mut state);
+    assert!(
+        (find_item(&after, "stack").rect.w - 298.67).abs() < 1.5,
+        "{:?}",
+        find_item(&after, "stack").rect
+    );
+    assert!(!state.media_intrinsics_stale(), "absorbed by the recompute");
+    // A fetch landing that no style here waited on does not invalidate.
+    crate::paint::image::bump_image_load_generation_for_test();
+    assert!(!state.media_intrinsics_stale(), "unrelated load");
+}
+
+/// The real Food hero with its decoded photo and SafeArea overlay: the
+/// Stack fills the 430px Column instead of shrinking to the photo's
+/// `height × ratio` width (≈299) — the image spans the screen.
+#[test]
+fn decoded_hero_image_fills_its_column() {
+    let src = "/layout-tests/food-hero-800x600.png";
+    crate::paint::image::test_seed_decoded(
+        src,
+        std::sync::Arc::new(tiny_skia::Pixmap::new(800, 600).unwrap()),
+    );
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(&mut tree, "col", "stack", "Stack", &[]);
+    node(
+        &mut tree,
+        "stack",
+        "hero",
+        "Image",
+        &[
+            ("src", json!(src)),
+            ("width.0", json!("100%")),
+            ("height.0", json!("14rem")),
+            ("objectFit", json!("cover")),
+        ],
+    );
+    node(&mut tree, "stack", "safe", "SafeArea", &[]);
+    node(
+        &mut tree,
+        "safe",
+        "bar",
+        "Row",
+        &[
+            ("width.0", json!("100%")),
+            ("paddingLeft.0", json!("16px")),
+            ("paddingRight.0", json!("16px")),
+            ("justifyContent.0", json!("space-between")),
+        ],
+    );
+    node(
+        &mut tree,
+        "bar",
+        "b1",
+        "Button",
+        &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+    );
+    node(
+        &mut tree,
+        "bar",
+        "b2",
+        "Button",
+        &[("width.0", json!("40px")), ("height.0", json!("40px"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let stack = find_item(&pass, "stack");
+    let hero = find_item(&pass, "hero");
+    assert!(
+        (stack.rect.w - 430.0).abs() < 0.5 && (hero.rect.w - 430.0).abs() < 0.5,
+        "stack={:?} hero={:?}",
+        stack.rect,
+        hero.rect
+    );
+    assert!((hero.rect.h - 224.0).abs() < 0.5, "hero={:?}", hero.rect);
+    let bar = find_item(&pass, "bar");
+    assert!((bar.rect.w - 430.0).abs() < 0.5, "bar={:?}", bar.rect);
+    // The favourite button sits at the right edge, not at ≈299.
+    let b2 = find_item(&pass, "b2");
+    assert!((b2.rect.x + b2.rect.w - 414.0).abs() < 0.5, "b2={:?}", b2.rect);
+}
+
+/// A Stack of fixed-size children (avatar + online dot) in a Column has
+/// no width demand and keeps its content size; a sized Stack ends a
+/// percentage child's demand (radio artwork tile).
+#[test]
+fn stack_without_percentage_children_stays_content_sized() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "col", "Column", &[("width", json!("100%"))]);
+    node(
+        &mut tree,
+        "col",
+        "avatar",
+        "Stack",
+        &[
+            ("horizontalAlignment", json!("end")),
+            ("verticalAlignment", json!("end")),
+        ],
+    );
+    node(
+        &mut tree,
+        "avatar",
+        "face",
+        "Column",
+        &[("width", json!(54)), ("height", json!(54))],
+    );
+    node(
+        &mut tree,
+        "avatar",
+        "dot",
+        "Box",
+        &[("width", json!(16)), ("height", json!(16))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "tile",
+        "Stack",
+        &[("width", json!(148)), ("height", json!(148))],
+    );
+    node(
+        &mut tree,
+        "tile",
+        "art",
+        "Image",
+        &[("width", json!("100%")), ("height", json!("100%"))],
+    );
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let avatar = find_item(&pass, "avatar").rect;
+    assert!((avatar.w - 54.0).abs() < 0.5, "avatar={avatar:?}");
+    let dot = find_item(&pass, "dot").rect;
+    assert!((dot.x + dot.w - (avatar.x + avatar.w)).abs() < 0.5, "dot={dot:?}");
+    let tile = find_item(&pass, "tile").rect;
+    assert!((tile.w - 148.0).abs() < 0.5, "tile={tile:?}");
+    assert!((find_item(&pass, "art").rect.w - 148.0).abs() < 0.5);
+}
+
+/// Calories Breakfast card: a content-sized Row (inside a Button) whose
+/// growing text column is exactly as wide at min-content as at max-content
+/// (its label Row is the widest child). The fit-content probes must not
+/// leave the min-content layout (every word wrapped) cached for it.
+#[test]
+fn fit_content_probe_does_not_leak_min_content_heights() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "col",
+        "Column",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "col",
+        "btn",
+        "Button",
+        &[("width", json!("100%"))],
+    );
+    node(
+        &mut tree,
+        "btn",
+        "row",
+        "Row",
+        &[("alignItems", json!("center"))],
+    );
+    node(
+        &mut tree,
+        "row",
+        "icon",
+        "Column",
+        &[("width", json!(48)), ("height", json!(48))],
+    );
+    node(&mut tree, "row", "body", "Column", &[("flex", json!(1))]);
+    // The label Row's min-content width equals its max-content width (one
+    // word + a fixed check icon) and exceeds the multi-word subtitle's.
+    node(&mut tree, "body", "label", "Row", &[("gap", json!(6))]);
+    add_text(&mut tree, "label", "name", "Breakfastbreakfast");
+    node(
+        &mut tree,
+        "label",
+        "check",
+        "Column",
+        &[("width", json!(14)), ("height", json!(14))],
+    );
+    add_text(&mut tree, "body", "sub", "25 / 50 kc");
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    let body = find_item(&pass, "body").rect;
+    let sub = find_item(&pass, "sub").rect;
+    assert!(
+        body.y + body.h <= sub.y + sub.h + 0.5,
+        "text column ends with its last line: body={body:?} sub={sub:?}"
+    );
+}
+
+// ---------------------------------------------------------------------
+// `display: none`, responsive display variants, flex-wrap, axis gaps
+// (home-screen Files: `hidden sm:block`, `hidden md:flex`, the
+// `flex-wrap gap-x-3 gap-y-2` selection bar).
+// ---------------------------------------------------------------------
+
+/// The Files toolbar shape: an Upload label `hidden sm:block` and a
+/// list cell `block md:hidden` next to a `hidden md:block` column.
+fn responsive_display_tree() -> Tree {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch(
+        "label",
+        "Text",
+        &[
+            ("0", json!("Upload")),
+            ("display.0", json!("none")),
+            ("display@sm.0", json!("block")),
+        ],
+    ));
+    tree.apply(&insert_patch("row", "label"));
+    tree.apply(&create_patch(
+        "detail",
+        "Text",
+        &[
+            ("0", json!("Today · Empty")),
+            ("display.0", json!("block")),
+            ("display@md.0", json!("none")),
+        ],
+    ));
+    tree.apply(&insert_patch("row", "detail"));
+    tree.apply(&create_patch(
+        "kind",
+        "Column",
+        &[("display.0", json!("none")), ("display@md.0", json!("flex"))],
+    ));
+    tree.apply(&insert_patch("row", "kind"));
+    add_text(&mut tree, "kind", "kind_text", "Folder");
+    tree
+}
+
+#[test]
+fn display_none_with_breakpoint_variants_follows_the_window_width() {
+    let tree = responsive_display_tree();
+    let mut text = TextEngine::new();
+
+    // 430px phone window: below `sm` (640) and `md` (768).
+    let narrow = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    assert!(
+        narrow.item_by_id("label").is_none(),
+        "`hidden sm:block` must not paint below sm"
+    );
+    assert!(narrow.item_by_id("detail").is_some());
+    assert!(
+        narrow.item_by_id("kind").is_none() && narrow.item_by_id("kind_text").is_none(),
+        "a display:none subtree emits nothing"
+    );
+
+    // Desktop-wide window: above md.
+    let wide = LayoutPass::compute(&tree, &mut text, (1000, 900), 1.0);
+    assert!(wide.item_by_id("label").is_some(), "sm:block re-shows it");
+    assert!(wide.item_by_id("detail").is_none(), "md:hidden hides it");
+    assert!(wide.item_by_id("kind_text").is_some());
+}
+
+#[test]
+fn display_none_sibling_takes_no_space_in_a_row() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch(
+        "gone",
+        "Column",
+        &[("width.0", json!(200)), ("display.0", json!("none"))],
+    ));
+    tree.apply(&insert_patch("row", "gone"));
+    tree.apply(&create_patch("kept", "Column", &[("width.0", json!(50))]));
+    tree.apply(&insert_patch("row", "kept"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let row = find_item(&pass, "row");
+    let kept = find_item(&pass, "kept");
+    assert!(
+        (kept.rect.x - row.rect.x).abs() < 0.5,
+        "the hidden 200px sibling must not push `kept`: row={:?} kept={:?}",
+        row.rect,
+        kept.rect
+    );
+}
+
+#[test]
+fn display_setprop_restyles_through_the_retained_taffy_state() {
+    // `.display("@{cond ? 'flex' : 'none'}")` flips via SetProp.
+    let initial = vec![
+        create_patch("col", "Column", &[]),
+        insert_patch("root", "col"),
+        create_patch("btn", "Container", &[("width.0", json!(40)), ("height.0", json!(20))]),
+        insert_patch("col", "btn"),
+    ];
+    let mut tree = Tree::new();
+    tree.apply_batch(&initial);
+    let mut taffy = TaffyState::new();
+    assert!(taffy.apply_patches(&initial, &tree, 1.0, vp(800.0)));
+    let mut text = TextEngine::new();
+    let compute = |taffy: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen| {
+        LayoutPass::compute_with_state(
+            taffy,
+            tree,
+            text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    assert!(compute(&mut taffy, &tree, &mut text, 1).item_by_id("btn").is_some());
+
+    let hide = vec![hypen_engine::Patch::SetProp {
+        id: "btn".into(),
+        name: "display.0".into(),
+        value: json!("none"),
+    }];
+    tree.apply_batch(&hide);
+    assert!(taffy.apply_patches(&hide, &tree, 1.0, vp(800.0)));
+    assert!(compute(&mut taffy, &tree, &mut text, 2).item_by_id("btn").is_none());
+
+    let show = vec![hypen_engine::Patch::SetProp {
+        id: "btn".into(),
+        name: "display.0".into(),
+        value: json!("flex"),
+    }];
+    tree.apply_batch(&show);
+    assert!(taffy.apply_patches(&show, &tree, 1.0, vp(800.0)));
+    assert!(compute(&mut taffy, &tree, &mut text, 3).item_by_id("btn").is_some());
+}
+
+#[test]
+fn flex_wrap_breaks_an_overflowing_row_onto_a_second_line_with_axis_gaps() {
+    // Files selection bar: `w-full flex-wrap gap-x-3 gap-y-2` with an
+    // info block (`flex-1 min-w-[220px]`) and a button group.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "bar",
+        "Row",
+        &[
+            ("width.0", json!(400)),
+            ("flexWrap.0", json!("wrap")),
+            ("columnGap.0", json!("12px")),
+            ("rowGap.0", json!("8px")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "bar"));
+    tree.apply(&create_patch(
+        "info",
+        "Row",
+        &[
+            ("flex.0", json!("1")),
+            ("minWidth.0", json!(220)),
+            ("height.0", json!(40)),
+        ],
+    ));
+    tree.apply(&insert_patch("bar", "info"));
+    tree.apply(&create_patch(
+        "buttons",
+        "Row",
+        &[("width.0", json!(300)), ("height.0", json!(30))],
+    ));
+    tree.apply(&insert_patch("bar", "buttons"));
+
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let info = find_item(&pass, "info");
+    let buttons = find_item(&pass, "buttons");
+    assert!(
+        (buttons.rect.y - (info.rect.y + info.rect.h + 8.0)).abs() < 0.5,
+        "buttons wrap to a second line one row-gap below: info={:?} buttons={:?}",
+        info.rect,
+        buttons.rect
+    );
+    assert!(
+        buttons.rect.x + buttons.rect.w <= 400.5,
+        "the wrapped line stays inside the bar: {:?}",
+        buttons.rect
+    );
+    assert!(
+        (info.rect.w - 400.0).abs() < 0.5,
+        "alone on its line, the flex-1 info block fills the bar: {:?}",
+        info.rect
+    );
+}
+
+#[test]
+fn column_gap_without_wrap_spaces_row_children() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[("columnGap.0", json!("12px"))]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch("a", "Container", &[("width.0", json!(10)), ("height.0", json!(10))]));
+    tree.apply(&insert_patch("row", "a"));
+    tree.apply(&create_patch("b", "Container", &[("width.0", json!(10)), ("height.0", json!(10))]));
+    tree.apply(&insert_patch("row", "b"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let a = find_item(&pass, "a");
+    let b = find_item(&pass, "b");
+    assert!(
+        (b.rect.x - (a.rect.x + 10.0 + 12.0)).abs() < 0.5,
+        "a={:?} b={:?}",
+        a.rect,
+        b.rect
+    );
+}
+
+#[test]
+fn margin_left_auto_pushes_a_row_child_to_the_end_of_its_line() {
+    let mut tree = Tree::new();
+    tree.apply(&create_patch("row", "Row", &[("width.0", json!(400))]));
+    tree.apply(&insert_patch("root", "row"));
+    tree.apply(&create_patch(
+        "end",
+        "Container",
+        &[
+            ("width.0", json!(100)),
+            ("height.0", json!(10)),
+            ("marginLeft.0", json!("auto")),
+        ],
+    ));
+    tree.apply(&insert_patch("row", "end"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let end = find_item(&pass, "end");
+    assert!((end.rect.x - 300.0).abs() < 0.5, "{:?}", end.rect);
+}
+
+#[test]
+fn overflow_hidden_content_does_not_extend_the_page() {
+    // Home Screen app frame: an `overflow-hidden` body holding an app
+    // whose root is taller than it. The hidden part must not make the
+    // window page-scrollable.
+    let mut tree = Tree::new();
+    tree.apply(&create_patch(
+        "frame",
+        "Column",
+        &[
+            ("width.0", json!(400)),
+            ("height.0", json!(300)),
+            ("overflow.0", json!("hidden")),
+        ],
+    ));
+    tree.apply(&insert_patch("root", "frame"));
+    tree.apply(&create_patch(
+        "app",
+        "Column",
+        &[("width.0", json!(400)), ("height.0", json!(900)), ("flexShrink.0", json!(0))],
+    ));
+    tree.apply(&insert_patch("frame", "app"));
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(
+        pass.content_size.1 <= 600.5,
+        "hidden overflow leaked into the page extent: {:?}",
+        pass.content_size
+    );
+
+    // Without the clip the same content does extend the page.
+    tree.apply(&hypen_engine::Patch::RemoveProp {
+        id: "frame".into(),
+        name: "overflow.0".into(),
+    });
+    let pass = LayoutPass::compute(&tree, &mut text, (400, 600), 1.0);
+    assert!(pass.content_size.1 >= 899.5, "{:?}", pass.content_size);
+}
+
+/// Review follow-up: the text fill is settled against the Text's CURRENT
+/// parent in both directions. A centred Text moved (no restyle) from a Row
+/// — where the DOM cancels the fill — into a Column must take the fill
+/// back; moved back into the Row it must lose it again.
+#[test]
+fn text_fill_follows_the_text_when_moved_between_row_and_column() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let build = vec![
+        create_patch("col", "Column", &[]),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch(
+            "t",
+            "Text",
+            &[("0", json!("Mon")), ("textAlign", json!("center"))],
+        ),
+        insert_patch("row", "t"),
+        create_patch(
+            "body",
+            "Text",
+            &[("0", json!("A considerably longer line of plain body text"))],
+        ),
+        insert_patch("col", "body"),
+    ];
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(800.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen| {
+        LayoutPass::compute_with_state(
+            state,
+            tree,
+            text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let pass = compute(&mut state, &tree, &mut text, 1);
+    let body_w = find_item(&pass, "body").rect.w;
+    assert!(
+        find_item(&pass, "t").rect.w < body_w * 0.5,
+        "intrinsic in the Row: {:?}",
+        find_item(&pass, "t").rect
+    );
+
+    let to_column = vec![Patch::Move {
+        parent_id: "col".into(),
+        id: "t".into(),
+        before_id: Some("body".into()),
+    }];
+    tree.apply_batch(&to_column);
+    assert!(state.apply_patches(&to_column, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 2);
+    let (t, col) = (find_item(&pass, "t").rect, find_item(&pass, "col").rect);
+    assert!(
+        (t.w - col.w).abs() < 0.5 && (t.x - col.x).abs() < 0.5,
+        "moved into the Column the centred Text fills it: {t:?} vs {col:?}"
+    );
+
+    let back = vec![Patch::Move {
+        parent_id: "row".into(),
+        id: "t".into(),
+        before_id: None,
+    }];
+    tree.apply_batch(&back);
+    assert!(state.apply_patches(&back, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 3);
+    assert!(
+        find_item(&pass, "t").rect.w < find_item(&pass, "body").rect.w * 0.5,
+        "back in the Row it is intrinsic again: {:?}",
+        find_item(&pass, "t").rect
+    );
+}
+
+/// The DOM fills only under a centre / right / end / justify alignment —
+/// a start-aligned Text in a Stack keeps its intrinsic width (Stack is
+/// `justify-items: start`), while a centred one takes the track.
+#[test]
+fn stack_text_takes_the_track_only_for_a_filling_alignment() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "stack", "Stack", &[("width", json!(300))]);
+    node(
+        &mut tree,
+        "stack",
+        "start",
+        "Text",
+        &[("0", json!("Start")), ("textAlign", json!("start"))],
+    );
+    node(
+        &mut tree,
+        "stack",
+        "centre",
+        "Text",
+        &[("0", json!("Centre")), ("textAlign", json!("center"))],
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    assert!(
+        find_item(&pass, "start").rect.w < 150.0,
+        "start-aligned Text stays intrinsic: {:?}",
+        find_item(&pass, "start").rect
+    );
+    assert!(
+        (find_item(&pass, "centre").rect.w - 300.0).abs() < 0.5,
+        "centred Text fills the Stack track: {:?}",
+        find_item(&pass, "centre").rect
+    );
+}
+
+/// The automatic cross-axis stretch is an ALLOWLIST of parents (DOM
+/// `applyAutomaticStretch` + block flow): a demanding Column under a
+/// Column fills it, under a Tabs-like horizontal / Link parent it does not.
+#[test]
+fn auto_cross_fill_is_granted_only_by_allowlisted_parents() {
+    let column_style = Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Column,
+        ..Default::default()
+    };
+    let parent_types = ["Column", "List", "Box", "Card", "Link"];
+    for parent_type in parent_types {
+        let mut tree = Tree::new();
+        node(&mut tree, "root", "outer", "Column", &[("width", json!(400))]);
+        node(&mut tree, "outer", "parent", parent_type, &[("padding", json!(0))]);
+        node(&mut tree, "parent", "demanding", "Column", &[]);
+        node(&mut tree, "demanding", "bar", "Box", &[("width", json!("50%")), ("height", json!(4))]);
+        let mut text = TextEngine::new();
+        let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+        let parent = find_item(&pass, "parent").rect;
+        let demanding = find_item(&pass, "demanding").rect;
+        let granted = parent_type != "Link";
+        assert!(
+            grants_auto_cross_fill(parent_type, &column_style) == granted,
+            "{parent_type}: allowlist"
+        );
+        if granted {
+            assert!(
+                (demanding.w - parent.w).abs() < 0.5,
+                "{parent_type}: demanding child fills {parent:?}, got {demanding:?}"
+            );
+        }
+    }
+    // Horizontal parents never grant it, whatever their type.
+    let row = Style {
+        display: Display::Flex,
+        flex_direction: FlexDirection::Row,
+        ..Default::default()
+    };
+    assert!(!grants_auto_cross_fill("Column", &row));
+    for blocked in ["Row", "Button", "Center", "Stack", "Badge", "Tabs", "Link"] {
+        assert!(!grants_auto_cross_fill(blocked, &column_style), "{blocked}");
+    }
+}
+
+/// CSS computed overflow: `overflow-x: hidden` alone makes `overflow-y`
+/// `auto` (a vertical scroll container); `overflow-x: clip` leaves y
+/// visible, so the vertical extent still reaches the page while the
+/// horizontal one does not.
+#[test]
+fn overflow_axes_follow_css_computed_values() {
+    let mk = |props: &[(&str, Value)]| {
+        let mut tree = Tree::new();
+        node(&mut tree, "root", "n", "Column", props);
+        tree.get("n").unwrap().clone()
+    };
+    let v = vp(800.0);
+    use CssOverflow::*;
+    assert_eq!(css_overflow_axes(&mk(&[]), v), None);
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflowX", json!("hidden"))]), v),
+        Some((Hidden, Auto))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflowX", json!("clip"))]), v),
+        Some((Clip, Visible))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflow", json!("hidden")), ("overflowY", json!("visible"))]), v),
+        Some((Hidden, Auto))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflowX", json!("clip")), ("overflowY", json!("scroll"))]), v),
+        Some((Hidden, Scroll))
+    );
+    assert_eq!(
+        css_overflow_axes(&mk(&[("overflow", json!("hidden clip"))]), v),
+        Some((Hidden, Hidden))
+    );
+    assert!(is_scrollable_node(&mk(&[("overflowX", json!("hidden"))]), v));
+    assert!(!is_scrollable_node(&mk(&[("overflowX", json!("clip"))]), v));
+    assert!(!is_scrollable_node(&mk(&[("overflow", json!("hidden"))]), v));
+}
+
+#[test]
+fn overflow_x_clip_keeps_the_vertical_extent_on_the_page() {
+    let page = |overflow_x: &str| {
+        let mut tree = Tree::new();
+        node(
+            &mut tree,
+            "root",
+            "frame",
+            "Column",
+            &[("width", json!(200)), ("height", json!(100)), ("overflowX", json!(overflow_x))],
+        );
+        node(
+            &mut tree,
+            "frame",
+            "tall",
+            "Box",
+            &[("width", json!(600)), ("height", json!(2000)), ("flexShrink", json!(0))],
+        );
+        let mut text = TextEngine::new();
+        LayoutPass::compute(&tree, &mut text, (400, 300), 1.0).content_size
+    };
+    let (w, h) = page("clip");
+    assert!(h >= 2000.0, "y stays visible under overflow-x: clip: {h}");
+    assert!(w < 600.0, "the clipped x overflow is off the page: {w}");
+    // `hidden` makes the box a vertical scroller: its content scrolls
+    // inside the 100px frame and widens nothing.
+    let (w, _) = page("hidden");
+    assert!(w < 600.0, "the hidden x overflow is off the page: {w}");
+}
+
+/// `.shadow({...})` / `.boxShadow({...})` object defaults match the DOM
+/// applicators exactly (`applicators/effects.ts`): `shadow` → blur 4,
+/// `rgba(0,0,0,0.2)`, no spread / inset; `boxShadow` → blur 0 and honours
+/// `spread` / `inset`.
+#[test]
+fn shadow_object_defaults_match_the_dom_applicators() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "s",
+        "Box",
+        &[("shadow.0", json!({ "y": 2, "spread": 5, "inset": true }))],
+    );
+    node(
+        &mut tree,
+        "root",
+        "b",
+        "Box",
+        &[("boxShadow.0", json!({ "y": 2, "spread": 5, "inset": true }))],
+    );
+    let v = vp(800.0);
+    let s = resolve_box_shadow_layers(tree.get("s").unwrap(), v);
+    assert_eq!(s.len(), 1);
+    assert_eq!((s[0].x, s[0].y, s[0].blur, s[0].spread), (0.0, 2.0, 4.0, 0.0));
+    assert_eq!(s[0].color, Rgba(0, 0, 0, 51));
+    assert!(!s[0].inset, "the DOM `shadow` applicator writes no inset");
+    let b = resolve_box_shadow_layers(tree.get("b").unwrap(), v);
+    assert_eq!((b[0].blur, b[0].spread, b[0].inset), (0.0, 5.0, true));
+    assert_eq!(b[0].color, Rgba(0, 0, 0, 51));
+}
+
+/// Review follow-up: the fit-content pre-pass carries last frame's
+/// fitted nodes only while the fit actually clamped them. Once the Row's
+/// content fits again the node drops out instead of staying a candidate
+/// (and being re-probed) forever.
+///
+/// Driven by text updates in a FIXED window, so every frame is an
+/// incremental pass over the same retained Taffy tree: a viewport change
+/// rebuilds the tree, which clears the fit set by itself and would let
+/// this pass without the clamped-only carry-over filter.
+#[test]
+fn fit_content_candidates_drop_out_once_they_fit_again() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let build = vec![
+        create_patch("col", "Column", &[("width", json!("100%"))]),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch("user", "Text", &[("0", json!("amara_reads"))]),
+        insert_patch("row", "user"),
+        create_patch(
+            "caption",
+            "Text",
+            &[("0", json!("A quiet corner and a book I did not mean to finish today."))],
+        ),
+        insert_patch("row", "caption"),
+    ];
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(260.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen: u64| {
+        LayoutPass::compute_with_state(
+            state,
+            tree,
+            text,
+            (260, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let set_text = |tree: &mut Tree, state: &mut TaffyState, id: &str, value: &str| {
+        let batch = vec![Patch::SetProp {
+            id: id.into(),
+            name: "0".into(),
+            value: json!(value),
+        }];
+        tree.apply_batch(&batch);
+        assert!(state.apply_patches(&batch, tree, 1.0, vp(260.0)));
+    };
+    let narrow = compute(&mut state, &tree, &mut text, 1);
+    assert!(
+        find_item(&narrow, "row").rect.w <= 260.5,
+        "the Row is clamped to the window: {:?}",
+        find_item(&narrow, "row").rect
+    );
+    assert_eq!(state.fit_width_override_len(), 1, "fitted (clamped) while too wide");
+    let rebuilds = state.bulk_rebuilds();
+    // The caption shrinks: the clamped node is re-fitted once, now at its
+    // max-content width (no longer clamped) ...
+    set_text(&mut tree, &mut state, "caption", "Short.");
+    let fits = compute(&mut state, &tree, &mut text, 2);
+    assert!(find_item(&fits, "row").rect.w < 200.0);
+    // ... and on the next layout-affecting frame it is no candidate at all.
+    set_text(&mut tree, &mut state, "user", "amara");
+    let after = compute(&mut state, &tree, &mut text, 3);
+    assert!(find_item(&after, "row").rect.w < 200.0);
+    assert_eq!(state.bulk_rebuilds(), rebuilds, "incremental passes only");
+    assert_eq!(
+        state.fit_width_override_len(),
+        0,
+        "no longer clamped, so no longer a fit candidate"
+    );
+}
+
+/// Per-corner radii (Tailwind `rounded-t-*` / `rounded-tl-*`, a corner
+/// object, a multi-value string) reach the item's border and the clip its
+/// `overflow-hidden` children get; a Card's 8px default stays on the
+/// corners the author did not set, like the DOM's inline longhands.
+#[test]
+fn per_corner_radii_reach_the_border_and_the_child_clip() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Card { Text("card") }.tw("rounded-t-xl")
+            Column { Text("clipped") }.tw("rounded-tl-2xl rounded-br-lg overflow-hidden")
+            Column { Text("object") }.cornerRadius({ topLeft: 4, bottomRight: 10 })
+            Column { Text("string") }.borderRadius("12px 12px 0 0")
+            Column { Text("uniform") }.tw("rounded-lg")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let kids = tree.children_of(&first_of_type(&tree, "Column"));
+    let radii = |i: usize| pass.item_by_id(&kids[i]).unwrap().border.radii();
+    use crate::style::CornerRadii;
+    let c = |tl, tr, br, bl| CornerRadii { tl, tr, br, bl };
+    assert_eq!(radii(0), c(12.0, 12.0, 8.0, 8.0), "Card default under rounded-t-xl");
+    assert_eq!(radii(1), c(16.0, 0.0, 8.0, 0.0));
+    assert_eq!(radii(2), c(4.0, 0.0, 10.0, 0.0));
+    assert_eq!(radii(3), c(12.0, 12.0, 0.0, 0.0));
+    assert_eq!(radii(4), CornerRadii::uniform(8.0));
+    assert!(pass.item_by_id(&kids[4]).unwrap().border.corners.is_none());
+    let clipped_text = &tree.children_of(&kids[1])[0];
+    assert_eq!(
+        pass.item_by_id(clipped_text).unwrap().clip_radius,
+        c(16.0, 0.0, 8.0, 0.0),
+        "the overflow-hidden clip keeps the per-corner shape"
+    );
+}
+
+/// Shadow strings are parsed once and shared: a paint-only refresh of an
+/// item re-resolves its shadow without re-tokenising the CSS.
+#[test]
+fn css_box_shadows_are_parsed_once_and_shared() {
+    let mut tree = Tree::new();
+    let css = json!("0 1px 3px rgba(0,0,0,0.1), 0 1px 2px -1px rgba(0,0,0,0.1)");
+    node(&mut tree, "root", "a", "Box", &[("boxShadow", css.clone())]);
+    node(&mut tree, "root", "b", "Box", &[("boxShadow", css)]);
+    let v = vp(800.0);
+    let a = resolve_box_shadow(tree.get("a").unwrap(), v).expect("shadow");
+    let b = resolve_box_shadow(tree.get("b").unwrap(), v).expect("shadow");
+    assert_eq!(a.len(), 2);
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "one parse, one shared list");
+}
+
+// ---------------------------------------------------------------------------
+// final-leftovers: text-align fill on non-Text elements (DOM `applyTextAlign`
+// marks ANY element with `data-hypen-text-fill`).
+// ---------------------------------------------------------------------------
+
+/// A Column / Button / Row with their own `text-center` fill a vertical
+/// parent's width, like the DOM's `:where([data-hypen-text-fill])` rule; the
+/// parent stays content-sized (the fill is not width demand); under a Row the
+/// rule is cancelled and the element keeps its intrinsic width.
+#[test]
+fn non_text_elements_with_center_alignment_fill_their_column() {
+    let mut tree = Tree::new();
+    node(&mut tree, "root", "outer", "Column", &[]);
+    node(&mut tree, "outer", "col", "Column", &[]);
+    node(
+        &mut tree,
+        "col",
+        "body",
+        "Text",
+        &[("0", json!("A considerably longer line of plain body text"))],
+    );
+    for (id, ty) in [("box", "Column"), ("btn", "Button"), ("row", "Row")] {
+        node(&mut tree, "col", id, ty, &[("textAlign", json!("center"))]);
+        node(&mut tree, id, &format!("{id}-t"), "Text", &[("0", json!("Hi"))]);
+    }
+    node(&mut tree, "outer", "hrow", "Row", &[]);
+    node(&mut tree, "hrow", "hbox", "Column", &[("textAlign", json!("center"))]);
+    node(&mut tree, "hbox", "hbox-t", "Text", &[("0", json!("Hi"))]);
+    node(&mut tree, "hrow", "hbody", "Text", &[("0", json!("Some long sibling text"))]);
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let col = find_item(&pass, "col").rect;
+    let body = find_item(&pass, "body").rect;
+    assert!(col.w < 700.0, "the parent Column stays content-sized: {col:?}");
+    assert!((col.w - body.w).abs() < 0.5, "{col:?} vs {body:?}");
+    for id in ["box", "btn", "row"] {
+        let r = find_item(&pass, id).rect;
+        assert!(
+            (r.w - col.w).abs() < 0.5 && (r.x - col.x).abs() < 0.5,
+            "{id} with text-center fills its Column like the DOM: {r:?} vs {col:?}"
+        );
+    }
+    let (natural, _) = text.measure("Hi", 16.0, None);
+    let hbox = find_item(&pass, "hbox").rect;
+    assert!(
+        hbox.w <= natural + 1.0,
+        "under a Row the fill is cancelled (intrinsic width): {hbox:?}"
+    );
+}
+
+/// Moving a centred Column (no restyle) from a Row into a Column takes the
+/// fill back, and back into the Row loses it again — both directions.
+#[test]
+fn container_text_fill_follows_moves_between_row_and_column() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let build = vec![
+        create_patch("col", "Column", &[]),
+        insert_patch("root", "col"),
+        create_patch("row", "Row", &[]),
+        insert_patch("col", "row"),
+        create_patch("c", "Column", &[("textAlign", json!("right"))]),
+        insert_patch("row", "c"),
+        create_patch("ct", "Text", &[("0", json!("Mon"))]),
+        insert_patch("c", "ct"),
+        create_patch(
+            "body",
+            "Text",
+            &[("0", json!("A considerably longer line of plain body text"))],
+        ),
+        insert_patch("col", "body"),
+    ];
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(800.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen| {
+        LayoutPass::compute_with_state(
+            state,
+            tree,
+            text,
+            (800, 600),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let pass = compute(&mut state, &tree, &mut text, 1);
+    let body_w = find_item(&pass, "body").rect.w;
+    assert!(find_item(&pass, "c").rect.w < body_w * 0.5);
+    let to_column = vec![Patch::Move {
+        parent_id: "col".into(),
+        id: "c".into(),
+        before_id: Some("body".into()),
+    }];
+    tree.apply_batch(&to_column);
+    assert!(state.apply_patches(&to_column, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 2);
+    let (c, col) = (find_item(&pass, "c").rect, find_item(&pass, "col").rect);
+    assert!(
+        (c.w - col.w).abs() < 0.5,
+        "moved into the Column it fills it: {c:?} vs {col:?}"
+    );
+    let back = vec![Patch::Move {
+        parent_id: "row".into(),
+        id: "c".into(),
+        before_id: None,
+    }];
+    tree.apply_batch(&back);
+    assert!(state.apply_patches(&back, &tree, 1.0, vp(800.0)));
+    let pass = compute(&mut state, &tree, &mut text, 3);
+    assert!(find_item(&pass, "c").rect.w < find_item(&pass, "body").rect.w * 0.5);
+}
+
+// ---------------------------------------------------------------------------
+// final-leftovers: Grid rows follow CSS `grid-auto-rows: auto` — they stretch
+// to fill a definite-height Grid (align-content: normal), and the DOM's
+// `[data-hypen-type="grid"] > * { align-self: stretch }` stretches every
+// child, aspect-ratio photos included.
+// ---------------------------------------------------------------------------
+
+fn grid_images(tree: &Tree, id: &str, out: &mut Vec<String>) {
+    if tree.get(id).is_some_and(|n| n.element_type == "Image") {
+        out.push(id.to_string());
+    }
+    for c in tree.children_of(id) {
+        grid_images(tree, c, out);
+    }
+}
+
+/// Social user profile (`UserProfile.hypen`): a `flex-1` 3-column Grid of
+/// `aspect-square w-full` photos under a fixed header. Chrome stretches the
+/// two auto rows to share the Grid's definite height and the photos (explicit
+/// `align-self: stretch`) to the row: 142 × 245 here, not 142 × 142.
+#[test]
+fn flex_one_grid_rows_stretch_to_fill_like_css() {
+    let src = "test://grid-stretch-1080x1920";
+    seed_tall_story_photo(src);
+    let tree = tree_from_dsl(
+        &format!(
+            r#"Column {{
+            Column {{ Text("header") }}.height(100)
+            Grid(@state.posts, key: "id") {{
+                Image(src: "{src}")
+                    .objectFit("cover")
+                    .tw("aspect-square w-full")
+            }}
+            .gridColumns(3)
+            .gap(2)
+            .tw("flex-1 pt-2")
+        }}
+        .width(430)
+        .height(600)"#
+        ),
+        json!({ "posts": [{"id": 1}, {"id": 2}, {"id": 3}, {"id": 4}, {"id": 5}, {"id": 6}] }),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 900), 1.0);
+    let grid = first_of_type(&tree, "Grid");
+    let g = pass.item_by_id(&grid).expect("grid").rect;
+    assert!((g.h - 500.0).abs() < 1.0, "flex-1 grid takes the rest: {g:?}");
+    let track = (430.0 - 2.0 * 2.0) / 3.0;
+    // content 500 - pt 8 = 492; two rows + one 2px gap share it.
+    let row = (492.0 - 2.0) / 2.0;
+    let mut ids = Vec::new();
+    grid_images(&tree, &grid, &mut ids);
+    assert_eq!(ids.len(), 6);
+    for (i, id) in ids.iter().enumerate() {
+        let r = pass.item_by_id(id).expect("photo").rect;
+        assert!(
+            (r.w - track).abs() < 1.0 && (r.h - row).abs() < 1.0,
+            "photo {i} should fill its stretched {track}x{row} cell; got {r:?}"
+        );
+        let expect_y = g.y + 8.0 + (i / 3) as f32 * (row + 2.0);
+        assert!((r.y - expect_y).abs() < 1.0, "photo {i} row origin: {r:?}");
+    }
+}
+
+/// The DOM grid stylesheet stretches a Button (desktop's provisional
+/// `align-self: start`) to its row's height when a sibling is taller.
+#[test]
+fn grid_children_stretch_to_the_row_like_the_dom_stylesheet() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "grid",
+        "Grid",
+        &[("gridColumns", json!(3)), ("width", json!(300))],
+    );
+    node(&mut tree, "grid", "btn", "Button", &[]);
+    node(&mut tree, "btn", "btn-t", "Text", &[("0", json!("Go"))]);
+    node(&mut tree, "grid", "tall", "Column", &[("height", json!(120))]);
+    node(&mut tree, "grid", "self", "Column", &[("alignSelf", json!("start"))]);
+    node(&mut tree, "self", "self-t", "Text", &[("0", json!("x"))]);
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (800, 600), 1.0);
+    let btn = find_item(&pass, "btn").rect;
+    assert!(
+        (btn.h - 120.0).abs() < 0.5 && (btn.w - 100.0).abs() < 0.5,
+        "the Button fills its 100x120 cell: {btn:?}"
+    );
+    let own = find_item(&pass, "self").rect;
+    assert!(own.h < 60.0, "an authored alignSelf wins: {own:?}");
+}
+
+/// Review gap: the parsed-box-shadow cache must key viewport-unit shadows
+/// by the viewport (a `vw` / `vh` offset resolved at one width must not be
+/// served at another), while a plain px shadow is shared across them.
+#[test]
+fn cached_css_box_shadows_follow_viewport_units() {
+    let mut tree = Tree::new();
+    node(
+        &mut tree,
+        "root",
+        "card",
+        "Column",
+        &[("boxShadow", json!("0 1vw 2vh rgba(0,0,0,0.5)"))],
+    );
+    node(
+        &mut tree,
+        "root",
+        "plain",
+        "Column",
+        &[("boxShadow", json!("0 4px 8px rgba(0,0,0,0.5)"))],
+    );
+    let card = tree.get("card").unwrap();
+    let narrow = resolve_box_shadow(card, Viewport::new(400.0, 800.0)).expect("shadow");
+    let wide = resolve_box_shadow(card, Viewport::new(1000.0, 500.0)).expect("shadow");
+    assert!((narrow[0].y - 4.0).abs() < 0.01 && (narrow[0].blur - 16.0).abs() < 0.01);
+    assert!((wide[0].y - 10.0).abs() < 0.01 && (wide[0].blur - 10.0).abs() < 0.01);
+    let plain = tree.get("plain").unwrap();
+    let a = resolve_box_shadow(plain, Viewport::new(400.0, 800.0)).unwrap();
+    let b = resolve_box_shadow(plain, Viewport::new(1000.0, 500.0)).unwrap();
+    assert!(std::sync::Arc::ptr_eq(&a, &b), "a px shadow is parsed once and shared");
+}
+
+// ---------------------------------------------------------------------------
+// final-polish regressions
+// ---------------------------------------------------------------------------
+
+/// MovieDB watchlist row: `Row(items-center) { Button(flex-1 p-0) { Row
+/// (flex-1 items-center) { Image w-16 h-24; Column(flex-1) } } ; Button }`.
+/// The Button must be as tall as its poster Row (Chrome centres a 96px
+/// Button in the card); it used to come out 0px tall, centred, with the
+/// poster and text spilling out below the card.
+#[test]
+fn button_wrapping_a_growing_row_is_as_tall_as_its_content() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Row {
+                Button {
+                    Row {
+                        Image(src: "x.png").tw("w-16 h-24 rounded-xl mr-3.5 border border-white/10")
+                        Column {
+                            Text("Inception").tw("text-[15px] font-semibold")
+                            Row {
+                                Text("8.8 · Action, Adventure, Sci-Fi").tw("text-xs ml-1 truncate")
+                            }
+                            .tw("mt-1.5 items-center w-full")
+                            Text("148 min").tw("text-xs mt-1")
+                        }
+                        .tw("flex-1 items-start min-w-0")
+                    }
+                    .tw("flex-1 items-center")
+                }
+                .tw("flex-1 min-w-0 bg-transparent border-0 p-0")
+                Button { Text("x") }
+                    .tw("w-9 h-9 rounded-full border items-center justify-center shrink-0 ml-2")
+            }
+            .tw("mb-3 p-3 rounded-2xl border items-center")
+        }
+        .tw("px-5 pb-8")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let card = tree.children_of(&first_of_type(&tree, "Column"))[0].clone();
+    let card_r = pass.item_by_id(&card).unwrap().rect;
+    let button = tree.children_of(&card)[0].clone();
+    let button_r = pass.item_by_id(&button).unwrap().rect;
+    let image = first_of_type_under(&tree, &button, "Image");
+    let image_r = pass.item_by_id(&image).unwrap().rect;
+    assert!(
+        (button_r.h - 96.0).abs() < 1.0,
+        "the Button hugs its 96px poster row: {button_r:?}"
+    );
+    assert!(
+        (card_r.h - 122.0).abs() < 1.0,
+        "card = poster + padding + border: {card_r:?}"
+    );
+    assert!(
+        image_r.y >= card_r.y && image_r.y + image_r.h <= card_r.y + card_r.h,
+        "the poster stays inside its card: {image_r:?} in {card_r:?}"
+    );
+}
+
+/// Food-ordering restaurant menu: `Grid { MenuItem }` where MenuItem is an
+/// `overflow-hidden` card (`w-full … overflow-hidden`: photo + a padded
+/// body). An `overflow: hidden` item's automatic minimum is 0, but an
+/// auto-height Grid's `auto` rows still grow to the items' max-content
+/// height (CSS: the block-axis free space is indefinite). Rows used to be
+/// capped to a share of the viewport, so each card showed its photo plus
+/// ~24px and the name / description / price / Add button were clipped.
+#[test]
+fn auto_grid_rows_hold_the_full_height_of_overflow_hidden_cards() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Column { Text("Napoli Pizzeria").tw("text-2xl font-bold") }.tw("w-full h-[420px]")
+            Column {
+                Text("Menu").tw("text-xl font-bold px-4 pt-5 pb-4")
+                Grid {
+                    Column {
+                        Image(src: "m1.png").tw("w-full h-36 rounded-2xl bg-stone-100")
+                        Column {
+                            Row { Text("Margherita").tw("text-sm font-semibold ml-1") }.tw("items-center")
+                            Row { Text("Popular").tw("text-xs ml-1 font-medium") }.tw("items-center mt-1")
+                            Text("Tomato, fresh mozzarella, basil, olive oil.").tw("text-xs text-gray-500 mt-1 leading-5")
+                            Row {
+                                Text("$14.50").tw("text-base font-bold flex-1")
+                                Button { Row { Text("Add").tw("text-sm font-bold ml-1") }.tw("items-center") }
+                                    .tw("bg-orange-500 border rounded-full px-4 py-2")
+                            }
+                            .tw("mt-4 items-center")
+                        }
+                        .tw("p-4")
+                    }
+                    .tw("w-full bg-white rounded-2xl border border-gray-100 overflow-hidden")
+                    Column {
+                        Image(src: "m2.png").tw("w-full h-36 rounded-2xl")
+                        Column { Text("Pepperoni").tw("text-sm") Text("Spicy").tw("text-xs mt-1") }.tw("p-4")
+                    }
+                    .tw("w-full rounded-2xl border overflow-hidden")
+                }
+                .gridColumns(1)
+                .fillMaxWidth(true)
+                .gap(18)
+                .tw("w-full px-4 pb-28")
+            }
+            .width("100%")
+        }
+        .scrollable(true)
+        .tw("flex-1 w-full min-h-0")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let grid = first_of_type(&tree, "Grid");
+    let cards = tree.children_of(&grid).to_vec();
+    for card in &cards {
+        let card_r = pass.item_by_id(card).unwrap().rect;
+        let body = tree.children_of(card)[1].clone();
+        let body_r = pass.item_by_id(&body).unwrap().rect;
+        assert!(
+            body_r.y + body_r.h <= card_r.y + card_r.h + 1.5,
+            "the card holds its whole body: body {body_r:?} card {card_r:?}"
+        );
+        assert!(body_r.h > 40.0, "{body_r:?}");
+    }
+    let first = pass.item_by_id(&cards[0]).unwrap().rect;
+    let second = pass.item_by_id(&cards[1]).unwrap().rect;
+    assert!(
+        (second.y - (first.y + first.h) - 18.0).abs() < 1.0,
+        "the next card starts one gap below: {first:?} {second:?}"
+    );
+    // Large enough for: photo 144 + padding 32 + name / popular / description
+    // / price row — well past the ~170px the capped row gave.
+    assert!(first.h > 260.0, "{first:?}");
+}
+
+/// News "On this day" timeline: `Button { … }.tw("p-0 pb-5")` keeps its
+/// declared sides — 0 on top, 20 at the bottom — like the DOM. The sides
+/// used to be averaged into a floor, so the Button got 10px on top as
+/// well: every row 10px taller with its year pushed below the rail dot.
+#[test]
+fn button_declared_padding_is_applied_per_side() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Button { Text("2012").tw("text-[20px] leading-none") }
+                .tw("p-0 pb-5 border-0")
+            Button { Text("left") }.tw("pl-4 border-0")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let b = pass.item_by_id(&kids[0]).unwrap().rect;
+    let t = pass.item_by_id(&tree.children_of(&kids[0])[0]).unwrap().rect;
+    assert!((t.y - b.y).abs() < 0.5, "no top padding: {t:?} in {b:?}");
+    assert!(
+        (b.y + b.h - (t.y + t.h) - 20.0).abs() < 0.5,
+        "20px bottom padding: {t:?} in {b:?}"
+    );
+    let b2 = pass.item_by_id(&kids[1]).unwrap().rect;
+    let t2 = pass.item_by_id(&tree.children_of(&kids[1])[0]).unwrap().rect;
+    assert!((t2.x - b2.x - 16.0).abs() < 0.5, "{t2:?} in {b2:?}");
+    assert!((b2.x + b2.w - (t2.x + t2.w)).abs() < 0.5, "no right padding: {t2:?} in {b2:?}");
+}
+
+/// A Heading without an authored `lineHeight` gets CSS `line-height:
+/// normal` (the DOM `<hN>` sets none), i.e. the face's ascent + descent +
+/// gap — not the Text `<span>`'s `line-height: 1`. News' 30px
+/// "November 15" title was 30px tall on desktop, 35px in Chrome, and
+/// everything below it sat ~5px higher.
+#[test]
+fn heading_line_box_is_css_normal_unless_authored() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Heading("November 15", level: 1).fontSize(30)
+            Text("November 15").fontSize(30)
+            Heading("Tight", level: 1).fontSize(30).lineHeight(1)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let heading = pass.item_by_id(&kids[0]).unwrap().rect;
+    let plain = pass.item_by_id(&kids[1]).unwrap().rect;
+    let tight = pass.item_by_id(&kids[2]).unwrap().rect;
+    let normal = crate::text::normal_line_height(&Default::default(), 700, 30.0);
+    assert!(normal > 31.0, "a real face's normal line height: {normal}");
+    assert!((heading.h - normal).abs() < 1.0, "{heading:?} vs normal {normal}");
+    assert!((plain.h - 30.0).abs() < 1.0, "Text keeps line-height 1: {plain:?}");
+    assert!((tight.h - 30.0).abs() < 1.0, "an authored lineHeight wins: {tight:?}");
+}
+
+/// Social search with no results: `Row(w-full gap-1) { Column.tw("flex-1
+/// aspect-square …") ×3 }` placeholder tiles. A flex item with an aspect
+/// ratio and an auto cross size gets its height from its flexed width (CSS
+/// lays it out at its used main size); desktop drew three 0px-tall tiles —
+/// nothing under "No posts match that search", where Chrome shows squares.
+#[test]
+fn flex_one_aspect_square_tiles_in_a_row_are_square() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Text("No posts match that search").tw("text-sm text-center pb-4")
+            Row {
+                Column {}.tw("flex-1 aspect-square bg-gray-100 rounded-md")
+                Column {}.tw("flex-1 aspect-square bg-gray-100 rounded-md")
+                Column {}.tw("flex-1 aspect-square bg-gray-100 rounded-md")
+            }
+            .tw("flex-row gap-1 w-full")
+        }
+        .tw("shrink-0 px-4 pt-8 items-center")"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let row = first_of_type(&tree, "Row");
+    let tiles = tree.children_of(&row).to_vec();
+    assert_eq!(tiles.len(), 3);
+    for tile in &tiles {
+        let r = pass.item_by_id(tile).unwrap().rect;
+        assert!(r.w > 100.0, "{r:?}");
+        assert!((r.w - r.h).abs() < 1.0, "a square tile: {r:?}");
+    }
+    let row_r = pass.item_by_id(&row).unwrap().rect;
+    let first = pass.item_by_id(&tiles[0]).unwrap().rect;
+    assert!((row_r.h - first.h).abs() < 1.0, "the Row holds the tiles: {row_r:?}");
+}
+
+/// Calories stats: the chart card (`Box { Stack { Column(w-full) {…};
+/// List(w-full flex-row) { bar Column(flex-1) … } } }`) hugs its bars.
+/// Switching from the 7-bar weekly view to the 1-bar daily view (one
+/// `clearChildren` + one new bar) must shrink it like Chrome: the
+/// fit-content probes used to replay Taffy cache entries of the `w-full`
+/// descendants (keyed without the parent size their percentage resolves
+/// against), so the card kept its weekly width.
+#[test]
+fn chart_card_shrinks_when_its_bars_are_replaced() {
+    let mut tree = Tree::new();
+    let mut state = TaffyState::new();
+    let mut text = TextEngine::new();
+    let bar = |i: usize, label: &str| -> Vec<Patch> {
+        let col = format!("bar{i}");
+        vec![
+            create_patch(
+                &col,
+                "Column",
+                &[
+                    ("flex.0", json!("1")),
+                    ("height.0", json!("100%")),
+                    ("alignItems.0", json!("center")),
+                ],
+            ),
+            insert_patch("list", &col),
+            create_patch(&format!("{col}-v"), "Text", &[("0", json!("614"))]),
+            insert_patch(&col, &format!("{col}-v")),
+            create_patch(&format!("{col}-l"), "Text", &[("0", json!(label))]),
+            insert_patch(&col, &format!("{col}-l")),
+        ]
+    };
+    let mut build = vec![
+        create_patch("page", "Column", &[("width.0", json!("100%"))]),
+        insert_patch("root", "page"),
+        create_patch(
+            "card",
+            "Box",
+            &[("padding.0", json!("0.75rem")), ("height.0", json!("14rem"))],
+        ),
+        insert_patch("page", "card"),
+        create_patch(
+            "stack",
+            "Stack",
+            &[("width.0", json!("100%")), ("height.0", json!("100%"))],
+        ),
+        insert_patch("card", "stack"),
+        create_patch(
+            "goal",
+            "Column",
+            &[
+                ("width.0", json!("100%")),
+                ("height.0", json!("100%")),
+                ("paddingLeft.0", json!("0.5rem")),
+                ("paddingRight.0", json!("0.5rem")),
+                ("justifyContent.0", json!("end")),
+            ],
+        ),
+        insert_patch("stack", "goal"),
+        create_patch(
+            "rule",
+            "Box",
+            &[("width.0", json!("100%")), ("borderTopWidth.0", json!("2px"))],
+        ),
+        insert_patch("goal", "rule"),
+        create_patch(
+            "list",
+            "List",
+            &[
+                ("display.0", json!("flex")),
+                ("flexDirection.0", json!("row")),
+                ("width.0", json!("100%")),
+                ("height.0", json!("100%")),
+                ("alignItems.0", json!("stretch")),
+            ],
+        ),
+        insert_patch("stack", "list"),
+    ];
+    for (i, day) in ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].iter().enumerate() {
+        build.extend(bar(i, day));
+    }
+    tree.apply_batch(&build);
+    state.apply_patches(&build, &tree, 1.0, vp(430.0));
+    let compute = |state: &mut TaffyState, tree: &Tree, text: &mut TextEngine, gen: u64| {
+        LayoutPass::compute_with_state(
+            state,
+            tree,
+            text,
+            (430, 934),
+            1.0,
+            0.0,
+            &HashMap::new(),
+            gen,
+        )
+    };
+    let weekly = find_item(&compute(&mut state, &tree, &mut text, 1), "card").rect;
+    let mut daily = vec![Patch::ClearChildren { id: "list".into() }];
+    daily.extend(bar(100, "Nov 15"));
+    tree.apply_batch(&daily);
+    assert!(state.apply_patches(&daily, &tree, 1.0, vp(430.0)));
+    let pass = compute(&mut state, &tree, &mut text, 2);
+    let card = find_item(&pass, "card").rect;
+    let (label_w, _) = text.measure("Nov 15", 16.0, None);
+    assert!(weekly.w > card.w + 50.0, "weekly {weekly:?} vs daily {card:?}");
+    assert!(
+        card.w <= label_w + 24.0 + 2.0,
+        "the daily card hugs its single bar ({label_w} + padding): {card:?}"
+    );
+}
+
+/// A single-line Input is one CSS `normal` line of its own font tall (plus
+/// its padding), like the DOM `<input>` that inherits the font with no
+/// padding — 17px at 15px in Chrome — not a fixed 1.3 × 16px.
+#[test]
+fn input_height_is_one_normal_line_of_its_font() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Input(placeholder: "Search for a food").fontSize(15)
+            Input(placeholder: "Padded").fontSize(15).padding(6)
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let line = crate::text::normal_line_height(&Default::default(), 400, 15.0);
+    let plain = pass.item_by_id(&kids[0]).unwrap().rect;
+    let padded = pass.item_by_id(&kids[1]).unwrap().rect;
+    assert!((plain.h - line).abs() < 0.5, "{plain:?} vs a {line}px line");
+    assert!(plain.h < 20.0, "shorter than the old fixed 20.8px: {plain:?}");
+    assert!((padded.h - (line + 12.0)).abs() < 0.5, "{padded:?}");
+}
+
+/// A `transparent` border still takes its width in layout, like CSS:
+/// Messages' unselected bubbles are `.border("2px solid transparent")` so
+/// selecting one (a visible 2px border) does not move anything. Desktop
+/// laid them out borderless — every bubble 4px short of Chrome's.
+#[test]
+fn transparent_border_takes_its_width_in_layout() {
+    let tree = tree_from_dsl(
+        r#"Column {
+            Column { Text("Morning all!").fontSize(15) }
+                .paddingVertical(7).border("2px solid transparent")
+            Column { Text("Morning all!").fontSize(15) }
+                .paddingVertical(7).border("2px solid #F5F2EA")
+        }"#,
+        json!({}),
+    );
+    let mut text = TextEngine::new();
+    let pass = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    let col = first_of_type(&tree, "Column");
+    let kids = tree.children_of(&col).to_vec();
+    let clear = pass.item_by_id(&kids[0]).unwrap().rect;
+    let shown = pass.item_by_id(&kids[1]).unwrap().rect;
+    let clear_text = pass.item_by_id(&tree.children_of(&kids[0])[0]).unwrap().rect;
+    assert!((clear.h - shown.h).abs() < 0.5, "{clear:?} vs {shown:?}");
+    assert!((clear_text.y - clear.y - 9.0).abs() < 0.5, "2px border + 7px padding: {clear_text:?}");
+}
+
+/// Border widths snap like CSS ("snap as a border width", Chrome): floored
+/// to whole device pixels, at least one. Messages' reaction chips
+/// (`paddingVertical(3)`, `border("1.5px solid …")`, a 12px line) are 20px
+/// tall in Chrome at 1x and 22px at 2x (a 3px border), not 21 / 21.
+#[test]
+fn border_widths_snap_to_device_pixels() {
+    let tree = tree_from_dsl(
+        r#"Row {
+            Button { Text("1").fontSize(12) }
+                .paddingHorizontal(8).paddingVertical(3)
+                .border("1.5px solid #3A3648")
+        }"#,
+        json!({}),
+    );
+    let button = first_of_type(&tree, "Button");
+    let mut text = TextEngine::new();
+    let at1 = LayoutPass::compute(&tree, &mut text, (430, 934), 1.0);
+    assert!((at1.item_by_id(&button).unwrap().rect.h - 20.0).abs() < 0.5);
+    let at2 = LayoutPass::compute(&tree, &mut text, (860, 1868), 2.0);
+    assert!((at2.item_by_id(&button).unwrap().rect.h - 42.0).abs() < 0.5);
+    let hairline = crate::style::Border { width: 0.25, ..Default::default() };
+    assert_eq!(hairline.device_width(1.0), 1.0);
+    assert_eq!(hairline.device_width(0.0), 0.0);
 }

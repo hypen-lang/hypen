@@ -898,6 +898,15 @@ struct BoxPropKeys {
     dot_right: &'static str,
     dot_bottom: &'static str,
     dot_left: &'static str,
+    /// Named-argument axes / logical edges: `.padding(horizontal: 14,
+    /// vertical: 12)` arrives as `padding.horizontal` / `padding.vertical`,
+    /// `.padding(start: 8)` as `padding.start` (see [`apply_named_box_args`]).
+    dot_horizontal: &'static str,
+    dot_vertical: &'static str,
+    dot_start: &'static str,
+    dot_end: &'static str,
+    dot_leading: &'static str,
+    dot_trailing: &'static str,
 }
 
 static PADDING_KEYS: BoxPropKeys = BoxPropKeys {
@@ -912,6 +921,12 @@ static PADDING_KEYS: BoxPropKeys = BoxPropKeys {
     dot_right: "padding.right",
     dot_bottom: "padding.bottom",
     dot_left: "padding.left",
+    dot_horizontal: "padding.horizontal",
+    dot_vertical: "padding.vertical",
+    dot_start: "padding.start",
+    dot_end: "padding.end",
+    dot_leading: "padding.leading",
+    dot_trailing: "padding.trailing",
 };
 
 static MARGIN_KEYS: BoxPropKeys = BoxPropKeys {
@@ -926,7 +941,51 @@ static MARGIN_KEYS: BoxPropKeys = BoxPropKeys {
     dot_right: "margin.right",
     dot_bottom: "margin.bottom",
     dot_left: "margin.left",
+    dot_horizontal: "margin.horizontal",
+    dot_vertical: "margin.vertical",
+    dot_start: "margin.start",
+    dot_end: "margin.end",
+    dot_leading: "margin.leading",
+    dot_trailing: "margin.trailing",
 };
+
+/// The named-argument form of `.padding(...)` / `.margin(...)`, resolved
+/// like the DOM renderer's `resolveSpacingKeys` (and Swift's): an axis
+/// (`horizontal` / `vertical`) is the fallback for its two edges, an
+/// explicit edge (`top` / `right` / `bottom` / `left`) beats it, and the
+/// logical `leading ?? start` / `trailing ?? end` win over both (LTR, so
+/// they land on left / right). Desktop used to read only the four
+/// physical edges, so `.padding(horizontal: 14, vertical: 12)` — the
+/// Messages inputs — was silently dropped.
+fn apply_named_box_args(node: &Node, keys: &BoxPropKeys, viewport: Option<Viewport>, p: &mut Padding) {
+    let named = |key: &str| node.props.get(key).and_then(|v| value_to_f32(v, viewport));
+    if let Some(v) = named(keys.dot_horizontal) {
+        p.left = v;
+        p.right = v;
+    }
+    if let Some(v) = named(keys.dot_vertical) {
+        p.top = v;
+        p.bottom = v;
+    }
+    if let Some(v) = named(keys.dot_top) {
+        p.top = v;
+    }
+    if let Some(v) = named(keys.dot_right) {
+        p.right = v;
+    }
+    if let Some(v) = named(keys.dot_bottom) {
+        p.bottom = v;
+    }
+    if let Some(v) = named(keys.dot_left) {
+        p.left = v;
+    }
+    if let Some(v) = named(keys.dot_leading).or_else(|| named(keys.dot_start)) {
+        p.left = v;
+    }
+    if let Some(v) = named(keys.dot_trailing).or_else(|| named(keys.dot_end)) {
+        p.right = v;
+    }
+}
 
 /// Shared box-model reader for `padding` / `margin`. The Hypen DSL gives
 /// both shorthand and per-side applicators that all collapse to the same
@@ -962,7 +1021,18 @@ pub fn declares_padding(node: &Node, vs: &VariantState) -> bool {
     {
         return true;
     }
-    [k.dot_top, k.dot_right, k.dot_bottom, k.dot_left]
+    [
+        k.dot_top,
+        k.dot_right,
+        k.dot_bottom,
+        k.dot_left,
+        k.dot_horizontal,
+        k.dot_vertical,
+        k.dot_start,
+        k.dot_end,
+        k.dot_leading,
+        k.dot_trailing,
+    ]
         .iter()
         .any(|key| {
             node.props
@@ -986,34 +1056,7 @@ fn read_box_props_at(node: &Node, keys: &BoxPropKeys, vs: &VariantState) -> Padd
         p.top = v;
         p.bottom = v;
     }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_top)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.top = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_right)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.right = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_bottom)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.bottom = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_left)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.left = v;
-    }
+    apply_named_box_args(node, keys, viewport, &mut p);
     if let Some(v) = prop_f32_with(node, keys.top, vs) {
         p.top = v;
     }
@@ -1044,34 +1087,7 @@ fn read_box_props(node: &Node, keys: &BoxPropKeys) -> Padding {
         p.top = v;
         p.bottom = v;
     }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_top)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.top = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_right)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.right = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_bottom)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.bottom = v;
-    }
-    if let Some(v) = node
-        .props
-        .get(keys.dot_left)
-        .and_then(|v| value_to_f32(v, viewport))
-    {
-        p.left = v;
-    }
+    apply_named_box_args(node, keys, viewport, &mut p);
     if let Some(v) = prop_f32(node, keys.top) {
         p.top = v;
     }
@@ -1103,12 +1119,106 @@ pub enum BorderLineStyle {
     Dotted,
 }
 
+/// Per-corner border radii, CSS order: top-left, top-right, bottom-right,
+/// bottom-left. Logical px in a [`Border`], physical once
+/// [`Self::scaled`]. `From<f32>` makes a uniform set, so every paint
+/// helper that takes a radius takes either.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct CornerRadii {
+    pub tl: f32,
+    pub tr: f32,
+    pub br: f32,
+    pub bl: f32,
+}
+
+impl CornerRadii {
+    pub const ZERO: CornerRadii = CornerRadii::uniform(0.0);
+
+    pub const fn uniform(r: f32) -> Self {
+        Self {
+            tl: r,
+            tr: r,
+            br: r,
+            bl: r,
+        }
+    }
+
+    pub fn is_zero(&self) -> bool {
+        self.tl <= 0.0 && self.tr <= 0.0 && self.br <= 0.0 && self.bl <= 0.0
+    }
+
+    pub fn is_uniform(&self) -> bool {
+        self.tl == self.tr && self.tr == self.br && self.br == self.bl
+    }
+
+    /// The largest corner (for single-radius consumers: blurred shadows,
+    /// the focus ring).
+    pub fn max(&self) -> f32 {
+        self.tl.max(self.tr).max(self.br).max(self.bl)
+    }
+
+    pub fn scaled(self, k: f32) -> Self {
+        Self {
+            tl: self.tl * k,
+            tr: self.tr * k,
+            br: self.br * k,
+            bl: self.bl * k,
+        }
+    }
+
+    /// Grow (or shrink, negative) every rounded corner by `d`, keeping
+    /// square corners square — CSS's rule for a box-shadow's spread.
+    pub fn grown(self, d: f32) -> Self {
+        let g = |r: f32| if r > 0.0 { (r + d).max(0.0) } else { 0.0 };
+        Self {
+            tl: g(self.tl),
+            tr: g(self.tr),
+            br: g(self.br),
+            bl: g(self.bl),
+        }
+    }
+
+    /// CSS's overlapping-curves rule (CSS Backgrounds 3 §5.5): when two
+    /// radii on one side add up to more than the side, every radius is
+    /// scaled down by the same factor. Negative radii clamp to 0.
+    pub fn fit(self, w: f32, h: f32) -> Self {
+        let c = Self {
+            tl: self.tl.max(0.0),
+            tr: self.tr.max(0.0),
+            br: self.br.max(0.0),
+            bl: self.bl.max(0.0),
+        };
+        let ratio = |side: f32, sum: f32| if sum > side { side.max(0.0) / sum } else { 1.0 };
+        let f = ratio(w, c.tl + c.tr)
+            .min(ratio(w, c.bl + c.br))
+            .min(ratio(h, c.tl + c.bl))
+            .min(ratio(h, c.tr + c.br));
+        if f < 1.0 {
+            c.scaled(f)
+        } else {
+            c
+        }
+    }
+}
+
+impl From<f32> for CornerRadii {
+    fn from(r: f32) -> Self {
+        Self::uniform(r)
+    }
+}
+
 /// Resolved border style for a node.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Border {
     pub width: f32,
     pub color: Rgba,
+    /// The uniform radius — or, when [`Self::corners`] is set, its largest
+    /// corner (what single-radius consumers use).
     pub radius: f32,
+    /// Per-corner radii (`rounded-t-*`, `borderTopLeftRadius`, a
+    /// `{topLeft, …}` object, a multi-value `borderRadius` string), when
+    /// they are not all equal. `None`: every corner is `radius`.
+    pub corners: Option<CornerRadii>,
     /// Bitmask of which sides this border draws on. `BORDER_SIDES_ALL`
     /// (the default) is the standard "stroke the full rounded rect"
     /// path. A subset means tw `border-b` / `border-t` etc. — those
@@ -1125,6 +1235,7 @@ impl Default for Border {
             width: 0.0,
             color: Rgba::TRANSPARENT,
             radius: 0.0,
+            corners: None,
             sides: BORDER_SIDES_ALL,
             style: BorderLineStyle::Solid,
         }
@@ -1142,6 +1253,118 @@ impl Border {
     pub fn is_partial(&self) -> bool {
         self.sides != 0 && self.sides != BORDER_SIDES_ALL
     }
+
+    /// The width in device pixels at `scale`, snapped like a CSS border
+    /// width (CSS Values 4 "snap as a border width", what Chrome does): a
+    /// width of at least one device pixel is floored to whole pixels, a
+    /// thinner non-zero one becomes one pixel. A `1.5px` border is 1px at
+    /// 1x (Messages' reaction chips were 1px taller than Chrome's).
+    pub fn device_width(&self, scale: f32) -> f32 {
+        let w = self.width * scale;
+        if w <= 0.0 {
+            0.0
+        } else if w < 1.0 {
+            1.0
+        } else {
+            w.floor()
+        }
+    }
+
+    /// Every corner's radius (logical px).
+    pub fn radii(&self) -> CornerRadii {
+        self.corners.unwrap_or(CornerRadii::uniform(self.radius))
+    }
+
+    /// Set the radii, keeping `radius` / `corners` normalised.
+    pub fn set_radii(&mut self, radii: CornerRadii) {
+        if radii.is_uniform() {
+            self.radius = radii.tl;
+            self.corners = None;
+        } else {
+            self.radius = radii.max();
+            self.corners = Some(radii);
+        }
+    }
+}
+
+/// Per-corner radii from the props, over a uniform `radius`: a multi-value
+/// `borderRadius` / `cornerRadius` string (`"12px 12px 0 0"`), a corner
+/// object (`{topLeft, topRight, bottomRight, bottomLeft}` and the logical
+/// `topStart` / `topEnd` / `bottomStart` / `bottomEnd`, LTR — the DOM
+/// `applyCornerRadii`), then the per-corner longhands (`borderTopLeftRadius`
+/// …, what Tailwind `rounded-t-*` / `rounded-tl-*` lower to), later ones
+/// winning per corner like inline CSS.
+/// [`corner_radii_with`] at a viewport — for element defaults (a Card's
+/// 8px, a Badge's 4px, a round Avatar) that per-corner props refine, as
+/// the DOM's inline `rounded-t-*` longhands refine its component default.
+pub fn corner_radii_at(node: &Node, viewport: Viewport, radius: f32) -> CornerRadii {
+    corner_radii_with(node, &VariantState::layout(viewport), radius)
+}
+
+fn corner_radii_with(node: &Node, vs: &VariantState, radius: f32) -> CornerRadii {
+    let viewport = Some(vs.viewport);
+    let mut c = CornerRadii::uniform(radius);
+    for name in ["borderRadius", "cornerRadius"] {
+        if let Some(text) = prop_str_with(node, name, vs) {
+            let values: Vec<f32> = text
+                .split('/')
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .filter_map(|t| parse_length(t, viewport))
+                .collect();
+            c = match values.as_slice() {
+                [a, b] => CornerRadii { tl: *a, tr: *b, br: *a, bl: *b },
+                [a, b, d] => CornerRadii { tl: *a, tr: *b, br: *d, bl: *b },
+                [a, b, d, e] => CornerRadii { tl: *a, tr: *b, br: *d, bl: *e },
+                _ => c,
+            };
+        }
+        let object = node
+            .props
+            .get(&format!("{name}.0"))
+            .or_else(|| node.props.get(name))
+            .and_then(Value::as_object);
+        if let Some(obj) = object {
+            let get = |k: &str| obj.get(k).and_then(|v| value_to_f32(v, viewport));
+            c = CornerRadii {
+                tl: get("topLeft").unwrap_or(0.0),
+                tr: get("topRight").unwrap_or(0.0),
+                br: get("bottomRight").unwrap_or(0.0),
+                bl: get("bottomLeft").unwrap_or(0.0),
+            };
+            if let Some(v) = get("topStart") {
+                c.tl = v;
+            }
+            if let Some(v) = get("topEnd") {
+                c.tr = v;
+            }
+            if let Some(v) = get("bottomEnd") {
+                c.br = v;
+            }
+            if let Some(v) = get("bottomStart") {
+                c.bl = v;
+            }
+        }
+    }
+    for (names, idx) in [
+        (["borderTopLeftRadius", "borderStartStartRadius"], 0),
+        (["borderTopRightRadius", "borderStartEndRadius"], 1),
+        (["borderBottomRightRadius", "borderEndEndRadius"], 2),
+        (["borderBottomLeftRadius", "borderEndStartRadius"], 3),
+    ] {
+        for name in names {
+            if let Some(v) = prop_f32_with(node, name, vs) {
+                match idx {
+                    0 => c.tl = v,
+                    1 => c.tr = v,
+                    2 => c.br = v,
+                    _ => c.bl = v,
+                }
+            }
+        }
+    }
+    c
 }
 
 /// Resolve border / borderWidth / borderColor / borderRadius / cornerRadius.
@@ -1227,7 +1450,7 @@ pub fn border(node: &Node) -> Border {
         line_style = parse_border_line_style(value);
     }
 
-    Border {
+    let mut out = Border {
         width,
         // A width without an explicit colour falls back to opaque black —
         // matches the DOM applicator's "default solid black" behaviour.
@@ -1237,9 +1460,16 @@ pub fn border(node: &Node) -> Border {
             Rgba::TRANSPARENT
         }),
         radius,
+        corners: None,
         sides: BORDER_SIDES_ALL,
         style: line_style,
-    }
+    };
+    out.set_radii(corner_radii_with(
+        node,
+        &VariantState::layout(Viewport::default()),
+        radius,
+    ));
+    out
 }
 
 /// Viewport-aware [`border`] — honours `borderWidth@md` etc.
@@ -1359,6 +1589,35 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
     let mut right = prop_f32_with(node, "borderRightWidth", vs);
     let mut bottom = prop_f32_with(node, "borderBottomWidth", vs);
     let mut left = prop_f32_with(node, "borderLeftWidth", vs);
+    // Per-side CSS shorthands: `.borderTop("1px solid #333")` (Weather's
+    // 7-day row dividers). A bare number is the side's width. CSS's
+    // initial width is `medium` (3px) when the shorthand omits it.
+    for (name, slot) in [
+        ("borderTop", &mut top),
+        ("borderRight", &mut right),
+        ("borderBottom", &mut bottom),
+        ("borderLeft", &mut left),
+    ] {
+        let raw = prop_str_with(node, name, vs);
+        let hidden = raw.is_some_and(|v| {
+            v.split_whitespace()
+                .any(|t| t.eq_ignore_ascii_case("none") || t.eq_ignore_ascii_case("hidden"))
+        });
+        if hidden {
+            *slot = Some(0.0);
+        } else if let Some(sh) = raw.and_then(parse_border_shorthand) {
+            let side_width = sh.0.unwrap_or(3.0);
+            *slot = Some(side_width);
+            if let Some(c) = sh.1 {
+                color = Some(c);
+            }
+            if side_width > 0.0 {
+                line_style = sh.2;
+            }
+        } else if let Some(w) = prop_f32_with(node, name, vs) {
+            *slot = Some(w);
+        }
+    }
 
     let any_side = top.is_some() || right.is_some() || bottom.is_some() || left.is_some();
     if uniform_set && any_side {
@@ -1403,7 +1662,7 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
         BORDER_SIDES_ALL
     };
 
-    Border {
+    let mut out = Border {
         width,
         color: color.unwrap_or(if width > 0.0 {
             Rgba::BLACK
@@ -1411,9 +1670,12 @@ pub fn border_with(node: &Node, vs: &VariantState) -> Border {
             Rgba::TRANSPARENT
         }),
         radius,
+        corners: None,
         sides,
         style: line_style,
-    }
+    };
+    out.set_radii(corner_radii_with(node, vs, radius));
+    out
 }
 
 /// True if the user supplied any border-* prop on this node — even
@@ -1446,12 +1708,18 @@ pub fn has_explicit_border(node: &Node) -> bool {
 /// site. Viewport units then read as *absent* rather than silently
 /// collapsing to zero — a dropped prop is recoverable, a confidently
 /// wrong `0` is not.
-fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32> {
+pub(crate) fn value_to_f32(v: &Value, viewport: Option<Viewport>) -> Option<f32> {
     match v {
         Value::Number(n) => n.as_f64().map(|f| f as f32),
         Value::String(s) => parse_length(s, viewport),
         _ => None,
     }
+}
+
+/// Crate-visible [`parse_length`] for CSS value lists parsed outside this
+/// module (`box-shadow`).
+pub(crate) fn parse_css_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
+    parse_length(s, viewport)
 }
 
 /// Parse a CSS-ish length. `%` is *not* handled here — it is a
@@ -1503,6 +1771,66 @@ fn parse_length(s: &str, viewport: Option<Viewport>) -> Option<f32> {
     }
     let stripped = trimmed.strip_suffix("px").unwrap_or(trimmed);
     stripped.trim().parse::<f32>().ok()
+}
+
+/// A CSS `calc()` length of the form `P% ± L` — the only shape the web
+/// examples author (`width: calc(100% - 40px)`). `percent` is a fraction
+/// (1.0 = 100%) of the containing block; `px` is in logical px.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CalcLength {
+    pub percent: f32,
+    pub px: f32,
+}
+
+impl CalcLength {
+    /// Resolve against a containing-block size, clamped at zero like a
+    /// CSS `width` (negative widths are invalid and floor at 0).
+    pub fn resolve(self, basis: f32) -> f32 {
+        (self.percent * basis + self.px).max(0.0)
+    }
+}
+
+/// Parse `calc(<term> (+|-) <term> ...)` where each term is a percentage
+/// or a length (`px`, `rem`, `em`, viewport units). Products, quotients and
+/// nested parentheses are not supported and yield `None`.
+pub fn parse_calc(s: &str, viewport: Option<Viewport>) -> Option<CalcLength> {
+    let inner = s.trim().strip_prefix("calc(")?.strip_suffix(')')?.trim();
+    if inner.is_empty() || inner.contains(['(', ')', '*', '/']) {
+        return None;
+    }
+    let mut out = CalcLength {
+        percent: 0.0,
+        px: 0.0,
+    };
+    let mut sign = 1.0_f32;
+    let mut expect_term = true;
+    for token in inner.split_whitespace() {
+        if expect_term {
+            if let Some(pct) = parse_percent(token) {
+                out.percent += sign * pct;
+            } else {
+                out.px += sign * parse_length(token, viewport)?;
+            }
+            expect_term = false;
+        } else {
+            sign = match token {
+                "+" => 1.0,
+                "-" => -1.0,
+                _ => return None,
+            };
+            expect_term = true;
+        }
+    }
+    (!expect_term).then_some(out)
+}
+
+/// Variant-aware read of a `calc()` dimension prop (`width`, `height`).
+pub fn prop_calc_with(node: &Node, name: &str, vs: &VariantState) -> Option<CalcLength> {
+    let raw = prop_str_with(node, name, vs)?;
+    if !raw.trim_start().starts_with("calc(") {
+        return None;
+    }
+    parse_calc(raw, Some(vs.viewport))
 }
 
 /// Parse a dimension prop that may carry a `%` unit. Returns the
@@ -1936,14 +2264,16 @@ pub fn prop_linear_gradient(node: &Node, viewport: Viewport) -> Option<LinearGra
 /// Splitting is paren- and quote-aware: a layer list is comma-separated, but
 /// so are `rgba(3, 7, 18, 0.6)` and a gradient's colour stops, and a base64
 /// payload can contain anything. A naive `split(',')` shreds all three.
-pub fn prop_background_image_url(node: &Node) -> Option<String> {
+pub fn prop_background_image_url(node: &Node, viewport: Viewport) -> Option<String> {
     for name in ["background", "backgroundImage"] {
-        let Some(raw) = prop_str(node, name) else {
+        let Some(raw) = prop_str_at(node, name, viewport) else {
             continue;
         };
         for layer in split_top_level(raw) {
             if let Some(url) = extract_url(layer.trim()) {
-                return Some(url);
+                // Resolved under the node's own asset origin; a refused
+                // source draws no image.
+                return crate::paint::image::node_source_owned(node, url);
             }
         }
     }
@@ -2066,6 +2396,56 @@ fn parse_border_line_style(value: &str) -> BorderLineStyle {
     }
 }
 
+/// Split a CSS value on top-level whitespace, keeping functional notation
+/// (`rgba(0, 0, 0, 0.1)`, `rgb(0 0 0 / 0.1)`) in one token.
+pub(crate) fn split_css_tokens(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0_i32;
+    let mut start: Option<usize> = None;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => {
+                depth += 1;
+                start.get_or_insert(i);
+            }
+            ')' => depth -= 1,
+            c if c.is_whitespace() && depth <= 0 => {
+                if let Some(st) = start.take() {
+                    out.push(&s[st..i]);
+                }
+            }
+            _ => {
+                start.get_or_insert(i);
+            }
+        }
+    }
+    if let Some(st) = start {
+        out.push(&s[st..]);
+    }
+    out
+}
+
+/// Split a CSS list value on top-level commas (`a, b` but not inside
+/// `rgba(...)`).
+pub(crate) fn split_css_commas(s: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut depth = 0_i32;
+    let mut st = 0;
+    for (i, ch) in s.char_indices() {
+        match ch {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth <= 0 => {
+                out.push(s[st..i].trim());
+                st = i + 1;
+            }
+            _ => {}
+        }
+    }
+    out.push(s[st..].trim());
+    out
+}
+
 /// Parse the CSS `border` shorthand — `1px solid #333`, `2px #f00`,
 /// `solid red`. Returns `(width, colour, style)`.
 ///
@@ -2082,7 +2462,7 @@ fn parse_border_shorthand(s: &str) -> Option<(Option<f32>, Option<Rgba>, BorderL
     let mut width = None;
     let mut color = None;
     let mut line_style = BorderLineStyle::Solid;
-    for tok in s.split_whitespace() {
+    for tok in split_css_tokens(s) {
         if STYLES.contains(&tok.to_ascii_lowercase().as_str()) {
             line_style = parse_border_line_style(tok);
             continue;
@@ -2617,13 +2997,35 @@ pub fn parse_background_value(value: &str) -> Option<ParsedBackground> {
 ///
 /// Returns `None` for the common solid-colour node so the painter's
 /// existing fast paths are undisturbed.
-pub fn prop_background_layers(node: &Node) -> Option<ParsedBackground> {
-    if let Some(raw) = prop_str(node, "background") {
+pub fn prop_background_layers(node: &Node, viewport: Viewport) -> Option<ParsedBackground> {
+    let mut parsed = prop_background_layers_authored(node, viewport)?;
+    // `url(...)` layers resolve under the node's own asset origin
+    // (`paint::image::node_source`); a refused source drops its layer.
+    if parsed
+        .layers
+        .iter()
+        .any(|l| matches!(l, BackgroundLayer::Image(_)))
+    {
+        parsed.layers = std::mem::take(&mut parsed.layers)
+            .into_iter()
+            .filter_map(|layer| match layer {
+                BackgroundLayer::Image(uri) => {
+                    crate::paint::image::node_source_owned(node, uri).map(BackgroundLayer::Image)
+                }
+                other => Some(other),
+            })
+            .collect();
+    }
+    Some(parsed)
+}
+
+fn prop_background_layers_authored(node: &Node, viewport: Viewport) -> Option<ParsedBackground> {
+    if let Some(raw) = prop_str_at(node, "background", viewport) {
         if let Some(parsed) = parse_background_value(raw) {
             return Some(parsed);
         }
     }
-    if let Some(body) = prop_str(node, "radialGradient") {
+    if let Some(body) = prop_str_at(node, "radialGradient", viewport) {
         if let Some(g) = parse_radial_gradient(&format!("radial-gradient({})", body.trim())) {
             return Some(ParsedBackground {
                 color: None,
@@ -2631,7 +3033,7 @@ pub fn prop_background_layers(node: &Node) -> Option<ParsedBackground> {
             });
         }
     }
-    if let Some(raw) = prop_str(node, "backgroundImage") {
+    if let Some(raw) = prop_str_at(node, "backgroundImage", viewport) {
         // Only values the legacy single-linear path can't express are
         // worth the full layered parse: a radial gradient, or a layer
         // list (a depth-0 comma outside any gradient's stop list —
@@ -3290,8 +3692,42 @@ mod tests {
                     .into(),
             ),
         )]);
-        let pb = prop_background_layers(&node).expect("resolves");
+        let pb = prop_background_layers(&node, vp(430.0)).expect("resolves");
         assert_eq!(pb.layers.len(), 2);
+    }
+
+    #[test]
+    fn background_value_map_picks_the_breakpoint_for_the_window_width() {
+        // `.background({default: …, sm: …, md: …, lg: …, xl: …})` lowers to
+        // `background.0` + `background@<bp>.0` (the launcher wallpaper).
+        let layer = |name: &str| {
+            Value::String(format!(
+                "linear-gradient(180deg, rgba(3, 7, 18, 0.25), rgba(3, 7, 18, 0.62)), \
+                 url('/wallpapers/{name}.avif') center / cover no-repeat #0B1020"
+            ))
+        };
+        let node = node_with(&[
+            ("background.0", layer("default")),
+            ("background@sm.0", layer("sm")),
+            ("background@md.0", layer("md")),
+            ("background@lg.0", layer("lg")),
+            ("background@xl.0", layer("xl")),
+        ]);
+        for (w, want) in [
+            (430.0, "default"),
+            (640.0, "sm"),
+            (800.0, "md"),
+            (1100.0, "lg"),
+            (1920.0, "xl"),
+        ] {
+            let url = format!("/wallpapers/{want}.avif");
+            let pb = prop_background_layers(&node, vp(w)).expect("resolves");
+            assert_eq!(pb.color, Some(Rgba(0x0b, 0x10, 0x20, 0xff)), "{w}");
+            // Paint order: the url layer under the scrim gradient.
+            assert_eq!(pb.layers.first(), Some(&BackgroundLayer::Image(url.clone())), "{w}");
+            assert!(matches!(pb.layers.get(1), Some(BackgroundLayer::Linear(_))), "{w}");
+            assert_eq!(prop_background_image_url(&node, vp(w)).as_deref(), Some(url.as_str()));
+        }
     }
 
     #[test]
@@ -3302,7 +3738,7 @@ mod tests {
             "radialGradient.0",
             Value::String("circle, #ffffff, #000000".into()),
         )]);
-        let pb = prop_background_layers(&node).expect("resolves");
+        let pb = prop_background_layers(&node, vp(430.0)).expect("resolves");
         assert_eq!(pb.layers.len(), 1);
         assert!(matches!(pb.layers[0], BackgroundLayer::Radial(_)));
     }
@@ -3316,7 +3752,7 @@ mod tests {
             "backgroundImage.0",
             Value::String("linear-gradient(to right, #fff, #000)".into()),
         )]);
-        assert!(prop_background_layers(&node).is_none());
+        assert!(prop_background_layers(&node, vp(430.0)).is_none());
         assert!(prop_linear_gradient(&node, vp(800.0)).is_some());
     }
 
@@ -3328,7 +3764,7 @@ mod tests {
             "backgroundImage.0",
             Value::String("radial-gradient(circle, #fff, #000)".into()),
         )]);
-        let pb = prop_background_layers(&node).expect("resolves");
+        let pb = prop_background_layers(&node, vp(430.0)).expect("resolves");
         assert!(matches!(pb.layers[0], BackgroundLayer::Radial(_)));
     }
 
@@ -3729,6 +4165,22 @@ mod tests {
             prop_color(&node, "backgroundColor"),
             Some(Rgba(0xff, 0, 0, 0xff))
         );
+    }
+
+    #[test]
+    fn font_family_readers_accept_every_spelling() {
+        // The invalidation predicates (`is_layout_prop`,
+        // `is_inherited_text_measure_key`) accept `font-family`; the
+        // readers ask for `fontFamily` and reach the kebab and `.0`
+        // spellings through the lookup chain.
+        for key in ["fontFamily", "fontFamily.0", "font-family"] {
+            let node = node_with(&[(key, serde_json::json!("ui-monospace, monospace"))]);
+            assert_eq!(
+                prop_str_at(&node, "fontFamily", vp(1000.0)),
+                Some("ui-monospace, monospace"),
+                "{key}"
+            );
+        }
     }
 
     #[test]

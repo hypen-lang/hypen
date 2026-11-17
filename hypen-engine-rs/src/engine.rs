@@ -13,6 +13,16 @@ use std::sync::{Arc, Weak};
 /// Callback type for rendering patches to the platform
 pub type RenderCallback = Box<dyn Fn(&[Patch]) + Send + Sync>;
 
+/// A render callback that takes each batch BY VALUE — the engine's own
+/// `Vec<Patch>`, moved, never copied. See [`Engine::set_owned_render_callback`].
+pub type OwnedRenderCallback = Box<dyn Fn(Vec<Patch>) + Send + Sync>;
+
+/// Where [`Engine::emit_patches`] sends a batch.
+enum RenderSink {
+    Borrowed(RenderCallback),
+    Owned(OwnedRenderCallback),
+}
+
 /// The main Hypen engine that orchestrates reactive UI rendering.
 ///
 /// # Architecture: Shared Engine, Namespaced State
@@ -67,7 +77,7 @@ pub struct Engine {
     resources: ResourceCache,
 
     /// Callback to send patches to the platform renderer
-    render_callback: Option<RenderCallback>,
+    render_callback: Option<RenderSink>,
 
     /// Weak handle to the primary module's state Arc as of the last
     /// `notify_state_change` render. Used to detect duplicate notifications
@@ -178,7 +188,18 @@ impl Engine {
     where
         F: Fn(&[Patch]) + Send + Sync + 'static,
     {
-        self.render_callback = Some(Box::new(callback));
+        self.render_callback = Some(RenderSink::Borrowed(Box::new(callback)));
+    }
+
+    /// [`Self::set_render_callback`] for a consumer that keeps (queues)
+    /// each batch: `callback` receives the engine's `Vec<Patch>` itself,
+    /// so it never has to copy the batch (and every `SetProp` value in
+    /// it) to own it. Replaces any earlier callback of either kind.
+    pub fn set_owned_render_callback<F>(&mut self, callback: F)
+    where
+        F: Fn(Vec<Patch>) + Send + Sync + 'static,
+    {
+        self.render_callback = Some(RenderSink::Owned(Box::new(callback)));
     }
 
     /// Register an action handler
@@ -347,8 +368,10 @@ impl Engine {
     /// children whose stored template doesn't carry module_scope.
     fn emit_patches(&self, mut patches: Vec<Patch>) {
         EngineCore::filter_spurious_removes(&mut patches);
-        if let Some(ref callback) = self.render_callback {
-            callback(&patches);
+        match &self.render_callback {
+            Some(RenderSink::Borrowed(callback)) => callback(&patches),
+            Some(RenderSink::Owned(callback)) => callback(patches),
+            None => {}
         }
     }
 
@@ -447,5 +470,77 @@ impl Engine {
 impl Default for Engine {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+#[cfg(test)]
+mod owned_render_callback_tests {
+    use super::*;
+    use crate::lifecycle::{Module, ModuleInstance};
+    use serde_json::json;
+    use std::sync::Mutex;
+
+    fn render(engine: &mut Engine) {
+        engine.set_module(ModuleInstance::new(
+            Module::new("App"),
+            json!({"title": "a"}),
+        ));
+        let doc = hypen_parser::parse_document(r#"Column { Text("@{state.title}") }"#).unwrap();
+        engine.render_ir_node(&crate::ir::ast_to_ir_node(&doc.components[0]));
+        engine.update_state(None, json!({"title": "b".repeat(256)}));
+    }
+
+    /// The owned callback gets the engine's batch ITSELF, not a copy: each
+    /// `Create`'s props map is shared by exactly two owners while the
+    /// callback runs — the engine's instance tree and the patch handed
+    /// over. A copied batch would show a third (a `clone` of the `Vec`
+    /// alongside the engine's) or a fresh map with one (a deep copy).
+    #[test]
+    fn owned_render_callback_gets_the_engine_batch_itself() {
+        let counts: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&counts);
+        let mut engine = Engine::new();
+        engine.set_owned_render_callback(move |patches| {
+            for p in &patches {
+                if let Patch::Create { props, .. } = p {
+                    sink.lock().unwrap().push(Arc::strong_count(props));
+                }
+            }
+        });
+        render(&mut engine);
+        let counts = counts.lock().unwrap();
+        assert!(!counts.is_empty(), "no Create reached the callback");
+        assert!(
+            counts.iter().all(|&c| c == 2),
+            "props owners per Create: {counts:?}"
+        );
+    }
+
+    /// The owned callback receives exactly the batches the borrowed one
+    /// does — moved to it, so a consumer that queues them copies nothing.
+    #[test]
+    fn owned_render_callback_receives_the_same_batches() {
+        let borrowed: Arc<Mutex<Vec<Vec<Patch>>>> = Arc::default();
+        let sink = Arc::clone(&borrowed);
+        let mut a = Engine::new();
+        a.set_render_callback(move |p| sink.lock().unwrap().push(p.to_vec()));
+        render(&mut a);
+
+        let owned: Arc<Mutex<Vec<Vec<Patch>>>> = Arc::default();
+        let sink = Arc::clone(&owned);
+        let mut b = Engine::new();
+        b.set_owned_render_callback(move |p| sink.lock().unwrap().push(p));
+        render(&mut b);
+
+        let (borrowed, owned) = (borrowed.lock().unwrap(), owned.lock().unwrap());
+        assert_eq!(
+            owned.len(),
+            2,
+            "initial render + one state update: {owned:?}"
+        );
+        assert_eq!(
+            serde_json::to_value(&*owned).unwrap(),
+            serde_json::to_value(&*borrowed).unwrap()
+        );
     }
 }

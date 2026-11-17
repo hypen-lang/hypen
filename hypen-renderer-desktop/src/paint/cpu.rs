@@ -376,7 +376,10 @@ impl CpuPainter {
                     max_lines: _,
                     padding: _,
                     line_height: _,
+                    decoration: _,
+                    font_family,
                 } => {
+                    let outer_family = self.text.replace_family(font_family.clone());
                     // Pre-measure the line so right/center alignment
                     // can offset within the laid-out rect. Wrap width
                     // is the full rect for alignment purposes — long
@@ -400,6 +403,7 @@ impl CpuPainter {
                         Some(item.rect.w),
                         item.font_weight,
                     );
+                    self.text.replace_family(outer_family);
                 }
                 ItemKind::Input {
                     value,
@@ -423,7 +427,7 @@ impl CpuPainter {
                                 text_x,
                                 text_y,
                                 *font_size * scale_factor,
-                                Rgba(0x90, 0x96, 0xa1, 0xff),
+                                crate::paint::PLACEHOLDER_COLOR,
                                 Some(inner_w),
                                 item.font_weight,
                             );

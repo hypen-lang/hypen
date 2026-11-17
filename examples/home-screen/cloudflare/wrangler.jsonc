@@ -9,11 +9,13 @@
   // plane, so no uploads. Frames go uncompressed instead.
   "compatibility_flags": ["nodejs_compat", "no_web_socket_compression"],
 
-  // Wallpaper renditions are deployed with the Worker and served asset-first
-  // from Cloudflare's edge. Requests such as /ws still fall through here.
-  "assets": {
-    "directory": "./public"
-  },
+  // NO `assets` block, on purpose. Any Workers Static Assets config puts
+  // Cloudflare's asset router in front of this Worker, and the router
+  // terminates the /ws WebSocket itself and negotiates permessage-deflate
+  // regardless of `no_web_socket_compression` (`run_worker_first` doesn't
+  // help) — so the device plane is off and Files uploads fail. The wallpaper
+  // renditions are served by the Worker from R2 instead (src/wallpapers.ts);
+  // `public/wallpapers/` is only the source for `bun run wallpapers:upload`.
 
   // The Hypen WASM engine is pulled in as a CompiledWasm module — this rule is
   // what lets the engine boot inside a Worker.
@@ -28,7 +30,8 @@
     ]
   },
 
-  // The Files app's bytes (metadata lives in each visitor's Durable Object).
+  // The Files app's bytes (metadata lives in each visitor's Durable Object,
+  // objects under `drive/<DO id>/`) and the wallpapers (`assets/wallpapers/`).
   // `wrangler dev` emulates the bucket locally; before the first deploy create
   // it once: `bunx wrangler r2 bucket create hypen-home-files`.
   "r2_buckets": [

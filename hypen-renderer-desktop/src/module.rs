@@ -21,6 +21,18 @@ pub trait HypenModule: Send + Sync + 'static {
     /// including the initial render fired by `mount()`.
     fn on_patches(&self, cb: Arc<dyn Fn(&[Patch]) + Send + Sync>);
 
+    /// [`Self::on_patches`] for a consumer that KEEPS each batch (the
+    /// window's patch queue): `cb` receives the batch by value. A module
+    /// whose batches are already owned on their way here (a local
+    /// engine, a [`crate::RemoteModule`], the browser's merged stream)
+    /// overrides this to move them through — no batch, `SetProp` value
+    /// or props map is copied (CLAUDE.md "Arc-Shared Props"). The
+    /// default, for borrowed-only modules (test doubles), copies the
+    /// batch once. Replaces any earlier callback, like `on_patches`.
+    fn on_owned_patches(&self, cb: Arc<dyn Fn(Vec<Patch>) + Send + Sync>) {
+        self.on_patches(Arc::new(move |patches: &[Patch]| cb(patches.to_vec())));
+    }
+
     /// Trigger the initial render and run the sync `on_created` handler.
     fn mount(&self);
 
@@ -45,6 +57,15 @@ pub trait HypenModule: Send + Sync + 'static {
     fn set_list_viewport(&self, list_id: &str, start: usize, end: usize) {
         let _ = (list_id, start, end);
     }
+    /// The HTTP origin a REMOTE module's image-like sources resolve
+    /// against (e.g. `http://localhost:8787`), or `None` for a module
+    /// embedded locally, whose sources are local files / absolute URLs.
+    /// The window enters it as the asset scope for everything it does
+    /// (see `paint::image::enter_asset_origin`), so the origin belongs
+    /// to this module rather than to the process.
+    fn asset_origin(&self) -> Option<Arc<str>> {
+        None
+    }
 
     /// Report the window's system color scheme (`dark` = the platform's
     /// dark appearance). A remote module tells its server, whose theme
@@ -59,6 +80,10 @@ pub trait HypenModule: Send + Sync + 'static {
 impl<S: State> HypenModule for ModuleInstance<S> {
     fn on_patches(&self, cb: Arc<dyn Fn(&[Patch]) + Send + Sync>) {
         ModuleInstance::on_patches(self, move |patches| cb(patches));
+    }
+
+    fn on_owned_patches(&self, cb: Arc<dyn Fn(Vec<Patch>) + Send + Sync>) {
+        ModuleInstance::on_owned_patches(self, move |patches| cb(patches));
     }
 
     fn mount(&self) {
@@ -145,6 +170,32 @@ mod tests {
         assert!(
             batches_after >= batches_before,
             "dispatch_action must not regress the batch count",
+        );
+    }
+
+    /// A local module's batches reach an owned consumer (the window's
+    /// patch queue) as the ENGINE's own `Vec` — through the trait object,
+    /// as the window wires it: while the callback runs, each `Create`'s
+    /// props map has exactly two owners (the engine's instance tree and
+    /// the patch). The trait's copying default would show a third.
+    #[test]
+    fn hypen_module_owned_patches_are_the_engines_own() {
+        let module = make_counter_module();
+        let counts: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&counts);
+        module.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
+            for p in &patches {
+                if let Patch::Create { props, .. } = p {
+                    sink.lock().unwrap().push(Arc::strong_count(props));
+                }
+            }
+        }));
+        module.mount();
+        let counts = counts.lock().unwrap();
+        assert!(!counts.is_empty(), "no Create reached the owned callback");
+        assert!(
+            counts.iter().all(|&c| c == 2),
+            "props owners per Create: {counts:?}"
         );
     }
 

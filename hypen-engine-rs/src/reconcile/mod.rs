@@ -23,14 +23,9 @@ pub mod patch;
 pub mod resolve;
 pub mod tree;
 
-pub(crate) use diff::{emit_semantics_delta, reconcile_ir_node_impl, ReconcileCtx};
-// Only consumed by `wasm::shared`; re-export it under the same gate so
-// native non-test builds don't flag it dead.
-#[cfg(any(
-    test,
-    all(target_arch = "wasm32", any(feature = "js", feature = "wasi"))
-))]
-pub(crate) use diff::create_ir_node_tree_impl;
+pub(crate) use diff::{
+    create_ir_node_tree_impl, emit_semantics_delta, reconcile_ir_node_impl, ReconcileCtx,
+};
 #[doc(hidden)]
 pub use diff::{reconcile_ir, reconcile_ir_with_ds};
 #[doc(hidden)]

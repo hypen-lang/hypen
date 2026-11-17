@@ -273,6 +273,11 @@ fn node_errored(node: &Node) -> bool {
 /// Without the feature there is no playback, so the state is `idle` —
 /// except that a poster/probe fetch which came back with an HTTP failure
 /// is exactly the contract's sticky error surface, and reports `error`.
+/// With or without it, a node with no pipeline whose track its asset
+/// origin refuses reports `error` as well. A failed (HTTP) or refused
+/// POSTER is the `error` state only when no playable track stands behind
+/// it — with feature `video` and an allowed track it only hides the
+/// poster, so the state (`idle`) and a click (which plays) agree.
 pub fn player_state(node: &Node, viewport: Viewport) -> VideoPlayerState {
     #[cfg(test)]
     if let Some(state) = test_state_override(&node.id) {
@@ -314,13 +319,37 @@ pub fn player_state(node: &Node, viewport: Viewport) -> VideoPlayerState {
             return VideoPlayerState::Loading;
         }
     }
-    // The poster/probe failure registry is the feature-off error source
-    // (and, with the feature on, the error source for a player that has
-    // no pipeline — it is what `dispatch_media_poster_errors` reports).
-    if let Some(poster) = crate::layout::resolve_media_poster(node, viewport) {
-        if crate::paint::image::load_failure(&poster).is_some() {
+    // A track the node's asset origin refuses (a remote app naming
+    // `file:` …) can never load: that is the sticky error (its `onError`
+    // is dispatched once by the media error scan). A playlist whose
+    // `startIndex` entry is refused has already moved on to the next
+    // allowed entry in `resolve_media_source`.
+    let (source, _) = crate::layout::resolve_media_source(node, viewport);
+    if source.as_ref().is_some_and(|s| s.is_refused()) {
+        return VideoPlayerState::Error;
+    }
+    // A POSTER failure — refused by the asset origin, or an HTTP error
+    // from the poster/probe fetch — is the error state only when there
+    // is no playable track behind it: with feature `video` and an
+    // allowed track, the poster just doesn't show (dark box) and the
+    // player stays `idle`, so a click plays it — state and click agree
+    // (both kinds of poster failure behave the same way, and each still
+    // reports its `onError` once). Without the feature there is no
+    // playback, and the poster fetch is the only probe of the stream:
+    // its failure is the contract's sticky error surface.
+    let playable_track =
+        cfg!(feature = "video") && source.as_ref().is_some_and(|s| s.url().is_some());
+    if playable_track {
+        return VideoPlayerState::Idle;
+    }
+    match crate::layout::resolve_media_poster_source(node, viewport) {
+        Some(crate::layout::MediaSource::Refused { .. }) => return VideoPlayerState::Error,
+        Some(crate::layout::MediaSource::Allowed { url, .. })
+            if crate::paint::image::load_failure(&url).is_some() =>
+        {
             return VideoPlayerState::Error;
         }
+        _ => {}
     }
     VideoPlayerState::Idle
 }

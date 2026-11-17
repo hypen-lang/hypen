@@ -35,7 +35,14 @@ import { HypenDurableObject, type HypenDurableObjectConfig, type DurableObjectSt
 import { createCFEngine, type CFWasmExports } from "./engine.js";
 import { hasDeviceBroker } from "./device-broker.js";
 import type { DurableObjectStorage } from "./durable-object-store.js";
-import { createWorkerHandler } from "./worker.js";
+import {
+  createWorkerHandler,
+  mintVisitorId,
+  readVisitorId,
+  withVisitorCookie,
+  type RoutingMode,
+  type VisitorCookieOptions,
+} from "./worker.js";
 import {
   buildClientPages,
   servePage,
@@ -102,7 +109,25 @@ export interface DefineHypenWorkerOptions {
    * mapping is NOT applied — defaults to `"HYPEN_DO"`. Set to match your config.
    */
   binding?: string;
-  /** Extract the DO routing key (default: ?sessionId / cookie / path / uuid). */
+  /**
+   * Which Durable Object a connection lands in (ignored when
+   * `getRoutingKey` is set). Default `"visitor"`: one DO per browser
+   * visitor, keyed by an HttpOnly `hypen_visitor` cookie this worker sets on
+   * the first page response AND the first WebSocket 101 without it — so a
+   * reload, a second tab and a same-site `HypenApp` embed reach the same DO
+   * and its `.persist()` state. `"connection"`: the client's `?sessionId=`
+   * (the generic page client sends a fresh one per load) / `hypen_session`
+   * cookie / path, else a fresh DO. `"shared"`: every client in one DO —
+   * opt in for state shared by the whole deployment. A bare `/ws` never
+   * collapses clients into one DO unless `"shared"` is chosen.
+   */
+  routing?: RoutingMode;
+  /** Visitor cookie settings (name, lifetime, SameSite) for `routing: "visitor"`. */
+  visitorCookie?: VisitorCookieOptions;
+  /**
+   * Extract the DO routing key yourself. Overrides `routing`; no visitor
+   * cookie is set.
+   */
   getRoutingKey?: (request: Request) => string | Promise<string>;
   /**
    * Called after the DO's persistence stores are bound — on `fetch` and on
@@ -185,8 +210,13 @@ export function defineHypenWorker(opts: DefineHypenWorkerOptions): WorkerExports
     }
   }
 
+  const routing: RoutingMode = opts.routing ?? "visitor";
+  const visitorCookies = opts.getRoutingKey === undefined && routing === "visitor";
+
   const wsFetch = createWorkerHandler({
     binding,
+    routing,
+    ...(opts.visitorCookie !== undefined ? { visitorCookie: opts.visitorCookie } : {}),
     ...(opts.getRoutingKey !== undefined ? { getRoutingKey: opts.getRoutingKey } : {}),
   }) as WorkerExports["fetch"];
 
@@ -206,7 +236,14 @@ export function defineHypenWorker(opts: DefineHypenWorkerOptions): WorkerExports
           return wsFetch(request, env);
         }
         const page = servePage(pages, request);
-        if (page) return page;
+        if (page) {
+          // Mint the visitor id on the page, so the page's own socket
+          // already carries it.
+          if (visitorCookies && !readVisitorId(request, opts.visitorCookie)) {
+            return withVisitorCookie(page, mintVisitorId(), request, opts.visitorCookie);
+          }
+          return page;
+        }
         return wsFetch(request, env);
       }
     : wsFetch;

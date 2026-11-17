@@ -17,6 +17,10 @@
  * in `driveScope.run({ storage, bucket, prefix }, …)` so the Files handlers reach THIS
  * DO's SQLite, even across long `await`s on a device pick (see drive.ts).
  * `GET /drive/<id>` serves image thumbnails from the same DO.
+ *
+ * Wallpapers: `/wallpapers/<version>/<file>.avif` comes from the same R2
+ * bucket (`assets/wallpapers/`), served here rather than as Workers Static
+ * Assets — see wallpapers.ts for why the asset router must stay out of /ws.
  */
 
 import { defineHypenWorker } from "@hypen-space/cf";
@@ -29,6 +33,7 @@ import genericClientJs from "../../../../hypen-web/packages/cf/dist/client/gener
 import launcher, { resources } from "./launcher";
 import { GEO_HEADER, captureGeo, geoHeaderValue } from "./geo";
 import { driveScope, servePreview, type DriveBucket, type DriveScope, type DriveStorage } from "./drive";
+import { isWallpaperRequest, serveWallpaper, type WallpaperBucket } from "./wallpapers";
 
 const VISITOR_COOKIE = "hypen_home";
 const VISITOR_ID = /^[0-9a-f-]{36}$/;
@@ -115,7 +120,13 @@ type DONamespace = {
 const PREVIEW_PATH = /^\/drive\/([0-9a-f]{64})\/f-[0-9a-f-]{36}$/;
 
 export default {
-  async fetch(request: Request, env: { HOME_SCREEN_DO: DONamespace }, ctx: unknown): Promise<Response> {
+  async fetch(
+    request: Request,
+    env: { HOME_SCREEN_DO: DONamespace; FILES: WallpaperBucket },
+    ctx: unknown,
+  ): Promise<Response> {
+    if (isWallpaperRequest(request)) return serveWallpaper(request, env.FILES);
+
     const url = new URL(request.url);
     const visitor = visitorFrom(request);
 

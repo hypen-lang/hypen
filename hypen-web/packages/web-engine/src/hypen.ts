@@ -572,6 +572,7 @@ export class Hypen {
       "Icon",
       "SafeArea",
       "Scrubber",
+      "Link",
       // Web-only primitives (not in the engine list)
       "Canvas",
       // Chart family (see packages/web/src/dom/components/chart.ts)

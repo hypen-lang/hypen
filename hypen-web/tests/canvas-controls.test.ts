@@ -317,6 +317,54 @@ describe("Link is activatable", () => {
     expect(e.dispatched.map((d) => d.name)).toEqual(["go"]);
   });
 
+  test("a bare link with a dangerous scheme navigates nowhere", async () => {
+    const { dispatchNodeEvent } = await import("../packages/web/src/canvas/dispatch");
+    const g = globalThis as any;
+    const hadWindow = "window" in g;
+    const prevWindow = g.window;
+    const calls: string[] = [];
+    g.window = {
+      open: (u: string) => { calls.push(`open:${u}`); },
+      location: { assign: (u: string) => { calls.push(`assign:${u}`); } },
+    };
+    try {
+      const bad = [
+        "javascript:alert(1)",
+        "JaVaScRiPt:alert(1)",
+        " javascript:alert(1)",
+        "java\tscript:alert(1)",
+        "\u0001javascript:alert(1)",
+        "vbscript:msgbox(1)",
+        "data:text/html,<script>alert(1)</script>",
+      ];
+      for (const href of bad) {
+        for (const key of ["0", "href", "to"]) {
+          for (const target of [undefined, "_blank"]) {
+            const e = new MockEngine();
+            const props: Record<string, unknown> = { [key]: href };
+            if (target) props.target = target;
+            dispatchNodeEvent(e, node("link", props), "click", {});
+            expect(e.dispatched).toHaveLength(0);
+          }
+        }
+      }
+      expect(calls).toEqual([]);
+
+      // Safe external links still leave the app.
+      dispatchNodeEvent(new MockEngine(), node("link", { href: "https://example.com/" }), "click", {});
+      dispatchNodeEvent(
+        new MockEngine(),
+        node("link", { href: "mailto:a@b.c", target: "_blank" }),
+        "click",
+        {},
+      );
+      expect(calls).toEqual(["assign:https://example.com/", "open:mailto:a@b.c"]);
+    } finally {
+      if (hadWindow) g.window = prevWindow;
+      else delete g.window;
+    }
+  });
+
   test("a link with neither destination nor handler is not clickable", async () => {
     const { CanvasRenderer } = await import("../packages/web/src/canvas/renderer");
     const r = new CanvasRenderer(makeStubCanvas(), { dispatchAction() {} } as any);

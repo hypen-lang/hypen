@@ -133,6 +133,21 @@ describe("evaluateTemplate: unknown-state-path", () => {
     expect(findings[0].message).toContain('"nmae"');
   });
 
+  test("an inline-template ${…} key is a hole: only the path before it is judged", () => {
+    const { findings } = run({
+      module: { kind: "loaded", facts: facts({ user: { name: "a", age: 3 } }) },
+      report: report([
+        stateRef("user.__ts_interpolation"),
+        stateRef("user.x__ts_interpolation.y"),
+        stateRef("__ts_interpolation.name"),
+        stateRef("usr.__ts_interpolation", { line: 4, col: 2 }),
+      ]),
+    });
+    expect(findings).toHaveLength(1);
+    expect(findings[0]).toMatchObject({ rule: "unknown-state-path", line: 4, col: 2 });
+    expect(findings[0].message).toContain('"usr"');
+  });
+
   test("skips reserved roots, module-name prefixes and other modules' scopes", () => {
     const { findings } = run({
       module: { kind: "loaded", facts: facts({ a: 1 }) },
@@ -297,6 +312,24 @@ describe("evaluateTemplate: unknown-theme-token", () => {
     const { findings } = run(({ report: report([themeRef("glow")]), theme }));
     expect(findings[0]!.message).toContain("defined only for dark");
     expect(findings[0]!.message).toContain("empty in light");
+  });
+
+  test("judges only the group before an inline template's ${} interpolation", () => {
+    // `@{theme.color.${k}}` in a `.ui(\`…\`)` template: the key is runtime-only.
+    const { findings } = run(
+      ({
+        report: report([
+          themeRef("color.__ts_interpolation"),
+          themeRef("space.x__ts_interpolation"),
+          themeRef("__ts_interpolation.primary"),
+          themeRef("colr.__ts_interpolation"),
+        ]),
+        theme,
+      }),
+    );
+    expect(findings.map((f) => f.rule)).toEqual(["unknown-theme-token"]);
+    expect(findings[0]!.message).toContain("@theme.colr is not defined");
+    expect(findings[0]!.message).not.toContain("__ts_interpolation");
   });
 
   test("is silent without a theme file, for other providers, and when suppressed", () => {

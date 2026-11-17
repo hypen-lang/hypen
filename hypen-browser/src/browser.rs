@@ -43,7 +43,9 @@ use crate::shell::{
 };
 use crate::storage::Storage;
 use hypen_engine::Patch;
-use hypen_renderer_desktop::{ConnectionStatus, HypenModule, RemoteModule, Tree};
+use hypen_renderer_desktop::{
+    ConnectionStatus, HypenModule, OwnedPatchCallback, RemoteModule, Tree,
+};
 use hypen_server::prelude::*;
 use indexmap::IndexMap;
 use serde_json::Value;
@@ -90,12 +92,12 @@ struct Tab {
     /// linked into the visible tree. Flipped by `attach_tab` /
     /// `detach_tab`.
     attached: bool,
-    /// Lowers `RegisterTemplate`/`Instantiate` from the tab's server
-    /// into the plain `Create`+`Insert` runs the id-rewriting and the
-    /// desktop renderer consume. Remote servers should expand before
-    /// streaming, but a raw host may not — one expander per tab
-    /// (per session) makes the merged stream template-free either way.
-    expander: hypen_engine::TemplateExpander,
+    // No per-tab `TemplateExpander` / media-URL rewriting: the tab's
+    // `RemoteModule` already delivers a template-free batch whose every
+    // `Create` carries its server's asset origin
+    // (`hypen_renderer_desktop::paint::image::ASSET_ORIGIN_PROP`), and
+    // the renderer resolves each node's `src` / `poster` / `url(...)`
+    // against that origin (`paint::image::node_source`).
 }
 
 fn track_tab_roots(tab: &mut Tab, patches: &[Patch], viewport: &str) {
@@ -145,9 +147,10 @@ pub struct BrowserModule {
 }
 
 struct Inner {
-    /// Callback the desktop renderer wired via `on_patches`. Patches
-    /// from every engine are merged through this single sink.
-    callback: Option<PatchCallback>,
+    /// Callback the desktop renderer wired via `on_patches` /
+    /// `on_owned_patches`, taking each batch by value. Patches from every
+    /// engine are merged through this single sink.
+    callback: Option<OwnedPatchCallback>,
     /// Patches that arrived from shell's `mount()` before the
     /// renderer wired its callback. Drained on first `on_patches`.
     pending: Vec<Patch>,
@@ -170,6 +173,10 @@ struct Inner {
     /// (tab or parent embed); torn down when the host node is
     /// Removed or the owning tab closes.
     embeds: IndexMap<String, Embed>,
+    /// The window's system color scheme (`true` = dark), once the window
+    /// reported one ([`HypenModule::set_color_scheme`]). Every tab and
+    /// embed connection is told it, so each server's theme can follow it.
+    color_scheme: Option<bool>,
     /// Monotonic counter for embed marker allocation. Never reused, so
     /// a stale action name can't route to a fresh embed.
     next_embed_id: u64,
@@ -181,9 +188,11 @@ struct Inner {
     /// lifecycle scan (server-stream Detach/Attach) and by the slot
     /// reconcile paths (our own Detaches).
     detached_parents: std::collections::HashMap<String, String>,
-    /// Shadow copy of the full forwarded UI tree (shell chrome + the
-    /// active tab's content), kept in sync by `forward`. Serialised on
-    /// demand by the `dump_tree` debug button.
+    /// Shadow of the full forwarded UI tree (shell chrome + the active
+    /// tab's content), kept in sync by `forward`: the whole structure,
+    /// but only the props read back from it ([`shadow_prop`]) — every
+    /// other prop value the stream carries goes to the renderer without
+    /// a copy here. Serialised on demand by the `dump_tree` debug button.
     tree: Tree,
 }
 
@@ -198,10 +207,38 @@ impl Inner {
             tabs: IndexMap::new(),
             active_tab_id: None,
             embeds: IndexMap::new(),
+            color_scheme: None,
             next_embed_id: 1,
             detached_parents: std::collections::HashMap::new(),
-            tree: Tree::new(),
+            tree: Tree::with_prop_retention(shadow_prop),
         }
+    }
+}
+
+/// Characters of a node's text the shadow tree keeps — what
+/// `serialize_tree` shows of it.
+const SHADOW_TEXT_PREVIEW_CHARS: usize = 40;
+
+/// What the shadow tree keeps of a prop (see [`Inner::tree`]): the slot
+/// name (`slot` / `slot.0`, read back when a cached host child is
+/// re-attached) and a [`SHADOW_TEXT_PREVIEW_CHARS`] preview of the text
+/// (`0` / `text`, for `dump_tree`). Every other prop — styles, media
+/// URLs, a bound value, a whole document in a `SetProp` — is skipped:
+/// no copy of it is made.
+fn shadow_prop(key: &str, value: &Value) -> Option<Value> {
+    match key {
+        "slot" | "slot.0" => Some(value.clone()),
+        "0" | "text" => Some(match value {
+            Value::String(text) => Value::String(
+                text.trim()
+                    .chars()
+                    .take(SHADOW_TEXT_PREVIEW_CHARS)
+                    .collect(),
+            ),
+            Value::Array(_) | Value::Object(_) => Value::Null,
+            scalar => scalar.clone(),
+        }),
+        _ => None,
     }
 }
 
@@ -244,7 +281,7 @@ impl BrowserModule {
             // so shell patches are inert to the scan.
             let lifecycle = handle_embed_lifecycle(&inner_for_shell, &forwarded);
             forwarded.extend(lifecycle.extra);
-            forward(&inner_for_shell, &forwarded);
+            forward(&inner_for_shell, forwarded);
             // The host Create/Insert must reach the renderer before a fast
             // embedded worker can send children targeting that host.
             for marker in lifecycle.to_connect {
@@ -409,11 +446,14 @@ impl BrowserModule {
             // the viewport — no Detach needed for incoming root
             // inserts.
             attached: true,
-            expander: hypen_engine::TemplateExpander::new(),
         };
 
         log::info!("hypen-browser: opening {url} in {tab_id}");
         let remote = Arc::new(RemoteModule::connect(url, "App"));
+        let scheme = self.inner.lock().expect("inner poisoned").color_scheme;
+        if let Some(dark) = scheme {
+            remote.set_color_scheme(dark);
+        }
 
         // Patch callback — rewrites the tab's IDs and re-roots inserts
         // onto the shell's viewport. The closure must look the tab up
@@ -423,11 +463,18 @@ impl BrowserModule {
         let inner_for_remote = Arc::clone(&self.inner);
         let shell_for_remote = Arc::clone(&self.shell);
         let tab_id_for_remote = tab_id.clone();
-        remote.on_patches(Arc::new(move |patches: &[Patch]| {
+        // Owned delivery: the decoded batch moves through the id
+        // rewriting instead of being cloned (props / values included).
+        remote.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
             log::debug!(
                 "hypen-browser: tab {tab_id_for_remote} on_patches: {} patches in",
                 patches.len(),
             );
+            // The console summary reads the incoming batch, which the
+            // rewrite below consumes: summarise first (no-op closed).
+            let summary = crate::devlog::console()
+                .enabled()
+                .then(|| summarize_patches(&patches));
             let mut rewritten = process_tab_patches(&inner_for_remote, &tab_id_for_remote, patches);
             // HypenApp embeds: register / tear down any the batch
             // creates or removes, and reconcile their slot visibility.
@@ -438,17 +485,16 @@ impl BrowserModule {
                 rewritten.len(),
             );
             if !rewritten.is_empty() {
-                forward(&inner_for_remote, &rewritten);
+                forward(&inner_for_remote, rewritten);
             }
             for marker in lifecycle.to_connect {
                 connect_embed(&inner_for_remote, marker);
             }
             // Debug console: record the incoming batch (no-op when the
             // console is closed).
-            record_console(
-                &shell_for_remote,
-                format!("◀ in  {}", summarize_patches(patches)),
-            );
+            if let Some(summary) = summary {
+                record_console(&shell_for_remote, format!("◀ in  {summary}"));
+            }
         }));
 
         // Status callback — surface lifecycle transitions on the
@@ -623,7 +669,7 @@ impl BrowserModule {
             transition: false,
         }));
         if !removes.is_empty() {
-            forward(&self.inner, &removes);
+            forward(&self.inner, removes);
         }
         // Dropping the RemoteModule's Arc shuts down its worker.
         drop(tab.remote);
@@ -684,7 +730,7 @@ impl BrowserModule {
                 .collect()
         };
         if !patches.is_empty() {
-            forward(&self.inner, &patches);
+            forward(&self.inner, patches);
         }
     }
 
@@ -721,7 +767,7 @@ impl BrowserModule {
                 .collect()
         };
         if !patches.is_empty() {
-            forward(&self.inner, &patches);
+            forward(&self.inner, patches);
         }
     }
 
@@ -859,18 +905,54 @@ impl BrowserModule {
 
 impl HypenModule for BrowserModule {
     fn on_patches(&self, cb: PatchCallback) {
+        self.on_owned_patches(Arc::new(move |patches: Vec<Patch>| cb(&patches)));
+    }
+
+    fn on_owned_patches(&self, cb: OwnedPatchCallback) {
         let pending = {
             let mut inner = self.inner.lock().expect("inner poisoned");
             inner.callback = Some(Arc::clone(&cb));
             std::mem::take(&mut inner.pending)
         };
         if !pending.is_empty() {
-            cb(&pending);
+            cb(pending);
         }
     }
 
     fn mount(&self) {
         self.shell.mount();
+    }
+
+    /// The browser window mixes a local shell (no images of its own)
+    /// with remote tabs and embeds from any number of servers, so it has
+    /// no single asset origin. Each remote node carries its own server's
+    /// origin (stamped by its `RemoteModule`, see
+    /// `paint::image::ASSET_ORIGIN_PROP`) and resolves against that; the
+    /// window-wide fallback refuses local files outright, so nothing in
+    /// this window — whatever a server streams — can read the local
+    /// filesystem.
+    fn asset_origin(&self) -> Option<Arc<str>> {
+        Some(Arc::from(
+            hypen_renderer_desktop::paint::image::NO_LOCAL_ASSETS_ORIGIN,
+        ))
+    }
+
+    /// The shell is local (its host owns its theme); every open tab and
+    /// embed is a remote connection whose server's theme follows the
+    /// window's scheme. Remembered for tabs and embeds opened later.
+    fn set_color_scheme(&self, dark: bool) {
+        let remotes: Vec<Arc<RemoteModule>> = {
+            let mut g = self.inner.lock().expect("inner poisoned");
+            g.color_scheme = Some(dark);
+            g.tabs
+                .values()
+                .filter_map(|t| t.remote.clone())
+                .chain(g.embeds.values().filter_map(|e| e.remote.clone()))
+                .collect()
+        };
+        for remote in remotes {
+            remote.set_color_scheme(dark);
+        }
     }
 
     /// A windowed list's viewport report goes to the stream that owns the
@@ -1142,7 +1224,11 @@ fn serialize_tree(tree: &Tree) -> String {
     out
 }
 
-fn forward(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
+/// Takes the batch BY VALUE and hands the very same `Vec` to the
+/// renderer's owned callback ([`HypenModule::on_owned_patches`]): from a
+/// tab's socket to the window's patch queue no batch, props map or
+/// `SetProp` value is copied (CLAUDE.md "Arc-Shared Props").
+fn forward(inner: &Arc<Mutex<Inner>>, patches: Vec<Patch>) {
     if patches.is_empty() {
         return;
     }
@@ -1151,20 +1237,20 @@ fn forward(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
         patches.len(),
         std::thread::current().name().unwrap_or("?"),
     );
-    let cb = {
+    let (cb, patches) = {
         let mut g = inner.lock().expect("inner poisoned");
         // Keep the shadow tree in lockstep with what the renderer sees,
         // so the `dump_tree` debug button can serialise it on demand.
-        g.tree.apply_batch(patches);
+        g.tree.apply_batch(&patches);
         if let Some(cb) = g.callback.as_ref() {
-            Some(Arc::clone(cb))
+            (Some(Arc::clone(cb)), patches)
         } else {
             log::debug!(
                 "hypen-browser: forward buffered {} patches (no callback yet)",
                 patches.len(),
             );
-            g.pending.extend_from_slice(patches);
-            None
+            g.pending.extend(patches);
+            (None, Vec::new())
         }
     };
     log::trace!("hypen-browser: forward released inner lock");
@@ -1258,31 +1344,25 @@ fn process_shell_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) -> Vec<Pa
 ///
 /// Returns the rewritten patches; returns empty when the tab isn't
 /// known (worker fired after a close, for instance).
-fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch]) -> Vec<Patch> {
+fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: Vec<Patch>) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
-    // Lower template patches first so everything downstream — the
-    // pre-viewport buffer included — carries the plain wire.
-    let patches: Vec<Patch> = match g.tabs.get_mut(tab_id) {
-        Some(t) => t.expander.expand(patches.to_vec()),
+    // The batch arrives from the tab's `RemoteModule` already lowered
+    // (no template patches) and owner-stamped, so root-relative media
+    // URLs resolve per node against the tab's server in the renderer —
+    // nothing to expand or absolutize here. It arrives OWNED
+    // (`RemoteModule::on_owned_patches`): the rewrite below moves each
+    // patch, never cloning a `SetProp` value or a `Create`'s props.
+    let (prefix, attached) = match g.tabs.get(tab_id) {
+        Some(t) => (t.id_prefix.clone(), t.attached),
         None => return Vec::new(),
     };
-    let (prefix, attached, source_url) = match g.tabs.get(tab_id) {
-        Some(t) => (t.id_prefix.clone(), t.attached, t.info.url.clone()),
-        None => return Vec::new(),
-    };
-    // DOM clients resolve `/poster/foo` and other root-relative media URLs
-    // against the page origin. A native renderer has no document URL, so do
-    // that small browser responsibility here while the owning tab endpoint is
-    // still known. This is what makes Hypeflix's same-origin poster proxy work
-    // in the Desktop Browser instead of handing the image loader `/poster/foo`.
-    let patches = absolutize_tab_media_urls(patches, &source_url);
     let viewport = match g.viewport_id.clone() {
         Some(v) => v,
         None => {
             // Shell hasn't rendered yet; buffer per-tab so we can
             // replay once we learn the viewport id.
             if let Some(tab) = g.tabs.get_mut(tab_id) {
-                tab.queued.extend_from_slice(&patches);
+                tab.queued.extend(patches);
             }
             return Vec::new();
         }
@@ -1349,89 +1429,6 @@ fn process_tab_patches(inner: &Arc<Mutex<Inner>>, tab_id: &str, patches: &[Patch
         }
     }
     out
-}
-
-/// Resolve root-relative Image/Video media props against a tab's WebSocket
-/// endpoint (`wss:` → `https:`, `ws:` → `http:`). The renderer deliberately
-/// stays transport-agnostic; only the Browser knows which remote origin owns a
-/// streamed tree.
-fn absolutize_tab_media_urls(patches: Vec<Patch>, endpoint: &str) -> Vec<Patch> {
-    let Some((http_scheme, authority)) = websocket_http_origin(endpoint) else {
-        return patches;
-    };
-
-    let resolve = |value: &mut Value| {
-        let Value::String(raw) = value else { return };
-        if raw.starts_with("//") {
-            *raw = format!("{http_scheme}:{raw}");
-        } else if raw.starts_with('/') {
-            *raw = format!("{http_scheme}://{authority}{raw}");
-        }
-    };
-    let is_media_prop = |name: &str| {
-        matches!(
-            hypen_engine::portable::parse_prop_key(name).base.as_str(),
-            "src" | "poster"
-        )
-    };
-
-    patches
-        .into_iter()
-        .map(|patch| match patch {
-            Patch::Create {
-                id,
-                element_type,
-                props,
-                semantics,
-            } => {
-                let is_media = matches!(
-                    element_type.to_ascii_lowercase().as_str(),
-                    "image" | "video" | "audio"
-                );
-                if !is_media {
-                    return Patch::Create {
-                        id,
-                        element_type,
-                        props,
-                        semantics,
-                    };
-                }
-                let mut resolved = (*props).clone();
-                for (name, value) in resolved.iter_mut() {
-                    if is_media_prop(name) {
-                        resolve(value);
-                    }
-                }
-                Patch::Create {
-                    id,
-                    element_type,
-                    props: Arc::new(resolved),
-                    semantics,
-                }
-            }
-            Patch::SetProp {
-                id,
-                name,
-                mut value,
-            } if is_media_prop(&name) => {
-                resolve(&mut value);
-                Patch::SetProp { id, name, value }
-            }
-            other => other,
-        })
-        .collect()
-}
-
-fn websocket_http_origin(endpoint: &str) -> Option<(&'static str, &str)> {
-    let (scheme, rest) = if let Some(rest) = endpoint.strip_prefix("wss://") {
-        ("https", rest)
-    } else if let Some(rest) = endpoint.strip_prefix("ws://") {
-        ("http", rest)
-    } else {
-        return None;
-    };
-    let authority = rest.split('/').next()?.split('?').next()?;
-    (!authority.is_empty()).then_some((scheme, authority))
 }
 
 // ---------------------------------------------------------------------------
@@ -1817,16 +1814,20 @@ fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
         }
     };
     let remote = Arc::new(RemoteModule::connect(url, "App"));
+    let scheme = inner.lock().expect("inner poisoned").color_scheme;
+    if let Some(dark) = scheme {
+        remote.set_color_scheme(dark);
+    }
 
     let inner_for_patches = Arc::clone(inner);
     let marker_for_patches = marker.clone();
-    remote.on_patches(Arc::new(move |patches: &[Patch]| {
+    remote.on_owned_patches(Arc::new(move |patches: Vec<Patch>| {
         let mut rewritten = process_embed_patches(&inner_for_patches, &marker_for_patches, patches);
         // Embedded apps can embed further apps.
         let lifecycle = handle_embed_lifecycle(&inner_for_patches, &rewritten);
         rewritten.extend(lifecycle.extra);
         if !rewritten.is_empty() {
-            forward(&inner_for_patches, &rewritten);
+            forward(&inner_for_patches, rewritten);
         }
         for marker in lifecycle.to_connect {
             connect_embed(&inner_for_patches, marker);
@@ -1855,7 +1856,7 @@ fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
             patches
         };
         if !patches.is_empty() {
-            forward(&inner_for_status, &patches);
+            forward(&inner_for_status, patches);
         }
     });
 
@@ -1880,13 +1881,17 @@ fn connect_embed(inner: &Arc<Mutex<Inner>>, marker: String) {
 /// expansion, id prefixing, re-rooting onto the HypenApp host node,
 /// and action-name marking — plus replacement-root handling for
 /// reconnects and the loading→connected slot flip on the first batch.
-fn process_embed_patches(inner: &Arc<Mutex<Inner>>, marker: &str, patches: &[Patch]) -> Vec<Patch> {
+fn process_embed_patches(
+    inner: &Arc<Mutex<Inner>>,
+    marker: &str,
+    patches: Vec<Patch>,
+) -> Vec<Patch> {
     let mut g = inner.lock().expect("inner poisoned");
     let Some(embed) = g.embeds.get_mut(marker) else {
         return Vec::new();
     };
-    let patches = embed.expander.expand(patches.to_vec());
-    let patches = absolutize_tab_media_urls(patches, &embed.url);
+    // Already lowered, owner-stamped and OWNED, from the embed's
+    // `RemoteModule` (see `process_tab_patches`).
     let prefix = embed.id_prefix.clone();
     let host = embed.host_id.clone();
 
@@ -2099,12 +2104,11 @@ fn rewrite_patch(
         // namespacing rewrite has nothing to touch — pass it through
         // untouched at the head of its batch.
         p @ Patch::BatchAnimation { .. } => p,
-        // Template patches are lowered by the per-tab `TemplateExpander`
-        // before the rewrite, so these arms only see the expander's
-        // degraded pass-throughs (unknown template id / malformed
-        // skeleton). Rewrite their ids anyway so the merged stream stays
-        // consistently namespaced; the renderer skips what it can't
-        // expand.
+        // Template patches never reach here from a live tab or embed:
+        // its `RemoteModule` lowers them and drops any it could not
+        // lower (`hypen_renderer_desktop::remote::own_patches`). Rewrite
+        // their ids anyway so the merged stream stays consistently
+        // namespaced should a caller ever pass one.
         p @ Patch::RegisterTemplate { .. } => p,
         Patch::Instantiate {
             template_id,
@@ -2595,9 +2599,13 @@ mod tests {
         );
         // Tabs: ids only (their action names / bind paths are unmarked);
         // a source from another stream can't resolve there → null.
-        let env = json!({"node": "a1:9", "fromNode": "a3:4", "action": "drop", "payload": {"path": "x"}});
+        let env =
+            json!({"node": "a1:9", "fromNode": "a3:4", "action": "drop", "payload": {"path": "x"}});
         let out = localize_ui_envelope(&env, "a1:", None).unwrap();
-        assert_eq!(out, json!({"node": "9", "fromNode": null, "action": "drop", "payload": {"path": "x"}}));
+        assert_eq!(
+            out,
+            json!({"node": "9", "fromNode": null, "action": "drop", "payload": {"path": "x"}})
+        );
         // A node outside the stream is refused.
         assert!(localize_ui_envelope(&json!({"node": "a2:1"}), "a1:", None).is_none());
     }
@@ -2679,9 +2687,58 @@ mod tests {
         ));
     }
 
+    /// Stamp `patches` with `url`'s asset origin exactly as the tab's /
+    /// embed's `RemoteModule` does before its callback ever fires.
+    fn stamped(url: &str, patches: Vec<Patch>) -> Vec<Patch> {
+        use hypen_renderer_desktop::paint::image::{http_origin_for, ASSET_ORIGIN_PROP};
+        let origin = http_origin_for(url).expect("ws(s) url");
+        patches
+            .into_iter()
+            .map(|p| match p {
+                Patch::Create {
+                    id,
+                    element_type,
+                    mut props,
+                    semantics,
+                } => {
+                    Arc::make_mut(&mut props).insert(ASSET_ORIGIN_PROP.to_string(), json!(origin));
+                    Patch::Create {
+                        id,
+                        element_type,
+                        props,
+                        semantics,
+                    }
+                }
+                other => other,
+            })
+            .collect()
+    }
+
+    /// Resolve `prop` of the node `id` in `out` the way the renderer
+    /// does: under the node's own (stamped) asset origin.
+    fn resolved_media_prop(out: &[Patch], id: &str, prop: &str) -> Option<String> {
+        let mut tree = Tree::new();
+        for p in out {
+            tree.apply(p);
+        }
+        let node = tree.get(id)?;
+        let raw = node.props.get(prop)?.as_str()?;
+        hypen_renderer_desktop::paint::image::node_source(node, raw).map(|c| c.into_owned())
+    }
+
+    /// The browser no longer rewrites a tab's media URLs: root-relative
+    /// `src` / `poster` stay as the server authored them (no deep copy
+    /// of the props map), and the renderer resolves each against the
+    /// tab's server through the node's stamped origin — the same URLs
+    /// the old browser-side absolutization produced.
     #[test]
     fn tab_media_urls_resolve_against_the_remote_http_origin() {
-        let patches = absolutize_tab_media_urls(
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-A", "a1:", &[], true);
+        module.inner.lock().unwrap().viewport_id = Some("viewport".into());
+        let url = "wss://hypeflix.example/ws?session=abc";
+        let batch = stamped(
+            url,
             vec![
                 create_with(
                     "poster",
@@ -2696,46 +2753,54 @@ mod tests {
                         ("poster.0", json!("/poster/sintel")),
                     ],
                 ),
-                Patch::SetProp {
-                    id: "poster".into(),
-                    name: "src".into(),
-                    value: json!("/poster/updated"),
-                },
+                create_with("cdn", "Image", &[("src", json!("//cdn.example/a.png"))]),
             ],
-            "wss://hypeflix.example/ws?session=abc",
         );
-
-        let values: Vec<Value> = patches
+        let in_ptrs: Vec<usize> = batch
             .iter()
-            .flat_map(|patch| match patch {
-                Patch::Create { props, .. } => props.values().cloned().collect(),
-                Patch::SetProp { value, .. } => vec![value.clone()],
-                _ => Vec::new(),
+            .filter_map(|p| match p {
+                Patch::Create { props, .. } => Some(Arc::as_ptr(props) as usize),
+                _ => None,
             })
             .collect();
-        assert!(values.contains(&json!("https://hypeflix.example/poster/big-buck-bunny")));
-        assert!(values.contains(&json!("https://hypeflix.example/poster/sintel")));
-        assert!(values.contains(&json!("https://hypeflix.example/poster/updated")));
-        assert!(values.contains(&json!("https://cdn.example/movie.mp4")));
-    }
-
-    #[test]
-    fn tab_media_url_resolution_preserves_non_websocket_transports() {
-        let original = vec![create_with(
-            "poster",
-            "Image",
-            &[("src", json!("/poster/local"))],
-        )];
+        let out = process_tab_patches(&module.inner, "tab-A", batch.clone());
+        let out_ptrs: Vec<usize> = out
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Create { props, .. } => Some(Arc::as_ptr(props) as usize),
+                _ => None,
+            })
+            .collect();
         assert_eq!(
-            format!(
-                "{:?}",
-                absolutize_tab_media_urls(original.clone(), "file:///tmp/app")
-            ),
-            format!("{original:?}"),
+            in_ptrs, out_ptrs,
+            "media Create props must not be deep-cloned"
+        );
+
+        let mut out = out;
+        out.push(Patch::SetProp {
+            id: "a1:poster".into(),
+            name: "src".into(),
+            value: json!("/poster/updated"),
+        });
+        assert_eq!(
+            resolved_media_prop(&out[..out.len() - 1], "a1:poster", "src").as_deref(),
+            Some("https://hypeflix.example/poster/big-buck-bunny")
         );
         assert_eq!(
-            websocket_http_origin("ws://localhost:5556/app"),
-            Some(("http", "localhost:5556"))
+            resolved_media_prop(&out, "a1:poster", "src").as_deref(),
+            Some("https://hypeflix.example/poster/updated")
+        );
+        assert_eq!(
+            resolved_media_prop(&out, "a1:video", "poster.0").as_deref(),
+            Some("https://hypeflix.example/poster/sintel")
+        );
+        assert_eq!(
+            resolved_media_prop(&out, "a1:video", "src").as_deref(),
+            Some("https://cdn.example/movie.mp4")
+        );
+        assert_eq!(
+            resolved_media_prop(&out, "a1:cdn", "src").as_deref(),
+            Some("https://cdn.example/a.png")
         );
     }
 
@@ -2819,7 +2884,6 @@ mod tests {
                     active_root_ids: vec!["a99:1".into(), "a99:2".into()],
                     queued: Vec::new(),
                     attached: true,
-                    expander: hypen_engine::TemplateExpander::new(),
                 },
             );
             inner.active_tab_id = Some(tab_id.into());
@@ -2867,7 +2931,6 @@ mod tests {
                         active_root_ids: vec![format!("a{n}:1")],
                         queued: Vec::new(),
                         attached: n == 3,
-                        expander: hypen_engine::TemplateExpander::new(),
                     },
                 );
             }
@@ -3029,9 +3092,44 @@ mod tests {
                 active_root_ids: roots.iter().map(|s| (*s).to_string()).collect(),
                 queued: Vec::new(),
                 attached,
-                expander: hypen_engine::TemplateExpander::new(),
             },
         );
+    }
+
+    /// The browser window mixes a local shell with remote tabs from any
+    /// server, so its window-wide asset origin must refuse local files
+    /// (a remote page must never get `Image("/etc/passwd")` read off the
+    /// local disk), and each tab node must keep the per-node origin its
+    /// `RemoteModule` stamped through the browser's id rewriting.
+    #[test]
+    fn browser_window_refuses_local_assets_and_keeps_per_node_origins() {
+        use hypen_renderer_desktop::paint::image::{ASSET_ORIGIN_PROP, NO_LOCAL_ASSETS_ORIGIN};
+        let (module, _captured) = fresh_browser_with_capture();
+        assert_eq!(
+            module.asset_origin().as_deref(),
+            Some(NO_LOCAL_ASSETS_ORIGIN)
+        );
+
+        install_tab(&module, "tab-A", "a1:", &[], true);
+        let mut props = indexmap::IndexMap::new();
+        props.insert("src".to_string(), json!("art/1.png"));
+        props.insert(ASSET_ORIGIN_PROP.to_string(), json!("http://tab-a.test"));
+        let stamped = Patch::Create {
+            id: "img".into(),
+            element_type: "Image".into(),
+            props: Arc::new(props),
+            semantics: None,
+        };
+        module.inner.lock().unwrap().viewport_id = Some("viewport".into());
+        let out = process_tab_patches(&module.inner, "tab-A", vec![stamped]);
+        let origin = out.iter().find_map(|p| match p {
+            Patch::Create { id, props, .. } if id.as_ref() == "a1:img" => props
+                .get(ASSET_ORIGIN_PROP)
+                .and_then(Value::as_str)
+                .map(str::to_string),
+            _ => None,
+        });
+        assert_eq!(origin.as_deref(), Some("http://tab-a.test"));
     }
 
     #[test]
@@ -3158,7 +3256,7 @@ mod tests {
                 before_id: None,
             },
         ];
-        let out = process_tab_patches(&module.inner, "tab-bg", &in_patches);
+        let out = process_tab_patches(&module.inner, "tab-bg", in_patches.clone());
 
         // Expect: Create(a7:1), Insert(parent=viewport, id=a7:1), Detach(a7:1).
         assert_eq!(out.len(), 3, "got {out:?}");
@@ -3323,7 +3421,7 @@ mod tests {
                 before_id: None,
             },
         ];
-        let out = process_tab_patches(&module.inner, "tab-fg", &in_patches);
+        let out = process_tab_patches(&module.inner, "tab-fg", in_patches.clone());
         assert!(
             !out.iter().any(|p| matches!(p, Patch::Detach { .. })),
             "active tab's roots must NOT be Detach'd; got {out:?}",
@@ -3346,7 +3444,7 @@ mod tests {
             insert("root", "1"),
             insert("1", "2"),
         ];
-        let out = process_tab_patches(&module.inner, "tab-1", &again);
+        let out = process_tab_patches(&module.inner, "tab-1", again.clone());
 
         assert!(
             matches!(&out[0], Patch::Remove { id, transition: false } if id.as_ref() == "a9:1"),
@@ -3377,7 +3475,7 @@ mod tests {
         use hypen_renderer_desktop::layout::LayoutPass;
         use hypen_renderer_desktop::text::TextEngine;
 
-        let (module, _captured) = fresh_browser_with_capture();
+        let (module, captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-fg", "a9:", &[], true);
         module.inner.lock().unwrap().active_tab_id = Some("tab-fg".into());
         // Tell the shell about the tab too, so it swaps the home screen
@@ -3423,7 +3521,10 @@ mod tests {
         };
         let (safe_area, text) = (id_of("SafeArea"), id_of("Text"));
 
-        let inner = module.inner.lock().unwrap();
+        // What the RENDERER holds: the forwarded stream replayed into a
+        // full tree (the browser's own shadow tree keeps no style props).
+        let mut tree = Tree::new();
+        tree.apply_batch(&captured.lock().unwrap());
         let mut fonts = TextEngine::new();
         let viewport = (1024, 720);
         let rect = |pass: &LayoutPass, id: &str| pass.item_by_id(id).expect("laid out").rect;
@@ -3432,7 +3533,7 @@ mod tests {
         // island chrome is a floating overlay hosted apps draw under by
         // design, so a SafeArea-wrapped app lays out full-bleed — the
         // chrome is NOT reserved.
-        let bare = LayoutPass::compute(&inner.tree, &mut fonts, viewport, 1.0);
+        let bare = LayoutPass::compute(&tree, &mut fonts, viewport, 1.0);
         let area = rect(&bare, &safe_area);
         assert_eq!(
             (area.x, area.y, area.h),
@@ -3452,7 +3553,7 @@ mod tests {
         // that. Simulated explicitly so the assertion holds on any
         // host OS.
         let macos = LayoutPass::compute_with_safe_area(
-            &inner.tree,
+            &tree,
             &mut fonts,
             viewport,
             1.0,
@@ -3608,10 +3709,10 @@ mod tests {
     /// Feed a raw tab batch through the same pipeline the tab's
     /// on_patches closure runs: rewrite, embed lifecycle, forward.
     fn ingest_tab_batch(module: &Arc<BrowserModule>, tab_id: &str, batch: &[Patch]) -> Vec<Patch> {
-        let mut rewritten = process_tab_patches(&module.inner, tab_id, batch);
+        let mut rewritten = process_tab_patches(&module.inner, tab_id, batch.to_vec());
         let lifecycle = handle_embed_lifecycle(&module.inner, &rewritten);
         rewritten.extend(lifecycle.extra);
-        forward(&module.inner, &rewritten);
+        forward(&module.inner, rewritten.clone());
         for marker in lifecycle.to_connect {
             connect_embed(&module.inner, marker);
         }
@@ -3670,6 +3771,195 @@ mod tests {
             .any(|p| matches!(p, Patch::Detach { id } if id.as_ref() == "a9:52")));
     }
 
+    /// Tab and embed batches arrive OWNED (`RemoteModule::on_owned_patches`)
+    /// and the id rewrite moves each patch: a `Create`'s props map and a
+    /// `SetProp`'s value come out as the very allocations that went in —
+    /// never deep-copied (CLAUDE.md "Arc-Shared Props"; same check as
+    /// remote.rs's `stamping_does_not_deep_copy_a_creates_props`).
+    #[test]
+    fn tab_and_embed_batches_are_rewritten_without_deep_copies() {
+        let (module, _captured) = fresh_browser_with_capture();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &hypenapp_route_batch("ws://127.0.0.1:1/nope"),
+        );
+        let big = "x".repeat(4096);
+        let batch = |big: &str| {
+            let create = create_with("70", "Text", &[("0", json!("hi"))]);
+            let props_ptr = match &create {
+                Patch::Create { props, .. } => Arc::as_ptr(props),
+                _ => unreachable!(),
+            };
+            let value = json!(big);
+            let value_ptr = value.as_str().unwrap().as_ptr();
+            let set = Patch::SetProp {
+                id: "70".into(),
+                name: "0".into(),
+                value,
+            };
+            (
+                vec![create, insert("root", "70"), set],
+                props_ptr,
+                value_ptr,
+            )
+        };
+        let check = |out: &[Patch], prefix: &str, props_ptr, value_ptr| {
+            let id = format!("{prefix}70");
+            let (mut saw_create, mut saw_set) = (false, false);
+            for p in out {
+                match p {
+                    Patch::Create { id: pid, props, .. } if pid.as_ref() == id => {
+                        assert_eq!(Arc::as_ptr(props), props_ptr, "props map deep-copied");
+                        assert_eq!(Arc::strong_count(props), 1, "props map shared");
+                        saw_create = true;
+                    }
+                    Patch::SetProp { id: pid, value, .. } if pid.as_ref() == id => {
+                        assert_eq!(
+                            value.as_str().map(str::as_ptr),
+                            Some(value_ptr),
+                            "SetProp value deep-copied"
+                        );
+                        saw_set = true;
+                    }
+                    _ => {}
+                }
+            }
+            assert!(saw_create && saw_set, "{out:?}");
+        };
+
+        let (tab_batch, props_ptr, value_ptr) = batch(&big);
+        let out = process_tab_patches(&module.inner, "tab-1", tab_batch);
+        check(&out, "a9:", props_ptr, value_ptr);
+
+        let (embed_batch, props_ptr, value_ptr) = batch(&big);
+        let out = process_embed_patches(&module.inner, "e1:", embed_batch);
+        check(&out, "e1:", props_ptr, value_ptr);
+    }
+
+    /// The shadow tree copies no prop value: a forwarded batch carrying a
+    /// 1 MiB `SetProp` (a bound document, say) and a `Create` with 1 MiB
+    /// of props costs the shadow tree a bounded number of bytes — the
+    /// structure, the slot name and a 40-character text preview — not a
+    /// copy of the values (which travel on, owned, to the renderer). The
+    /// structure and the read-back props are all still there.
+    #[test]
+    fn shadow_tree_copies_no_prop_value() {
+        const BIG: usize = 1 << 20;
+        let (module, _captured) = fresh_browser_with_capture();
+        let mut inner = module.inner.lock().unwrap();
+        let tree = &mut inner.tree;
+        let batch = vec![
+            create_with(
+                "zz1",
+                "Column",
+                &[
+                    ("backgroundImage", json!("u".repeat(BIG))),
+                    ("slot", json!("header")),
+                ],
+            ),
+            insert("root", "zz1"),
+            create_with("zz2", "Text", &[("0", json!("t".repeat(BIG)))]),
+            insert("zz1", "zz2"),
+            Patch::SetProp {
+                id: "zz2".into(),
+                name: "title".into(),
+                value: json!("v".repeat(BIG)),
+            },
+            Patch::SetProp {
+                id: "zz2".into(),
+                name: "0".into(),
+                value: json!(format!("  {}", "w".repeat(BIG))),
+            },
+        ];
+        let ((), allocated) = crate::alloc_meter::allocated_during(|| tree.apply_batch(&batch));
+        assert!(
+            allocated < 64 * 1024,
+            "the shadow tree copied prop values: {allocated} bytes for a batch carrying 4 MiB"
+        );
+        assert_eq!(tree.children_of("zz1"), ["zz2".to_string()]);
+        let column = tree.get("zz1").unwrap();
+        assert_eq!(column.props.get("slot"), Some(&json!("header")));
+        assert!(!column.props.contains_key("backgroundImage"));
+        let text = tree.get("zz2").unwrap();
+        assert_eq!(
+            text.text_content().as_deref(),
+            Some("w".repeat(40).as_str())
+        );
+        assert!(!text.props.contains_key("title"));
+        let dump = serialize_tree(tree);
+        assert!(
+            dump.contains(&format!(
+                "<Column #zz1>\n  <Text #zz2> \"{}\"\n",
+                "w".repeat(40)
+            )),
+            "{dump}"
+        );
+    }
+
+    /// The merged stream reaches the RENDERER owned as well: a tab batch,
+    /// rewritten and forwarded, arrives at the window's
+    /// `on_owned_patches` callback (its patch queue) as the very `SetProp`
+    /// value allocation and `Create` props map that came off the tab's
+    /// socket — the browser hop adds no deep copy.
+    #[test]
+    fn forwarded_batches_reach_the_renderer_owned() {
+        let storage = Storage::at_path(
+            std::env::temp_dir().join(format!("hypen-browser-owned-{}.json", std::process::id())),
+        );
+        let module = BrowserModule::build(storage);
+        let batches: Arc<Mutex<Vec<Vec<Patch>>>> = Arc::default();
+        let sink = Arc::clone(&batches);
+        HypenModule::on_owned_patches(
+            &*module,
+            Arc::new(move |patches: Vec<Patch>| sink.lock().unwrap().push(patches)),
+        );
+        module.mount();
+        install_tab(&module, "tab-1", "a9:", &[], true);
+
+        let create = create_with("70", "Text", &[("0", json!("hi"))]);
+        let props_ptr = match &create {
+            Patch::Create { props, .. } => Arc::as_ptr(props),
+            _ => unreachable!(),
+        };
+        let value = json!("y".repeat(4096));
+        let value_ptr = value.as_str().unwrap().as_ptr();
+        let set = Patch::SetProp {
+            id: "70".into(),
+            name: "0".into(),
+            value,
+        };
+        let rewritten = process_tab_patches(
+            &module.inner,
+            "tab-1",
+            vec![create, insert("root", "70"), set],
+        );
+        forward(&module.inner, rewritten);
+
+        let batches = batches.lock().unwrap();
+        let last = batches.last().expect("forwarded batch");
+        let (mut saw_create, mut saw_set) = (false, false);
+        for p in last {
+            match p {
+                Patch::Create { id, props, .. } if id.as_ref() == "a9:70" => {
+                    assert_eq!(Arc::as_ptr(props), props_ptr, "props map deep-copied");
+                    saw_create = true;
+                }
+                Patch::SetProp { id, value, .. } if id.as_ref() == "a9:70" => {
+                    assert_eq!(
+                        value.as_str().map(str::as_ptr),
+                        Some(value_ptr),
+                        "SetProp value deep-copied on the way to the renderer"
+                    );
+                    saw_set = true;
+                }
+                _ => {}
+            }
+        }
+        assert!(saw_create && saw_set, "{last:?}");
+    }
+
     #[test]
     fn embed_patches_graft_under_host_and_carry_action_markers() {
         let (module, _captured) = fresh_browser_with_capture();
@@ -3694,7 +3984,7 @@ mod tests {
             ),
             insert("1", "2"),
         ];
-        let out = process_embed_patches(&module.inner, "e1:", &batch);
+        let out = process_embed_patches(&module.inner, "e1:", batch.clone());
 
         // Root re-rooted onto the HypenApp host, ids prefixed.
         assert!(
@@ -3722,11 +4012,12 @@ mod tests {
         let out2 = process_embed_patches(
             &module.inner,
             "e1:",
-            &[Patch::SetProp {
+            [Patch::SetProp {
                 id: "2".into(),
                 name: "0".into(),
                 value: json!("Play now"),
-            }],
+            }]
+            .to_vec(),
         );
         assert_eq!(out2.len(), 1);
         let inner = module.inner.lock().unwrap();
@@ -3740,7 +4031,7 @@ mod tests {
         let (module, captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-1", "a9:", &[], true);
         let raw = hypenapp_route_batch("ws://127.0.0.1:1/nope");
-        let rewritten = process_tab_patches(&module.inner, "tab-1", &raw);
+        let rewritten = process_tab_patches(&module.inner, "tab-1", raw.clone());
         let lifecycle = handle_embed_lifecycle(&module.inner, &rewritten);
 
         assert_eq!(lifecycle.to_connect.len(), 1);
@@ -3756,7 +4047,7 @@ mod tests {
 
         let mut host_batch = rewritten;
         host_batch.extend(lifecycle.extra);
-        forward(&module.inner, &host_batch);
+        forward(&module.inner, host_batch);
 
         assert!(module.inner.lock().unwrap().tree.get("a9:51").is_some());
         assert!(captured.lock().unwrap().iter().any(
@@ -3767,52 +4058,84 @@ mod tests {
         // callbacks perform that step only after this forwarding point.
     }
 
+    /// An embed's nodes keep the origin their `RemoteModule` stamped
+    /// through the browser's embed rewrite — id prefixing, re-rooting
+    /// onto the host and the action-marker rewrite that REBUILDS the
+    /// props map (`embed::rewrite_embed_patch_actions`) — so their media
+    /// resolve against the embedded app's server and a `file:` source
+    /// stays refused.
     #[test]
-    fn embed_media_urls_resolve_against_the_embedded_app_origin() {
+    fn embed_nodes_keep_their_stamped_origin_through_the_rewrite() {
+        use hypen_renderer_desktop::paint::image::ASSET_ORIGIN_PROP;
         let (module, _captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-1", "a9:", &[], true);
         ingest_tab_batch(
             &module,
             "tab-1",
-            &hypenapp_route_batch("wss://hypeflix.example/ws"),
+            &stamped(
+                "wss://launcher.example/ws",
+                hypenapp_route_batch("wss://hypeflix.example/ws"),
+            ),
         );
 
         let out = process_embed_patches(
             &module.inner,
             "e1:",
-            &[
-                create_with("1", "Column", &[]),
-                insert("root", "1"),
-                create_with("2", "Image", &[("src", json!("/poster/sintel"))]),
-                insert("1", "2"),
-                create_with(
-                    "3",
-                    "Video",
-                    &[("poster.0", json!("/poster/big-buck-bunny"))],
-                ),
-                insert("1", "3"),
-            ],
+            stamped(
+                "wss://hypeflix.example/ws",
+                vec![
+                    create_with("1", "Column", &[]),
+                    insert("root", "1"),
+                    create_with(
+                        "2",
+                        "Image",
+                        &[
+                            ("src", json!("/poster/sintel")),
+                            ("onClick", json!("@actions.open")),
+                        ],
+                    ),
+                    insert("1", "2"),
+                    create_with(
+                        "3",
+                        "Video",
+                        &[("poster.0", json!("/poster/big-buck-bunny"))],
+                    ),
+                    insert("1", "3"),
+                    create_with("4", "Image", &[("src", json!("file:///etc/passwd"))]),
+                    insert("1", "4"),
+                ],
+            )
+            .to_vec(),
         );
 
-        let media_props: Vec<&Arc<IndexMap<String, Value>>> = out
+        let creates: Vec<(&str, &Arc<IndexMap<String, Value>>)> = out
             .iter()
             .filter_map(|patch| match patch {
-                Patch::Create {
-                    element_type,
-                    props,
-                    ..
-                } if element_type == "Image" || element_type == "Video" => Some(props),
+                Patch::Create { id, props, .. } => Some((id.as_ref(), props)),
                 _ => None,
             })
             .collect();
+        assert_eq!(creates.len(), 4);
+        for (id, props) in &creates {
+            assert_eq!(
+                props.get(ASSET_ORIGIN_PROP),
+                Some(&json!("https://hypeflix.example")),
+                "{id} lost its stamp"
+            );
+        }
+        // The rebuilt map (action rewrite) still carries it.
+        let (_, image) = creates.iter().find(|(id, _)| *id == "e1:2").unwrap();
+        assert_eq!(image.get("onClick"), Some(&json!("@actions.e1:open")));
+
         assert_eq!(
-            media_props[0].get("src"),
-            Some(&json!("https://hypeflix.example/poster/sintel"))
+            resolved_media_prop(&out, "e1:2", "src").as_deref(),
+            Some("https://hypeflix.example/poster/sintel")
         );
         assert_eq!(
-            media_props[1].get("poster.0"),
-            Some(&json!("https://hypeflix.example/poster/big-buck-bunny"))
+            resolved_media_prop(&out, "e1:3", "poster.0").as_deref(),
+            Some("https://hypeflix.example/poster/big-buck-bunny")
         );
+        assert_eq!(resolved_media_prop(&out, "e1:4", "src"), None);
     }
 
     #[test]
@@ -3827,12 +4150,12 @@ mod tests {
         let first = vec![create_with("1", "Column", &[]), insert("root", "1")];
         forward(
             &module.inner,
-            &process_embed_patches(&module.inner, "e1:", &first),
+            process_embed_patches(&module.inner, "e1:", first.clone()),
         );
 
         // Fresh session after a reconnect: new ids, new root.
         let second = vec![create_with("7", "Column", &[]), insert("root", "7")];
-        let out = process_embed_patches(&module.inner, "e1:", &second);
+        let out = process_embed_patches(&module.inner, "e1:", second.clone());
         assert!(
             matches!(&out[0], Patch::Remove { id, .. } if id.as_ref() == "e1:1"),
             "expected the stale root removed first, got {out:?}",
@@ -3859,10 +4182,10 @@ mod tests {
         );
         forward(
             &module.inner,
-            &process_embed_patches(
+            process_embed_patches(
                 &module.inner,
                 "e1:",
-                &[create_with("1", "Column", &[]), insert("root", "1")],
+                [create_with("1", "Column", &[]), insert("root", "1")].to_vec(),
             ),
         );
 
@@ -3871,11 +4194,12 @@ mod tests {
         let route_change = process_embed_patches(
             &module.inner,
             "e1:",
-            &[
+            [
                 Patch::Detach { id: "1".into() },
                 create_with("2", "Column", &[]),
                 insert("root", "2"),
-            ],
+            ]
+            .to_vec(),
         );
         assert!(
             !route_change
@@ -3883,7 +4207,7 @@ mod tests {
                 .any(|patch| matches!(patch, Patch::Remove { id, .. } if id.as_ref() == "e1:1")),
             "Router navigation must preserve the cached outgoing root: {route_change:?}",
         );
-        forward(&module.inner, &route_change);
+        forward(&module.inner, route_change);
         {
             let inner = module.inner.lock().unwrap();
             let embed = &inner.embeds["e1:"];
@@ -3906,7 +4230,7 @@ mod tests {
         assert!(error_patches
             .iter()
             .any(|patch| matches!(patch, Patch::Detach { id } if id.as_ref() == "e1:2")));
-        forward(&module.inner, &error_patches);
+        forward(&module.inner, error_patches);
 
         let recovered = {
             let mut inner = module.inner.lock().unwrap();
@@ -4012,10 +4336,10 @@ mod tests {
         // Give the first embed a grafted root.
         forward(
             &module.inner,
-            &process_embed_patches(
+            process_embed_patches(
                 &module.inner,
                 "e1:",
-                &[create_with("1", "Column", &[]), insert("root", "1")],
+                [create_with("1", "Column", &[]), insert("root", "1")].to_vec(),
             ),
         );
 
@@ -4115,11 +4439,11 @@ mod tests {
         let first = vec![create_with("1", "Column", &[]), insert("root", "1")];
         forward(
             &module.inner,
-            &process_embed_patches(&module.inner, "e1:", &first),
+            process_embed_patches(&module.inner, "e1:", first.clone()),
         );
 
         let again = vec![create_with("1", "Column", &[]), insert("root", "1")];
-        let out = process_embed_patches(&module.inner, "e1:", &again);
+        let out = process_embed_patches(&module.inner, "e1:", again.clone());
         assert!(
             matches!(&out[0], Patch::Remove { id, .. } if id.as_ref() == "e1:1"),
             "expected the old-session root removed first, got {out:?}",
@@ -4189,7 +4513,11 @@ mod tests {
         let out = ingest_tab_batch(
             &module,
             "tab-1",
-            &[clear("60"), create_with("64", "Text", &[]), insert("60", "64")],
+            &[
+                clear("60"),
+                create_with("64", "Text", &[]),
+                insert("60", "64"),
+            ],
         );
         assert!(
             matches!(&out[0], Patch::ClearChildren { id } if id.as_ref() == "a9:60"),
@@ -4199,7 +4527,10 @@ mod tests {
         let inner = module.inner.lock().unwrap();
         assert_eq!(inner.tree.children_of("a9:60"), ["a9:64".to_string()]);
         for id in ["a9:61", "a9:71", "a9:63", "a9:73"] {
-            assert!(inner.tree.get(id).is_none(), "{id} gone from the shadow tree");
+            assert!(
+                inner.tree.get(id).is_none(),
+                "{id} gone from the shadow tree"
+            );
         }
     }
 
@@ -4218,7 +4549,11 @@ mod tests {
         let (module, _captured) = fresh_browser_with_capture();
         install_tab(&module, "tab-1", "a9:", &[], true);
         // Wrap the launcher route in a list element so a clear reaches it.
-        ingest_tab_batch(&module, "tab-1", &[create_with("40", "Column", &[]), insert("root", "40")]);
+        ingest_tab_batch(
+            &module,
+            "tab-1",
+            &[create_with("40", "Column", &[]), insert("root", "40")],
+        );
         let mut route = hypenapp_route_batch("ws://127.0.0.1:1/nope");
         route[1] = insert("40", "50");
         ingest_tab_batch(&module, "tab-1", &route);
@@ -4227,7 +4562,10 @@ mod tests {
         let out = ingest_tab_batch(&module, "tab-1", &[clear("40")]);
         assert!(matches!(&out[0], Patch::ClearChildren { id } if id.as_ref() == "a9:40"));
         let inner = module.inner.lock().unwrap();
-        assert!(inner.embeds.is_empty(), "the host left with the cleared route");
+        assert!(
+            inner.embeds.is_empty(),
+            "the host left with the cleared route"
+        );
         // The embed held its error slot Detached: reclaimed explicitly.
         assert!(inner.tree.get("a9:53").is_none());
         assert!(inner.tree.get("a9:51").is_none());
@@ -4248,9 +4586,9 @@ mod tests {
         let grafted = process_embed_patches(
             &module.inner,
             "e1:",
-            &[create_with("1", "Column", &[]), insert("root", "1")],
+            [create_with("1", "Column", &[]), insert("root", "1")].to_vec(),
         );
-        forward(&module.inner, &grafted);
+        forward(&module.inner, grafted);
         assert_eq!(
             module.inner.lock().unwrap().tree.children_of("a9:51"),
             ["e1:1".to_string()]
@@ -4271,9 +4609,16 @@ mod tests {
         assert_eq!(removed, ["a9:52", "a9:53"]);
         let inner = module.inner.lock().unwrap();
         assert_eq!(inner.tree.children_of("a9:51"), ["e1:1".to_string()]);
-        assert!(inner.tree.get("e1:1").is_some(), "the embedded tree survives");
+        assert!(
+            inner.tree.get("e1:1").is_some(),
+            "the embedded tree survives"
+        );
         assert!(inner.tree.get("a9:52").is_none() && inner.tree.get("a9:53").is_none());
-        assert_eq!(inner.embeds.len(), 1, "the host survives, so does its embed");
+        assert_eq!(
+            inner.embeds.len(),
+            1,
+            "the host survives, so does its embed"
+        );
     }
 
     #[test]
@@ -4307,14 +4652,17 @@ mod tests {
         // Graft a foreign node under the list (as an embed would).
         forward(
             &module.inner,
-            &[create_with("e5:1", "Text", &[]), insert("a9:60", "e5:1")],
+            vec![create_with("e5:1", "Text", &[]), insert("a9:60", "e5:1")],
         );
         let g = module.inner.lock().unwrap();
         let lowered = lower_clear_children(&g, vec![clear("a9:60")]);
         let ids: Vec<&str> = lowered
             .iter()
             .map(|p| match p {
-                Patch::Remove { id, transition: false } => id.as_ref(),
+                Patch::Remove {
+                    id,
+                    transition: false,
+                } => id.as_ref(),
                 other => panic!("expected plain Removes, got {other:?}"),
             })
             .collect();

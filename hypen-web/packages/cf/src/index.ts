@@ -1,11 +1,20 @@
 export { global, session, withKey, type KeyStrategy } from "./strategies.js";
 export {
   durableObjectStore,
+  deriveStore,
+  withStorageScope,
   type DurableObjectStateStore,
   type DurableObjectStorage,
 } from "./durable-object-store.js";
 export {
   createWorkerHandler,
+  DEFAULT_VISITOR_COOKIE,
+  mintVisitorId,
+  readVisitorId,
+  visitorRoutingKey,
+  withVisitorCookie,
+  type RoutingMode,
+  type VisitorCookieOptions,
   type WorkerConfig,
 } from "./worker.js";
 export {

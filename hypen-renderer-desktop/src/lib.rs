@@ -30,6 +30,7 @@ pub(crate) mod damage;
 pub(crate) mod dev_overlay;
 pub mod device;
 pub mod dnd;
+pub mod embed;
 pub mod gpu;
 pub(crate) mod ime;
 pub mod layout;
@@ -53,14 +54,16 @@ pub mod tree;
 /// slots. Mirrors `hypen-web/packages/core/src/types.ts`.
 pub mod video_v2;
 pub mod virt;
+pub(crate) mod web_fonts;
 pub mod window;
 
 pub use app::DesktopApp;
 pub use device::DeviceConfig;
+pub use embed::EmbeddingModule;
 pub use layout::{window_controls_platform_insets, SafeAreaInsets, WINDOW_CONTROLS_BAR_HEIGHT};
 pub use module::HypenModule;
 pub use painter::{PaintTarget, Painter};
-pub use remote::{ConnectionStatus, RemoteModule, RemoteOptions};
+pub use remote::{ConnectionStatus, OwnedPatchCallback, RemoteModule, RemoteOptions};
 pub use tree::{Node, Tree};
 pub use window::Shortcut;
 

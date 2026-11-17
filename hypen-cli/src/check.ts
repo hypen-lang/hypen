@@ -30,7 +30,19 @@
  * engine.
  */
 
-import { formatHypenParseError } from "./dev-diagnostics.js";
+import {
+  engineErrorMessage,
+  formatHypenParseError,
+  parseEngineErrorPositions,
+} from "./dev-diagnostics.js";
+import {
+  extractInlineTemplates,
+  findInlineTemplateFiles,
+  formatInlineParseError,
+  isInlineTemplateCandidate,
+  mapToTs,
+  spanHasHole,
+} from "./check-inline.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "fs";
 import { join, relative, resolve } from "path";
 import type { A11yDiagnostic } from "@hypen-space/core";
@@ -173,7 +185,7 @@ export function formatDriftWarning(drift: RuleDrift): string[] {
  * Resolve `hypen check [path...]` positional arguments into concrete files.
  * Relative paths resolve against `cwd`. A file argument is checked as-is
  * (the user named it explicitly, so no extension filter); a directory is
- * scanned with {@link findHypenFiles}. Nonexistent paths are returned in
+ * scanned with {@link findCheckFiles}. Nonexistent paths are returned in
  * `missing` so the caller can refuse to report a clean pass for them.
  */
 export function resolveCheckTargets(
@@ -187,7 +199,7 @@ export function resolveCheckTargets(
     if (!existsSync(full)) {
       missing.push(path);
     } else if (statSync(full).isDirectory()) {
-      files.push(...findHypenFiles(full));
+      files.push(...findCheckFiles(full));
     } else {
       files.push(full);
     }
@@ -244,6 +256,70 @@ export function findHypenFiles(root: string): string[] {
   }
   out.sort();
   return out;
+}
+
+/**
+ * Every file `hypen check` covers under `root`: `.hypen` templates plus
+ * `.ts` modules declaring an inline `.ui(\`…\`)` template (see
+ * `check-inline.ts`). Sorted, absolute.
+ */
+export function findCheckFiles(root: string): string[] {
+  return [...findHypenFiles(root), ...findInlineTemplateFiles(root)].sort();
+}
+
+/**
+ * Accessibility findings for one checked file. A `.hypen` file is checked
+ * as-is; a `.ts` module has each inline template checked, with locations
+ * mapped back to the `.ts` file. Findings on an element whose expression
+ * contains a dropped `${…}` interpolation are not reported (its label,
+ * children or applicators may live in the interpolation) but counted in
+ * `skipped`. Throws an `Error` whose message is the ready-to-print lines
+ * (joined by newlines) when a template fails to parse, or when a `.ts` file
+ * has no inline template.
+ */
+export function checkFileAccessibility(
+  check: (source: string) => A11yDiagnostic[],
+  file: string,
+  display: string,
+  source: string,
+): { diagnostics: A11yDiagnostic[]; skipped: number } {
+  if (!isInlineTemplateCandidate(file)) {
+    try {
+      return { diagnostics: check(source), skipped: 0 };
+    } catch (e) {
+      throw new Error(formatHypenParseError(display, source, e).join("\n"));
+    }
+  }
+  const templates = extractInlineTemplates(source);
+  if (templates.length === 0) {
+    throw new Error(`${display}: no inline .ui(\`…\`) template found to check`);
+  }
+  const diagnostics: A11yDiagnostic[] = [];
+  let skipped = 0;
+  for (const template of templates) {
+    let diags: A11yDiagnostic[];
+    try {
+      diags = check(template.source);
+    } catch (e) {
+      const message = engineErrorMessage(e);
+      const errors = parseEngineErrorPositions(message);
+      throw new Error(
+        errors.length > 0
+          ? formatInlineParseError(display, source, template, errors).join("\n")
+          : `${display}: inline template: ${message}`,
+      );
+    }
+    for (const d of diags) {
+      const exprSpan = (d as { exprSpan?: { start: number; end: number } }).exprSpan;
+      if (spanHasHole(template, exprSpan)) {
+        skipped++;
+        continue;
+      }
+      const at = mapToTs(source, template, d);
+      diagnostics.push(at ? { ...d, line: at.line, col: at.col } : d);
+    }
+  }
+  return { diagnostics, skipped };
 }
 
 /**
@@ -355,14 +431,14 @@ export async function runCheck(opts: {
   } else {
     const componentsDir = opts.componentsDir ?? projectRoot;
     const scanRoot = existsSync(componentsDir) ? componentsDir : projectRoot;
-    files = findHypenFiles(scanRoot);
+    files = findCheckFiles(scanRoot);
   }
 
   if (files.length === 0) {
     console.log(
       opts.files
-        ? "  No .hypen files found in the given path(s)."
-        : "  No .hypen files found under the components directory or project root.",
+        ? "  No .hypen files or inline .ui(`…`) templates found in the given path(s)."
+        : "  No .hypen files or inline .ui(`…`) templates found under the components directory or project root.",
     );
     return 0;
   }
@@ -397,6 +473,7 @@ export async function runCheck(opts: {
   const findings: FileA11yFinding[] = [];
   const failedFiles: string[] = [];
   let suppressedCount = 0;
+  let interpolationSkipped = 0;
   for (const file of files) {
     // Display relative to the project root, except for explicit targets
     // outside it — a `../../..` chain is noisier than the absolute path.
@@ -412,12 +489,17 @@ export async function runCheck(opts: {
     }
     let diags: A11yDiagnostic[] = [];
     try {
-      diags = engine.checkAccessibility(source);
+      const checked = checkFileAccessibility(
+        (src) => engine.checkAccessibility(src),
+        file,
+        display,
+        source,
+      );
+      diags = checked.diagnostics;
+      interpolationSkipped += checked.skipped;
     } catch (e: any) {
-      // Parse errors carry a byte offset; show file:line:col + a frame.
-      const [head, ...frame] = formatHypenParseError(display, source, e);
-      console.error(`  ${head}`);
-      for (const line of frame) console.error(`  ${line}`);
+      // Parse errors carry a byte offset; shown as file:line:col + a frame.
+      for (const line of String(e?.message ?? e).split("\n")) console.error(`  ${line}`);
       failedFiles.push(display);
       continue;
     }
@@ -441,6 +523,12 @@ export async function runCheck(opts: {
       : lines;
   for (const line of printable) {
     console.log(`  ${line}`);
+  }
+  if (interpolationSkipped > 0) {
+    console.log(
+      `  Note: ${interpolationSkipped} finding${interpolationSkipped === 1 ? " was" : "s were"} not ` +
+        "reported: the element contains a ${…} interpolation whose content is only known at runtime.",
+    );
   }
   if (failedFiles.length > 0) {
     console.error(

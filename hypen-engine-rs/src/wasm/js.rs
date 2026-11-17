@@ -28,7 +28,7 @@ use crate::{
     ir::{ast_to_ir_node, Element, IRNode},
     lifecycle::ModuleInstance,
     reconcile::Patch,
-    wasm::shared::{format_parse_errors, render_subtree_into, NodeIdIndex},
+    wasm::shared::{format_parse_errors, NodeIdIndex},
 };
 
 /// Convert the optional trailing `animation` argument of `updateState` /
@@ -361,12 +361,6 @@ impl WasmEngine {
         let ir_node = ast_to_ir_node(component);
         self.resolve_ir_node_components(&ir_node);
 
-        let mut expanded = self.core.component_registry.expand_ir_node(&ir_node);
-
-        if !self.core.resource_registry.is_empty() {
-            crate::ir::resolve_icons_in_ir(&self.core.resource_registry, &mut expanded);
-        }
-
         let state: serde_json::Value = if state_js.is_null() || state_js.is_undefined() {
             serde_json::Value::Null
         } else {
@@ -388,8 +382,9 @@ impl WasmEngine {
             &format!("[WASM] Rendering into parent node: {}", parent_node_id_str).into(),
         );
 
-        let mut patches = Vec::new();
-        render_subtree_into(&mut self.core, parent_id, &expanded, &state, &mut patches);
+        // Expand, fold renderer bind writes, resolve icons, reconcile —
+        // the same passes as every other reconcile entry point.
+        let patches = self.core.render_subtree_into(parent_id, &ir_node, &state);
         self.emit_patches(patches);
 
         Ok(())

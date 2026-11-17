@@ -168,6 +168,12 @@ pub enum AppEvent {
     DevOverlayTick,
 }
 
+/// Default settle time between the first non-empty frame and a
+/// screenshot capture: enough for local images to decode. Pages that
+/// fetch data asynchronously need longer — see
+/// [`crate::DesktopApp::screenshot_delay`].
+pub const DEFAULT_SCREENSHOT_DELAY: std::time::Duration = std::time::Duration::from_millis(750);
+
 const MAX_SURFACE_RETRY_ATTEMPTS: u8 = 6;
 
 #[derive(Debug, Default)]
@@ -242,18 +248,22 @@ impl PatchQueue {
         Arc::new(Self::default())
     }
 
+    /// Queue one callback transaction, taking the batch BY VALUE: it is
+    /// moved into the queue, never copied (CLAUDE.md "Arc-Shared Props")
+    /// — the module delivers it owned ([`HypenModule::on_owned_patches`]).
+    ///
     /// Returns `true` if the queue went from empty to non-empty —
     /// callers use this to fire `AppEvent::Wake` only on the
     /// rising edge so a chatty engine doesn't flood winit's user
     /// event queue with redundant wake-ups.
-    pub fn push(&self, patches: &[Patch]) -> bool {
+    pub fn push(&self, patches: Vec<Patch>) -> bool {
         if patches.is_empty() {
             return false;
         }
         let mut q = self.queued.lock().expect("patch queue poisoned");
         let was_empty = q.batches.is_empty();
         q.patch_count = q.patch_count.saturating_add(patches.len());
-        q.batches.push_back(patches.to_vec());
+        q.batches.push_back(patches);
         if q.patch_count > PATCH_QUEUE_CAP {
             let before = q.patch_count;
             let mut dropped = 0usize;
@@ -313,8 +323,8 @@ mod patch_queue_tests {
     #[test]
     fn preserves_callback_transaction_boundaries() {
         let queue = PatchQueue::new();
-        assert!(queue.push(&[remove("host-a"), remove("host-b")]));
-        assert!(!queue.push(&[remove("embedded-child")]));
+        assert!(queue.push(vec![remove("host-a"), remove("host-b")]));
+        assert!(!queue.push(vec![remove("embedded-child")]));
 
         let first = queue.drain();
         assert_eq!(first.len(), 2);
@@ -324,6 +334,57 @@ mod patch_queue_tests {
         assert_eq!(second.len(), 1);
         assert!(queue.is_empty());
     }
+
+    /// A queued batch is the module's own allocation: the `Vec`, a
+    /// `Create`'s props map and a `SetProp`'s value all come back out of
+    /// `drain` as the very allocations that were pushed — no deep copy
+    /// on the way through the queue.
+    #[test]
+    fn queued_batches_are_moved_not_copied() {
+        use std::sync::Arc;
+        let props: hypen_engine::reconcile::tree::ResolvedProps = Arc::new(
+            [("0".to_string(), serde_json::json!("hello"))]
+                .into_iter()
+                .collect(),
+        );
+        let value = serde_json::json!("x".repeat(1024));
+        let value_ptr = value.as_str().unwrap().as_ptr();
+        let batch = vec![
+            Patch::Create {
+                id: "t".into(),
+                element_type: "Text".into(),
+                props: Arc::clone(&props),
+                semantics: None,
+            },
+            Patch::SetProp {
+                id: "t".into(),
+                name: "0".into(),
+                value,
+            },
+        ];
+        let vec_ptr = batch.as_ptr();
+        let queue = PatchQueue::new();
+        assert!(queue.push(batch));
+        let out = queue.drain();
+        assert_eq!(out.as_ptr(), vec_ptr, "batch Vec re-allocated");
+        match &out[0] {
+            Patch::Create { props: p, .. } => {
+                assert!(Arc::ptr_eq(p, &props));
+                assert_eq!(Arc::strong_count(&props), 2, "props map cloned");
+            }
+            other => panic!("{other:?}"),
+        }
+        match &out[1] {
+            Patch::SetProp { value, .. } => {
+                assert_eq!(
+                    value.as_str().unwrap().as_ptr(),
+                    value_ptr,
+                    "value deep-copied"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 }
 
 pub struct App {
@@ -331,12 +392,21 @@ pub struct App {
     initial_size: (u32, u32),
     queue: Arc<PatchQueue>,
     module: Arc<dyn HypenModule>,
+    /// The module's asset origin ([`HypenModule::asset_origin`]): `Some`
+    /// for a remote module, whose image-like sources resolve against its
+    /// server and never reach local files. Entered as the thread's asset
+    /// scope around every event this window handles, so the origin is
+    /// this window's, not the process's.
+    asset_origin: Option<Arc<str>>,
     /// Lowers `RegisterTemplate`/`Instantiate` back into the plain
     /// `Create`+`Insert` runs the rest of the renderer consumes. The
     /// desktop renderer can't exploit template cloning, so every drained
     /// batch is expanded in `flush_patches` before ingestion. Session-
     /// lifetime state: skeletons registered by earlier batches expand
-    /// later `Instantiate`s.
+    /// later `Instantiate`s. Needed for LOCAL engines only: a remote
+    /// connection's batches arrive already lowered (and any template
+    /// patch its own expander couldn't lower is dropped there —
+    /// `remote::own_patches`), so they pass through this unchanged.
     template_expander: hypen_engine::TemplateExpander,
     /// EventLoopProxy used to construct the AccessKit adapter on
     /// `resumed`.
@@ -646,13 +716,16 @@ pub struct App {
     /// same Vello scene used on screen, then the event loop exits.
     screenshot_path: Option<std::path::PathBuf>,
     screenshot_ready_at: Option<std::time::Instant>,
+    /// How long after the first non-empty frame the capture is taken.
+    /// See [`DEFAULT_SCREENSHOT_DELAY`] and `DesktopApp::screenshot_delay`.
+    screenshot_delay: std::time::Duration,
     screenshot_complete: bool,
     screenshot_error: Option<String>,
 }
 
 /// Sticky-error key for a `(video node, src)` pair — mirrors the
 /// poster path's `"node_id\u{0}poster"` dedupe keys.
-#[cfg(feature = "video")]
+#[cfg(any(feature = "video", test))]
 pub(crate) fn video_error_key(node_id: &str, src: &str) -> String {
     format!("{node_id}\u{0}{src}")
 }
@@ -669,6 +742,7 @@ impl App {
             title: title.into(),
             initial_size,
             queue,
+            asset_origin: module.asset_origin(),
             module,
             template_expander: hypen_engine::TemplateExpander::new(),
             proxy,
@@ -713,7 +787,9 @@ impl App {
             last_scroll_y_in_layout: 0.0,
             last_scroll_y_emitted: 0.0,
             last_a11y_fingerprint: None,
-            device_overlay: crate::device::overlay::OverlayController::new(crate::device::overlay_hub()),
+            device_overlay: crate::device::overlay::OverlayController::new(
+                crate::device::overlay_hub(),
+            ),
             last_overlay_a11y: None,
             layout_generation: 0,
             last_a11y_layout_generation: 0,
@@ -748,6 +824,7 @@ impl App {
             video_pending_bind_seeks: HashMap::new(),
             screenshot_path: None,
             screenshot_ready_at: None,
+            screenshot_delay: DEFAULT_SCREENSHOT_DELAY,
             screenshot_complete: false,
             screenshot_error: None,
         }
@@ -812,7 +889,8 @@ impl App {
         let detached = self.tree.detached_node_ids();
         let mut alive: HashSet<String> = HashSet::new();
         let mut to_release: Vec<String> = Vec::new();
-        let mut to_start: Vec<(String, String, u64, crate::media::PlayOpts)> = Vec::new();
+        // (node, url, authored src, index, opts)
+        let mut to_start: Vec<(String, String, String, u64, crate::media::PlayOpts)> = Vec::new();
         let mut suspend_flips: Vec<(String, bool)> = Vec::new();
         for node in self.tree.nodes() {
             if !crate::layout::MEDIA_TYPES
@@ -831,7 +909,12 @@ impl App {
             if crate::media::set_suspended(&node.id, false) {
                 suspend_flips.push((node.id.clone(), false));
             }
-            let (src, index) = crate::layout::resolve_media_src(node, viewport);
+            // A refused source never starts (no URL); its `onError` is
+            // dispatched once by `dispatch_media_poster_errors`.
+            let (source, index) = crate::layout::resolve_media_source(node, viewport);
+            let src = source
+                .as_ref()
+                .and_then(|s| Some((s.url()?.to_string(), s.authored().to_string())));
             // `autoplay`, or the one-way controlled form (`playing:` as
             // a plain truthy prop — the spec's "module drives, renderer
             // follows" subset): both mean this node should be playing on
@@ -840,48 +923,50 @@ impl App {
             // `apply_playback_writes`.
             let autoplay = crate::media::prop_truthy(node, "autoplay")
                 || crate::video_v2::controlled_playing(node) == Some(true);
-            if let Some((cur_url, _)) = crate::media::current_track(&node.id) {
+            if let Some(cur) = crate::media::current_track(&node.id) {
                 let single_src = crate::media::resolve_playlist(node).is_empty();
-                if single_src && src.as_deref() != Some(cur_url.as_str()) {
+                if single_src && src.as_ref().map(|(url, _)| url) != Some(&cur.url) {
                     to_release.push(node.id.clone());
-                    if let Some(src) = src {
+                    if let Some((url, authored)) = src {
                         if autoplay
                             && !self
                                 .video_error_keys
-                                .contains(&video_error_key(&node.id, &src))
+                                .contains(&video_error_key(&node.id, &url))
                         {
                             let opts = crate::media::resolve_play_opts(node);
-                            to_start.push((node.id.clone(), src, index, opts));
+                            to_start.push((node.id.clone(), url, authored, index, opts));
                         }
                     }
                 }
                 continue;
             }
-            let Some(src) = src else { continue };
+            let Some((url, authored)) = src else { continue };
             if !autoplay {
                 continue;
             }
             if self
                 .video_error_keys
-                .contains(&video_error_key(&node.id, &src))
+                .contains(&video_error_key(&node.id, &url))
             {
                 continue;
             }
             let opts = crate::media::resolve_play_opts(node);
-            to_start.push((node.id.clone(), src, index, opts));
+            to_start.push((node.id.clone(), url, authored, index, opts));
         }
         crate::media::retain_only(&alive);
         for id in to_release {
             crate::media::release(&id);
         }
-        for (id, src, index, opts) in to_start {
-            self.start_video(&id, &src, index, &opts);
+        for (id, url, authored, index, opts) in to_start {
+            self.start_video(&id, &url, &authored, index, &opts);
         }
         // Suspension flips map onto the contract's playback events:
         // navigating away pauses (`onPause`), navigating back resumes
         // (`onPlay`) — same payloads a user-initiated toggle sends.
         for (id, suspended) in suspend_flips {
-            let Some((src, index)) = crate::media::current_track(&id) else {
+            let Some(crate::media::CurrentTrack { src, index, .. }) =
+                crate::media::current_track(&id)
+            else {
                 continue;
             };
             let (event, typ) = if suspended {
@@ -898,13 +983,21 @@ impl App {
         }
     }
 
-    /// Feature `video`: start playback of `src` for the node and
+    /// Feature `video`: start playback of `url` (the resolution of the
+    /// app's authored `src`, which the payloads report) and
     /// dispatch the contract event — `onPlay` on success, `onError`
     /// (code `pipeline`, no status) when the pipeline can't even be
     /// constructed. Failures record a sticky error key so autoplay
     /// doesn't retry-loop.
     #[cfg(feature = "video")]
-    fn start_video(&mut self, node_id: &str, src: &str, index: u64, opts: &crate::media::PlayOpts) {
+    fn start_video(
+        &mut self,
+        node_id: &str,
+        url: &str,
+        src: &str,
+        index: u64,
+        opts: &crate::media::PlayOpts,
+    ) {
         // A fresh pipeline invalidates any Scrubber drag captured on the
         // old one (its fraction belongs to the old track's timeline) and
         // clears the Video v2 sticky-error marker (which is what shows
@@ -913,7 +1006,7 @@ impl App {
         // changes only (`apply_start_positions`), not on restarts.
         self.cancel_video_scrub_for(node_id);
         self.mark_video_error(node_id, false);
-        match crate::media::start(node_id, src, index, opts, true) {
+        match crate::media::start(node_id, url, src, index, opts, true) {
             Ok(true) => {
                 if let Some((action, payload)) =
                     self.video_event_payload(node_id, "onPlay", "play", src, index, &[])
@@ -928,8 +1021,8 @@ impl App {
             // dispatch the single `onError` and record the sticky key.
             Ok(false) => {}
             Err(e) => {
-                log::warn!("video: failed to start {src} for {node_id}: {e}");
-                self.video_error_keys.insert(video_error_key(node_id, src));
+                log::warn!("video: failed to start {url} for {node_id}: {e}");
+                self.video_error_keys.insert(video_error_key(node_id, url));
                 // Video v2: the sticky error is also the `error` player
                 // state, which is what shows an `error` composition slot.
                 self.mark_video_error(node_id, true);
@@ -997,12 +1090,24 @@ impl App {
                 crate::media::release(&ev.node_id);
                 continue;
             }
-            let (cur_src, cur_idx) = match crate::media::current_track(&ev.node_id) {
-                Some((u, i)) => (u, i),
+            // `cur_url` is the track's identity (sticky error keys),
+            // `cur_src` what the payloads report (the authored source).
+            let (cur_url, cur_src, cur_idx) = match crate::media::current_track(&ev.node_id) {
+                Some(t) => (t.url, t.src, t.index),
                 None => {
                     let node = self.tree.get(&ev.node_id).expect("checked above");
-                    let (s, i) = crate::layout::resolve_media_src(node, viewport);
-                    (s.unwrap_or_default(), i)
+                    let (s, i) = crate::layout::resolve_media_source(node, viewport);
+                    let url = s
+                        .as_ref()
+                        .and_then(|s| s.url())
+                        .unwrap_or_default()
+                        .to_string();
+                    let src = s
+                        .as_ref()
+                        .map(|s| s.authored())
+                        .unwrap_or_default()
+                        .to_string();
+                    (url, src, i)
                 }
             };
             match ev.kind {
@@ -1011,20 +1116,26 @@ impl App {
                     let playlist = crate::media::resolve_playlist(node);
                     let wraps = crate::media::prop_truthy(node, "loop");
                     let opts = crate::media::resolve_play_opts(node);
-                    let next = if playlist.is_empty() {
-                        None
-                    } else {
-                        let n = cur_idx + 1;
-                        if (n as usize) < playlist.len() {
-                            Some((playlist[n as usize].clone(), n))
-                        } else if wraps {
-                            Some((playlist[0].clone(), 0))
-                        } else {
-                            None
-                        }
-                    };
+                    // Refused entries are skipped — never started with
+                    // an empty URL — and each reports its own `onError`
+                    // (once per (node, entry), like any sticky error).
+                    let (skipped, next) =
+                        crate::layout::next_playlist_track(&playlist, cur_idx, wraps);
+                    let refused =
+                        refused_track_dispatches(node, &skipped, &mut self.dispatched_media_errors);
+                    let next = next.and_then(|(i, s)| {
+                        Some((s.url()?.to_string(), s.authored().to_string(), i))
+                    });
+                    for (action, payload) in refused {
+                        log::warn!(
+                            "video: skipped a refused playlist entry for {}: {payload}",
+                            ev.node_id
+                        );
+                        self.module
+                            .dispatch_ui_action(&ev.node_id, &action, Some(payload));
+                    }
                     match next {
-                        Some((next_src, next_idx)) => {
+                        Some((next_url, next_src, next_idx)) => {
                             // Finished track first (`completed: false`
                             // — the queue continues), then advance and
                             // announce the new track.
@@ -1046,8 +1157,14 @@ impl App {
                             // (and write it into module state). Cancel
                             // the gesture before advancing.
                             self.cancel_video_scrub_for(&ev.node_id);
-                            match crate::media::start(&ev.node_id, &next_src, next_idx, &opts, true)
-                            {
+                            match crate::media::start(
+                                &ev.node_id,
+                                &next_url,
+                                &next_src,
+                                next_idx,
+                                &opts,
+                                true,
+                            ) {
                                 Ok(true) => {
                                     if let Some((action, payload)) = self.video_event_payload(
                                         &ev.node_id,
@@ -1069,9 +1186,9 @@ impl App {
                                 // and records the sticky key.
                                 Ok(false) => {}
                                 Err(e) => {
-                                    log::warn!("video: playlist advance to {next_src} failed: {e}");
+                                    log::warn!("video: playlist advance to {next_url} failed: {e}");
                                     self.video_error_keys
-                                        .insert(video_error_key(&ev.node_id, &next_src));
+                                        .insert(video_error_key(&ev.node_id, &next_url));
                                     self.mark_video_error(&ev.node_id, true);
                                     if let Some((action, payload)) = self.video_event_payload(
                                         &ev.node_id,
@@ -1116,11 +1233,11 @@ impl App {
                 } => {
                     log::warn!(
                         "video: {} failed for {}: {code}: {message} (status {status:?})",
-                        cur_src,
+                        cur_url,
                         ev.node_id
                     );
                     self.video_error_keys
-                        .insert(video_error_key(&ev.node_id, &cur_src));
+                        .insert(video_error_key(&ev.node_id, &cur_url));
                     self.mark_video_error(&ev.node_id, true);
                     // The pipeline is going away — an in-flight Scrubber
                     // drag on it has nothing left to commit against.
@@ -1209,12 +1326,17 @@ impl App {
         let Some(node) = self.tree.get(node_id) else {
             return false;
         };
-        let (src, index) = match crate::media::current_track(node_id) {
-            Some((u, i)) => (Some(u), i),
-            None => crate::layout::resolve_media_src(node, viewport),
-        };
-        let Some(src) = src else {
-            return false;
+        let (url, src, index) = match crate::media::current_track(node_id) {
+            Some(t) => (t.url, t.src, t.index),
+            None => {
+                let (source, index) = crate::layout::resolve_media_source(node, viewport);
+                // A refused source has nothing to play (its `onError`
+                // is the poster/source error scan's).
+                let Some(crate::layout::MediaSource::Allowed { url, authored }) = source else {
+                    return false;
+                };
+                (url, authored, index)
+            }
         };
         let opts = crate::media::resolve_play_opts(node);
         if crate::media::has_playback(node_id) {
@@ -1236,8 +1358,8 @@ impl App {
             // for this (node, src) so the user can recover from a
             // transient failure.
             self.video_error_keys
-                .remove(&video_error_key(node_id, &src));
-            self.start_video(node_id, &src, index, &opts);
+                .remove(&video_error_key(node_id, &url));
+            self.start_video(node_id, &url, &src, index, &opts);
         }
         self.request_redraw_full();
         true
@@ -1281,6 +1403,11 @@ impl App {
         self.screenshot_ready_at = None;
         self.screenshot_complete = false;
         self.screenshot_error = None;
+    }
+
+    /// Wait `delay` after the first non-empty frame before capturing.
+    pub fn set_screenshot_delay(&mut self, delay: std::time::Duration) {
+        self.screenshot_delay = delay;
     }
 
     pub fn take_screenshot_error(&mut self) -> Option<String> {
@@ -1910,7 +2037,7 @@ impl App {
             self.layout_generation = self.layout_generation.wrapping_add(1);
         }
         if !pad_patches.is_empty() {
-            self.queue.push(&pad_patches);
+            self.queue.push(pad_patches);
             if let Some(window) = self.window.as_ref() {
                 window.request_redraw();
             }
@@ -2166,7 +2293,11 @@ impl App {
                     .fold(0.0f32, f32::max)
             })
             .unwrap_or(0.0);
-        let layout_inputs_changed = self.layout.is_none() || !key_match;
+        // An image whose natural size a style was waiting on has landed:
+        // the cached layout was built without it (see
+        // `TaffyState::media_intrinsics_stale`).
+        let layout_inputs_changed =
+            self.layout.is_none() || !key_match || self.taffy.media_intrinsics_stale();
         let scroll_window_stale = !layout_inputs_changed
             && page_emit_drift + max_chain_drift > scroll_recompute_threshold;
         let mut flips_played = false;
@@ -2318,9 +2449,13 @@ impl App {
                 scale,
                 std::time::Instant::now(),
                 &mut |text: &str, size: f32, wrap: Option<f32>, weight: u16| {
-                    painter
-                        .text_engine_mut()
-                        .measure_weighted_line_height(text, size, wrap, weight, size * 1.2)
+                    painter.text_engine_mut().measure_weighted_line_height(
+                        text,
+                        size,
+                        wrap,
+                        weight,
+                        size * 1.2,
+                    )
                 },
             )
         };
@@ -2378,10 +2513,11 @@ impl App {
             let now = std::time::Instant::now();
             match self.screenshot_ready_at {
                 None => {
-                    self.screenshot_ready_at = Some(now + std::time::Duration::from_millis(750));
+                    let delay = self.screenshot_delay;
+                    self.screenshot_ready_at = Some(now + delay);
                     let proxy = self.proxy.clone();
                     std::thread::spawn(move || {
-                        std::thread::sleep(std::time::Duration::from_millis(750));
+                        std::thread::sleep(delay);
                         let _ = proxy.send_event(AppEvent::Wake);
                     });
                 }
@@ -2660,8 +2796,9 @@ impl App {
         };
         let overlay = &self.device_overlay;
         adapter.update_if_active(|| {
-            let mut update =
-                tree_update_for_layout_excluding(layout, &|id| exit_excluded.iter().any(|e| e == id));
+            let mut update = tree_update_for_layout_excluding(layout, &|id| {
+                exit_excluded.iter().any(|e| e == id)
+            });
             crate::accessibility::apply_set_positions(&mut update, &set_positions);
             // Device host UI: its nodes join the window root; a modal
             // dialog (or F6 into the indicators) takes the focus.
@@ -3156,6 +3293,7 @@ pub(crate) mod window_video;
 
 impl ApplicationHandler<AppEvent> for App {
     fn resumed(&mut self, event_loop: &ActiveEventLoop) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         if self.window.is_some() {
             return;
         }
@@ -3210,6 +3348,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn user_event(&mut self, _event_loop: &ActiveEventLoop, event: AppEvent) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         match event {
             AppEvent::Accessibility(AkEvent { window_event, .. }) => match window_event {
                 AkWindowEvent::InitialTreeRequested => {
@@ -3317,6 +3456,11 @@ impl ApplicationHandler<AppEvent> for App {
                 } else {
                     // Background worker (image fetch, future async work)
                     // finished and wants the renderer to repaint.
+                    // Web-font faces landing change every text measure:
+                    // drop the cached layout so this frame re-lays out.
+                    if self.painter.text_engine_mut().sync_web_fonts() {
+                        self.layout = None;
+                    }
                     self.request_redraw_full();
                 }
             }
@@ -3343,6 +3487,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         if let (Some(adapter), Some(window)) = (self.ak.as_mut(), self.window.as_ref()) {
             adapter.process_event(window, &event);
         }
@@ -4069,6 +4214,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         // A chart long press can mature while the loop is otherwise idle.
         self.check_chart_long_press();
 
@@ -4144,6 +4290,7 @@ impl ApplicationHandler<AppEvent> for App {
     }
 
     fn exiting(&mut self, _event_loop: &ActiveEventLoop) {
+        let _assets = crate::paint::image::enter_asset_origin(self.asset_origin.clone());
         self.device_overlay.hub().detach_window();
         // Feature `video`: tear down every playback pipeline so the
         // process exits without live GStreamer streaming threads.
@@ -4241,7 +4388,8 @@ pub(crate) fn drive_animation_frame(
         && outcome.restyle.is_empty()
         && !writes.is_empty()
         && writes.iter().all(|(id, key)| {
-            !crate::layout::is_layout_prop_key(key) && !crate::chart::is_chart_family_node(tree, id)
+            !crate::layout::is_node_layout_prop_key(tree, id, key)
+                && !crate::chart::is_chart_family_node(tree, id)
         }) {
         let mut affected: HashSet<String> = HashSet::new();
         let mut capped = false;
@@ -4351,10 +4499,70 @@ pub(crate) fn clear_focus_if_exiting(
     }
 }
 
+/// Dedupe key for the `onError` of a media source the node's asset
+/// origin refuses: ONE report per `(node, authored source)`, whichever
+/// path finds it first — the media error scan (the current track, or
+/// entries the initial playlist selection skipped) or a playlist
+/// auto-advance skipping it. Both paths share the window's
+/// `dispatched_media_errors` set through this key.
+pub(crate) fn refused_source_key(node_id: &str, authored: &str) -> String {
+    format!("{node_id}\u{0}refused-src\u{0}{authored}")
+}
+
+/// The `onError` dispatches `(action, payload)` for refused media
+/// sources — playlist entries a track advance (or the initial
+/// selection) SKIPPED because the node's asset origin refuses them
+/// ([`crate::layout::next_playlist_track`]), or a refused current
+/// track: payload `{ type: "error", src: <authored entry>, index, code,
+/// message }` merged over the applicator's static args, `code`
+/// [`crate::layout::REFUSED_MEDIA_ERROR_CODE`]. Each `(node, source)`
+/// reports once — `dispatched` is the window's media-error dedupe set,
+/// keyed by [`refused_source_key`]. Empty when no `onError` is wired
+/// (and then nothing is marked reported).
+pub(crate) fn refused_track_dispatches(
+    node: &crate::tree::Node,
+    skipped: &[(u64, &crate::layout::MediaSource)],
+    dispatched: &mut HashSet<String>,
+) -> Vec<(String, serde_json::Value)> {
+    let mut out = Vec::new();
+    let Some((action, base)) = crate::layout::resolve_named_event_action(node, "onError") else {
+        return out;
+    };
+    for (index, source) in skipped {
+        if !dispatched.insert(refused_source_key(&node.id, source.authored())) {
+            continue;
+        }
+        let mut obj = match base.clone() {
+            serde_json::Value::Object(o) => o,
+            _ => serde_json::Map::new(),
+        };
+        obj.insert("type".to_string(), json!("error"));
+        obj.insert("src".to_string(), json!(source.authored()));
+        obj.insert("index".to_string(), json!(index));
+        obj.insert(
+            "code".to_string(),
+            json!(crate::layout::REFUSED_MEDIA_ERROR_CODE),
+        );
+        obj.insert("message".to_string(), json!(source.refused_message()));
+        out.push((action.clone(), serde_json::Value::Object(obj)));
+    }
+    out
+}
+
 /// Pure scan behind [`App::dispatch_media_poster_errors`]: walk the
-/// tree's Video nodes and produce the `(node_id, action, payload)` dispatches
-/// for posters whose fetch failed with an HTTP status, deduped through
-/// `dispatched` (`"node_id\u{0}poster"` keys, mutated in place).
+/// tree's Video nodes and produce the `(node_id, action, payload)`
+/// dispatches for
+///
+/// - posters whose fetch failed with an HTTP status (`status`,
+///   `message`), and
+/// - a current track (`src` / playlist entry) or poster that the node's
+///   asset origin REFUSES (a remote app naming `file:` …): never
+///   loaded, so without this it would fail silently. `code` is
+///   [`crate::layout::REFUSED_MEDIA_ERROR_CODE`], no `status`.
+///
+/// Each is deduped through `dispatched` (mutated in place; keys are
+/// per node and source). Payload `src` is the app's AUTHORED source —
+/// the track's, or the poster's for a poster-only element.
 /// `lookup_failure` is injected so tests don't depend on the global
 /// image-cache registry.
 pub(crate) fn collect_media_error_dispatches(
@@ -4363,6 +4571,7 @@ pub(crate) fn collect_media_error_dispatches(
     dispatched: &mut HashSet<String>,
     lookup_failure: &dyn Fn(&str) -> Option<crate::paint::image::LoadFailure>,
 ) -> Vec<(String, String, serde_json::Value)> {
+    use crate::layout::{MediaSource, REFUSED_MEDIA_ERROR_CODE};
     let mut pending = Vec::new();
     for node in tree.nodes() {
         if !crate::layout::MEDIA_TYPES
@@ -4376,36 +4585,76 @@ pub(crate) fn collect_media_error_dispatches(
         else {
             continue;
         };
-        let Some(poster) = crate::layout::resolve_media_poster(node, viewport) else {
-            continue;
-        };
-        let Some(failure) = lookup_failure(&poster) else {
-            continue;
-        };
-        let dedupe_key = format!("{}\u{0}{}", node.id, poster);
-        if !dispatched.insert(dedupe_key) {
-            continue;
+        let (source, index, skipped) = crate::layout::resolve_media_selection(node, viewport);
+        let poster = crate::layout::resolve_media_poster_source(node, viewport);
+        // Refused tracks first: entries the initial playlist selection
+        // skipped, then a refused current track (shared dedupe with the
+        // auto-advance path — see `refused_source_key`).
+        let mut refused: Vec<(u64, &MediaSource)> = skipped.iter().map(|(i, s)| (*i, s)).collect();
+        if let Some(src @ MediaSource::Refused { .. }) = &source {
+            refused.push((index, src));
         }
-        let (src, index) = crate::layout::resolve_media_src(node, viewport);
-        let mut obj = match base_payload {
-            serde_json::Value::Object(o) => o,
-            _ => serde_json::Map::new(),
+        for (action, payload) in refused_track_dispatches(node, &refused, dispatched) {
+            pending.push((node.id.clone(), action, payload));
+        }
+        let mut push = |src: &str, extra: Vec<(&str, serde_json::Value)>| {
+            let mut obj = match base_payload.clone() {
+                serde_json::Value::Object(o) => o,
+                _ => serde_json::Map::new(),
+            };
+            obj.insert("type".to_string(), json!("error"));
+            obj.insert("src".to_string(), json!(src));
+            obj.insert("index".to_string(), json!(index));
+            for (k, v) in extra {
+                obj.insert(k.to_string(), v);
+            }
+            pending.push((
+                node.id.clone(),
+                action.clone(),
+                serde_json::Value::Object(obj),
+            ));
         };
-        obj.insert("type".to_string(), json!("error"));
-        // `src` names the track the error refers to; the poster is
-        // what actually failed, so fall back to it for poster-only
-        // elements.
-        obj.insert(
-            "src".to_string(),
-            match src.as_deref() {
-                Some(s) => json!(s),
-                None => json!(poster),
-            },
-        );
-        obj.insert("index".to_string(), json!(index));
-        obj.insert("status".to_string(), json!(failure.status));
-        obj.insert("message".to_string(), json!(failure.message));
-        pending.push((node.id.clone(), action, serde_json::Value::Object(obj)));
+        // `src` names the track the error refers to; for a poster-only
+        // element the poster is what failed, so it stands in.
+        let reported = source
+            .as_ref()
+            .or(poster.as_ref())
+            .map(MediaSource::authored)
+            .unwrap_or_default()
+            .to_string();
+        match &poster {
+            Some(p @ MediaSource::Refused { .. }) => {
+                if dispatched.insert(format!(
+                    "{}\u{0}refused-poster\u{0}{}",
+                    node.id,
+                    p.authored()
+                )) {
+                    push(
+                        &reported,
+                        vec![
+                            ("code", json!(REFUSED_MEDIA_ERROR_CODE)),
+                            ("message", json!(p.refused_message())),
+                        ],
+                    );
+                }
+            }
+            Some(MediaSource::Allowed { url, .. }) => {
+                let Some(failure) = lookup_failure(url) else {
+                    continue;
+                };
+                if !dispatched.insert(format!("{}\u{0}{}", node.id, url)) {
+                    continue;
+                }
+                push(
+                    &reported,
+                    vec![
+                        ("status", json!(failure.status)),
+                        ("message", json!(failure.message)),
+                    ],
+                );
+            }
+            None => {}
+        }
     }
     pending
 }
@@ -4460,7 +4709,7 @@ pub(crate) fn paint_only_affected_ids(
     for patch in patches {
         let id = match patch {
             Patch::SetProp { id, name, .. } | Patch::RemoveProp { id, name } => {
-                if crate::layout::is_layout_prop_key(name) {
+                if crate::layout::is_node_layout_prop_key(tree, id, name) {
                     return None;
                 }
                 // A chart resolves its domains and every mark's geometry
@@ -4518,7 +4767,9 @@ pub(crate) fn structural_fragment_invalidation(
     let mut paint_roots: Vec<&str> = restyle.iter().map(String::as_str).collect();
     for patch in forwarded {
         match patch {
-            Patch::SetProp { id, .. } | Patch::RemoveProp { id, .. } | Patch::SetText { id, .. } => {
+            Patch::SetProp { id, .. }
+            | Patch::RemoveProp { id, .. }
+            | Patch::SetText { id, .. } => {
                 paint_roots.push(id.as_ref());
             }
             Patch::Insert { id, .. }

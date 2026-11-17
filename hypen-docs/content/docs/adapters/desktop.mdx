@@ -153,6 +153,14 @@ The connection reconnects with exponential backoff (1s → 2s → 4s → … cap
 `Hello`, so a server restart resumes the session rather than minting a fresh
 one. `wss://` URLs are supported via rustls.
 
+`HypenApp("ws://…")` embeds in the streamed tree are live: each one opens its
+own connection and renders the embedded app inside the element's box, with
+relative image URLs resolved against the embedded app's server. Its
+`.slot("loading")` children show until the first tree arrives and its
+`.slot("error")` children when the connection fails. Like the web embed, a
+Router-cached route keeps its embeds connected; removing the element closes
+them.
+
 > **Note.** The desktop client does not offer WebSocket `permessage-deflate`
 > compression — no published `tokio-tungstenite` release exposes it. This is
 > interoperable either way: compression is negotiated per connection and

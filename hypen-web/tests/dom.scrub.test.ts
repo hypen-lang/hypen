@@ -331,6 +331,29 @@ describe("post-settle cleanup (no-flash contract)", () => {
     expect(renderer.getScrubber().ownsNode("sheet")).toBe(false);
   });
 
+  test("the engine's label flip after a settle fires .onAnimationComplete for the pose", async () => {
+    const harness = makeScrubHarness();
+    const { renderer, engine } = harness;
+    const sheet = mountSheet(renderer, {
+      ...gestureProps(),
+      "__anim.transition": { duration: 20, curve: "easeOut" },
+      "onAnimationComplete.0": "@actions.animDone",
+    });
+    settleToOpen(harness, sheet);
+    expect(engine.dispatchCalls).toEqual([
+      { name: "__hypen_bind", payload: { path: "sheetPhase", value: "open" } },
+    ]);
+
+    renderer.applyPatches([
+      { type: "setProp", id: "sheet", name: "translateY.0", value: 0 } as Patch,
+      { type: "setProp", id: "sheet", name: "__anim.states", value: { label: "open" } } as Patch,
+    ]);
+    await sleep(50);
+    expect(engine.dispatchCalls.slice(1)).toEqual([
+      { name: "animDone", payload: { animation: "states", state: "open" } },
+    ]);
+  });
+
   test("with no states feed at all, the ~500ms timeout fallback cleans up", async () => {
     const harness = makeScrubHarness();
     const { renderer } = harness;

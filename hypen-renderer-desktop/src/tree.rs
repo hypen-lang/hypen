@@ -69,8 +69,17 @@ impl Node {
     /// the path to a `Number(42)`) silently rendered nothing because
     /// `Value::as_str()` only matches `String`. Profile's "42 Posts /
     /// 1.2k Followers / 3 Following" labels were the visible victim.
+    ///
+    /// A `Heading` also accepts the named `text:` argument — the DOM
+    /// renderer reads `props["0"] ?? props.text` for it.
     pub fn text_content(&self) -> Option<std::borrow::Cow<'_, str>> {
-        let v = self.props.get("0")?;
+        let v = match self.props.get("0") {
+            Some(v) if !v.is_null() => v,
+            other if self.element_type.eq_ignore_ascii_case("Heading") => {
+                self.props.get("text").or(other)?
+            }
+            other => other?,
+        };
         match v {
             Value::String(s) => Some(std::borrow::Cow::Borrowed(s.as_str())),
             Value::Number(n) => Some(std::borrow::Cow::Owned(n.to_string())),
@@ -132,7 +141,16 @@ pub struct Tree {
     /// `tree.apply` added inside the tick can never silently escape
     /// the paint-only classification and leave a stale render.
     raw_structural_seen: bool,
+    /// `Some` for a tree that keeps only some props (see
+    /// [`Tree::with_prop_retention`]); `None` keeps every prop.
+    retain: Option<PropRetention>,
 }
+
+/// Decides, for a tree built with [`Tree::with_prop_retention`], what it
+/// keeps of each prop a patch carries: `Some(value)` to store (the
+/// function builds the stored value — typically a clone of something
+/// small), `None` to skip the prop entirely, without copying it.
+pub type PropRetention = fn(&str, &Value) -> Option<Value>;
 
 /// Which paint-gate counters a prop key belongs to:
 /// `(opacity, transform)`. Prefix-based, so variant-decorated keys
@@ -167,6 +185,28 @@ impl Tree {
             transform_keys: 0,
             raw_write_log: None,
             raw_structural_seen: false,
+            retain: None,
+        }
+    }
+
+    /// A tree that keeps only the props `retain` lets through — the
+    /// structure (ids, element types, parent/child links, detach state)
+    /// in full. For a shadow of the patch stream that reads back a few
+    /// props (a slot name, a text preview) and must not copy every value
+    /// the stream carries (CLAUDE.md "Arc-Shared Props").
+    pub fn with_prop_retention(retain: PropRetention) -> Self {
+        Self {
+            retain: Some(retain),
+            ..Self::new()
+        }
+    }
+
+    /// What this tree stores for `key` = `value` (see [`PropRetention`]).
+    #[inline]
+    fn retained(&self, key: &str, value: &Value) -> Option<Value> {
+        match self.retain {
+            None => Some(value.clone()),
+            Some(retain) => retain(key, value),
         }
     }
 
@@ -332,8 +372,11 @@ impl Tree {
                 let mut prop_map =
                     PropMap::with_capacity_and_hasher(props.len(), FxRandomState::default());
                 for (k, v) in props.iter() {
+                    let Some(v) = self.retained(k, v) else {
+                        continue;
+                    };
                     self.count_key_added(k);
-                    prop_map.insert(k.clone(), v.clone());
+                    prop_map.insert(k.clone(), v);
                 }
                 let replaced = self.nodes.insert(
                     id.to_string(),
@@ -352,8 +395,11 @@ impl Tree {
                 self.children.entry(id.to_string()).or_default();
             }
             Patch::SetProp { id, name, value } => {
+                let Some(value) = self.retained(name, value) else {
+                    return;
+                };
                 let added = match self.nodes.get_mut(id.as_ref()) {
-                    Some(node) => node.props.insert(name.clone(), value.clone()).is_none(),
+                    Some(node) => node.props.insert(name.clone(), value).is_none(),
                     None => {
                         log::warn!("SetProp on unknown node {id}");
                         false
@@ -389,8 +435,11 @@ impl Tree {
                 // Emulate by writing prop "0" so renderer behaviour stays
                 // consistent if a host emits it. (`"0"` is in neither
                 // paint-gate class, so no counter update is needed.)
+                let Some(value) = self.retained("0", &Value::String(text.clone())) else {
+                    return;
+                };
                 if let Some(node) = self.nodes.get_mut(id.as_ref()) {
-                    node.props.insert("0".into(), Value::String(text.clone()));
+                    node.props.insert("0".into(), value);
                 }
             }
             Patch::Insert {

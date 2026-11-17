@@ -82,6 +82,10 @@ pub(crate) fn backoff_for(attempt: u32) -> Duration {
 }
 
 type PatchCallback = Arc<dyn Fn(&[Patch]) + Send + Sync>;
+/// A patch callback that takes the delivered batch BY VALUE — the
+/// decoded, owner-stamped `Vec<Patch>` itself, never a copy. See
+/// [`RemoteModule::on_owned_patches`].
+pub type OwnedPatchCallback = Arc<dyn Fn(Vec<Patch>) + Send + Sync>;
 type StatusCallback = Arc<dyn Fn(&ConnectionStatus) + Send + Sync>;
 
 /// Lifecycle of a [`RemoteModule`]'s WebSocket. Fired through
@@ -118,12 +122,18 @@ pub enum ConnectionStatus {
 
 #[derive(Default)]
 pub(crate) struct Inner {
-    /// Callback set by `on_patches`. The window's `PatchQueue` lives
-    /// behind this.
-    callback: Option<PatchCallback>,
+    /// Callback set by `on_patches` / `on_owned_patches`, taking each
+    /// batch by value (a borrowed `on_patches` callback is wrapped). The
+    /// window's `PatchQueue` lives behind this.
+    callback: Option<OwnedPatchCallback>,
     /// Callback set by `on_status`. Fires every time the worker
     /// transitions between states in [`ConnectionStatus`].
     status_callback: Option<StatusCallback>,
+    /// Callback set by [`RemoteModule::on_initial_tree`]: fired on the
+    /// worker thread right BEFORE the patches of an `initialTree` message
+    /// are delivered — the protocol's explicit "this is a whole new tree"
+    /// marker (a fresh session after a reconnect re-sends one).
+    initial_tree_callback: Option<Arc<dyn Fn() + Send + Sync>>,
     /// Latest status the worker reached. Replayed to a late
     /// `on_status` wiring so the UI doesn't miss the initial
     /// "Connecting" state because of the wire-up race.
@@ -132,12 +142,77 @@ pub(crate) struct Inner {
     /// wired its callback. Drained on the first `on_patches` call so
     /// no initial tree is lost to the connect/wire-up race.
     pending: Vec<Patch>,
+    /// This connection's asset origin, stamped on every node it creates
+    /// (see [`own_patches`]). `None` only for test fixtures.
+    asset_origin: Option<Arc<str>>,
+    /// Lowers the server's `RegisterTemplate` / `Instantiate` before
+    /// stamping, so template-instantiated nodes carry the origin too.
+    expander: hypen_engine::TemplateExpander,
     /// The window's system color scheme, once the window reported one
     /// ([`HypenModule::set_color_scheme`]). Sent in every hello and, on a
     /// change while connected, as a `colorScheme` message.
     color_scheme: Option<SystemScheme>,
     /// Wakes the worker when `color_scheme` changes.
     color_scheme_changed: Arc<tokio::sync::Notify>,
+}
+
+/// Make a server's patch batch carry its owner: lower templates, stamp
+/// `origin` as [`crate::paint::image::ASSET_ORIGIN_PROP`] on every
+/// `Create`, and drop any server write to that reserved prop. The
+/// origin then travels with each node wherever the batch is forwarded
+/// (a window, or hypen-browser's tab / embed grafting), so the node's
+/// image-like sources resolve against THIS server and never reach a
+/// local file (`paint::image::node_source`).
+///
+/// Template patches the expander could not lower (an `Instantiate` for
+/// an unknown template id or with a node-count mismatch, a
+/// `RegisterTemplate` with a malformed skeleton) are DROPPED: they
+/// would otherwise reach a downstream expander — e.g. the window's own,
+/// which also learns templates from local engines — and expand there
+/// into unstamped nodes carrying server-controlled props.
+///
+/// Takes the batch by value: a decoded `Create`'s props `Arc` is then
+/// uniquely owned, so stamping it is an in-place insert, not a deep
+/// copy of the map.
+pub(crate) fn own_patches(
+    patches: Vec<Patch>,
+    origin: &Arc<str>,
+    expander: &mut hypen_engine::TemplateExpander,
+) -> Vec<Patch> {
+    use crate::paint::image::ASSET_ORIGIN_PROP;
+    // One `Value` per batch; each node still needs its own copy (the
+    // props map owns `String` keys and `Value`s), so a stamp costs the
+    // key and value allocations and nothing else.
+    let stamp = Value::String(origin.to_string());
+    let mut out = expander.expand(patches);
+    out.retain_mut(|patch| match patch {
+        Patch::Create { props, .. } => {
+            let props = Arc::make_mut(props);
+            match props.get_mut(ASSET_ORIGIN_PROP) {
+                // A server-forged stamp: overwrite in place (no key
+                // allocation, original key order kept).
+                Some(v) => *v = stamp.clone(),
+                None => {
+                    props.insert(ASSET_ORIGIN_PROP.to_owned(), stamp.clone());
+                }
+            }
+            true
+        }
+        Patch::SetProp { name, .. } | Patch::RemoveProp { name, .. }
+            if name == ASSET_ORIGIN_PROP =>
+        {
+            log::warn!("remote: dropping a server write to the reserved {ASSET_ORIGIN_PROP}");
+            false
+        }
+        Patch::RegisterTemplate { template_id, .. } | Patch::Instantiate { template_id, .. } => {
+            log::debug!(
+                "remote: dropping a template patch the expander could not lower (template '{template_id}')"
+            );
+            false
+        }
+        _ => true,
+    });
+    out
 }
 
 /// How a [`RemoteModule`] connects.
@@ -151,6 +226,108 @@ pub struct RemoteOptions {
     /// `None` connects UI-only (no `hello.device`, device calls on the server
     /// answer `unavailable`).
     pub device: Option<DeviceConfig>,
+    /// Run the connection on the process-wide shared remote runtime (one
+    /// thread, one tokio runtime for every such connection) instead of a
+    /// thread + runtime of its own. `HypenApp` embeds use it, so a page
+    /// with many embeds does not cost a thread each. Default `false`.
+    pub shared_runtime: bool,
+    /// Resolve the target host up front and connect only to PUBLIC
+    /// addresses (see [`PublicAddressesOnly`]). `None` (default): the
+    /// socket connects to whatever the system resolver answers.
+    pub public_addresses_only: Option<PublicAddressesOnly>,
+}
+
+/// A resolver for [`PublicAddressesOnly`]: `(host, port)` → addresses.
+/// The default is the system resolver (`tokio::net::lookup_host`); tests
+/// substitute a fake one.
+pub type ResolveFn = Arc<
+    dyn Fn(
+            String,
+            u16,
+        ) -> std::pin::Pin<
+            Box<dyn std::future::Future<Output = std::io::Result<Vec<std::net::SocketAddr>>> + Send>,
+        > + Send
+        + Sync,
+>;
+
+/// Connect only to public addresses — the DNS-rebinding half of the
+/// `HypenApp` embed policy's private-network rule
+/// ([`crate::embed::EmbedPolicy`]).
+///
+/// Checking the URL's host NAME is not enough: a public name can resolve to
+/// `127.0.0.1` or `10.0.0.5` (DNS rebinding), and `getaddrinfo` also
+/// accepts numeric forms no URL parser treats as an IP (`2130706433`,
+/// `127.1`, `0x7f.0.0.1`, `0`). So every connect attempt (reconnects
+/// included) resolves the host itself, drops every address
+/// [`crate::embed::is_non_public_ip`] classifies as non-public (loopback,
+/// RFC 1918, link-local incl. `169.254.169.254`, CGNAT `100.64/10`,
+/// `0.0.0.0/8`, IPv6 loopback / ULA / link-local, and IPv4 embedded in
+/// IPv6 — mapped, compatible, NAT64, 6to4), and opens the TCP socket to
+/// one of the remaining addresses directly. The WebSocket / TLS handshake
+/// then runs over THAT socket (the `Host` header and TLS server name stay
+/// the URL's), so a second DNS answer can never swap the address after the
+/// check. No public address: the attempt fails like an unreachable server.
+#[derive(Clone)]
+pub struct PublicAddressesOnly {
+    resolver: ResolveFn,
+}
+
+impl std::fmt::Debug for PublicAddressesOnly {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PublicAddressesOnly")
+    }
+}
+
+impl Default for PublicAddressesOnly {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PublicAddressesOnly {
+    /// With the system resolver.
+    pub fn new() -> Self {
+        Self::with_resolver(Arc::new(|host: String, port: u16| {
+            Box::pin(async move {
+                Ok(tokio::net::lookup_host((host.as_str(), port))
+                    .await?
+                    .collect())
+            })
+        }))
+    }
+
+    /// With a custom resolver (tests, or a host app's own DNS).
+    pub fn with_resolver(resolver: ResolveFn) -> Self {
+        Self { resolver }
+    }
+
+    /// Resolve `host:port` and keep the public addresses, in resolver
+    /// order. `Err` when none is left (or resolution failed).
+    pub async fn public_addrs(
+        &self,
+        host: &str,
+        port: u16,
+    ) -> Result<Vec<std::net::SocketAddr>, String> {
+        // An IPv6 literal arrives bracketed from the URI.
+        let host = host
+            .strip_prefix('[')
+            .and_then(|h| h.strip_suffix(']'))
+            .unwrap_or(host);
+        let all = (self.resolver)(host.to_string(), port)
+            .await
+            .map_err(|e| format!("resolve {host}: {e}"))?;
+        let public: Vec<_> = all
+            .iter()
+            .copied()
+            .filter(|addr| !crate::embed::is_non_public_ip(addr.ip()))
+            .collect();
+        if public.is_empty() {
+            return Err(format!(
+                "{host} resolves only to non-public addresses ({all:?}); refused"
+            ));
+        }
+        Ok(public)
+    }
 }
 
 impl Default for RemoteOptions {
@@ -158,6 +335,8 @@ impl Default for RemoteOptions {
         RemoteOptions {
             headers: Vec::new(),
             device: Some(DeviceConfig::native()),
+            shared_runtime: false,
+            public_addresses_only: None,
         }
     }
 }
@@ -174,6 +353,60 @@ impl RemoteOptions {
         self.device = device;
         self
     }
+
+    /// See [`Self::shared_runtime`] (the field).
+    pub fn shared_runtime(mut self, on: bool) -> Self {
+        self.shared_runtime = on;
+        self
+    }
+
+    /// See [`Self::public_addresses_only`] (the field).
+    pub fn public_addresses_only(mut self, guard: Option<PublicAddressesOnly>) -> Self {
+        self.public_addresses_only = guard;
+        self
+    }
+}
+
+/// One connection's worker, handed to the shared runtime thread.
+struct SharedWorkerJob {
+    url: String,
+    module_name: String,
+    outbound_rx: mpsc::UnboundedReceiver<RemoteMessage>,
+    inner: Arc<Mutex<Inner>>,
+    options: RemoteOptions,
+}
+
+/// The process-wide shared remote runtime ([`RemoteOptions::shared_runtime`]):
+/// one thread running a current-thread tokio runtime with a `LocalSet`, on
+/// which each job's worker is a local task. Started on first use.
+fn shared_worker_sender() -> &'static mpsc::UnboundedSender<SharedWorkerJob> {
+    static SENDER: std::sync::OnceLock<mpsc::UnboundedSender<SharedWorkerJob>> =
+        std::sync::OnceLock::new();
+    SENDER.get_or_init(|| {
+        let (tx, mut rx) = mpsc::unbounded_channel::<SharedWorkerJob>();
+        std::thread::Builder::new()
+            .name("hypen-remote-shared".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("tokio rt");
+                let local = tokio::task::LocalSet::new();
+                local.block_on(&rt, async move {
+                    while let Some(job) = rx.recv().await {
+                        tokio::task::spawn_local(run_worker(
+                            job.url,
+                            job.module_name,
+                            job.outbound_rx,
+                            job.inner,
+                            job.options,
+                        ));
+                    }
+                });
+            })
+            .expect("spawn shared remote worker");
+        tx
+    })
 }
 
 pub struct RemoteModule {
@@ -182,9 +415,30 @@ pub struct RemoteModule {
     module_name: String,
     inner: Arc<Mutex<Inner>>,
     outbound: mpsc::UnboundedSender<RemoteMessage>,
+    /// HTTP origin of the server this connection talks to; relative
+    /// image-like sources resolve against it (see `paint::image`).
+    asset_origin: Arc<str>,
 }
 
 impl RemoteModule {
+    /// [`HypenModule::on_patches`] for a consumer that wants each batch
+    /// OWNED: `cb` receives the decoded, owner-stamped `Vec<Patch>` the
+    /// connection produced (and the pre-wiring backlog, drained here),
+    /// so a consumer that rewrites the batch (the browser re-prefixing
+    /// ids per tab / embed) moves patches instead of cloning them — a
+    /// `SetProp` value or a `Create`'s props are never deep-copied on
+    /// the way. Replaces any earlier callback, like `on_patches`.
+    pub fn on_owned_patches(&self, cb: OwnedPatchCallback) {
+        let pending = {
+            let mut guard = self.inner.lock().expect("remote inner poisoned");
+            guard.callback = Some(Arc::clone(&cb));
+            std::mem::take(&mut guard.pending)
+        };
+        if !pending.is_empty() {
+            cb(pending);
+        }
+    }
+
     /// Open a WebSocket to `url`, log in as `module_name`, and start
     /// pumping patches. Spawns a worker OS thread that owns its own
     /// single-threaded tokio runtime so the (sync) winit event loop
@@ -202,12 +456,44 @@ impl RemoteModule {
     ) -> Self {
         let url = url.into();
         let module_name = module_name.into();
-        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
+        // Image-like sources (`Image` src, backgrounds, avatars, posters)
+        // from a remote app are URLs relative to its server, as in a
+        // browser — and must never resolve to local files. See the
+        // policy notes in `paint::image`. An unparseable URL still
+        // switches to remote mode (with a placeholder origin that can't
+        // be fetched) so local files stay unreachable. The origin is
+        // this connection's own (`HypenModule::asset_origin`), not
+        // process state: other modules in the process are unaffected.
+        let asset_origin: Arc<str> = crate::paint::image::http_origin_for(&url)
+            .unwrap_or_else(|| crate::paint::image::NO_LOCAL_ASSETS_ORIGIN.to_string())
+            .into();
+        let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::clone(&asset_origin)),
+            ..Inner::default()
+        }));
         let (outbound_tx, outbound_rx) = mpsc::unbounded_channel::<RemoteMessage>();
 
         let inner_for_worker = Arc::clone(&inner);
         let module_for_worker = module_name.clone();
         let url_for_worker = url.clone();
+        if options.shared_runtime {
+            let job = SharedWorkerJob {
+                url: url_for_worker,
+                module_name: module_for_worker,
+                outbound_rx,
+                inner: inner_for_worker,
+                options,
+            };
+            if shared_worker_sender().send(job).is_err() {
+                log::warn!("remote: the shared runtime is gone; {url} not connected");
+            }
+            return Self {
+                module_name,
+                inner,
+                outbound: outbound_tx,
+                asset_origin,
+            };
+        }
         std::thread::Builder::new()
             .name(format!("hypen-remote:{module_name}"))
             .spawn(move || {
@@ -229,6 +515,7 @@ impl RemoteModule {
             module_name,
             inner,
             outbound: outbound_tx,
+            asset_origin,
         }
     }
 }
@@ -237,18 +524,29 @@ impl RemoteModule {
 /// wired we fire the callback; otherwise we buffer for the first
 /// `on_patches` call to drain. Lock is released before firing the
 /// callback so the renderer's queue mutex doesn't contend with ours.
-pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: &[Patch]) {
-    let cb = {
+///
+/// Every batch is first made to carry its owner ([`own_patches`]), so
+/// no consumer ever sees an unstamped node from this connection.
+///
+/// Takes the decoded batch by value so stamping never deep-copies a
+/// `Create`'s props or clones a `SetProp` value (see [`own_patches`]).
+pub(crate) fn deliver_patches(inner: &Arc<Mutex<Inner>>, patches: Vec<Patch>) {
+    let (cb, owned) = {
         let mut guard = inner.lock().expect("remote inner poisoned");
+        let guard = &mut *guard;
+        let owned = match guard.asset_origin.as_ref() {
+            Some(origin) => own_patches(patches, origin, &mut guard.expander),
+            None => patches,
+        };
         if let Some(cb) = guard.callback.as_ref() {
-            Some(Arc::clone(cb))
+            (Some(Arc::clone(cb)), owned)
         } else {
-            guard.pending.extend_from_slice(patches);
-            None
+            guard.pending.extend(owned);
+            (None, Vec::new())
         }
     };
     if let Some(cb) = cb {
-        cb(patches);
+        cb(owned);
     }
 }
 
@@ -312,6 +610,7 @@ async fn run_worker(
         let result = run_session(
             &url,
             &options.headers,
+            options.public_addresses_only.as_ref(),
             &module_name,
             &mut resume,
             &mut outbound,
@@ -357,12 +656,39 @@ async fn run_worker(
                     delay,
                 );
                 deliver_status(&inner, ConnectionStatus::Reconnecting { attempt });
-                tokio::time::sleep(delay).await;
+                if backoff_or_shutdown(delay, &outbound).await {
+                    log::info!("remote: closed while waiting to reconnect; exiting worker");
+                    deliver_status(&inner, ConnectionStatus::Closed);
+                    break;
+                }
                 deliver_status(&inner, ConnectionStatus::Connecting);
             }
         }
     }
     drop(driver_tx);
+}
+
+/// Sleep out a reconnect backoff, returning early (`true`) once every
+/// [`RemoteModule`] handle is gone. Without the check a dropped module
+/// whose server is down — a closed `HypenApp` embed, say — kept its worker
+/// retrying for the whole reconnect budget (60 attempts, ~30 minutes).
+/// Queued actions are left in the channel for the next session.
+async fn backoff_or_shutdown(
+    delay: Duration,
+    outbound: &mpsc::UnboundedReceiver<RemoteMessage>,
+) -> bool {
+    const SLICE: Duration = Duration::from_millis(200);
+    let deadline = tokio::time::Instant::now() + delay;
+    loop {
+        if outbound.is_closed() {
+            return true;
+        }
+        let now = tokio::time::Instant::now();
+        if now >= deadline {
+            return false;
+        }
+        tokio::time::sleep((deadline - now).min(SLICE)).await;
+    }
 }
 
 /// Build the upgrade request: the URL plus the configured headers.
@@ -385,6 +711,34 @@ fn upgrade_request(
     Ok(req)
 }
 
+/// Open the TCP socket for `request` to a PUBLIC address only, pinned:
+/// the address checked is the address connected to (see
+/// [`PublicAddressesOnly`]). Tries each public address in turn.
+pub(crate) async fn connect_public(
+    request: &tokio_tungstenite::tungstenite::handshake::client::Request,
+    guard: &PublicAddressesOnly,
+) -> Result<tokio::net::TcpStream, String> {
+    let uri = request.uri();
+    let host = uri.host().ok_or_else(|| format!("{uri}: no host"))?;
+    let port = uri
+        .port_u16()
+        .or(match uri.scheme_str() {
+            Some("wss") => Some(443),
+            Some("ws") => Some(80),
+            _ => None,
+        })
+        .ok_or_else(|| format!("{uri}: unsupported scheme"))?;
+    let addrs = guard.public_addrs(host, port).await?;
+    let mut last_err = None;
+    for addr in addrs {
+        match tokio::net::TcpStream::connect(addr).await {
+            Ok(socket) => return Ok(socket),
+            Err(e) => last_err = Some(format!("connect {addr}: {e}")),
+        }
+    }
+    Err(last_err.unwrap_or_else(|| "no address".into()))
+}
+
 /// Run a single connect → handshake → pump cycle. Captures the session
 /// id and resume token from `SessionAck` so reconnects can resume. Returns
 /// `Shutdown` only when the outbound channel hangs up.
@@ -392,6 +746,7 @@ fn upgrade_request(
 async fn run_session(
     url: &str,
     headers: &[(String, String)],
+    public_only: Option<&PublicAddressesOnly>,
     module_name: &str,
     resume: &mut Resume,
     outbound: &mut mpsc::UnboundedReceiver<RemoteMessage>,
@@ -435,9 +790,17 @@ async fn run_session(
     // merges, enable the `deflate` feature and offer the extension here — and
     // then keep the device plane off on compressed sockets.
     let request = upgrade_request(url, headers)?;
-    let (ws_stream, _resp) = connect_async(request)
-        .await
-        .map_err(|e| format!("connect failed: {e}"))?;
+    let (ws_stream, _resp) = match public_only {
+        None => connect_async(request)
+            .await
+            .map_err(|e| format!("connect failed: {e}"))?,
+        Some(guard) => {
+            let socket = connect_public(&request, guard).await?;
+            tokio_tungstenite::client_async_tls_with_config(request, socket, None, None)
+                .await
+                .map_err(|e| format!("connect failed: {e}"))?
+        }
+    };
     let (mut sink, mut stream) = ws_stream.split();
     log::info!("remote: connected (module={module_name})");
 
@@ -659,10 +1022,20 @@ pub(crate) fn handle_incoming(
     // Patch batches are decoded patch by patch (see
     // `decode_patches_lenient`); everything else as a whole message.
     match value.get("type").and_then(Value::as_str) {
-        Some("patch") | Some("initialTree") => {
+        Some(kind @ ("patch" | "initialTree")) => {
+            if kind == "initialTree" {
+                let cb = inner
+                    .lock()
+                    .expect("remote inner poisoned")
+                    .initial_tree_callback
+                    .clone();
+                if let Some(cb) = cb {
+                    cb();
+                }
+            }
             let patches = decode_patches_lenient(value.get("patches"));
             if !patches.is_empty() {
-                deliver_patches(inner, &patches);
+                deliver_patches(inner, patches);
             }
             return;
         }
@@ -711,7 +1084,7 @@ pub(crate) fn handle_incoming(
         }
         RemoteMessage::InitialTree { patches, .. } | RemoteMessage::Patch { patches, .. } => {
             if !patches.is_empty() {
-                deliver_patches(inner, &patches);
+                deliver_patches(inner, patches);
             }
         }
         RemoteMessage::StateUpdate { .. } => {
@@ -739,6 +1112,20 @@ impl RemoteModule {
     /// Fires immediately with the current state if one was already
     /// recorded, so wiring `on_status` after the worker started
     /// doesn't drop the initial `Connecting` event on the floor.
+    /// Called (on the worker thread) just before the patches of every
+    /// `initialTree` message are delivered: the server is sending a whole
+    /// tree, replacing whatever an earlier session rendered. Mirrors the
+    /// web `RemoteEngine.onInitialTree` the DOM `HypenApp` clears on.
+    pub fn on_initial_tree<F>(&self, cb: F)
+    where
+        F: Fn() + Send + Sync + 'static,
+    {
+        self.inner
+            .lock()
+            .expect("remote inner poisoned")
+            .initial_tree_callback = Some(Arc::new(cb));
+    }
+
     pub fn on_status<F>(&self, cb: F)
     where
         F: Fn(&ConnectionStatus) + Send + Sync + 'static,
@@ -756,15 +1143,16 @@ impl RemoteModule {
 }
 
 impl HypenModule for RemoteModule {
+    fn asset_origin(&self) -> Option<Arc<str>> {
+        Some(Arc::clone(&self.asset_origin))
+    }
+
     fn on_patches(&self, cb: PatchCallback) {
-        let pending = {
-            let mut guard = self.inner.lock().expect("remote inner poisoned");
-            guard.callback = Some(Arc::clone(&cb));
-            std::mem::take(&mut guard.pending)
-        };
-        if !pending.is_empty() {
-            cb(&pending);
-        }
+        self.on_owned_patches(Arc::new(move |patches: Vec<Patch>| cb(&patches)));
+    }
+
+    fn on_owned_patches(&self, cb: OwnedPatchCallback) {
+        RemoteModule::on_owned_patches(self, cb);
     }
 
     fn mount(&self) {
@@ -839,11 +1227,312 @@ mod tests {
     #[test]
     fn deliver_buffers_patches_when_no_callback_is_set() {
         let inner = Arc::new(Mutex::new(Inner::default()));
-        deliver_patches(&inner, &[fake_patch("a", "Text")]);
-        deliver_patches(&inner, &[fake_patch("b", "Text")]);
+        deliver_patches(&inner, vec![fake_patch("a", "Text")]);
+        deliver_patches(&inner, vec![fake_patch("b", "Text")]);
         let g = inner.lock().unwrap();
         assert_eq!(g.pending.len(), 2);
         assert!(g.callback.is_none());
+    }
+
+    fn origin_of(patch: &Patch) -> Option<&str> {
+        match patch {
+            Patch::Create { props, .. } => props
+                .get(crate::paint::image::ASSET_ORIGIN_PROP)
+                .and_then(Value::as_str),
+            _ => None,
+        }
+    }
+
+    /// Every node a connection creates carries that connection's asset
+    /// origin — template-instantiated ones included — and the server can
+    /// neither forge nor clear it (a cleared/forged stamp would put the
+    /// node back in the window's scope, e.g. a local one).
+    #[test]
+    fn own_patches_stamps_every_created_node_and_guards_the_stamp() {
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let origin: Arc<str> = Arc::from("http://a.test:8787");
+        let mut expander = hypen_engine::TemplateExpander::new();
+        let mut forged = IndexMap::new();
+        forged.insert(ASSET_ORIGIN_PROP.to_string(), Value::Null);
+        forged.insert("src".to_string(), json!("/x.png"));
+        let raw = vec![
+            Patch::Create {
+                id: "img".into(),
+                element_type: "Image".into(),
+                props: Arc::new(forged),
+                semantics: None,
+            },
+            Patch::RegisterTemplate {
+                template_id: "row".into(),
+                root: json!({
+                    "elementType": "Row",
+                    "props": {},
+                    "children": [
+                        {"elementType": "Image", "props": {"src": "/t.png"}, "children": []},
+                    ],
+                }),
+            },
+            Patch::Instantiate {
+                template_id: "row".into(),
+                parent_id: "root".into(),
+                before_id: None,
+                nodes: vec!["r".into(), "r_img".into()],
+                subs: Vec::new(),
+                semantics: Vec::new(),
+            },
+            Patch::SetProp {
+                id: "img".into(),
+                name: ASSET_ORIGIN_PROP.into(),
+                value: Value::Null,
+            },
+            Patch::RemoveProp {
+                id: "img".into(),
+                name: ASSET_ORIGIN_PROP.into(),
+            },
+            Patch::SetProp {
+                id: "img".into(),
+                name: "src".into(),
+                value: json!("/y.png"),
+            },
+        ];
+        let out = own_patches(raw, &origin, &mut expander);
+        let creates: Vec<(&str, Option<&str>)> = out
+            .iter()
+            .filter_map(|p| match p {
+                Patch::Create { id, .. } => Some((id.as_ref(), origin_of(p))),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            creates,
+            vec![
+                ("img", Some("http://a.test:8787")),
+                ("r", Some("http://a.test:8787")),
+                ("r_img", Some("http://a.test:8787")),
+            ]
+        );
+        assert!(!out.iter().any(|p| matches!(
+            p,
+            Patch::RegisterTemplate { .. } | Patch::Instantiate { .. }
+        )));
+        assert!(!out.iter().any(|p| matches!(
+            p,
+            Patch::SetProp { name, .. } | Patch::RemoveProp { name, .. } if name == ASSET_ORIGIN_PROP
+        )));
+        assert!(out
+            .iter()
+            .any(|p| matches!(p, Patch::SetProp { name, .. } if name == "src")));
+    }
+
+    /// A decoded batch is owned end to end: stamping a `Create` inserts
+    /// into the SAME props map the decoder produced (no deep copy of the
+    /// map per remote node — CLAUDE.md "Arc-Shared Props").
+    #[test]
+    fn stamping_does_not_deep_copy_a_creates_props() {
+        use crate::paint::image::ASSET_ORIGIN_PROP;
+        let mut props = IndexMap::new();
+        props.insert("src".to_string(), json!("/a.png"));
+        let props = Arc::new(props);
+        let before = Arc::as_ptr(&props);
+        let create = Patch::Create {
+            id: "img".into(),
+            element_type: "Image".into(),
+            props,
+            semantics: None,
+        };
+
+        // Directly through `own_patches`: same allocation, still unique.
+        let origin: Arc<str> = Arc::from("http://a.test");
+        let out = own_patches(
+            vec![create],
+            &origin,
+            &mut hypen_engine::TemplateExpander::new(),
+        );
+        match &out[0] {
+            Patch::Create { props, .. } => {
+                assert_eq!(Arc::as_ptr(props), before, "props map was deep-copied");
+                assert_eq!(Arc::strong_count(props), 1);
+                assert_eq!(props.get(ASSET_ORIGIN_PROP), Some(&json!("http://a.test")));
+            }
+            other => panic!("expected Create, got {other:?}"),
+        }
+
+        // And through the delivery path the socket uses.
+        let mut props = IndexMap::new();
+        props.insert("src".to_string(), json!("/b.png"));
+        let props = Arc::new(props);
+        let before = Arc::as_ptr(&props);
+        let inner = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::clone(&origin)),
+            ..Inner::default()
+        }));
+        let seen: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: Vec<Patch>| {
+            for patch in &p {
+                if let Patch::Create { props, .. } = patch {
+                    sink.lock().unwrap().push(Arc::as_ptr(props) as usize);
+                }
+            }
+        }));
+        deliver_patches(
+            &inner,
+            vec![Patch::Create {
+                id: "img2".into(),
+                element_type: "Image".into(),
+                props,
+                semantics: None,
+            }],
+        );
+        assert_eq!(*seen.lock().unwrap(), vec![before as usize]);
+    }
+
+    /// `on_owned_patches` hands the consumer the delivered batch itself —
+    /// the backlog drained on wiring and every later batch — so a
+    /// `SetProp` value is the decoder's allocation, not a clone.
+    #[test]
+    fn owned_patch_callback_receives_the_batch_without_copies() {
+        let (tx, _rx) = mpsc::unbounded_channel::<RemoteMessage>();
+        let inner = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::from("http://a.test")),
+            ..Inner::default()
+        }));
+        let module = RemoteModule {
+            module_name: "Test".into(),
+            inner: Arc::clone(&inner),
+            outbound: tx,
+            asset_origin: "http://a.test".into(),
+        };
+        let set = |s: &str| {
+            let value = json!(s.repeat(64));
+            let ptr = value.as_str().unwrap().as_ptr() as usize;
+            (
+                Patch::SetProp {
+                    id: "t".into(),
+                    name: "0".into(),
+                    value,
+                },
+                ptr,
+            )
+        };
+        let (early, early_ptr) = set("a");
+        deliver_patches(&inner, vec![early]);
+        let seen: Arc<Mutex<Vec<usize>>> = Arc::default();
+        let sink = Arc::clone(&seen);
+        // Through the TRAIT, as the window wires it (its override
+        // forwards to the inherent owned path; the default would copy).
+        crate::module::HypenModule::on_owned_patches(
+            &module,
+            Arc::new(move |batch: Vec<Patch>| {
+                for p in batch {
+                    if let Patch::SetProp { value, .. } = p {
+                        sink.lock()
+                            .unwrap()
+                            .push(value.as_str().unwrap().as_ptr() as usize);
+                    }
+                }
+            }),
+        );
+        let (late, late_ptr) = set("b");
+        deliver_patches(&inner, vec![late]);
+        assert_eq!(*seen.lock().unwrap(), vec![early_ptr, late_ptr]);
+    }
+
+    /// Template patches the connection's expander can't lower must not
+    /// survive `own_patches`: passed through, an `Instantiate` naming a
+    /// template id some OTHER expander knows (the window's, which learns
+    /// templates from local engines) would expand downstream into
+    /// unstamped nodes with server-chosen props.
+    #[test]
+    fn own_patches_drops_template_patches_it_could_not_lower() {
+        let origin: Arc<str> = Arc::from("http://a.test");
+        let skeleton = json!({
+            "elementType": "Row",
+            "props": {},
+            "children": [{"elementType": "Image", "props": {}, "children": []}],
+        });
+        let instantiate = |template: &str, nodes: &[&str]| Patch::Instantiate {
+            template_id: template.into(),
+            parent_id: "root".into(),
+            before_id: None,
+            nodes: nodes.iter().map(|n| Arc::from(*n)).collect(),
+            subs: vec![(1, "src".to_string(), json!("/etc/passwd"))],
+            semantics: Vec::new(),
+        };
+
+        // The window's expander learned "local_row" from a local engine.
+        let mut window_expander = hypen_engine::TemplateExpander::new();
+        assert!(window_expander.register("local_row", &skeleton));
+
+        let mut remote_expander = hypen_engine::TemplateExpander::new();
+        let out = own_patches(
+            vec![
+                // Unknown to this connection (known to the window).
+                instantiate("local_row", &["x", "x_img"]),
+                // Malformed skeleton: not stored, would pass through.
+                Patch::RegisterTemplate {
+                    template_id: "bad".into(),
+                    root: json!({"props": {}}),
+                },
+                instantiate("bad", &["y"]),
+                // Registered here, but a node-count mismatch.
+                Patch::RegisterTemplate {
+                    template_id: "row".into(),
+                    root: skeleton.clone(),
+                },
+                instantiate("row", &["z"]),
+                fake_patch("kept", "Text"),
+            ],
+            &origin,
+            &mut remote_expander,
+        );
+        assert!(
+            !out.iter().any(|p| matches!(
+                p,
+                Patch::RegisterTemplate { .. } | Patch::Instantiate { .. }
+            )),
+            "{out:?}"
+        );
+        assert_eq!(out.len(), 1);
+        assert_eq!(origin_of(&out[0]), Some("http://a.test"));
+
+        // Nothing reaches the window's expander to expand unstamped.
+        let lowered = window_expander.expand(out);
+        assert!(lowered.iter().all(|p| match p {
+            Patch::Create { .. } => origin_of(p) == Some("http://a.test"),
+            _ => true,
+        }));
+        assert_eq!(
+            lowered
+                .iter()
+                .filter(|p| matches!(p, Patch::Create { .. }))
+                .count(),
+            1
+        );
+    }
+
+    /// The stamp is applied at the delivery choke point, so both the
+    /// pre-wiring buffer and a wired callback only ever see owned nodes.
+    #[test]
+    fn delivered_patches_carry_the_connection_origin() {
+        let inner = Arc::new(Mutex::new(Inner {
+            asset_origin: Some(Arc::from("https://b.test")),
+            ..Inner::default()
+        }));
+        deliver_patches(&inner, vec![fake_patch("early", "Image")]);
+        let got: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
+        let sink = Arc::clone(&got);
+        let cb: OwnedPatchCallback = Arc::new(move |p: Vec<Patch>| sink.lock().unwrap().extend(p));
+        let pending = {
+            let mut g = inner.lock().unwrap();
+            g.callback = Some(Arc::clone(&cb));
+            std::mem::take(&mut g.pending)
+        };
+        cb(pending);
+        deliver_patches(&inner, vec![fake_patch("late", "Image")]);
+        let got = got.lock().unwrap();
+        assert_eq!(got.len(), 2);
+        assert!(got.iter().all(|p| origin_of(p) == Some("https://b.test")));
     }
 
     #[test]
@@ -851,12 +1540,15 @@ mod tests {
         let inner = Arc::new(Mutex::new(Inner::default()));
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
-        let cb: PatchCallback = Arc::new(move |p: &[Patch]| {
-            captured.lock().unwrap().extend_from_slice(p);
+        let cb: OwnedPatchCallback = Arc::new(move |p: Vec<Patch>| {
+            captured.lock().unwrap().extend(p);
         });
         inner.lock().unwrap().callback = Some(cb);
 
-        deliver_patches(&inner, &[fake_patch("a", "Text"), fake_patch("b", "Text")]);
+        deliver_patches(
+            &inner,
+            vec![fake_patch("a", "Text"), fake_patch("b", "Text")],
+        );
         assert_eq!(received.lock().unwrap().len(), 2);
         // Buffer stays empty when the callback is live.
         assert!(inner.lock().unwrap().pending.is_empty());
@@ -873,10 +1565,11 @@ mod tests {
             module_name: "Test".into(),
             inner: Arc::clone(&inner),
             outbound: tx,
+            asset_origin: "http://test.invalid".into(),
         };
 
-        deliver_patches(&inner, &[fake_patch("root_a", "Column")]);
-        deliver_patches(&inner, &[fake_patch("a_text", "Text")]);
+        deliver_patches(&inner, vec![fake_patch("root_a", "Column")]);
+        deliver_patches(&inner, vec![fake_patch("a_text", "Text")]);
 
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
@@ -901,6 +1594,7 @@ mod tests {
             module_name: "Counter".into(),
             inner: Arc::new(Mutex::new(Inner::default())),
             outbound: tx,
+            asset_origin: "http://test.invalid".into(),
         };
 
         module.dispatch_action("increment", None);
@@ -942,6 +1636,7 @@ mod tests {
             module_name: "Feed".into(),
             inner: Arc::new(Mutex::new(Inner::default())),
             outbound: tx,
+            asset_origin: "http://test.invalid".into(),
         };
         module.set_list_viewport("4294967301", 40, 70);
         module.set_list_viewport("7", 0, usize::MAX);
@@ -961,8 +1656,8 @@ mod tests {
         let inner: Arc<Mutex<Inner>> = Arc::new(Mutex::new(Inner::default()));
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
-        inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
-            captured.lock().unwrap().extend_from_slice(p);
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: Vec<Patch>| {
+            captured.lock().unwrap().extend(p);
         }));
         let mut resume = Resume::default();
 
@@ -1055,6 +1750,26 @@ mod tests {
     }
 
     #[test]
+    fn backoff_wait_ends_early_once_the_module_is_dropped() {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        rt.block_on(async {
+            let (tx, rx) = mpsc::unbounded_channel::<RemoteMessage>();
+            // Live handle: the full backoff elapses.
+            let t0 = std::time::Instant::now();
+            assert!(!backoff_or_shutdown(Duration::from_millis(30), &rx).await);
+            assert!(t0.elapsed() >= Duration::from_millis(30));
+            // Dropped handle: a 30 s backoff returns straight away.
+            drop(tx);
+            let t0 = std::time::Instant::now();
+            assert!(backoff_or_shutdown(Duration::from_secs(30), &rx).await);
+            assert!(t0.elapsed() < Duration::from_secs(1));
+        });
+    }
+
+    #[test]
     fn build_hello_serialises_session_id_when_present() {
         let hello = build_hello(Some("resume-me".into()), None, None);
         let json = serde_json::to_value(&hello).expect("encode");
@@ -1088,17 +1803,13 @@ mod tests {
             module_name: "App".into(),
             inner: Arc::clone(&inner),
             outbound: tx,
+            asset_origin: "http://test.invalid".into(),
         };
         let changed = Arc::clone(&inner.lock().unwrap().color_scheme_changed);
         let woken = || {
             use std::future::Future;
-            use std::task::{Context, Poll, Wake, Waker};
-            struct Noop;
-            impl Wake for Noop {
-                fn wake(self: Arc<Self>) {}
-            }
-            let waker = Waker::from(Arc::new(Noop));
-            let mut cx = Context::from_waker(&waker);
+            use std::task::{Context, Poll, Waker};
+            let mut cx = Context::from_waker(Waker::noop());
             let notified = changed.notified();
             tokio::pin!(notified);
             matches!(notified.as_mut().poll(&mut cx), Poll::Ready(()))
@@ -1138,8 +1849,8 @@ mod tests {
     fn capture(inner: &Arc<Mutex<Inner>>) -> Arc<Mutex<Vec<Patch>>> {
         let received: Arc<Mutex<Vec<Patch>>> = Arc::new(Mutex::new(Vec::new()));
         let captured = Arc::clone(&received);
-        inner.lock().unwrap().callback = Some(Arc::new(move |p: &[Patch]| {
-            captured.lock().unwrap().extend_from_slice(p);
+        inner.lock().unwrap().callback = Some(Arc::new(move |p: Vec<Patch>| {
+            captured.lock().unwrap().extend(p);
         }));
         received
     }
@@ -1327,5 +2038,105 @@ mod tests {
             &patches[0],
             Patch::ClearChildren { id } if id.as_ref() == "4294967301"
         ));
+    }
+
+    // ---------------------------------------------------------------
+    // PublicAddressesOnly — the embed policy's DNS-rebinding guard
+    // ---------------------------------------------------------------
+
+    /// A resolver answering every name with `addrs` (port from the call),
+    /// counting its calls.
+    fn fake_resolver(
+        addrs: Vec<std::net::IpAddr>,
+        calls: Arc<std::sync::atomic::AtomicUsize>,
+    ) -> ResolveFn {
+        Arc::new(move |_host: String, port: u16| {
+            calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let out = addrs
+                .iter()
+                .map(|ip| std::net::SocketAddr::new(*ip, port))
+                .collect();
+            Box::pin(async move { Ok(out) })
+        })
+    }
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn a_public_name_resolving_privately_is_refused() {
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        for private in ["127.0.0.1", "10.0.0.7", "169.254.169.254", "::1", "::ffff:192.168.0.1"] {
+            let guard = PublicAddressesOnly::with_resolver(fake_resolver(
+                vec![private.parse().unwrap()],
+                Arc::clone(&calls),
+            ));
+            let got = rt().block_on(guard.public_addrs("rebind.example.com", 443));
+            assert!(got.is_err(), "{private} must be refused: {got:?}");
+        }
+        // Mixed answers keep only the public addresses, in order.
+        let guard = PublicAddressesOnly::with_resolver(fake_resolver(
+            vec![
+                "10.0.0.1".parse().unwrap(),
+                "8.8.8.8".parse().unwrap(),
+                "127.0.0.1".parse().unwrap(),
+                "2606:4700::1111".parse().unwrap(),
+            ],
+            Arc::clone(&calls),
+        ));
+        let got = rt().block_on(guard.public_addrs("[mixed.example.com]", 80)).unwrap();
+        assert_eq!(
+            got,
+            vec![
+                "8.8.8.8:80".parse().unwrap(),
+                "[2606:4700::1111]:80".parse().unwrap()
+            ]
+        );
+    }
+
+    /// The system resolver path: numeric host spellings `getaddrinfo`
+    /// accepts but no URL check sees as an IP, and `localhost.`.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn numeric_and_dotted_local_hosts_are_refused_after_resolution() {
+        let guard = PublicAddressesOnly::new();
+        for host in ["2130706433", "127.1", "0x7f.0.0.1", "0", "localhost", "[::1]"] {
+            let got = rt().block_on(guard.public_addrs(host, 80));
+            assert!(got.is_err(), "{host} must be refused: {got:?}");
+        }
+    }
+
+    /// End to end over a real socket: a rebinding name pointing at a live
+    /// local server never reaches it under the guard (the address checked
+    /// is the address connected to), while the same connection without
+    /// the guard does — the control that shows the server was reachable.
+    #[test]
+    fn the_guarded_connection_never_reaches_a_rebound_local_server() {
+        let rt = rt();
+        let listener = rt.block_on(tokio::net::TcpListener::bind("127.0.0.1:0")).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let url = format!("ws://rebind.example.com:{port}/ws");
+        let request = upgrade_request(&url, &[]).unwrap();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let guard = PublicAddressesOnly::with_resolver(fake_resolver(
+            vec!["127.0.0.1".parse().unwrap()],
+            Arc::clone(&calls),
+        ));
+        rt.block_on(async {
+            let refused = connect_public(&request, &guard).await;
+            assert!(refused.is_err(), "{refused:?}");
+            assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+            let accepted = tokio::time::timeout(Duration::from_millis(300), listener.accept()).await;
+            assert!(accepted.is_err(), "nothing may connect to the local server");
+            // Without the guard the same URL host (resolved to loopback)
+            // is reachable.
+            let direct = tokio::net::TcpStream::connect(("127.0.0.1", port)).await;
+            assert!(direct.is_ok());
+            assert!(listener.accept().await.is_ok());
+        });
     }
 }

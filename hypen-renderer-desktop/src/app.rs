@@ -33,7 +33,17 @@ pub struct DesktopApp {
     #[cfg(feature = "dev-overlay")]
     dev_overlay_top: f32,
     screenshot_path: Option<PathBuf>,
+    screenshot_delay: Option<std::time::Duration>,
+    startup_actions: Vec<(String, serde_json::Value)>,
+    startup_action_settle: std::time::Duration,
+    web_fonts: bool,
+    embed_policy: crate::embed::EmbedPolicy,
 }
+
+/// Default pause before the first [`DesktopApp::startup_actions`] entry
+/// and between consecutive entries.
+pub const DEFAULT_STARTUP_ACTION_SETTLE: std::time::Duration =
+    std::time::Duration::from_millis(1500);
 
 impl DesktopApp {
     pub fn new() -> Self {
@@ -49,6 +59,11 @@ impl DesktopApp {
             #[cfg(feature = "dev-overlay")]
             dev_overlay_top: 8.0,
             screenshot_path: None,
+            screenshot_delay: None,
+            startup_actions: Vec::new(),
+            startup_action_settle: DEFAULT_STARTUP_ACTION_SETTLE,
+            web_fonts: true,
+            embed_policy: crate::embed::EmbedPolicy::default(),
         }
     }
 
@@ -86,6 +101,28 @@ impl DesktopApp {
     #[cfg(feature = "dev-overlay")]
     pub fn dev_overlay_top(mut self, top: f32) -> Self {
         self.dev_overlay_top = top.max(0.0);
+        self
+    }
+
+    /// Fetch named `fontFamily` entries from Google Fonts, like the DOM
+    /// renderer's `fontFamily` applicator does (default: on). Pass `false`
+    /// for an app that must not touch the network for fonts (privacy,
+    /// offline, kiosk): lists then resolve to installed families and their
+    /// generic keyword. The `HYPEN_WEB_FONTS` environment variable (`0` /
+    /// `off` / `false` / `no`, or `1` / `on`) overrides this either way.
+    /// Fetching is bounded (a 2-thread pool, at most 24 families, Google's
+    /// two font origins only, a byte budget) — see `src/web_fonts.rs`.
+    pub fn web_fonts(mut self, on: bool) -> Self {
+        self.web_fonts = on;
+        self
+    }
+
+    /// Limits for `HypenApp` embeds in the connected app's tree: how many
+    /// may be live, and which targets they may open (see
+    /// [`crate::embed::EmbedPolicy`]). Applies to [`Self::connect`] /
+    /// [`Self::connect_with`] calls made AFTER it in the builder chain.
+    pub fn embed_policy(mut self, policy: crate::embed::EmbedPolicy) -> Self {
+        self.embed_policy = policy;
         self
     }
 
@@ -201,6 +238,48 @@ impl DesktopApp {
         self.screenshot_path = Some(path.into());
         self
     }
+
+    /// How long [`Self::screenshot`] waits after the first non-empty frame
+    /// before capturing. Defaults to
+    /// [`DEFAULT_SCREENSHOT_DELAY`](crate::window::DEFAULT_SCREENSHOT_DELAY)
+    /// (750 ms), which covers local image decodes; a page that loads its
+    /// data asynchronously (a remote app fetching an API in `onCreated`,
+    /// network images) would otherwise be captured mid-load, so give it a
+    /// few seconds. The window keeps processing patches and image loads
+    /// while it waits; the capture is of the frame current at the deadline.
+    /// No effect without [`Self::screenshot`].
+    pub fn screenshot_delay(mut self, delay: std::time::Duration) -> Self {
+        self.screenshot_delay = Some(delay);
+        self
+    }
+
+    /// Actions to dispatch against the module once its first patch batch
+    /// has arrived, in order, waiting [`Self::startup_action_settle`]
+    /// before the first and between each. Used by screenshot tooling to
+    /// reach a screen other than the initial one (e.g. `router.replace`
+    /// with `{"to": "/settings"}`). With [`Self::screenshot`], the capture
+    /// delay is extended by the total settle time so the shot is taken
+    /// after the last action has had its settle plus the configured delay.
+    pub fn startup_actions(mut self, actions: Vec<(String, serde_json::Value)>) -> Self {
+        self.startup_actions = actions;
+        self
+    }
+
+    /// Pause before / between [`Self::startup_actions`]. Default
+    /// [`DEFAULT_STARTUP_ACTION_SETTLE`].
+    pub fn startup_action_settle(mut self, settle: std::time::Duration) -> Self {
+        self.startup_action_settle = settle;
+        self
+    }
+
+    /// Total time the startup actions take after the first patch batch.
+    fn startup_actions_span(&self) -> std::time::Duration {
+        if self.startup_actions.is_empty() {
+            return std::time::Duration::ZERO;
+        }
+        self.startup_action_settle * (self.startup_actions.len() as u32 + 1)
+    }
+
     /// Drive the window with a fully-built SDK module instance.
     ///
     /// ```rust,ignore
@@ -251,9 +330,17 @@ impl DesktopApp {
     /// [`Self::connect_with`] for upgrade headers (a device-enabled server
     /// admits native clients only through its authenticator) or to connect
     /// UI-only.
+    ///
+    /// `HypenApp("ws://…")` elements in the remote tree are live embeds:
+    /// the connection is wrapped in an [`crate::EmbeddingModule`], which
+    /// connects each embedded app and renders its tree inside the
+    /// element's box (see [`crate::embed`]).
     pub fn connect(self, url: impl Into<String>, module_name: impl Into<String>) -> Self {
         let remote = RemoteModule::connect(url, module_name);
-        self.module(Arc::new(remote))
+        let policy = self.embed_policy.clone();
+        self.module(Arc::new(
+            crate::EmbeddingModule::new(Arc::new(remote)).with_policy(policy),
+        ))
     }
 
     /// [`Self::connect`] with explicit [`crate::RemoteOptions`]:
@@ -274,7 +361,10 @@ impl DesktopApp {
         options: crate::RemoteOptions,
     ) -> Self {
         let remote = RemoteModule::connect_with(url, module_name, options);
-        self.module(Arc::new(remote))
+        let policy = self.embed_policy.clone();
+        self.module(Arc::new(
+            crate::EmbeddingModule::new(Arc::new(remote)).with_policy(policy),
+        ))
     }
 
     /// Convenience for stateless demos. Builds an internal module with no
@@ -294,7 +384,8 @@ impl DesktopApp {
 
     /// Open the window, mount the module (firing the initial render), and
     /// block until the user closes the window.
-    pub fn run(self) {
+    pub fn run(mut self) {
+        let startup_span = self.startup_actions_span();
         let queue = PatchQueue::new();
         let module = self
             .module
@@ -333,7 +424,32 @@ impl DesktopApp {
         // reflects the dispatched action.
         let q_for_cb = Arc::clone(&queue);
         let proxy_for_cb = proxy.clone();
-        module.on_patches(Arc::new(move |patches| {
+        // Startup actions wait for the first patch batch (the session is
+        // live and the initial screen exists) before dispatching.
+        let (first_batch_tx, first_batch_rx) = std::sync::mpsc::sync_channel::<()>(1);
+        if !self.startup_actions.is_empty() {
+            let actions = std::mem::take(&mut self.startup_actions);
+            let settle = self.startup_action_settle;
+            let target = Arc::clone(&module);
+            std::thread::Builder::new()
+                .name("hypen-startup-actions".into())
+                .spawn(move || {
+                    if first_batch_rx.recv().is_err() {
+                        return;
+                    }
+                    for (name, payload) in actions {
+                        std::thread::sleep(settle);
+                        log::info!("startup action {name} {payload}");
+                        let payload = (!payload.is_null()).then_some(payload);
+                        target.dispatch_action(&name, payload);
+                    }
+                })
+                .expect("spawn startup action thread");
+        }
+        // Owned delivery: each batch moves into the queue untouched (no
+        // per-batch copy of patches, values or props).
+        module.on_owned_patches(Arc::new(move |patches| {
+            let _ = first_batch_tx.try_send(());
             // `push` returns true only on the empty → non-empty
             // transition. Without this gate, an engine that fires a
             // patch batch per frame (or worse, mid-frame) floods
@@ -353,6 +469,15 @@ impl DesktopApp {
         // Background image-fetch worker uses the same proxy to wake
         // the renderer when an HTTP avatar finishes decoding.
         crate::paint::image::set_waker(proxy.clone());
+        // `fontFamily` lists naming a web font fetch it like the DOM
+        // renderer does; a landed family wakes the loop to relayout.
+        // Opt-out: `.web_fonts(false)` / `HYPEN_WEB_FONTS=0`.
+        if crate::web_fonts::allowed(self.web_fonts) {
+            let proxy = proxy.clone();
+            crate::web_fonts::enable(move || {
+                let _ = proxy.send_event(crate::window::AppEvent::Wake);
+            });
+        }
         // Feature `video`: playback pipelines wake the loop the same
         // way — once per decoded frame and per EOS / error event.
         #[cfg(feature = "video")]
@@ -374,6 +499,12 @@ impl DesktopApp {
             app.set_reduced_motion(on);
         }
         app.set_screenshot_path(self.screenshot_path.clone());
+        if self.screenshot_delay.is_some() || !startup_span.is_zero() {
+            let base = self
+                .screenshot_delay
+                .unwrap_or(crate::window::DEFAULT_SCREENSHOT_DELAY);
+            app.set_screenshot_delay(base + startup_span);
+        }
         event_loop.run_app(&mut app).expect("event loop run");
         if let Some(error) = app.take_screenshot_error() {
             panic!("desktop screenshot failed: {error}");
@@ -396,3 +527,37 @@ impl Default for DesktopApp {
 
 #[derive(Default, Clone, serde::Serialize, serde::Deserialize)]
 struct EmptyState {}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn screenshot_delay_defaults_to_the_window_default_and_is_configurable() {
+        let app = DesktopApp::new().screenshot("out.png");
+        assert_eq!(
+            app.screenshot_delay, None,
+            "unset: the window default applies"
+        );
+        assert_eq!(
+            crate::window::DEFAULT_SCREENSHOT_DELAY,
+            Duration::from_millis(750)
+        );
+        let app = app.screenshot_delay(Duration::from_secs(4));
+        assert_eq!(app.screenshot_delay, Some(Duration::from_secs(4)));
+    }
+
+    #[test]
+    fn startup_actions_span_covers_a_settle_before_and_after_each_action() {
+        let app = DesktopApp::new();
+        assert_eq!(app.startup_actions_span(), Duration::ZERO);
+        let app = app
+            .startup_actions(vec![
+                ("router.replace".into(), serde_json::json!({"to": "/a"})),
+                ("tap".into(), serde_json::Value::Null),
+            ])
+            .startup_action_settle(Duration::from_millis(500));
+        assert_eq!(app.startup_actions_span(), Duration::from_millis(1500));
+    }
+}

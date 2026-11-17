@@ -347,9 +347,20 @@ impl VirtLists {
                 false
             }
             Patch::SetProp { id, name, value } if name == VIRT_PAD_PROP => {
-                if let Some(list) = self.lists.get_mut(id.as_ref()) {
-                    list.landed(pad_of(value));
+                let Some(list) = self.lists.get_mut(id.as_ref()) else {
+                    return true;
+                };
+                let pad = pad_of(value);
+                // A padding write queued by `remeasure` BEFORE a newer
+                // window landed is stale: the window's own write (made in
+                // this method, applied first) already superseded it. Letting
+                // it through re-padded the Calories "My Foods" list — just
+                // emptied to `total: 0` — with the 113-item list's 5,395px
+                // trailing stand-in, pushing the empty-state text off screen.
+                if list.requested.is_some() && pad != list.requested {
+                    return false;
                 }
+                list.landed(pad);
                 true
             }
             Patch::Create { id, props, .. } => {

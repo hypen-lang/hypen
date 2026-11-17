@@ -279,6 +279,15 @@ export function paintNode(
       paintContainer(ctx, node);
       paintText(ctx, node);
       break;
+    case "heading":
+      // A Heading paints like Text: its level supplies the default font size
+      // and bold weight (see `inheritedTextProp`). A Heading wrapping child
+      // nodes paints only its box; the children paint themselves and inherit
+      // the heading's typography. Previously Heading fell through to the
+      // container default and its title was never drawn.
+      paintContainer(ctx, node);
+      if (node.children.length === 0) paintText(ctx, node);
+      break;
     case "button":
       paintButton(ctx, node);
       break;
@@ -473,7 +482,8 @@ function paintContainer(ctx: CanvasRenderingContext2D, node: VirtualNode): void 
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  const radius = resolveCornerRadii(props, layout.border.radius);
+  const rounded = hasRadius(radius);
 
   // Apply shadow if specified
   const shadow = props.shadow || props.boxShadow;
@@ -486,7 +496,7 @@ function paintContainer(ctx: CanvasRenderingContext2D, node: VirtualNode): void 
   if (background) {
     ctx.fillStyle = resolveCanvasPaint(ctx, background, x, y, width, height);
 
-    if (radius > 0) {
+    if (rounded) {
       drawRoundedRect(ctx, x, y, width, height, radius);
       ctx.fill();
     } else {
@@ -507,7 +517,7 @@ function paintContainer(ctx: CanvasRenderingContext2D, node: VirtualNode): void 
     ctx.strokeStyle = layout.border.color;
     ctx.lineWidth = layout.border.width;
     applyBorderLineStyle(ctx, props, layout.border.width);
-    if (radius > 0) {
+    if (rounded) {
       drawRoundedRect(ctx, x, y, width, height, radius);
       ctx.stroke();
     } else {
@@ -532,7 +542,7 @@ function paintContainer(ctx: CanvasRenderingContext2D, node: VirtualNode): void 
   ) {
     ctx.save();
     ctx.beginPath();
-    if (radius > 0) {
+    if (rounded) {
       drawRoundedRect(ctx, x, y, width, height, radius);
     } else {
       ctx.rect(x, y, width, height);
@@ -1041,29 +1051,57 @@ function paintImage(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   const y = layout.y;
   const width = layout.width;
   const height = layout.height;
-  const radius = layout.border.radius;
+  // Per-corner radii (`rounded-t-xl`, `.borderRadius(topLeft: …)`) as well
+  // as the uniform `layout.border.radius`.
+  const radius = resolveCornerRadii(props, layout.border.radius);
 
   // Clip to the rounded box so `rounded-full` avatars actually paint as
   // circles. Without this, avatars and post-header photos paint as
   // squares behind their (correctly-rounded) story-ring border.
-  const clipped = radius > 0 && width > 0 && height > 0;
+  const clipped = hasRadius(radius) && width > 0 && height > 0;
   if (clipped) {
     ctx.save();
     drawRoundedRect(ctx, x, y, width, height, radius);
     ctx.clip();
   }
 
+  // Close the clip, then stroke the image's own border (`.tw("border")` +
+  // `.borderColor(…)`) along the same rounded outline the DOM `<img>` shows.
+  const finish = (): void => {
+    if (clipped) ctx.restore();
+    if (layout.border.width > 0 && layout.border.color !== "transparent") {
+      ctx.save();
+      ctx.strokeStyle = layout.border.color;
+      ctx.lineWidth = layout.border.width;
+      applyBorderLineStyle(ctx, props, layout.border.width);
+      if (hasRadius(radius)) {
+        drawRoundedRect(ctx, x, y, width, height, radius);
+        ctx.stroke();
+      } else {
+        ctx.strokeRect(x, y, width, height);
+      }
+      ctx.restore();
+    }
+  };
+
   const cached = imageCache.get(src);
   if (cached && cached.complete && cached.naturalWidth > 0) {
     // `objectFit: cover` is the social-feed default — fill the box without
     // squashing. Anything else (or unspecified) falls back to the prior
     // stretch behaviour for back-compat.
+    // The element's background shows through transparent image pixels,
+    // as it does behind a DOM `<img>`.
+    const background = resolveBackgroundPaint(props);
+    if (background) {
+      ctx.fillStyle = resolveCanvasPaint(ctx, background, x, y, width, height);
+      ctx.fillRect(x, y, width, height);
+    }
     if (props.objectFit === "cover") {
       drawImageCover(ctx, cached, x, y, width, height);
     } else {
       ctx.drawImage(cached, x, y, width, height);
     }
-    if (clipped) ctx.restore();
+    finish();
     return;
   }
 
@@ -1085,13 +1123,13 @@ function paintImage(ctx: CanvasRenderingContext2D, node: VirtualNode): void {
   if (failEntry) {
     if (failEntry.attempts >= IMAGE_MAX_ATTEMPTS || Date.now() - failEntry.failedAt < IMAGE_FAIL_COOLDOWN_MS) {
       ctx.fillText("Failed", x + width / 2, y + height / 2);
-      if (clipped) ctx.restore();
+      finish();
       return;
     }
   }
 
   ctx.fillText("Loading...", x + width / 2, y + height / 2);
-  if (clipped) ctx.restore();
+  finish();
 
   // Start loading if not already pending
   if (!imagePending.has(src)) {
@@ -2639,8 +2677,12 @@ function drawRoundedRect(
   y: number,
   width: number,
   height: number,
-  radius: number
+  radius: number | CornerRadii
 ): void {
+  if (typeof radius !== "number") {
+    drawRoundedRectCorners(ctx, x, y, width, height, radius);
+    return;
+  }
   if (radius <= 0 || width <= 0 || height <= 0) {
     ctx.rect(x, y, width, height);
     return;
@@ -2659,6 +2701,77 @@ function drawRoundedRect(
   ctx.lineTo(x, y + r);
   ctx.arcTo(x, y, x + r, y, r);
   ctx.closePath();
+}
+
+/** Per-corner radii in CSS order: top-left, top-right, bottom-right, bottom-left. */
+export type CornerRadii = [number, number, number, number];
+
+/** Rounded-rect path with an independent radius per corner. */
+function drawRoundedRectCorners(
+  ctx: CanvasRenderingContext2D,
+  x: number,
+  y: number,
+  width: number,
+  height: number,
+  radii: CornerRadii,
+): void {
+  ctx.beginPath();
+  if (width <= 0 || height <= 0) {
+    ctx.rect(x, y, width, height);
+    return;
+  }
+  const max = Math.min(width / 2, height / 2);
+  const [tl, tr, br, bl] = radii.map((r) => Math.max(0, Math.min(r, max))) as CornerRadii;
+  ctx.moveTo(x + tl, y);
+  ctx.lineTo(x + width - tr, y);
+  if (tr > 0) ctx.arcTo(x + width, y, x + width, y + tr, tr);
+  else ctx.lineTo(x + width, y);
+  ctx.lineTo(x + width, y + height - br);
+  if (br > 0) ctx.arcTo(x + width, y + height, x + width - br, y + height, br);
+  else ctx.lineTo(x + width, y + height);
+  ctx.lineTo(x + bl, y + height);
+  if (bl > 0) ctx.arcTo(x, y + height, x, y + height - bl, bl);
+  else ctx.lineTo(x, y + height);
+  ctx.lineTo(x, y + tl);
+  if (tl > 0) ctx.arcTo(x, y, x + tl, y, tl);
+  else ctx.lineTo(x, y);
+  ctx.closePath();
+}
+
+const CORNER_KEYS = [
+  ["topLeft", "borderTopLeftRadius", "topStart"],
+  ["topRight", "borderTopRightRadius", "topEnd"],
+  ["bottomRight", "borderBottomRightRadius", "bottomEnd"],
+  ["bottomLeft", "borderBottomLeftRadius", "bottomStart"],
+] as const;
+
+/**
+ * Resolve a node's corner radii, honouring per-corner overrides the uniform
+ * `layout.border.radius` cannot express: Tailwind's directional
+ * `rounded-t-xl` (→ `borderTopLeftRadius` / `borderTopRightRadius`) and the
+ * object form `.borderRadius(topLeft: 12, …)` / `.cornerRadius(…)` the DOM
+ * applicator accepts (physical keys, plus `topStart`-style logical keys mapped
+ * LTR). Returns the plain uniform number when no corner is overridden, so the
+ * common path is unchanged.
+ */
+export function resolveCornerRadii(
+  props: Record<string, any>,
+  uniform: number,
+): number | CornerRadii {
+  const objRaw = props.borderRadius ?? props.cornerRadius;
+  const obj = objRaw && typeof objRaw === "object" ? objRaw as Record<string, any> : null;
+  let overridden = obj !== null;
+  const radii = CORNER_KEYS.map(([physical, longhand, logical]) => {
+    const raw = props[longhand] ?? obj?.[physical] ?? obj?.[logical];
+    if (raw === undefined) return obj ? 0 : uniform;
+    overridden = true;
+    return cssLengthToPx(raw) ?? 0;
+  }) as CornerRadii;
+  return overridden ? radii : uniform;
+}
+
+function hasRadius(radius: number | CornerRadii): boolean {
+  return typeof radius === "number" ? radius > 0 : radius.some((r) => r > 0);
 }
 
 /**

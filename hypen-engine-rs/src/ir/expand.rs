@@ -1102,7 +1102,19 @@ pub fn ast_to_ir_node(component: &ComponentSpecification) -> IRNode {
             // into the semantics block above; strip them so they don't travel
             // on as junk props (which would otherwise be silently dropped by
             // the renderer's CSS fallback).
-            element.props.remove("label.0");
+            // A *dynamic* `.label(...)` (`.label("@{state.x ? 'a' : 'b'}")`,
+            // `.label("Colour @{item.color}")` in a ForEach, or a
+            // scheme-switched `.label({default: "Close", dark: …})`) is
+            // kept: its bindings must register as dependencies and resolve
+            // at reconcile, where `Semantics::with_resolved_name` reads it.
+            if !matches!(
+                element.props.get("label.0"),
+                Some(Value::Binding(_))
+                    | Some(Value::TemplateString { .. })
+                    | Some(Value::SchemeSwitch { .. })
+            ) {
+                element.props.remove("label.0");
+            }
             element.props.remove("hidden.0");
             element.props.remove("description.0");
             // NOTE: .role/.landmark (role.0/landmark.0) and .dir (dir.0) are

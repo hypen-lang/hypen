@@ -6,12 +6,13 @@
     "dev": "wrangler dev",
     "deploy": "wrangler deploy",
     "wallpapers:download": "bun run scripts/download-wallpapers.ts",
+    "wallpapers:upload": "bun run scripts/upload-wallpapers.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@hypen-space/core": "0.6.7",
     "@hypen-space/cf": "0.6.7",
-    "@hypen-space/web": "0.6.5",
+    "@hypen-space/web": "0.6.7",
     "hypen-engine": "0.6.7"
   },
   "devDependencies": {

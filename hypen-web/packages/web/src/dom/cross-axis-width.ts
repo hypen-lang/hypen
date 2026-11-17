@@ -24,7 +24,14 @@ const SOURCE_DATASET_KEYS: Record<WidthSource, string> = {
 };
 
 const VERTICAL_CARRIERS = new Set(["column", "list"]);
-const DEMAND_CARRIERS = new Set(["column", "list", "card"]);
+// A Stack carries demand too: it is a one-cell grid whose children all
+// share its width, so a `w-full` child (the Food restaurant hero image)
+// must size the Stack from the parent's proposal like it would a Column.
+// Without it the Stack shrank to its content — for an <img> with a fixed
+// height, the aspect-ratio width (~300px of a 430px screen) — and the 100%
+// resolved against that. A Stack of fixed-size children (avatar + badge)
+// carries no demand and stays content-sized; a sized Stack ends the chain.
+const DEMAND_CARRIERS = new Set(["column", "list", "card", "stack"]);
 
 function hypenType(element: HTMLElement): string {
   return element.dataset.hypenType?.toLowerCase() ?? "";

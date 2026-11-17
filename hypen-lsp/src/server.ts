@@ -250,13 +250,15 @@ const commonComponents = [
   // Layout
   "Column", "Row", "Container", "Box", "Center", "Stack", "Grid", "Spacer", "Divider", "SafeArea",
   // Content
-  "Text", "Heading", "Paragraph", "Image", "Avatar", "Badge", "Card", "Spinner", "ProgressBar",
+  "Text", "Heading", "Paragraph", "Image", "Icon", "Avatar", "Badge", "Card", "Spinner", "ProgressBar",
   // Input
   "Button", "Input", "Textarea", "Checkbox", "Switch", "Select", "Slider", "Scrubber",
   // Lists (virtualized: only visible rows are materialized)
   "List", "ForEach",
   // Navigation
   "Router", "Route", "Link",
+  // Embedding (a remote Hypen app)
+  "HypenApp",
   // Media
   "Video", "Audio",
   // Charts (data-space marks inside a Chart)
@@ -415,6 +417,13 @@ const componentSignatures: Record<string, ComponentSignature> = {
       { label: "alt", documentation: "Accessible alternative text (optional)" }
     ]
   },
+  Icon: {
+    label: "Icon(name: @resources.name | String)",
+    documentation: "SVG icon rendered from a registered resource (`resources()` / `resourcesDir()`); the client receives pre-resolved path data.\n\n```hypen\nIcon(@resources.heart)\n  .size(24)\n  .color(\"#ed4956\")\n```",
+    parameters: [
+      { label: "name", documentation: "`@resources.<name>` reference or a static resource name string" }
+    ]
+  },
   Avatar: {
     label: "Avatar(src: String)",
     documentation: "Circular image for profile pictures or icons.\n\n```hypen\nAvatar(src: \"@{state.user.avatar}\")\n  .size(48)\n```",
@@ -510,6 +519,17 @@ const componentSignatures: Record<string, ComponentSignature> = {
     documentation: "Navigation link. Renders as `<a>` and integrates with the Router.\n\n```hypen\nLink(to: \"/about\") {\n  Text(\"About Us\")\n}\n```",
     parameters: [
       { label: "to", documentation: "Target path or URL" }
+    ]
+  },
+
+  // ── Embedding ──
+  HypenApp: {
+    label: "HypenApp(url: String, autoReconnect?: Boolean, reconnectInterval?: Number)",
+    documentation: "Embed a remote Hypen app.\n\n```hypen\nHypenApp(\"ws://localhost:3000\")\n```",
+    parameters: [
+      { label: "url", documentation: "WebSocket URL of the remote Hypen server" },
+      { label: "autoReconnect", documentation: "Reconnect when the connection drops (optional)" },
+      { label: "reconnectInterval", documentation: "Milliseconds between reconnect attempts (optional)" }
     ]
   },
 

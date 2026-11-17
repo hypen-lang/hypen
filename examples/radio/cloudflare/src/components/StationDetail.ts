@@ -2,7 +2,7 @@ import { app } from "@hypen-space/core";
 import { stationById, tagList, type Station } from "../radio-browser";
 import { EMPTY_STATION, isFavourite, openPlayer, shell, startStation, toggleFavourite } from "../player";
 import { back, routeParam } from "../screen-actions";
-import { C, art, errorCard, screen, subHeader } from "../ui";
+import { C, MONO, errorCard, iconButton, kicker } from "../ui";
 
 // /station/:id — full station record from Radio Browser by UUID.
 
@@ -21,8 +21,13 @@ interface DetailState {
   error: string;
   favourite: boolean;
   hasLanguage: boolean;
-  /** "1,234 votes · 56,789 clicks" */
-  stats: string;
+  language: string;
+  /** Formatted figures for the stat strip. */
+  votes: string;
+  clicks: string;
+  bitrate: string;
+  /** "🇺🇸 UNITED STATES" */
+  origin: string;
   /** Homepage host, shown as text ("Link" isn't a registered primitive in the published engine). */
   website: string;
 }
@@ -45,7 +50,12 @@ async function load(state: DetailState, id: string, favourite: boolean) {
     state.station = station;
     state.tags = tagList(station).map((t) => ({ id: t, name: t, slug: encodeURIComponent(t) }));
     state.hasLanguage = station.language !== "";
-    state.stats = `${fmt.format(station.votes)} votes · ${fmt.format(station.clicks)} clicks`;
+    // The first listed language, capitalised (text-transform isn't portable).
+    state.language = (station.language.split(",")[0] ?? "").trim().replace(/\b\w/g, (m) => m.toUpperCase());
+    state.votes = fmt.format(station.votes);
+    state.clicks = fmt.format(station.clicks);
+    state.bitrate = station.bitrate > 0 ? String(station.bitrate) : "—";
+    state.origin = `${station.flag} ${station.country.toUpperCase()}`.trim();
     state.website = station.homepage ? station.homepage.replace(/^https?:\/\/(www\.)?/, "").replace(/\/$/, "") : "";
     state.favourite = favourite;
     state.ready = true;
@@ -68,7 +78,11 @@ export default app
     error: "",
     favourite: false,
     hasLanguage: false,
-    stats: "",
+    language: "",
+    votes: "",
+    clicks: "",
+    bitrate: "",
+    origin: "",
     website: "",
   })
   .onActivated(async (state, context) => {
@@ -108,60 +122,15 @@ export default app
     const lang = state.station.language.split(",")[0]?.trim();
     if (lang) context?.router?.push(`/list/language/${encodeURIComponent(lang)}`);
   })
-  .ui(
-    screen(
-      "StationDetail",
-      `
-${subHeader("Station")}
-
-          If(condition: "@{state.loading}") {
-            Column {
-              Box {}.tw("w-40 h-40 rounded-3xl").backgroundColor("${C.surface}")
-              Box {}.tw("h-5 w-48 mt-5 rounded").backgroundColor("${C.surface}")
-              Box {}.tw("h-3 w-32 mt-3 rounded").backgroundColor("${C.surface}")
-            }
-            .tw("items-center py-6 w-full")
-            .animate(shimmer)
-          }
-          If(condition: "@{state.failed}") {
-${errorCard("@{state.error}")}
-          }
-
-          If(condition: "@{state.ready}") {
-            Column {
-              Column {
-${art("@{state.station.art}", 168, 28, "@{state.station.name} logo")}
-                  .boxShadow("0 18px 40px rgba(0, 0, 0, 0.45)")
-                Heading("@{state.station.name}", level: 2)
-                  .tw("text-2xl font-bold mt-5 text-center")
-                  .color("${C.text}")
-                Text("@{state.station.quality}")
-                  .tw("text-xs mt-1.5 text-center")
-                  .color("${C.muted}")
-                Text("@{state.stats}")
-                  .tw("text-[11px] mt-1 text-center")
-                  .color("${C.faint}")
-              }
-              .tw("items-center w-full pt-2")
-
-              Row {
-                Button {
-                  Row {
-                    Icon(@resources.play)
-                      .size(16)
-                      .color("#FFFFFF")
-                    Text("Listen live")
-                      .tw("text-sm font-bold ml-2")
-                      .color("#FFFFFF")
-                  }
-                  .tw("items-center")
-                }
-                .tw("flex-1 h-12 rounded-2xl border-0 items-center justify-center")
-                .backgroundColor("@{state.station.playable ? '${C.accent}' : '${C.surface2}'}")
-                .opacity({ default: 1, active: 0.7 })
-                .disabled("@{!state.station.playable}")
-                .onClick(@actions.play)
-
+  .ui(`
+    module StationDetail {
+      Column {
+        Column {
+          Column {
+            Row {
+${iconButton("chevron-left", "back", "Back")}
+${kicker("STATION", "rgba(244, 238, 225, 0.8)", "ml-3.5 flex-1")}
+              If(condition: "@{state.ready}") {
                 Button {
                   If(condition: "@{state.favourite}") {
                     Icon(@resources.heart-filled)
@@ -174,87 +143,232 @@ ${art("@{state.station.art}", 168, 28, "@{state.station.name} logo")}
                       .color("${C.text}")
                   }
                 }
-                .tw("w-12 h-12 ml-3 rounded-2xl border-0 items-center justify-center")
-                .backgroundColor("${C.surface}")
+                .tw("w-11 h-11 rounded-full items-center justify-center shrink-0 p-0")
+                .border("1px solid ${C.line}")
+                .backgroundColor({ default: "rgba(244, 238, 225, 0.06)", hover: "rgba(244, 238, 225, 0.14)" })
                 .opacity({ default: 1, active: 0.6 })
                 .onClick(@actions.favourite)
                 .label("Favourite")
               }
-              .tw("w-full mt-6 items-center")
+            }
+            .tw("items-center pt-5 w-full")
 
-              If(condition: "@{!state.station.playable}") {
-                Text("@{state.station.unplayableReason}")
-                  .tw("text-xs mt-3 text-center")
-                  .color("${C.accent}")
-              }
-
+            If(condition: "@{state.loading}") {
               Column {
-                Text("DETAILS")
-                  .tw("text-[11px] font-bold tracking-widest text-left")
-                  .color("${C.faint}")
+                Box {}.tw("w-44 h-44 rounded-[32px]").backgroundColor("${C.surface}")
+                Box {}.tw("h-6 w-56 mt-7 rounded").backgroundColor("${C.surface}")
+                Box {}.tw("h-3 w-36 mt-3 rounded").backgroundColor("${C.surface}")
+                Box {}.tw("h-[52px] w-full mt-8 rounded-full").backgroundColor("${C.surface}")
+              }
+              .tw("items-center pt-6 w-full")
+              .animate(shimmer)
+            }
+            If(condition: "@{state.failed}") {
+${errorCard("@{state.error}")}
+            }
+
+            If(condition: "@{state.ready}") {
+              Column {
+                Column {
+                  Image(src: "@{state.station.art}", alt: "@{state.station.name} logo")
+                    .objectFit("cover")
+                    .width(148)
+                    .height(148)
+                    .borderRadius(30)
+                    .backgroundColor("${C.raised}")
+                    .boxShadow("0 24px 48px rgba(0, 0, 0, 0.5)")
+                    .border("1px solid ${C.line}")
+                  Text("@{state.origin}")
+                    .tw("text-[11px] font-bold tracking-widest mt-6 text-left w-full")
+                    ${MONO}
+                    .color("rgba(244, 238, 225, 0.8)")
+                  Heading("@{state.station.name}", level: 1)
+                    .tw("text-[32px] font-black mt-1.5 text-left leading-tight tracking-tight w-full")
+                    .color("${C.text}")
+                    .maxLines(3)
+                    .textOverflow("ellipsis")
+                  Text("@{state.station.tags}")
+                    .tw("text-sm mt-2 text-left w-full")
+                    .color("${C.muted}")
+                    .maxLines(1)
+                    .textOverflow("ellipsis")
+                }
+                .tw("items-start w-full pt-6")
+
                 Button {
                   Row {
-                    Text("@{state.station.flag}").tw("text-base")
-                    Text("@{state.station.country}")
-                      .tw("flex-1 ml-2 text-sm text-left")
+                    Icon(@resources.play)
+                      .size(16)
+                      .color("${C.ink}")
+                    Text("Listen live")
+                      .tw("text-base font-bold ml-2.5")
+                      .color("${C.ink}")
+                  }
+                  .tw("items-center")
+                }
+                .tw("w-full h-14 mt-7 rounded-full border-0 items-center justify-center")
+                .backgroundColor("@{state.station.playable ? '${C.text}' : '${C.faint}'}")
+                .opacity({ default: 1, active: 0.72 })
+                .transition(140, easeOut)
+                .disabled("@{!state.station.playable}")
+                .onClick(@actions.play)
+
+                If(condition: "@{!state.station.playable}") {
+                  Row {
+                    Icon(@resources.alert).size(16).color("${C.accent}")
+                    Text("@{state.station.unplayableReason}")
+                      .tw("flex-1 min-w-0 text-[13px] ml-2.5 text-left leading-5")
                       .color("${C.text}")
+                  }
+                  .tw("w-full items-start mt-3 px-4 py-3 rounded-[16px]")
+                  .backgroundColor("${C.accentSoft}")
+                }
+
+                Row {
+                Column {
+                  Text("@{state.votes}")
+                    .tw("text-xl font-black text-center")
+                    .color("${C.text}")
+                  Text("VOTES")
+                    .tw("text-[10px] font-bold tracking-widest mt-1 text-center")
+                    ${MONO}
+                    .color("${C.faint}")
+                }
+                .tw("flex-1 items-center")
+                Box {}.width(1).height(28).backgroundColor("${C.line}")
+                Column {
+                  Text("@{state.clicks}")
+                    .tw("text-xl font-black text-center")
+                    .color("${C.text}")
+                  Text("CLICKS")
+                    .tw("text-[10px] font-bold tracking-widest mt-1 text-center")
+                    ${MONO}
+                    .color("${C.faint}")
+                }
+                .tw("flex-1 items-center")
+                Box {}.width(1).height(28).backgroundColor("${C.line}")
+                Column {
+                  Text("@{state.bitrate}")
+                    .tw("text-xl font-black text-center")
+                    .color("${C.text}")
+                  Text("KBPS")
+                    .tw("text-[10px] font-bold tracking-widest mt-1 text-center")
+                    ${MONO}
+                    .color("${C.faint}")
+                }
+                .tw("flex-1 items-center")
+                Box {}.width(1).height(28).backgroundColor("${C.line}")
+                Column {
+                  Text("@{state.station.codec}")
+                    .tw("text-xl font-black text-center")
+                    .color("${C.text}")
+                  Text("CODEC")
+                    .tw("text-[10px] font-bold tracking-widest mt-1 text-center")
+                    ${MONO}
+                    .color("${C.faint}")
+                }
+                .tw("flex-1 items-center")
+                }
+                .tw("w-full items-center mt-6 py-4 rounded-[20px]")
+                .border("1px solid ${C.line}")
+                .backgroundColor("rgba(13, 11, 9, 0.35)")
+              }
+              .tw("w-full items-center")
+              .enter(fade, duration: 220)
+            }
+          }
+          .tw("w-full px-5 md:px-10 pb-7")
+          .maxWidth(640)
+        }
+        .tw("w-full items-center")
+        .background("linear-gradient(180deg, @{state.station.tint} 0%, ${C.bg} 100%)")
+
+        If(condition: "@{state.ready}") {
+          Column {
+${kicker("FIND MORE LIKE IT", C.faint, "mb-3")}
+            Column {
+                Button {
+                  Row {
+                    Icon(@resources.map-pin).size(18).color("${C.muted}").tw("w-6")
+                    Text("More from @{state.station.country}")
+                      .tw("flex-1 min-w-0 ml-3 text-[15px] text-left")
+                      .color("${C.text}")
+                      .maxLines(1)
+                      .textOverflow("ellipsis")
                     Icon(@resources.chevron-right).size(16).color("${C.faint}")
                   }
                   .tw("items-center w-full")
                 }
-                .tw("w-full py-3 bg-transparent border-0 px-0 items-stretch")
-                .borderBottom("1px solid ${C.line}")
+                .tw("w-full h-[52px] px-4 bg-transparent border-0 items-stretch justify-center")
+                .tw("bg-transparent hover:bg-white/10")
+                .opacity({ default: 1, active: 0.6 })
                 .onClick(@actions.country)
-                If(condition: "@{state.hasLanguage}") {
-                  Button {
-                    Row {
-                      Icon(@resources.language).size(16).color("${C.muted}")
-                      Text("@{state.station.language}")
-                        .tw("flex-1 ml-2 text-sm text-left")
-                        .color("${C.text}")
-                        .textTransform("capitalize")
-                      Icon(@resources.chevron-right).size(16).color("${C.faint}")
-                    }
-                    .tw("items-center w-full")
-                  }
-                  .tw("w-full py-3 bg-transparent border-0 px-0 items-stretch")
-                  .borderBottom("1px solid ${C.line}")
-                  .onClick(@actions.language)
-                }
-                If(condition: "@{state.station.hasHomepage}") {
+              If(condition: "@{state.hasLanguage}") {
+                Column {
+                  Box {}.tw("w-full").height(1).backgroundColor("${C.line}")
+                Button {
                   Row {
-                    Icon(@resources.external).size(16).color("${C.muted}")
-                    Text("@{state.website}")
-                      .tw("flex-1 ml-2 text-sm text-left")
+                    Icon(@resources.language).size(18).color("${C.muted}").tw("w-6")
+                    Text("Stations in @{state.language}")
+                      .tw("flex-1 min-w-0 ml-3 text-[15px] text-left")
                       .color("${C.text}")
                       .maxLines(1)
                       .textOverflow("ellipsis")
+                    Icon(@resources.chevron-right).size(16).color("${C.faint}")
                   }
-                  .tw("items-center w-full py-3")
+                  .tw("items-center w-full")
                 }
-              }
-              .tw("w-full mt-7 items-stretch")
-
-              Text("TAGS")
-                .tw("text-[11px] font-bold tracking-widest text-left mt-6 mb-3 w-full")
-                .color("${C.faint}")
-              Row {
-                ForEach(items: @state.tags, key: "id") {
-                  Button {
-                    Text("#@{item.name}")
-                      .tw("text-xs font-semibold")
-                      .color("${C.text}")
-                  }
-                  .tw("h-8 px-3.5 mr-2 mb-2 rounded-full border-0 items-center justify-center")
-                  .backgroundColor({ default: "${C.accentSoft}", hover: "rgba(255, 90, 54, 0.28)" })
-                  .onClick(@actions.tag, slug: "@{item.slug}")
+                .tw("w-full h-[52px] px-4 bg-transparent border-0 items-stretch justify-center")
+                .tw("bg-transparent hover:bg-white/10")
+                .opacity({ default: 1, active: 0.6 })
+                .onClick(@actions.language)
                 }
+                .tw("w-full")
               }
-              .tw("w-full flex-wrap")
             }
-            .tw("w-full items-center")
-            .enter(fade, duration: 200)
+            .tw("w-full rounded-[20px] overflow-hidden")
+            .border("1px solid ${C.line}")
+            .backgroundColor("${C.surface}")
+
+            If(condition: "@{state.station.hasHomepage}") {
+              Row {
+                Icon(@resources.external).size(16).color("${C.muted}")
+                Text("@{state.website}")
+                  .tw("flex-1 min-w-0 ml-3 text-sm text-left")
+                  ${MONO}
+                  .color("${C.muted}")
+                  .maxLines(1)
+                  .textOverflow("ellipsis")
+              }
+              .tw("items-center w-full px-4 mt-4")
+            }
+
+${kicker("TAGS", C.faint, "mt-8 mb-3")}
+            Grid(@state.tags, key: "id") {
+              Button {
+                Text("@{item.name}")
+                  .tw("text-[13px] font-bold text-center w-full")
+                  .color("${C.text}")
+                  .maxLines(1)
+                  .textOverflow("ellipsis")
+              }
+              .tw("h-10 px-3 rounded-full items-center justify-center min-w-0")
+              .border("1px solid ${C.lineStrong}")
+              .tw("bg-transparent hover:bg-white/10")
+              .opacity({ default: 1, active: 0.6 })
+              .onClick(@actions.tag, slug: "@{item.slug}")
+            }
+            .gridColumns(3)
+            .tw("gap-2 w-full")
           }
-`,
-    ),
-  );
+          .tw("w-full px-5 md:px-10 pt-2 pb-10 items-start")
+          .maxWidth(640)
+          .enter(fade, duration: 220)
+        }
+      }
+      .horizontalAlignment("center")
+      .scrollable(true)
+      .tw("flex-1 w-full min-h-0")
+      .backgroundColor("${C.bg}")
+    }
+  `);

@@ -109,7 +109,6 @@ pub const CHECK_IGNORE_TOKEN: &str = "hypen-check-ignore";
 /// derives roles for and the structural types the renderers register.
 /// Compared case-insensitively (renderers dispatch on the lowercased type).
 const EXTRA_BUILTIN_ELEMENTS: &[&str] = &[
-    "Link",
     "Tabs",
     "Tab",
     "TabPanel",

@@ -1482,6 +1482,62 @@ describe("touch-action is written at ARM time (before any touch starts)", () => 
     await sleep(60);
     expect(menu()).toBe(false);
   });
+
+  test("a LOOSE auto draggable keeps the UA pan (a grid of draggable tiles scrolls by touch)", () => {
+    const { renderer } = makeRenderer();
+    const { card } = mountCardAndZone(renderer);
+    // Not `none`: that made a scrolling grid of loose tiles unscrollable.
+    expect(styleOf(card, "touch-action")).toBe("manipulation");
+    // An explicit activation still hardens it.
+    renderer.applyPatches([
+      { type: "setProp", id: "card", name: "__dnd.source", value: SOURCE("cards", { activation: "press" }) } as Patch,
+    ]);
+    expect(styleOf(card, "touch-action")).toBe("none");
+  });
+
+  test("loose touch: a swipe pans (pointercancel abandons the press); a still press claims and its touchmoves cannot pan", async () => {
+    const { renderer, engine, dnd } = makeRenderer();
+    dnd.pressDelayMs = 20;
+    const { card } = mountCardAndZone(renderer);
+    const touchMove = () => {
+      let prevented = false;
+      card.dispatchEvent("touchmove", { cancelable: true, preventDefault: () => (prevented = true) });
+      return prevented;
+    };
+
+    // Swipe: the UA starts a pan and cancels the pointer. Silent no-op.
+    down(card, 50, 25, { pointerType: "touch" });
+    expect(touchMove()).toBe(false); // pending: the pan is the user's
+    card.dispatchEvent("pointercancel", { pointerId: 1 });
+    await sleep(40);
+    expect(dnd.isInteracting("card")).toBe(false);
+    expect(engine.dispatchCalls).toEqual([]);
+
+    // Still press: claims after the delay; from then on the guard holds.
+    down(card, 50, 25, { pointerType: "touch" });
+    await sleep(40);
+    expect(dnd.isInteracting("card")).toBe(true);
+    expect(touchMove()).toBe(true);
+    card.dispatchEvent("pointercancel", { pointerId: 1 });
+    expect(touchMove()).toBe(false);
+  });
+});
+
+describe("native HTML5 drags inside a Hypen draggable are cancelled", () => {
+  test("dragstart of an <img> (or anything) inside the source is prevented; disarm removes the guard", () => {
+    const { renderer } = makeRenderer();
+    const { card } = mountCardAndZone(renderer);
+    const img = document.createElement("img") as unknown as FakeElement;
+    card.appendChild(img as any);
+    const dragStart = () => {
+      let prevented = false;
+      card.dispatchEvent("dragstart", { target: img, preventDefault: () => (prevented = true) });
+      return prevented;
+    };
+    expect(dragStart()).toBe(true);
+    renderer.applyPatches([{ type: "removeProp", id: "card", name: "__dnd.source" } as Patch]);
+    expect(dragStart()).toBe(false);
+  });
 });
 
 describe("the click that trails a drop is swallowed", () => {

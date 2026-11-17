@@ -844,9 +844,10 @@ mod tests {
     fn structural_heading_role_reaches_accesskit() {
         use hypen_engine::ir::{Role as SemRole, Semantics};
         // The engine derives `role: heading` for a Heading element; the
-        // desktop layout has no Heading ItemKind (it falls into the container
-        // path), so without the semantics override this would announce as a
-        // generic container.
+        // desktop layout has no Heading ItemKind (a Heading with its own
+        // text lays out as a Text item, one without as a container), so
+        // without the semantics override this would announce as a generic
+        // container.
         let sem = Semantics {
             role: Some(SemRole::Heading),
             name: Some("Billing".into()),

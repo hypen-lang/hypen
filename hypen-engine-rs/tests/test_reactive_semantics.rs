@@ -294,3 +294,76 @@ fn name_reverting_to_original_re_emits() {
     assert_eq!(blocks.len(), 1, "revert must re-emit, got {patches:?}");
     assert_eq!(blocks[0].as_ref().unwrap().name.as_deref(), Some("Save"));
 }
+
+/// The semantics name carried by each `Create` for an element of `ty`.
+fn create_names(patches: &[Patch], ty: &str) -> Vec<Option<String>> {
+    patches
+        .iter()
+        .filter_map(|p| match p {
+            Patch::Create {
+                element_type,
+                semantics,
+                ..
+            } if element_type == ty => Some(semantics.as_ref().and_then(|s| s.name.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn templated_label_applicator_names_and_re_emits() {
+    // `.label(...)` with a ternary template on an icon-only button: the
+    // explicit label must be the accessible name, and follow state.
+    let state = json!({"isSaved": false});
+    let src = r#"Button { Text("★") }.label("@{state.isSaved ? 'Unsave' : 'Save'}")"#;
+    let (mut tree, mut deps, ir, initial) = setup(src, &state);
+    assert_eq!(
+        create_names(&initial, "Button"),
+        vec![Some("Save".to_string())],
+        "got {initial:?}"
+    );
+    let explicit = initial.iter().find_map(|p| match p {
+        Patch::Create {
+            element_type,
+            semantics: Some(s),
+            ..
+        } if element_type == "Button" => s.name_explicit,
+        _ => None,
+    });
+    assert_eq!(explicit, Some(true));
+
+    let patches = update(&mut tree, &mut deps, &ir, &json!({"isSaved": true}));
+    let blocks = set_semantics(&patches);
+    assert_eq!(blocks.len(), 1, "got {patches:?}");
+    assert_eq!(blocks[0].as_ref().unwrap().name.as_deref(), Some("Unsave"));
+}
+
+#[test]
+fn templated_label_applicator_resolves_per_foreach_row() {
+    let state = json!({"swatches": [{"color": "red"}, {"color": "blue"}]});
+    let src = r#"Row {
+        ForEach(items: @state.swatches, as: "swatch") {
+            Button { Text("") }.label("Colour @{swatch.color}")
+        }
+    }"#;
+    let (_tree, _deps, _ir, patches) = setup(src, &state);
+    assert_eq!(
+        create_names(&patches, "Button"),
+        vec![
+            Some("Colour red".to_string()),
+            Some("Colour blue".to_string())
+        ],
+        "got {patches:?}"
+    );
+}
+
+#[test]
+fn templated_label_applicator_names_a_bare_container() {
+    let state = json!({"title": "Inbox"});
+    let src = r#"Column { Text("x") }.role("region").label("@{state.title}")"#;
+    let (_tree, _deps, _ir, patches) = setup(src, &state);
+    assert_eq!(
+        create_names(&patches, "Column"),
+        vec![Some("Inbox".to_string())]
+    );
+}
