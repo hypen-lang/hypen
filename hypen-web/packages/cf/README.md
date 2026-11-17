@@ -47,6 +47,22 @@ storage. Every module instance of a DO's sessions writes through a store
 bound to that DO's storage, so concurrent DOs of one class (which share an
 isolate and a module definition) never write into each other.
 
+A custom store built on a `durableObjectStore` (saving only some fields,
+transforming the value on load) must stay per DO too. Build it with
+`deriveStore(inner, wrap)`: `wrap` receives a store bound to one DO's storage
+and returns the custom store over it, and the result implements the
+`__forStorage` hook that `HypenDurableObject` uses to hand each DO its own
+copy (memoised per storage, so state in `wrap`'s closure is per DO as well).
+
+A custom store without `__forStorage` is not re-bound. Instead the DO runs
+every call into it inside its own storage scope (`withStorageScope`), and a
+`durableObjectStore` called inside that scope resolves to the scoping DO's
+storage rather than the class-wide fallback. The scope uses
+`AsyncLocalStorage` (the `nodejs_compat` flag) to follow the call across
+`await`s; without it, only each call's synchronous prefix is scoped and the
+DO warns once. State kept in such a wrapper's own closure is shared by every
+DO of the class, which is another reason to prefer `deriveStore`.
+
 ## Building the browser client
 
 `bun run build` bundles `client/generic-client.ts` (with `@hypen-space/web`

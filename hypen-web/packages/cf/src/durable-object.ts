@@ -64,6 +64,7 @@
 
 import type { HypenApp, HypenModule, HypenModuleDefinition } from "@hypen-space/core/app";
 import type { Theme } from "@hypen-space/core/theme";
+import type { StateStore } from "@hypen-space/core/persistence";
 import { createLogger } from "@hypen-space/core/logger";
 import type { BaseEngine } from "@hypen-space/core/engine-base";
 import type { RemoteClient, RemoteMessage } from "@hypen-space/core/remote";
@@ -83,7 +84,9 @@ import {
   isOversizeDeviceText,
 } from "@hypen-space/core/remote/device";
 import {
+  hasAsyncStorageScope,
   isDurableObjectStore,
+  scopedStateStore,
   type DurableObjectStorage,
   type DurableObjectStateStore,
 } from "./durable-object-store.js";
@@ -682,8 +685,15 @@ export abstract class HypenDurableObject {
       // store copy bound to THIS DO's storage. The definition's store is
       // shared by every DO of the class (one isolate), so a shared binding
       // would let a save after an `await` land in another visitor's DO.
+      //
+      // A custom store without `__forStorage` (a hand-written wrapper around
+      // a `durableObjectStore`) cannot be re-bound, so every call into it
+      // runs in this DO's storage scope instead: the stores it wraps resolve
+      // to THIS DO's storage, across `await`s where the runtime has
+      // `AsyncLocalStorage` (`nodejs_compat`). Prefer `deriveStore`, which
+      // implements `__forStorage` and so needs no ambient scope.
       stateStoreFor(store) {
-        return isDurableObjectStore(store) ? store.__forStorage(self.ctx.storage) : store;
+        return stateStoreForStorage(store, self.ctx.storage);
       },
       createEngine() {
         return self.createEngine();
@@ -899,6 +909,39 @@ function toBytes(message: ArrayBuffer | ArrayBufferView): Uint8Array {
 }
 
 /** Bind DO storage into a state store if it exposes the `__bindStorage` channel. */
+const scopedCopies = new WeakMap<object, WeakMap<DurableObjectStorage, StateStore<any>>>();
+let warnedUnscoped = false;
+
+/**
+ * The store a module instance of the DO owning `storage` persists through.
+ * Exported for testing.
+ */
+export function stateStoreForStorage(
+  store: StateStore<any>,
+  storage: DurableObjectStorage,
+): StateStore<any> {
+  if (isDurableObjectStore(store)) return store.__forStorage(storage);
+  let perStorage = scopedCopies.get(store);
+  if (!perStorage) {
+    perStorage = new WeakMap();
+    scopedCopies.set(store, perStorage);
+  }
+  let copy = perStorage.get(storage);
+  if (!copy) {
+    if (!hasAsyncStorageScope() && !warnedUnscoped) {
+      warnedUnscoped = true;
+      console.warn(
+        "[hypen/cf] A custom StateStore without __forStorage is bound to each Durable Object " +
+          "only for the synchronous part of its calls (no AsyncLocalStorage: enable nodejs_compat). " +
+          "Build it with deriveStore() so it is bound per Durable Object.",
+      );
+    }
+    copy = scopedStateStore(store, storage);
+    perStorage.set(storage, copy);
+  }
+  return copy;
+}
+
 function bindStore(store: unknown, storage: DurableObjectStorage): void {
   const s = store as DurableObjectStateStore<unknown> | undefined;
   if (s && typeof s.__bindStorage === "function") {

@@ -1,6 +1,8 @@
 export { global, session, withKey, type KeyStrategy } from "./strategies.js";
 export {
   durableObjectStore,
+  deriveStore,
+  withStorageScope,
   type DurableObjectStateStore,
   type DurableObjectStorage,
 } from "./durable-object-store.js";

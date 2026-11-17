@@ -1,5 +1,6 @@
 import { app } from "@hypen-space/core";
 import { durableObjectStore, withKey } from "@hypen-space/cf";
+import type { StateStore } from "@hypen-space/core/persistence";
 import {
   CROP_KEYS,
   WALLPAPER_PHOTOS,
@@ -1122,51 +1123,82 @@ function settleWithin<T>(operation: Promise<T>, fallback: T, timeoutMs = 750): P
   });
 }
 
-const launcherStore: typeof baseStore = {
-  __bindStorage: (storage) => baseStore.__bindStorage(storage),
-  resolveKey: (state, moduleName, sessionId) => baseStore.resolveKey(state, moduleName, sessionId),
-  async load(key) {
-    // Persistence is optional for this demo. A damaged or unavailable DO
-    // value must never hold the protocol handshake behind an unbounded read.
-    const saved = (await settleWithin(baseStore.load(key), null)) as
-      | PersistedChoices
-      | LauncherState
-      | null;
-    if (!saved || typeof saved.wallpaperId !== "string") return null;
-    const wallpaper = WALLPAPERS.find((w) => w.id === saved.wallpaperId) ?? WALLPAPERS[0]!;
-    const accent = ACCENTS.find((a) => a.id === saved.accentId) ?? ACCENTS[0]!;
-    return {
-      ...initialLauncherState(),
-      location: typeof saved.location === "string" ? saved.location : "/",
-      wallpaperId: wallpaper.id,
-      wallpaper: wallpaper.css.default,
-      wallpaperSm: wallpaper.css.sm,
-      wallpaperMd: wallpaper.css.md,
-      wallpaperLg: wallpaper.css.lg,
-      wallpaperXl: wallpaper.css.xl,
-      wallpapers: WALLPAPERS.map((w) => ({ ...w, selected: w.id === wallpaper.id })),
-      accentId: accent.id,
-      accent: accent.color,
-      accents: ACCENTS.map((a) => ({ ...a, selected: a.id === accent.id })),
-      // onCreated's refreshFiles sorts the drive listing by these.
-      filesView: isFilesView(saved.filesView) ? saved.filesView : "grid",
-      filesSortKey: isSortKey(saved.filesSortKey) ? saved.filesSortKey : "name",
-      filesSortDesc: saved.filesSortDesc === true,
-    };
+/**
+ * The launcher's store over one `durableObjectStore` — either the copy bound
+ * to one Durable Object's storage, or the shared base (the class-wide
+ * fallback, for calls outside a session).
+ */
+function launcherStoreOver(base: StateStore<LauncherState>): StateStore<LauncherState> {
+  return {
+    resolveKey: (state, moduleName, sessionId) => base.resolveKey(state, moduleName, sessionId),
+    async load(key) {
+      // Persistence is optional for this demo. A damaged or unavailable DO
+      // value must never hold the protocol handshake behind an unbounded read.
+      const saved = (await settleWithin(base.load(key), null)) as
+        | PersistedChoices
+        | LauncherState
+        | null;
+      if (!saved || typeof saved.wallpaperId !== "string") return null;
+      const wallpaper = WALLPAPERS.find((w) => w.id === saved.wallpaperId) ?? WALLPAPERS[0]!;
+      const accent = ACCENTS.find((a) => a.id === saved.accentId) ?? ACCENTS[0]!;
+      return {
+        ...initialLauncherState(),
+        location: typeof saved.location === "string" ? saved.location : "/",
+        wallpaperId: wallpaper.id,
+        wallpaper: wallpaper.css.default,
+        wallpaperSm: wallpaper.css.sm,
+        wallpaperMd: wallpaper.css.md,
+        wallpaperLg: wallpaper.css.lg,
+        wallpaperXl: wallpaper.css.xl,
+        wallpapers: WALLPAPERS.map((w) => ({ ...w, selected: w.id === wallpaper.id })),
+        accentId: accent.id,
+        accent: accent.color,
+        accents: ACCENTS.map((a) => ({ ...a, selected: a.id === accent.id })),
+        // onCreated's refreshFiles sorts the drive listing by these.
+        filesView: isFilesView(saved.filesView) ? saved.filesView : "grid",
+        filesSortKey: isSortKey(saved.filesSortKey) ? saved.filesSortKey : "name",
+        filesSortDesc: saved.filesSortDesc === true,
+      };
+    },
+    async save(key, state) {
+      const choices: PersistedChoices = {
+        location: state.location,
+        wallpaperId: state.wallpaperId,
+        accentId: state.accentId,
+        filesView: state.filesView,
+        filesSortKey: state.filesSortKey,
+        filesSortDesc: state.filesSortDesc,
+      };
+      await settleWithin(base.save(key, choices as unknown as LauncherState), undefined);
+    },
+    delete: (key) => base.delete(key),
+  };
+}
+
+// Every visitor has their own Durable Object, but all DOs of the class share
+// this module (one isolate), so one store object. `__forStorage` is how
+// HypenDurableObject gives each DO a copy bound to ITS OWN storage: without
+// it a save that runs after an `await` could land in whichever DO handled a
+// message last — another visitor's settings. (`deriveStore` in
+// @hypen-space/cf > 0.6.7 builds this; it is spelled out here so the
+// example also builds against the published 0.6.7.)
+type BoundStorage = Parameters<typeof baseStore.__bindStorage>[0];
+const baseForStorage = (baseStore as {
+  __forStorage?: (storage: BoundStorage) => StateStore<LauncherState>;
+}).__forStorage;
+const launcherCopies = new WeakMap<BoundStorage, StateStore<LauncherState>>();
+
+export const launcherStore = Object.assign(launcherStoreOver(baseStore), {
+  __bindStorage: (storage: BoundStorage) => baseStore.__bindStorage(storage),
+  __forStorage(storage: BoundStorage): StateStore<LauncherState> {
+    let copy = launcherCopies.get(storage);
+    if (!copy) {
+      copy = launcherStoreOver(baseForStorage ? baseForStorage.call(baseStore, storage) : baseStore);
+      launcherCopies.set(storage, copy);
+    }
+    return copy;
   },
-  async save(key, state) {
-    const choices: PersistedChoices = {
-      location: state.location,
-      wallpaperId: state.wallpaperId,
-      accentId: state.accentId,
-      filesView: state.filesView,
-      filesSortKey: state.filesSortKey,
-      filesSortDesc: state.filesSortDesc,
-    };
-    await settleWithin(baseStore.save(key, choices as unknown as LauncherState), undefined);
-  },
-  delete: (key) => baseStore.delete(key),
-};
+});
 
 export default app
   .defineState<LauncherState>(initialLauncherState())

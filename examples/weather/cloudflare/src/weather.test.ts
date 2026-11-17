@@ -276,3 +276,54 @@ describe("forecast error state", () => {
     expect(batches.join("\n")).toContain("Couldn't refresh the forecast");
   });
 });
+
+describe("prefs persistence (one Durable Object per visitor)", () => {
+  const memStorage = () => {
+    const data = new Map<string, unknown>();
+    return {
+      data,
+      get: async (k: string) => data.get(k),
+      put: async (k: string, v: unknown) => void data.set(k, v),
+      delete: async (k: string) => data.delete(k),
+    };
+  };
+  const place = { id: "sf", name: "San Francisco", latitude: 37.77, longitude: -122.42 };
+
+  test("each visitor's DO copy keeps its own unit + saved cities", async () => {
+    const { prefsStore } = await import("./weather");
+    const a = memStorage();
+    const b = memStorage();
+    const forA = prefsStore.__forStorage(a);
+    const forB = prefsStore.__forStorage(b);
+    expect(prefsStore.__forStorage(a)).toBe(forA);
+    const key = forA.resolveKey(initialWeatherState(), "Weather", "s")!;
+
+    prefsStore.__bindStorage(a);
+    const saveA = forA.save(key, { ...initialWeatherState(), unit: "F", saved: [place] } as never);
+    prefsStore.__bindStorage(b);
+    await saveA;
+    expect(await forA.load(key)).toEqual({ unit: "F", saved: [place] } as never);
+    expect(await forB.load(key)).toBeNull();
+    expect(b.data.size).toBe(0);
+  });
+
+  test("identical prefs from two visitors are written to both DOs", async () => {
+    // The skip-unchanged cache is per DO copy: a shared one would skip B's
+    // write because A had just saved the same value under the same key.
+    const { prefsStore } = await import("./weather");
+    const a = memStorage();
+    const b = memStorage();
+    const forA = prefsStore.__forStorage(a);
+    const forB = prefsStore.__forStorage(b);
+    const key = forA.resolveKey(initialWeatherState(), "Weather", "s")!;
+    const prefs = { ...initialWeatherState(), unit: "F", saved: [] } as never;
+    await forA.save(key, prefs);
+    await forB.save(key, prefs);
+    expect(a.data.get(`hypen:${key}`)).toEqual({ unit: "F", saved: [] });
+    expect(b.data.get(`hypen:${key}`)).toEqual({ unit: "F", saved: [] });
+    // ...and an unchanged save is still skipped within one DO.
+    b.data.clear();
+    await forB.save(key, prefs);
+    expect(b.data.size).toBe(0);
+  });
+});

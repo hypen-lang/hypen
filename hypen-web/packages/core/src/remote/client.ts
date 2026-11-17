@@ -444,7 +444,7 @@ export class RemoteEngine implements Disposable {
         if (this.deviceSocket === ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(m));
       },
       sendBinary: (frame) => {
-        if (this.deviceSocket === ws && ws.readyState === WebSocket.OPEN) ws.send(frame);
+        if (this.deviceSocket === ws && ws.readyState === WebSocket.OPEN) ws.send(frame as Uint8Array<ArrayBuffer>);
       },
       // Socket write capacity: device uploads wait while ≥ 256 KiB is
       // pending (RFC 001 §2.3).

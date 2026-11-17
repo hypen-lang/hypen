@@ -1,5 +1,6 @@
 import { app } from "@hypen-space/core";
 import { durableObjectStore, withKey } from "@hypen-space/cf";
+import type { StateStore } from "@hypen-space/core/persistence";
 import { connectionGeo } from "./geo";
 import { ICONS } from "./icons";
 import { getAirQuality, getForecast, searchCities, type CityResult, type Forecast } from "./openmeteo";
@@ -130,29 +131,60 @@ interface Prefs {
 }
 
 const baseStore = durableObjectStore<WeatherState>(withKey<WeatherState>(() => "weather-prefs"));
-const lastSaved = new WeakMap<object, string>();
 
-const prefsStore: typeof baseStore = {
-  __bindStorage: (storage) => baseStore.__bindStorage(storage),
-  resolveKey: (state, moduleName, sessionId) => baseStore.resolveKey(state, moduleName, sessionId),
-  async load(key) {
-    const stored = (await baseStore.load(key).catch(() => null)) as Partial<Prefs> | null;
-    if (!stored) return null;
-    const saved = Array.isArray(stored.saved)
-      ? stored.saved.filter((p) => p && typeof p.latitude === "number" && typeof p.longitude === "number")
-      : [];
-    return { unit: stored.unit === "F" ? "F" : "C", saved } as unknown as WeatherState;
+/**
+ * The prefs store over one `durableObjectStore` — the copy bound to one
+ * Durable Object's storage, or the shared base (the class-wide fallback).
+ * Its "last saved" cache lives in this closure, so it is per copy: a cache
+ * shared by every DO would skip a visitor's write whenever another visitor
+ * had just saved the same prefs (the key is the same in every DO).
+ */
+function prefsStoreOver(base: StateStore<WeatherState>): StateStore<WeatherState> {
+  let lastSaved: string | null = null;
+  return {
+    resolveKey: (state, moduleName, sessionId) => base.resolveKey(state, moduleName, sessionId),
+    async load(key) {
+      const stored = (await base.load(key).catch(() => null)) as Partial<Prefs> | null;
+      if (!stored) return null;
+      const saved = Array.isArray(stored.saved)
+        ? stored.saved.filter((p) => p && typeof p.latitude === "number" && typeof p.longitude === "number")
+        : [];
+      return { unit: stored.unit === "F" ? "F" : "C", saved } as unknown as WeatherState;
+    },
+    async save(key, state) {
+      const prefs: Prefs = { unit: state.unit, saved: state.saved };
+      const json = `${key}:${JSON.stringify(prefs)}`;
+      // Every state flush calls save (clock ticks included); only write on change.
+      if (lastSaved === json) return;
+      lastSaved = json;
+      await base.save(key, prefs as unknown as WeatherState);
+    },
+    delete: (key) => base.delete(key),
+  };
+}
+
+// All DOs of the class share this module (one isolate), so one store object.
+// `__forStorage` is how HypenDurableObject gives each visitor's DO a copy
+// bound to ITS OWN storage, so a save after an `await` never lands in another
+// visitor's DO. (`deriveStore` in @hypen-space/cf > 0.6.7 builds this; it is
+// spelled out here so the example also builds against the published 0.6.7.)
+type BoundStorage = Parameters<typeof baseStore.__bindStorage>[0];
+const baseForStorage = (baseStore as {
+  __forStorage?: (storage: BoundStorage) => StateStore<WeatherState>;
+}).__forStorage;
+const prefsCopies = new WeakMap<BoundStorage, StateStore<WeatherState>>();
+
+export const prefsStore = Object.assign(prefsStoreOver(baseStore), {
+  __bindStorage: (storage: BoundStorage) => baseStore.__bindStorage(storage),
+  __forStorage(storage: BoundStorage): StateStore<WeatherState> {
+    let copy = prefsCopies.get(storage);
+    if (!copy) {
+      copy = prefsStoreOver(baseForStorage ? baseForStorage.call(baseStore, storage) : baseStore);
+      prefsCopies.set(storage, copy);
+    }
+    return copy;
   },
-  async save(key, state) {
-    const prefs: Prefs = { unit: state.unit, saved: state.saved };
-    const json = JSON.stringify(prefs);
-    // Every state flush calls save (clock ticks included); only write on change.
-    if (lastSaved.get(baseStore) === `${key}:${json}`) return;
-    lastSaved.set(baseStore, `${key}:${json}`);
-    await baseStore.save(key, prefs as unknown as WeatherState);
-  },
-  delete: (key) => baseStore.delete(key),
-};
+});
 
 // ---------------------------------------------------------------------------
 // Loading & presenting

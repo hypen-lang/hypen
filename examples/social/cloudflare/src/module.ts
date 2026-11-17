@@ -212,9 +212,9 @@ export const appModule = app
     location: "/",
   })
   // Persist the App shell's `currentUser` + `location` to DO storage
-  // so a reconnecting client lands on the same route. `bindAppStateStore
-  // (state.storage)` in src/do.ts wires the DO's transactional storage
-  // into this store on every fetch.
+  // so a reconnecting client lands on the same route. HypenDurableObject
+  // hands each DO's module instance a copy of this store bound to that
+  // DO's own storage.
   .persist(durableObjectStore<AppState>(session<AppState>()))
   .onCreated(async (state) => {
     // Always re-derive `currentUser` from the DB rather than trusting a
